@@ -12,11 +12,7 @@ import { restartTelemetrySidecar } from './slot-process-status.mjs'
 import { isNativeNodeVm, vmNodeId } from '../cluster/placement.mjs'
 import { slotHost } from './slot-host.mjs'
 import { restartRemoteServices } from '../cluster/remote-slot.mjs'
-import {
-  isMissingContainerMessage,
-  logTelemetryContainerSkip,
-  telemetryContainerSkip,
-} from './docker-container.mjs'
+import { isMissingContainerMessage, logTelemetryContainerSkip, telemetryContainerSkip } from './docker-container.mjs'
 import {
   drainEgressForProxyConfig,
   egressPidsForProxyConfig,
@@ -75,8 +71,7 @@ function normalizeTelemetryRefresh(changed, vm) {
   const message = String(changed?.error || changed?.code || '')
   if (!isMissingContainerMessage(message)) return changed
   const container =
-    String(vm?.runtime?.container || '').trim() ||
-    (vm?.id ? `kin-${String(vm.id).replace(/^vm-/, '')}` : '')
+    String(vm?.runtime?.container || '').trim() || (vm?.id ? `kin-${String(vm.id).replace(/^vm-/, '')}` : '')
   logTelemetryContainerSkip('fleet', vm.id, container, message)
   return telemetryContainerSkip(container, message)
 }

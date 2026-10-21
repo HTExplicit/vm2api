@@ -4,11 +4,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { slotContainerName } from '../transport/rust-kernel-supervisor.mjs'
-import {
-  isMissingContainerMessage,
-  logTelemetryContainerSkip,
-  telemetryContainerSkip,
-} from './docker-container.mjs'
+import { isMissingContainerMessage, logTelemetryContainerSkip, telemetryContainerSkip } from './docker-container.mjs'
 import { inspectContainer } from './vm-runtime.mjs'
 import { slotHost } from './slot-host.mjs'
 import { runtimeKind } from './runtime-kind.mjs'
