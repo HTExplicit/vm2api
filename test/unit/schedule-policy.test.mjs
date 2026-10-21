@@ -9,6 +9,7 @@ import {
   isManualScheduleLocked,
 } from '../../src/lib/pool/schedule-policy.mjs'
 import {
+  ORGANIZATION_PAUSE_REASON,
   getVm,
   holdSchedulableSlots,
   resumeSchedulableSlots,
@@ -130,4 +131,44 @@ test('restoreScheduleAfterLiveCredential keeps a manual lock', () => {
   restoreScheduleAfterLiveCredential(vm)
   assert.equal(vm.schedulable, true)
   assert.equal(vm.schedule_disabled_reason, null)
+})
+
+test('org pause records the upstream error and only an operator write resumes it', () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-org-pause-'))
+  const file = path.join(project, 'vms', 'vm-01.json')
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      id: 'vm-01',
+      status: 'running',
+      schedulable: true,
+      schedule_manual: true,
+      claude: { has_access: true, has_refresh: true },
+    }),
+  )
+  const detail = { status: 403, message: 'OAuth authentication is currently not allowed for this organization.' }
+  const paused = setVmSchedulable(project, 'vm-01', false, ORGANIZATION_PAUSE_REASON, {
+    preserveStatus: true,
+    source: 'force',
+    detail,
+  })
+  assert.equal(paused.schedulable, false)
+  assert.equal(paused.schedule_disabled_reason, 'organization_disabled')
+  assert.deepEqual(paused.schedule_disabled_detail, detail)
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).status, 'running')
+
+  // Auto writes (proxy re-enable, worker reload) neither resume nor rename it, manual lock or not.
+  setManualScheduleWins(false)
+  assert.equal(setVmSchedulable(project, 'vm-01', true).schedulable, false)
+  const renamed = setVmSchedulable(project, 'vm-01', false, 'egress_down|proxy=p1')
+  assert.equal(renamed.schedule_disabled_reason, 'organization_disabled')
+  assert.deepEqual(renamed.schedule_disabled_detail, detail)
+
+  const resumed = setVmSchedulable(project, 'vm-01', true, null, { preserveStatus: true, source: 'manual' })
+  assert.equal(resumed.schedulable, true)
+  assert.equal(resumed.schedule_disabled_reason, null)
+  assert.equal(resumed.schedule_disabled_detail, null)
+  assert.equal('schedule_disabled_detail' in JSON.parse(fs.readFileSync(file, 'utf8')), false)
+  fs.rmSync(project, { recursive: true, force: true })
 })

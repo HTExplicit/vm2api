@@ -139,6 +139,7 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     schedulable: vm.schedulable !== false,
     schedule_manual: vm.schedule_manual === true,
     schedule_disabled_reason: vm.schedule_disabled_reason || null,
+    schedule_disabled_detail: vm.schedule_disabled_detail || null,
     temp_unschedulable_until: vm.claude?.temp_unschedulable_until || vm.temp_unschedulable_until || null,
     temp_unschedulable_reason: vm.claude?.temp_unschedulable_reason || vm.temp_unschedulable_reason || null,
     owner_user_id: normalizeOwnerId(vm.owner_user_id),
@@ -492,27 +493,37 @@ export function isVmScheduleReady(vm, { allowMissingCredential = false } = {}) {
   return true
 }
 
+/** Upstream org refusal parks the slot until an operator turns scheduling back on. */
+export const ORGANIZATION_PAUSE_REASON = 'organization_disabled'
+
 export function setVmSchedulable(
   projectRoot,
   id,
   schedulable,
   reason = null,
-  { preserveStatus = false, source = 'auto' } = {},
+  { preserveStatus = false, source = 'auto', detail = null } = {},
 ) {
   const file = path.join(projectRoot, 'vms', `${id}.json`)
   if (!fs.existsSync(file)) return null
   const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
   const src = source === 'manual' || source === 'force' ? source : 'auto'
   if (src === 'auto' && isManualScheduleLocked(vm)) return summarizeVm(vm)
+  // An org pause is an upstream verdict: only an operator write resumes or replaces it.
+  if (src === 'auto' && vm.schedulable === false && vm.schedule_disabled_reason === ORGANIZATION_PAUSE_REASON) {
+    return summarizeVm(vm)
+  }
   if (src === 'manual') vm.schedule_manual = true
   vm.schedulable = !!schedulable
   vm.schedule_updated_at = new Date().toISOString()
   vm.updated_at = vm.schedule_updated_at
   if (schedulable) {
     vm.schedule_disabled_reason = null
+    delete vm.schedule_disabled_detail
     if (!preserveStatus && String(vm.status || '').toLowerCase() === 'paused') vm.status = 'running'
   } else {
     vm.schedule_disabled_reason = reason || 'disabled'
+    if (detail) vm.schedule_disabled_detail = detail
+    else delete vm.schedule_disabled_detail
     if (!preserveStatus && String(vm.status || '').toLowerCase() === 'running') vm.status = 'paused'
   }
   atomicWriteJson(file, vm)

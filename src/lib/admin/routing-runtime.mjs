@@ -14,6 +14,7 @@ import {
   persistVmSessionSlots,
   persistVmMaxSessions,
   setVmSchedulable,
+  ORGANIZATION_PAUSE_REASON,
 } from '../vm/vm-registry.mjs'
 import { normalizeInferenceConfig, normalizeSessionSlots, resolveInferenceEngine } from '../vm/slot-engine.mjs'
 import { slotExec } from '../vm/slot-runtime.mjs'
@@ -768,6 +769,19 @@ export function createRoutingRuntime(ctx) {
         if (policy?.reason === 'oauth_no_refresh' && shouldMarkMissingRefresh(selected.vm)) {
           setVmSchedulable(ctx.cfg.paths.project, selected.vmId, false, 'oauth_no_refresh')
         }
+      },
+      // Org refusal outranks the operator's manual "on"; the operator turns it back on.
+      onSchedulePause: ({ selected, policy }) => {
+        if (!selected?.vmId) return
+        setVmSchedulable(ctx.cfg.paths.project, selected.vmId, false, ORGANIZATION_PAUSE_REASON, {
+          preserveStatus: true,
+          source: 'force',
+          detail: {
+            ...policy?.detail,
+            account_id: selected.accountId || null,
+            at: new Date().toISOString(),
+          },
+        })
       },
     })
     setFailover(failoverRunner)
