@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- OpenAI Responses 上游：生命周期元数据（`response.created` / `queued` / `in_progress` / `metadata` / `keepalive`）之后若失败仍可 failover；首条真实输出前不 commit，避免仅 metadata 即锁定 attempt。（#645）
+
 ## 1.3.213 — 2026-10-22
 
 - 版本号保留；原官方透传修正（#676）已从历史移除，本版无运行时变化。
