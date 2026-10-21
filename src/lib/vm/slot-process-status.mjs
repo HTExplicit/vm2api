@@ -4,6 +4,12 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { slotContainerName } from '../transport/rust-kernel-supervisor.mjs'
+import {
+  isMissingContainerMessage,
+  logTelemetryContainerSkip,
+  telemetryContainerSkip,
+} from './docker-container.mjs'
+import { inspectContainer } from './vm-runtime.mjs'
 import { slotHost } from './slot-host.mjs'
 import { runtimeKind } from './runtime-kind.mjs'
 import { slotExecArgv } from './slot-exec.mjs'
@@ -115,7 +121,12 @@ export async function restartTelemetrySidecar({ projectRoot, vm, enabled, run = 
   const host = slotHost(vm)
   if (host.native) return host.restartTelemetry(vm, { enabled })
   const env = host.dockerEnv()
-  const target = { ...vm, runtime: { ...(vm.runtime || {}), container: slotContainerName({ vm }), type: kind } }
+  const container = slotContainerName({ vm })
+  const target = { ...vm, runtime: { ...(vm.runtime || {}), container, type: kind } }
+  if (!inspectContainer(container)) {
+    logTelemetryContainerSkip('fleet', vm.id, container)
+    return telemetryContainerSkip(container)
+  }
   const stop = 'pkill -TERM -x kin-worker 2>/dev/null || true'
   try {
     await run('docker', slotExecArgv(target, ['sh', '-c', stop]), {
@@ -137,6 +148,11 @@ export async function restartTelemetrySidecar({ projectRoot, vm, enabled, run = 
     )
     return { ok: true, action: 'restarted' }
   } catch (error) {
-    return { ok: false, action: 'restart_failed', error: String(error?.message || error) }
+    const message = String(error?.message || error)
+    if (isMissingContainerMessage(message)) {
+      logTelemetryContainerSkip('fleet', vm.id, container, message)
+      return telemetryContainerSkip(container, message)
+    }
+    return { ok: false, action: 'restart_failed', error: message }
   }
 }
