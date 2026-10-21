@@ -549,9 +549,12 @@ export function createSlotShell({
       if (size.login) await preparePanelShellLogin(projectRoot, vm)
       const launch = panelShellLaunch(slotHost(vm).bins.cli)
       const env = ['TERM=xterm-256color', `${SESSION_ENV}=${token}`, `${RC_ENV}=${launch.rc}`]
+      // guest-exec 经 root SSH 降权后仍继承 /root，终端须显式切换到槽用户目录。
+      if (isKvmRuntime(vm)) env.push('HOME=/home/kincli', 'CLAUDE_CONFIG_DIR=/home/kincli/.claude')
       if (size.login) env.push('KIN_PANEL_LOGIN=1')
       const { Cmd } = slotExecCmd(vm, launch.cmd, {
         env: isKvmRuntime(vm) ? env : undefined,
+        workdir: isKvmRuntime(vm) ? '/home/kincli' : undefined,
         interactive: true,
         tty: true,
         user: isKvmRuntime(vm) ? slotHost(vm).execUser(vm) : undefined,
