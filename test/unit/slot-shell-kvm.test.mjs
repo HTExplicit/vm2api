@@ -35,7 +35,9 @@ for (const runtime of ['kvm', 'docker']) {
       }
     })
     engine.on('upgrade', (_req, socket) => {
-      socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nslot-shell-ready\r\n')
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nslot-shell-ready\r\n',
+      )
     })
     const panel = http.createServer()
     panel.on('upgrade', (req, socket, head) => shell.handleUpgrade(req, socket, head))
@@ -72,7 +74,10 @@ for (const runtime of ['kvm', 'docker']) {
       } else {
         assert.deepEqual(execBody.Cmd.slice(0, 2), ['/bin/sh', '-c'])
         assert.ok(execBody.Env.includes('TERM=xterm-256color'))
-        assert.equal(execBody.Env.some((value) => /^(HOME|CLAUDE_CONFIG_DIR)=/.test(value)), false)
+        assert.equal(
+          execBody.Env.some((value) => /^(HOME|CLAUDE_CONFIG_DIR)=/.test(value)),
+          false,
+        )
       }
       assert.equal(Object.hasOwn(execBody, 'WorkingDir'), false)
       const closed = once(ws, 'close', { signal: AbortSignal.timeout(5_000) })
