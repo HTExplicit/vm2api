@@ -191,7 +191,12 @@ export function officialSystemTemplate(system, ttl = DEFAULT_CACHE_TTL) {
   return out
 }
 
-/** One marker, on the last text of the current tail, ttl omitted. */
+/**
+ * Two markers, stamped with the session TTL: the last text of the current tail
+ * and of the user turn before it (4+ messages). The second one sits on the
+ * previous request's write, so a turn that grows past the 20-block lookback
+ * still reads it instead of falling back to the system prefix.
+ */
 function officialMessageMarker(messages, ttl = DEFAULT_CACHE_TTL) {
   if (!Array.isArray(messages) || messages.length === 0) return messages
   const next = messages.map((message) => {
@@ -213,34 +218,36 @@ function officialMessageMarker(messages, ttl = DEFAULT_CACHE_TTL) {
     })
     return changed ? { ...message, content } : message
   })
-  let tail = -1
-  for (let i = next.length - 1; i >= 0; i--) {
+  const users = []
+  for (let i = next.length - 1; i >= 0 && users.length < 2; i--) {
     if (next[i]?.role !== 'user') continue
     const content = next[i].content
-    if (typeof content === 'string' ? content : Array.isArray(content) && content.length) {
-      tail = i
-      break
-    }
+    if (typeof content === 'string' ? content : Array.isArray(content) && content.length) users.push(i)
   }
-  if (tail < 0) return next
-  const message = next[tail]
+  if (users.length === 0) return next
+  stampMessageTail(next, users[0], ttl)
+  if (users.length > 1 && next.length >= 4) stampMessageTail(next, users[1], ttl)
+  return next
+}
+
+function stampMessageTail(messages, index, ttl) {
+  const message = messages[index]
   if (typeof message.content === 'string') {
-    next[tail] = {
+    messages[index] = {
       ...message,
       content: [
         { type: 'text', text: message.content, cache_control: { type: 'ephemeral', ttl: normalizeCacheTtl(ttl) } },
       ],
     }
-    return next
+    return
   }
   const content = message.content.slice()
   for (let i = content.length - 1; i >= 0; i--) {
     if (content[i]?.type === 'thinking' || content[i]?.type === 'redacted_thinking') continue
     content[i] = { ...content[i], cache_control: { type: 'ephemeral', ttl: normalizeCacheTtl(ttl) } }
-    next[tail] = { ...message, content }
-    return next
+    messages[index] = { ...message, content }
+    return
   }
-  return next
 }
 /** Official Claude Code omits eager streaming and tool cache markers. A caller TTL here makes CLI fill the omitted system and message markers. */
 function stripEagerInputStreaming(tools) {
