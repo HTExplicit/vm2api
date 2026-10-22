@@ -1,6 +1,6 @@
 {
   "repo": "dofastted/vm2api",
-  "release": "payload-2026.10.19-kernel-cli",
+  "release": "payload-2026.10.23-crag-303",
   "files": [
     {
       "path": "bin/kin-kernel",
@@ -71,8 +71,8 @@
     {
       "path": "share/crag/kin-kernel",
       "asset": "kin-kernel-crag",
-      "size": 9734168,
-      "sha256": "5764a186e3778278a8733ecaf924211070968def7c6648c6f6ecf3b76120a537"
+      "size": 9745176,
+      "sha256": "42f1ba39619cde6755f8e89f036dc475d0db91a8de9dfb1ae64172c4862ccec4"
     }
   ]
 }
