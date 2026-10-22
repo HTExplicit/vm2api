@@ -5,6 +5,7 @@
 - 槽位「采集特征」和终端「系统特征」不再读到宿主机：Docker 槽的 CPU 型号、DMI、MAC 读槽位计算机（`/etc/kin-hardware`、`/etc/kin-dmi`），核数与内存读容器 cgroup 配额；没有配额时读计算机文件，都没有才回落 `/proc`、`/sys`。KVM 槽不变。（#673）
 - `kin-computer` 默认造 Linux PC 计算机（Docker 槽原为 macOS 人设），`--os` 可选 `windows` / `macos`，KVM 支持 linux / windows。payload 改指 `payload-2026.10.22-computer-linux`，只换 `kin-computer`。已有槽位身份不重算。（#673）
 - 一键升级与 fleet `action=telemetry` 刷新 Go 槽位服务时，数据库仍登记但本机已无 Docker 容器（`No such container: kin-NN`）的 VM 记为跳过并继续处理其余槽位，不再因此整批失败；真实容器上的刷新失败仍会硬失败。（#642，#628，REQ-0628）
+- KVM 面板终端与官方登录终端显式设置 HOME=/home/kincli、CLAUDE_CONFIG_DIR 与工作目录，避免继承 root SSH 的 HOME 导致 mkdir /root/.claude 失败；Docker 槽行为不变。（#656）
 
 已部署机升级：更新 Node 控制面并执行 `npm run fetch:payload`（或更新控制面镜像）换上新 `bin/kin-computer`，重启一次 Node。无迁移、无新依赖，不必 `wrap-cli/sync`，不必重建槽位容器。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
 
