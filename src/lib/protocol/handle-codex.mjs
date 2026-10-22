@@ -1318,6 +1318,7 @@ export async function handleCodexImages({
   projectRoot,
   stickyRouter = null,
   ops = {},
+  ownerScope = null,
 }) {
   logBag.via = 'codex-images'
   const reject = (status, type, code, message) => {
@@ -1365,7 +1366,7 @@ export async function handleCodexImages({
   const post = ops.postCodexJson || postCodexJson
   // Selection-only body: the turn id becomes the sticky session; the upstream body is untouched.
   const pickBody = { model: model || null, ...(imageTurnId ? { session_id: `codex-image-turn:${imageTurnId}` } : {}) }
-  const pickOpts = { stickyRouter, sessions: null, body: pickBody, excluded }
+  const pickOpts = { stickyRouter, sessions: null, body: pickBody, excluded, ownerScope }
   const deadline = Date.now() + codexWaitTimeoutMs(routing)
   const gone = clientGoneSignal(req, res)
   let last = null
