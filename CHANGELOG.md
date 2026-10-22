@@ -1,5 +1,10 @@
 # Changelog
 
+## 未发布
+
+- `/v1/usage` 与 `/v1/messages/count_tokens` 传入 `apiKeyStore`，与 Messages 一致解析密钥属主角色；面板会话无 `apiKeyRecord` 时按会话角色收窄作用域（admin/super → 平台池，user → 仅本人 VM），避免租户 peek 平台账号用量或 admin 托管密钥误报 503。（#658，#677）
+- 管理端 `enrichVm` 输出 `owner_user_id`、`origin`，租户自建槽位不再显示「平台池（未分配）」；槽位重建 `buildRecreatedVmRecord` 保留 `origin`，避免租户自建槽被误判为 `admin_assigned` 并影响配额与删租户回收。（#677）
+
 ## 1.3.212 — 2026-10-22
 
 - 版本号保留；原官方透传（#674）已从历史移除，本版无运行时变化。
