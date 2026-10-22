@@ -4,6 +4,12 @@ export function isMissingContainerMessage(message) {
   return /no such container/i.test(String(message || ''))
 }
 
+/** Local `docker inspect` / Engine 404: container id or name is gone. */
+export function isDockerInspectNotFound({ stderr = '', stdout = '' } = {}) {
+  const hay = `${stderr}\n${stdout}`
+  return /no such container|no such object/i.test(hay)
+}
+
 export function telemetryContainerSkip(container, detail) {
   return {
     ok: true,

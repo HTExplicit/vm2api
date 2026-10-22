@@ -5,7 +5,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { slotContainerName } from '../transport/rust-kernel-supervisor.mjs'
 import { isMissingContainerMessage, logTelemetryContainerSkip, telemetryContainerSkip } from './docker-container.mjs'
-import { inspectContainer } from './vm-runtime.mjs'
+import { inspectContainerOutcome } from './vm-runtime.mjs'
 import { slotHost } from './slot-host.mjs'
 import { runtimeKind } from './runtime-kind.mjs'
 import { slotExecArgv } from './slot-exec.mjs'
@@ -110,7 +110,14 @@ export async function ensureTelemetrySidecar({ projectRoot, vm, run = exec, time
 }
 
 /** Replace only the Go telemetry child; the slot container and Rust process stay up. */
-export async function restartTelemetrySidecar({ projectRoot, vm, enabled, run = exec, timeoutMs = 15_000 } = {}) {
+export async function restartTelemetrySidecar({
+  projectRoot,
+  vm,
+  enabled,
+  run = exec,
+  timeoutMs = 15_000,
+  inspectContainerOutcome: inspectOutcome = inspectContainerOutcome,
+} = {}) {
   if (!projectRoot || !isSafeSlotId(vm?.id)) return { ok: false, action: 'invalid_vm' }
   const kind = runtimeKind(vm)
   if (kind !== 'docker' && kind !== 'kvm') return { ok: false, action: 'unsupported_runtime' }
@@ -119,9 +126,18 @@ export async function restartTelemetrySidecar({ projectRoot, vm, enabled, run = 
   const env = host.dockerEnv()
   const container = slotContainerName({ vm })
   const target = { ...vm, runtime: { ...(vm.runtime || {}), container, type: kind } }
-  if (!inspectContainer(container)) {
+  const inspected = inspectOutcome(container)
+  if (inspected.status === 'missing') {
     logTelemetryContainerSkip('fleet', vm.id, container)
     return telemetryContainerSkip(container)
+  }
+  if (inspected.status === 'error') {
+    return {
+      ok: false,
+      action: 'inspect_failed',
+      code: 'docker_inspect_failed',
+      error: inspected.error,
+    }
   }
   const stop = 'pkill -TERM -x kin-worker 2>/dev/null || true'
   try {
