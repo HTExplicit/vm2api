@@ -1,5 +1,12 @@
 # Changelog
 
+## 未发布
+
+- 槽位「采集特征」和终端「系统特征」不再读到宿主机：Docker 槽的 CPU 型号、DMI、MAC 读槽位计算机（`/etc/kin-hardware`、`/etc/kin-dmi`），核数与内存读容器 cgroup 配额；没有配额时读计算机文件，都没有才回落 `/proc`、`/sys`。KVM 槽不变。（#673）
+- `kin-computer` 默认造 Linux PC 计算机（Docker 槽原为 macOS 人设），`--os` 可选 `windows` / `macos`，KVM 支持 linux / windows。payload 改指 `payload-2026.10.22-computer-linux`，只换 `kin-computer`。已有槽位身份不重算。（#673）
+
+已部署机升级：更新 Node 控制面并执行 `npm run fetch:payload`（或更新控制面镜像）换上新 `bin/kin-computer`，重启一次 Node。无迁移、无新依赖，不必 `wrap-cli/sync`，不必重建槽位容器。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
 ## 1.3.209 — 2026-10-22
 
 - 遥测 `event_data.env` 不再附带客户机硬件（`cpu_model`、`cpu_cores`、`memory_bytes`、`root_disk`、`mac`、`dmi_*` 共 11 项），与官方 Claude Code 2.1.296 的 env 字段一致；`worker.json` 的 identity 也不再写这些键。新 `kin-worker` 发送前会剔除旧 `worker.json` 里残留的同名键。槽位运维页「物理特征」照旧读取和展示。（#646）
