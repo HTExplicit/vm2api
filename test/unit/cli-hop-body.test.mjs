@@ -375,7 +375,10 @@ test('cli-hop drops caller system/tools markers and restamps last plus penultima
   assert.equal(body.tools[0].cache_control, undefined)
   assert.equal(body.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
   assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral' })
-  assert.deepEqual(messageMarkers(body), [{ index: 2, blockIndex: 0, type: 'text', ttl: undefined }])
+  assert.deepEqual(messageMarkers(body), [
+    { index: 0, blockIndex: 0, type: 'text', ttl: undefined },
+    { index: 2, blockIndex: 0, type: 'text', ttl: undefined },
+  ])
 })
 
 test('cli-hop short history only marks the last message', () => {
@@ -434,7 +437,7 @@ test('cli-hop uses the inbound session TTL on both message anchors', () => {
   )
   assert.deepEqual(
     messageMarkers(body).map((hit) => hit.ttl),
-    [undefined],
+    [undefined, undefined],
   )
 })
 
