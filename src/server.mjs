@@ -1130,6 +1130,7 @@ const server = http.createServer(async (req, res) => {
         apiKeyStore,
         stickyRouter,
         accountQuota,
+        projectRoot: cfg.paths.project,
         getPoolScheduler: () => poolScheduler,
       })
     }
