@@ -2,6 +2,12 @@
 
 ## 未发布
 
+- GPT（Codex）槽调度按密钥属主收窄，与 Claude 池一致：租户密钥不再落到平台或其他租户的 GPT 槽，平台密钥也不进租户 GPT 槽。
+- API 直连（category=`api`）仅管理员：租户不能在面板创建或把密钥改为 `api`；推理入口在 api-kernel hop 拒绝租户已有 `api` 密钥（`api_backend_forbidden` / 403）。
+- 删除 VM/槽位仅管理员：租户不能删除自建槽；面板删槽按钮对租户隐藏。
+- **破坏性**：租户若仍持有 category=`api` 的密钥，调用平台 API 上游将收到 403；租户不能再自行删除槽位，需联系管理员。
+- `/v1/usage` 在 Codex 路径上读取用量窗口（与 Messages 属主解析一致）。
+
 ## 1.3.215 — 2026-10-22
 
 - `/v1/usage` 与 `/v1/messages/count_tokens` 传入 `apiKeyStore`，与 Messages 一致解析密钥属主角色；面板会话无 `apiKeyRecord` 时按会话角色收窄作用域（admin/super → 平台池，user → 仅本人 VM），避免租户 peek 平台账号用量或 admin 托管密钥误报 503。（#658，#677）

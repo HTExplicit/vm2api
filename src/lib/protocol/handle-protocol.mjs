@@ -646,19 +646,6 @@ export function createHandleProtocol(deps) {
       return json(res, errorResult.status, errorResult.body)
     }
     const inferenceBackend = resolveInferenceBackend(req)
-    // API 直连走平台端点，不经过槽位，租户密钥不能借此绕开自己的机器范围
-    if (inferenceBackend === 'api' && ownerScopeFromRequest(req, apiKeyStore?.users).type !== 'platform') {
-      stats.errors++
-      const errorResult = makeError({
-        type: ErrorType.PERMISSION,
-        code: ErrorCode.API_BACKEND_FORBIDDEN,
-        message: '租户密钥只能调用自己名下的槽位',
-        status: 403,
-      })
-      logBag.error_code = ErrorCode.API_BACKEND_FORBIDDEN
-      logBag.error_message = errorResult.body?.error?.message || null
-      return json(res, 403, errorResult.body)
-    }
     let want1m = hasClaudeCode1mSuffix(inbound?.model) || hasClaudeCode1mSuffix(ctx.body?.model)
     const modelRewrite = applyCodexInboundModelRewrite(ctx.body, getRouting() || {})
     if (!modelRewrite.ok) {
@@ -1038,6 +1025,19 @@ export function createHandleProtocol(deps) {
       })
     }
     if (inferenceBackend === 'api') {
+      // API 直连走平台端点，不经过槽位；门禁与 api-kernel hop 同位，勿提前于 credential/intercept 链
+      if (ownerScopeFromRequest(req, apiKeyStore?.users).type !== 'platform') {
+        stats.errors++
+        const errorResult = makeError({
+          type: ErrorType.PERMISSION,
+          code: ErrorCode.API_BACKEND_FORBIDDEN,
+          message: '租户密钥只能调用自己名下的槽位',
+          status: 403,
+        })
+        logBag.error_code = ErrorCode.API_BACKEND_FORBIDDEN
+        logBag.error_message = errorResult.body?.error?.message || null
+        return json(res, 403, errorResult.body)
+      }
       const managedKey = req.apiKeyRecord || null
       if (managedKey) {
         const gate = apiKeyStore.acquire(managedKey)
