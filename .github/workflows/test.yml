@@ -41,6 +41,8 @@ jobs:
         run: |
           npm run fetch:payload
           npm run build:egress
+      - name: native CLI CCH history regression
+        run: node --test test/e2e/cli-cch-history.e2e.test.mjs
       - run: npm run test:unit
       - name: ARM64 host preparation and rollback tests
         run: python3 -m unittest discover -s test/deploy -v

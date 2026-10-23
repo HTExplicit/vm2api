@@ -50,6 +50,8 @@ jobs:
           (cd worker && CGO_ENABLED=0 go build -trimpath -o ../dist/kin-slot-gate ./cmd/kin-slot-gate)
           node scripts/fetch-payload.mjs
           node scripts/fetch-payload.mjs --stage dist
+          # Application releases retain the stable filename even for append-only hotfix assets.
+          cp share/wrap-cli/cli-node dist/cli-node
       - uses: actions/upload-artifact@v7
         with:
           name: linux-amd64
