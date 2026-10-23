@@ -408,3 +408,67 @@ test('caller-declared web_search is not given injected defaults', () => {
   const [capped] = sanitizeAnthropicTools([{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }])
   assert.equal(capped.max_uses, 3)
 })
+
+test('caller-defined web_search function stays a client tool through convert', () => {
+  const fn = {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the web using Tavily.',
+      parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+    },
+  }
+  assert.equal(isWebSearchTool(fn), false)
+  const [out] = openaiToolsToClaude([fn])
+  assert.equal(out.name, 'web_search')
+  assert.equal(out.type, undefined)
+  assert.deepEqual(out.input_schema.required, ['query'])
+  assert.equal(out.description, 'Search the web using Tavily.')
+})
+
+test('caller-defined web_search function blocks native search injection', () => {
+  const body = {
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [
+      {
+        type: 'function',
+        function: {
+          name: 'web_search',
+          description: 'Tavily',
+          parameters: { type: 'object', properties: { query: { type: 'string' } } },
+        },
+      },
+    ],
+  }
+  assert.equal(ensureClaudeWebSearch(body), body)
+})
+
+test('bare OpenAI web_search and native types still map to the server tool', () => {
+  assert.equal(isWebSearchTool({ type: 'web_search' }), true)
+  assert.equal(isWebSearchTool({ type: 'function', function: { name: 'web_search' } }), true)
+  assert.equal(isWebSearchTool({ name: 'web_search' }), true)
+  assert.equal(isWebSearchTool({ name: 'web_search', input_schema: { type: 'object' } }), true)
+})
+
+test('caller-defined web_search survives convert then sanitize as a client tool', () => {
+  const fn = {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the web using Tavily.',
+      parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+    },
+  }
+  const [out] = sanitizeAnthropicTools(openaiToolsToClaude([fn]))
+  assert.equal(out.type, undefined)
+  assert.equal(out.name, 'web_search')
+  assert.deepEqual(out.input_schema.required, ['query'])
+  assert.equal(out.description, 'Search the web using Tavily.')
+})
+
+test('native web_search with a stray description is still rebuilt as the server tool', () => {
+  const [out] = sanitizeAnthropicTools([
+    { type: 'web_search_20250305', name: 'web_search', description: 'x', input_schema: {} },
+  ])
+  assert.deepEqual(out, { type: 'web_search_20250305', name: 'web_search' })
+})
