@@ -54,8 +54,14 @@ function isClaudeCodeClientWebSearch(tool, type) {
  * and makes Anthropic run a different search than the one the caller asked for.
  * Native tools have a `web_search*` type or no schema at all.
  */
+function isWebSearchFamilyName(tool, type) {
+  const name = searchToolName(tool)
+  return type.startsWith('web_search') || type === 'google_search' || WEB_SEARCH_NAMES.has(name)
+}
+
 function isCallerDefinedSearchFunction(tool, type) {
   if (type.startsWith('web_search') || type === 'google_search') return false
+  if (!isWebSearchFamilyName(tool, type)) return false
   const def = type === 'function' && tool.function ? tool.function : tool
   const schema = def.parameters ?? def.input_schema
   return schema != null && Boolean(def.description)
