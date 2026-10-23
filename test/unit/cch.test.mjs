@@ -117,7 +117,10 @@ test('CCH projection resets billing only, preserving prompt literals before syst
     system: [{ text: 'x-anthropic-billing-header: cc_version=2.1.296; cch=fffff;' }],
   }
   const projected = JSON.parse(projectClaudeCodeCchText(JSON.stringify(raw)))
-  assert.equal(projected.system[0].text, 'x-anthropic-billing-header: cc_version=2.1.296; cch=00000;')
+  assert.equal(
+    projected.system[0].text,
+    'x-anthropic-billing-header: cc_version=2.1.296; cc_entrypoint=sdk-cli; cch=00000;',
+  )
   assert.equal(projected.messages[0].content, raw.messages[0].content)
   assert.equal(projected.model, '')
   assert.equal(projected.messages[0].model, '')

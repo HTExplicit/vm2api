@@ -24,6 +24,7 @@ import {
   DEFAULT_CACHE_CONTROL_TTL,
   DEFAULT_CLI_VERSION,
   DEFAULT_PERSONA_MODE,
+  ensureBillingAttribution,
   FINGERPRINT_SALT,
   isOfficialClaudeCodeTraffic,
   officialCcPassthroughFromRouting,
@@ -437,6 +438,15 @@ test('fingerprint uses first user text, not discarded caller system', () => {
   })
   assert.match(out.system[0].text, new RegExp(expectedFp(firstUser)))
   assert.ok(!out.system[0].text.includes(expectedFp('[System Instructions]\nkeep this persona')))
+})
+
+test('billing attribution leaves caller-supplied billing unchanged', () => {
+  const caller =
+    'x-anthropic-billing-header: cc_version=2.1.296; cc_entrypoint=local-agent; cch=00000;'
+  const body = { system: [{ type: 'text', text: caller }] }
+  const out = ensureBillingAttribution(body)
+  assert.equal(out, body)
+  assert.equal(out.system[0].text, caller)
 })
 
 test('cliVersion can be parsed from a slot user-agent', () => {
