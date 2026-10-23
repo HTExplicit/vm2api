@@ -443,6 +443,43 @@ test('caller-defined web_search function blocks native search injection', () => 
   assert.equal(ensureClaudeWebSearch(body), body)
 })
 
+test('non-search tool with description+schema is not caller-defined search and does not block inject', () => {
+  const readFileFn = {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read a file from disk',
+      parameters: { type: 'object', properties: { path: { type: 'string' } } },
+    },
+  }
+  assert.equal(isWebSearchTool(readFileFn), false)
+  const body = {
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [readFileFn],
+  }
+  const out = ensureClaudeWebSearch(body)
+  assert.equal(out.tools.length, 2)
+  assert.equal(out.tools[0].function.name, 'read_file')
+  assert.deepEqual(out.tools[1], CLAUDE_WEB_SEARCH_TOOL)
+})
+
+test('Anthropic custom tool with description+schema but non-search name does not block inject', () => {
+  const body = {
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [
+      {
+        name: 'lookup',
+        description: 'Look up a record',
+        input_schema: { type: 'object', properties: { id: { type: 'string' } } },
+      },
+    ],
+  }
+  const out = ensureClaudeWebSearch(body)
+  assert.equal(out.tools.length, 2)
+  assert.equal(out.tools[0].name, 'lookup')
+  assert.deepEqual(out.tools[1], CLAUDE_WEB_SEARCH_TOOL)
+})
+
 test('bare OpenAI web_search and native types still map to the server tool', () => {
   assert.equal(isWebSearchTool({ type: 'web_search' }), true)
   assert.equal(isWebSearchTool({ type: 'function', function: { name: 'web_search' } }), true)

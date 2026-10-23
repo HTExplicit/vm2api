@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- 保留调用方自带 description+schema 的 web_search 族 function 工具，不再改写成原生服务端搜索；非搜索名工具不受影响。（#691）
+
 ## 1.3.219 — 2026-10-23
 
 - `kin-guest-exec`：修正 `if ! run_ssh` 在 POSIX 下吞掉真实退出码的问题；来宾非零退出、ssh 255、timeout 124 不再误报为 0，控制面不再把来宾崩溃误判为 `worker_output_invalid`。（#680）
