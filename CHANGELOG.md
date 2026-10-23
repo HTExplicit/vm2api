@@ -3,7 +3,12 @@
 ## 未发布
 
 - cli-node 补齐 `Accept: application/json, text/event-stream` 与 `Accept-Encoding: gzip, br`，在 CCH 密封后按最终 UTF-8 请求体写 `Content-Length`；修复旧 SDK 把毫秒 timeout 写入 `x-stainless-timeout` 的问题（缺省 `600000` → `600` 秒）。对应构建尚未进 payload。
-- 保留调用方自带 description+schema 的 web_search 族 function 工具，不再改写成原生服务端搜索；非搜索名工具不受影响。（#691）
+
+## 1.3.222 — 2026-10-23
+
+- 保留调用方自带 description+schema 的 web_search 族 function 工具，不再改写成原生服务端搜索；非搜索名工具不受影响。（#694）
+
+已部署机升级：仅更新 Node 控制面与 `web/dist` 后重启；不必 `fetch:payload` / `wrap-cli/sync` / recreate 槽。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
 
 ## 1.3.221 — 2026-10-23
 
