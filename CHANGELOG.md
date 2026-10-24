@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.208-stable.1 — 2026-10-24
+
+- 独立的 208 稳定分支，业务源码、缓存断点与 `deploy/payload.json` 保持 `v1.3.208` 基线；不包含 `10-22-outbound-official-schema` 的 303/profile 实现及 208 之后的其他业务改动。
+- Release 的 12 个二进制附件原样复用 `v1.3.208`，逐项校验大小和 SHA256，不重新编译。CLI 为 `b5054cb8…`，kernel 为 `8f1347cc…`。
+- 缓存专项测试 74/74、Node → 208 CLI → 本地模拟上游验证 11/11 通过，覆盖 5m / 1h 及长短历史。原基线 `cli-hop-body` 的 6 项 TTL 断言失败未修改，不代表全量测试通过；未验证真实上游缓存命中。
+- 本版单独发布、不替换主线 Release / Docker `latest`，不发布新 Docker 镜像；未部署生产。
+
 ## 1.3.208 — 2026-10-21
 
 - 回退 1.3.208 的请求体重组与缓存断点改动，保持 1.3.207 的 thinking、system 和消息结构；仅在 cli-node 最终 hop 补回缺失的 `x-anthropic-billing-header`。
