@@ -14,6 +14,13 @@ const SESSION_LIMIT = 10_000
 /** Longest cache TTL; an older turn cannot be read anyway. */
 const SESSION_IDLE_MS = 60 * 60_000
 const sessions = new Map()
+/** Image floors outlive the cache: a session that drops images keeps dropping them. */
+const IMAGE_SESSION_IDLE_MS = 24 * 60 * 60_000
+const imageSessions = new Map()
+/** Images within the last IMAGE_WINDOW messages always stay; see retainImages. */
+const IMAGE_WINDOW = 24
+/** Cache entries written by recent turns, per session; anchors only read these. */
+const WRITE_LIMIT = 64
 const IMAGE_TYPES = new Set(['image', 'input_image', 'image_url'])
 /** Anthropic accepts at most four cache breakpoints per request. */
 const MAX_CACHE_MARKERS = 4
@@ -509,7 +516,8 @@ export function peekCachePrefix(sessionKey, body, now = Date.now()) {
   if (!key || !body || typeof body !== 'object') return null
   const previous = liveSession(key, now)
   // Compare what prepareCachePrefix would send, not the client's raw images.
-  const current = snapshotBody(retainImages(previous, body).body)
+  const images = liveImageState(previous?.image_key || key, now)
+  const current = snapshotBody(retainImages(images, body).body)
   const compared = comparePrefix(previous, current)
   return { ...compared, confirmed: !!previous?.confirmed }
 }
@@ -517,6 +525,11 @@ export function peekCachePrefix(sessionKey, body, now = Date.now()) {
 function liveSession(key, now) {
   const hit = sessions.get(key)
   return hit && now - hit.at < SESSION_IDLE_MS ? hit : null
+}
+
+function liveImageState(key, now) {
+  const hit = imageSessions.get(key)
+  return hit && now - hit.at < IMAGE_SESSION_IDLE_MS ? hit : null
 }
 
 /** First message whose images stay: the newer half of those after `dropped`. */
@@ -531,36 +544,55 @@ function nextImageFloor(messages, dropped) {
   return dropped + 1
 }
 
+function firstImageAt(messages, from) {
+  for (let i = from; i < messages.length; i++) if (messageImageCount(messages[i])) return i
+  return -1
+}
+
 /**
- * Once the client drops a historical image (oh-my-pi past its image budget),
- * every image below the session floor goes out in the client's dropped form.
- * The client drops oldest-first, one image per new one, which would break the
- * prefix at a different message every turn. The floor moves only when the
- * client drops at or above it, and then skips past the older half of the
- * remaining images: one break per half-budget of new images instead of one per
- * image. Clients that never drop an image are never touched.
+ * oh-my-pi drops its oldest image whenever a new one passes its image budget.
+ * The oldest image sits far back in a long session, so every new screenshot
+ * changes history there and the whole tail is rewritten. Once a session has
+ * shown one such drop, images below a floor go out in the client's dropped form
+ * and the client never touches history behind the floor again:
+ *
+ * - Age: an image older than 2×IMAGE_WINDOW messages moves the floor to the last
+ *   IMAGE_WINDOW messages. Every change lands near the tail, at most once per
+ *   IMAGE_WINDOW messages, where a recently written cache entry still reads.
+ * - Budget: a client drop at or above the floor skips past the older half of
+ *   the remaining images, so a small budget breaks once per half budget.
+ *
+ * State is per caller session, so an account switch keeps the floor. Clients
+ * that never drop an image are never touched.
  */
-function retainImages(previous, body) {
+function retainImages(state, body) {
   const messages = Array.isArray(body?.messages) ? body.messages : null
-  if (!previous || !messages) return { body, floor: 0, moved: false }
-  const prior = previous.messages
+  if (!messages) return { body, floor: 0, active: false, moved: false }
+  const priorLength = state?.ids.length ?? 0
   // Floor indexes only hold while the history below them is the same history:
   // a compaction or rewind that replaces it must not lose the new images.
-  let floor = previous.image_floor || 0
-  let rewritten = messages.length < prior.length
-  for (let i = 0; !rewritten && i < floor; i++) {
-    rewritten = prior[i].role !== messages[i]?.role || prior[i].id !== messageIdentity(messages[i])
+  let rewritten = !!state && messages.length < priorLength
+  for (let i = 0; !rewritten && i < (state?.floor || 0); i++) {
+    rewritten = state.roles[i] !== messages[i]?.role || state.ids[i] !== messageIdentity(messages[i])
   }
-  if (rewritten) floor = 0
+  const start = rewritten ? 0 : state?.floor || 0
+  let floor = start
+  let active = !!state?.active
   let dropped = -1
-  for (let i = floor; !rewritten && i < prior.length; i++) {
-    const record = prior[i]
-    if (!record.images || messageImageCount(messages[i]) >= record.images) continue
-    if (record.role !== messages[i]?.role || record.id !== messageIdentity(messages[i])) continue
+  for (let i = floor; state && !rewritten && i < priorLength; i++) {
+    if (!state.images[i] || messageImageCount(messages[i]) >= state.images[i]) continue
+    if (state.roles[i] !== messages[i]?.role || state.ids[i] !== messageIdentity(messages[i])) continue
     dropped = i
   }
-  const moved = dropped >= 0
-  if (moved) floor = Math.max(floor, nextImageFloor(messages, dropped))
+  if (dropped >= 0) {
+    active = true
+    floor = Math.max(floor, nextImageFloor(messages, dropped))
+  }
+  if (active) {
+    const oldest = firstImageAt(messages, floor)
+    if (oldest >= 0 && oldest < messages.length - 2 * IMAGE_WINDOW)
+      floor = Math.max(floor, messages.length - IMAGE_WINDOW)
+  }
   let next = null
   for (let i = 0; i < Math.min(floor, messages.length); i++) {
     const stripped = stripMessageImages(messages[i])
@@ -568,7 +600,7 @@ function retainImages(previous, body) {
     next ??= messages.slice()
     next[i] = stripped
   }
-  return { body: next ? { ...body, messages: next } : body, floor, moved }
+  return { body: next ? { ...body, messages: next } : body, floor, active, moved: floor > start }
 }
 
 function hasContent(message) {
@@ -600,65 +632,149 @@ function withoutMarkers(message) {
   }
 }
 
+/** Cache entries this body writes: every message marker, valid for its TTL. */
+function markerWrites(body, now) {
+  const writes = []
+  for (const [index, message] of (body.messages || []).entries()) {
+    if (!Array.isArray(message?.content)) continue
+    const control = message.content.findLast((block) => block?.cache_control)?.cache_control
+    if (!control) continue
+    writes.push({ index, until: now + (normalizeCacheTtl(control.ttl) === '1h' ? 60 * 60_000 : 5 * 60_000) })
+  }
+  return writes
+}
+
 /**
- * A break behind every message marker leaves upstream nothing to read but the
- * system prefix. The last user turn before the break was the tail of an
- * earlier request, so its cache entry exists; marking it reads everything up
- * to the break and rewrites only what follows. Uses the free breakpoint, or
- * takes the one from the non-tail message marker, which sits past the break
- * and cannot hit anyway. The tail marker and its TTL are kept.
+ * Entries written before this turn whose prefix still holds: unexpired and
+ * before the break. A failed hop wrote nothing, so its markers only count once
+ * confirmed.
  */
-function anchorBeforeBreak(body, index) {
+function liveWrites(previous, br, now) {
+  if (!previous) return []
+  const limit = !br ? Number.POSITIVE_INFINITY : br.section === 'messages' ? br.index : 0
+  const latest = new Map()
+  for (const write of [...(previous.writes || []), ...(previous.confirmed ? previous.pending || [] : [])]) {
+    if (write.until <= now || write.index >= limit) continue
+    latest.set(write.index, Math.max(write.until, latest.get(write.index) || 0))
+  }
+  return [...latest]
+    .map(([index, until]) => ({ index, until }))
+    .sort((a, b) => a.index - b.index)
+    .slice(-WRITE_LIMIT)
+}
+
+function lastMarkedMessage(body) {
+  const messages = Array.isArray(body?.messages) ? body.messages : []
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (Array.isArray(messages[i]?.content) && messages[i].content.some((block) => block?.cache_control)) return i
+  }
+  return -1
+}
+
+/**
+ * Message markers for this turn: one reads the newest cache entry still valid
+ * before the first change, one writes. Normally those are the previous tail and
+ * the new tail the caller already placed, and nothing moves.
+ *
+ * After a change (break), the read marker goes on the newest valid entry before
+ * it (an entry this process did not see written, after a restart, falls back
+ * to the last user turn before the change), so upstream rewrites only from
+ * there. The write marker goes in front of the oldest image still sent past the
+ * change: the next change strips that image, and an entry right in front of it
+ * keeps that rewrite as short as the image's age. Entries only exist where a
+ * marker sat, so without this the next change would read from behind this one.
+ * The turn after such a write marks it as the read, since it is not the
+ * previous tail. Every marker keeps the tail marker's TTL.
+ */
+function placeMarkers(body, { br, writes, previousTail }) {
+  if (br && br.section !== 'messages') return null
   const messages = body.messages
   const marked = []
   for (const [i, message] of messages.entries()) {
     if (Array.isArray(message?.content) && message.content.some((block) => block?.cache_control)) marked.push(i)
   }
-  if (!marked.length || marked[0] < index) return null
-  let anchor = -1
-  for (let i = Math.min(index, messages.length) - 1; i >= 0 && anchor < 0; i--) {
-    if (messages[i]?.role === 'user' && hasContent(messages[i])) anchor = i
-  }
-  if (anchor < 0) return null
+  if (!marked.length) return null
   const tail = marked[marked.length - 1]
+  const limit = br ? br.index : messages.length
+  const usable = (i) => messages[i]?.role === 'user' && hasContent(messages[i])
+  let read = writes.findLast((write) => write.index < limit && write.index < tail && usable(write.index))?.index ?? -1
+  if (!br && (read < 0 || read >= previousTail || marked.includes(read))) return null
+  for (let i = Math.min(limit, tail) - 1; br && read < 0 && i >= 0; i--) if (usable(i)) read = i
+  let write = tail
+  const oldest = br ? firstImageAt(messages, br.index) : -1
+  for (let i = oldest - 1; oldest > 0 && write === tail && i > read; i--) if (usable(i)) write = i
+  const wanted = [read, write].filter((i) => i >= 0)
+  const messageMarkers = listCacheMarkers(body).filter((marker) => marker.section === 'messages').length
+  if (listCacheMarkers(body).length - messageMarkers + wanted.length > MAX_CACHE_MARKERS) return null
   const control = messages[tail].content.findLast((block) => block?.cache_control).cache_control
-  const next = messages.slice()
-  if (listCacheMarkers(body).length >= MAX_CACHE_MARKERS) {
-    const spare = marked.filter((i) => i !== tail)
-    if (!spare.length) return null
-    for (const i of spare) next[i] = withoutMarkers(next[i])
+  const next = messages.map((message, i) => (marked.includes(i) ? withoutMarkers(message) : message))
+  for (const i of wanted) {
+    const stamped = withMarker(next[i], control)
+    if (!stamped) return null
+    next[i] = stamped
   }
-  const stamped = withMarker(next[anchor], control)
-  if (!stamped) return null
-  next[anchor] = stamped
-  return { body: { ...body, messages: next }, anchor }
+  return {
+    body: { ...body, messages: next },
+    ...(read >= 0 ? { anchor: read } : {}),
+    ...(write !== tail ? { checkpoint: write } : {}),
+  }
 }
 
 /**
- * Prepare `body` as the next attempted turn of `sessionKey` and record it:
- * image floor first (it decides what is sent), then the prefix comparison,
- * then the anchor. The recorded snapshot is the body before anchoring, since
- * markers are not history. It stays unconfirmed until confirmCachePrefix: a
- * failed/rejected hop must not make the next estimate treat the session as warm.
+ * Prepare `body` as the next attempted turn of `sessionKey` (account + session)
+ * and record it: image floor first (it decides what is sent), then the prefix
+ * comparison, then the markers. `imageKey` names the caller session the image
+ * floor belongs to across accounts; it defaults to `sessionKey`. The recorded
+ * snapshot is the body before markers move, since markers are not history. It
+ * stays unconfirmed until confirmCachePrefix: a failed/rejected hop must not
+ * make the next estimate treat the session as warm.
  */
-export function prepareCachePrefix(sessionKey, body, now = Date.now()) {
+export function prepareCachePrefix(sessionKey, body, now = Date.now(), { imageKey = null } = {}) {
   const key = String(sessionKey || '').trim()
   if (!key || !body || typeof body !== 'object') return null
+  const imagesAt = String(imageKey || '').trim() || key
   const previous = liveSession(key, now)
-  const retained = retainImages(previous, body)
+  const retained = retainImages(liveImageState(imagesAt, now), body)
   const current = snapshotBody(retained.body)
   const compared = comparePrefix(previous, current)
-  sessions.delete(key)
-  sessions.set(key, { ...current, turn: compared.turn, at: now, confirmed: false, image_floor: retained.floor })
-  if (sessions.size > SESSION_LIMIT) sessions.delete(sessions.keys().next().value)
   const br = compared.break
-  const anchored = br?.section === 'messages' ? anchorBeforeBreak(retained.body, br.index) : null
+  const writes = liveWrites(previous, br, now)
+  const previousTail = previous?.tail ?? -1
+  const placed = Array.isArray(retained.body.messages)
+    ? placeMarkers(retained.body, { br, writes, previousTail })
+    : null
+  const sent = placed?.body ?? retained.body
+  sessions.delete(key)
+  sessions.set(key, {
+    ...current,
+    turn: compared.turn,
+    at: now,
+    confirmed: false,
+    image_key: imagesAt,
+    writes,
+    pending: markerWrites(sent, now),
+    // Where the caller's tail marker sat; a later turn reads it if it was written.
+    tail: lastMarkedMessage(retained.body),
+  })
+  if (sessions.size > SESSION_LIMIT) sessions.delete(sessions.keys().next().value)
+  imageSessions.delete(imagesAt)
+  imageSessions.set(imagesAt, {
+    at: now,
+    floor: retained.floor,
+    active: retained.active,
+    roles: current.messages.map((record) => record.role),
+    ids: current.messages.map((record) => record.id),
+    images: current.messages.map((record) => record.images || 0),
+  })
+  if (imageSessions.size > SESSION_LIMIT) imageSessions.delete(imageSessions.keys().next().value)
   return {
-    body: anchored?.body ?? retained.body,
+    body: sent,
     turn: compared.turn,
     break: br,
     ...(retained.floor > 0 ? { image_floor: retained.floor, image_floor_moved: retained.moved } : {}),
-    ...(anchored ? { anchor: anchored.anchor } : {}),
+    ...(placed?.anchor != null && br ? { anchor: placed.anchor } : {}),
+    ...(placed?.checkpoint != null ? { checkpoint: placed.checkpoint } : {}),
+    ...(placed && !br ? { reread: placed.anchor } : {}),
   }
 }
 
@@ -674,4 +790,5 @@ export function confirmCachePrefix(sessionKey, now = Date.now()) {
 
 export function clearCachePrefixSessions() {
   sessions.clear()
+  imageSessions.clear()
 }

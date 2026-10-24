@@ -1,7 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import {
   clearCachePrefixSessions,
+  confirmCachePrefix,
   describeCacheContinuity,
   DROPPED_IMAGE_TEXT,
   messageImageCount,
@@ -341,13 +343,16 @@ test('oh-my-pi dropping its oldest image breaks the prefix once per half budget,
     if (shots >= budget) assert.ok(sentImages(sent) >= budget / 2)
     if (!prefix.break) continue
     breaks.push(shots)
-    assert.ok(prefix.anchor < prefix.break.index, 'a marker is moved in front of the break')
+    assert.ok(prefix.anchor < prefix.break.index, 'the read marker sits in front of the break')
     const markers = describeCacheContinuity({ outbound: sent }).markers
     assert.equal(markers.length, 4)
     assert.ok(markers.every((marker) => marker.ttl === '1h'))
+    // The write marker sits right in front of the oldest image still sent, where the next drop lands.
+    const oldest = sent.messages.findIndex((message, i) => i >= prefix.break.index && messageImageCount(message))
+    assert.equal(prefix.checkpoint, oldest - 2)
     assert.deepEqual(
       markers.filter((marker) => marker.section === 'messages').map((marker) => marker.index),
-      [prefix.anchor, sent.messages.length - 1],
+      [prefix.anchor, prefix.checkpoint],
     )
   }
   // Without the floor every turn from the fifth would break: 20 rewrites.
@@ -396,4 +401,107 @@ test('a history edit behind both message markers anchors the last user turn befo
       [8, '1h'],
     ],
   )
+})
+
+// One tool turn per `t`; a screenshot every `every` turns; omp keeps the newest `budget`.
+function sparseBody(turns, every, budget) {
+  const shots = Array.from({ length: Math.floor(turns / every) }, (_, i) => (i + 1) * every)
+  const kept = new Set(shots.slice(-budget))
+  const messages = [{ role: 'user', content: [{ type: 'text', text: 'drive the browser' }] }]
+  for (let t = 1; t <= turns; t++) {
+    messages.push({ role: 'assistant', content: [{ type: 'tool_use', id: `t${t}`, name: 'act', input: {} }] })
+    if (t % every)
+      messages.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: `t${t}`, content: `ok ${t}` }] })
+    else messages.push(ompResult(t, kept.has(t)))
+  }
+  return marked(messages)
+}
+
+// Upstream prompt cache: an entry per (marker position, exact prefix). A request
+// reads the newest entry at a marker or within 20 blocks before one, writes an
+// entry at every marker, and pays creation from the read point to its last
+// marker. Text weighs 400 tokens a message, an image 1500.
+function upstreamCache() {
+  const entries = new Set()
+  const strip = (value) => JSON.stringify(value, (key, nested) => (key === 'cache_control' ? undefined : nested))
+  return (body) => {
+    const { messages } = body
+    const prefix = []
+    let hash = ''
+    for (const message of messages) {
+      hash = createHash('sha256').update(hash).update(strip(message)).digest('hex')
+      prefix.push(hash)
+    }
+    const blocks = messages.map((message) => (Array.isArray(message.content) ? message.content.length : 1))
+    const tokens = messages.map((message) => 400 + 1500 * messageImageCount(message))
+    const markers = messages.flatMap((message, i) =>
+      Array.isArray(message.content) && message.content.some((block) => block.cache_control) ? [i] : [],
+    )
+    let read = -1
+    for (const marker of markers) {
+      for (let i = marker, budget = 20; i >= 0 && budget > 0; budget -= blocks[i], i--) {
+        if (!entries.has(`${i}:${prefix[i]}`)) continue
+        read = Math.max(read, i)
+        break
+      }
+    }
+    for (const marker of markers) entries.add(`${marker}:${prefix[marker]}`)
+    return tokens.slice(read + 1, Math.max(...markers) + 1).reduce((sum, n) => sum + n, 0)
+  }
+}
+
+function cacheCost(turns, every, budget) {
+  clearCachePrefixSessions()
+  const direct = upstreamCache()
+  const gateway = upstreamCache()
+  const cost = { direct: 0, gateway: 0, ideal: 0 }
+  for (let t = 1; t <= turns; t++) {
+    const inbound = sparseBody(t, every, budget)
+    cost.direct += direct(inbound)
+    const { body: sent } = prepareCachePrefix('cost', inbound, t)
+    confirmCachePrefix('cost', t)
+    cost.gateway += gateway(sent)
+    cost.ideal += 800 + (t % every ? 0 : 1500)
+  }
+  return cost
+}
+
+test('screenshots past the client image budget no longer rewrite the history behind them', () => {
+  for (const every of [1, 3, 8, 20]) {
+    const cost = cacheCost(240, every, 5)
+    // The client alone drops its oldest image far back on every new screenshot.
+    assert.ok(cost.direct > 5 * cost.ideal, `every ${every}: direct ${cost.direct} ideal ${cost.ideal}`)
+    assert.ok(cost.gateway < 2.5 * cost.ideal, `every ${every}: gateway ${cost.gateway} ideal ${cost.ideal}`)
+  }
+})
+
+test('the image floor follows the caller session to another account', () => {
+  clearCachePrefixSessions()
+  for (let turns = 1; turns <= 120; turns++)
+    prepareCachePrefix('acct-a:s', sparseBody(turns, 8, 5), turns, { imageKey: 'caller' })
+  const floor = prepareCachePrefix('acct-a:s', sparseBody(121, 8, 5), 121, { imageKey: 'caller' }).image_floor
+  assert.ok(floor > 0)
+  const switched = prepareCachePrefix('acct-b:s', sparseBody(122, 8, 5), 122, { imageKey: 'caller' })
+  assert.equal(switched.image_floor, floor)
+  assert.ok(switched.body.messages.slice(0, floor).every((message) => messageImageCount(message) === 0))
+  // The client's next drop sits below the floor: no second rewrite on the new account.
+  prepareCachePrefix('acct-b:s', sparseBody(123, 8, 5), 123, { imageKey: 'caller' })
+  assert.equal(prepareCachePrefix('acct-b:s', sparseBody(128, 8, 5), 124, { imageKey: 'caller' }).break, null)
+})
+
+test('an anchor reads the newest entry an earlier turn wrote, not an unwritten user turn', () => {
+  clearCachePrefixSessions()
+  const history = (length, edits = {}) =>
+    Array.from({ length }, (_, i) => ({
+      role: i % 2 ? 'assistant' : 'user',
+      content: [{ type: 'text', text: edits[i] ?? `m${i}` }],
+    }))
+  prepareCachePrefix('w', marked(history(10)), 0)
+  confirmCachePrefix('w', 0)
+  // An edit at 2 rewrites from 0; this turn writes its anchor (0) and tail (8).
+  assert.equal(prepareCachePrefix('w', marked(history(10, { 2: 'x' })), 1).anchor, 0)
+  confirmCachePrefix('w', 1)
+  // User turns 4 and 6 were never a tail; 0 is the newest live entry before 7.
+  const { anchor } = prepareCachePrefix('w', marked(history(12, { 2: 'x', 7: 'y' })), 2)
+  assert.equal(anchor, 0)
 })

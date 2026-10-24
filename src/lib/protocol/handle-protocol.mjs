@@ -1224,22 +1224,27 @@ export function createHandleProtocol(deps) {
     // Cache bypass is a client hint; only authenticated master-key probes may skip accounting.
     const healthReal = req.apiKeyKind === 'master' && isHealthRealBypass(req.headers)
     // Cache lives per account; a failover to another account starts cold by design.
+    // The image floor follows the caller session across accounts, scoped to its key.
     // Returns the body to send: the image floor and break anchor may rewrite it.
+    const imageKey = callerSession ? `${req.apiKeyRecord?.id || req.apiKeyKind || ''}:${callerSession}` : null
     const noteCachePrefix = (selected, sessionId, body) => {
       if (!sessionId) return body
       const key = `${selected.accountId}:${sessionId}`
-      const { body: prepared, ...prefix } = prepareCachePrefix(key, body) || { body }
+      const { body: prepared, ...prefix } = prepareCachePrefix(key, body, Date.now(), { imageKey }) || { body }
       logBag.cache_prefix = prefix
       logBag.cache_prefix_key = key
       if (prefix.image_floor_moved) {
         console.warn(
-          `[cache-prefix] request ${logCtx.request_id} turn ${prefix.turn} client dropped images; image floor messages[${prefix.image_floor}]`,
+          `[cache-prefix] request ${logCtx.request_id} turn ${prefix.turn} image floor messages[${prefix.image_floor}]`,
         )
       }
       if (!prefix.break) return prepared
       const where = formatCacheBreak(prefix)
       const anchor = prefix.anchor == null ? '' : `; anchored messages[${prefix.anchor}]`
-      console.warn(`[cache-prefix] request ${logCtx.request_id} turn ${prefix.turn} broke at ${where}${anchor}`)
+      const checkpoint = prefix.checkpoint == null ? '' : `; checkpoint messages[${prefix.checkpoint}]`
+      console.warn(
+        `[cache-prefix] request ${logCtx.request_id} turn ${prefix.turn} broke at ${where}${anchor}${checkpoint}`,
+      )
       return prepared
     }
     // Keep the envelope separately; only the CLI send boundary owns final headers.
