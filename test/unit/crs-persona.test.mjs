@@ -6,8 +6,10 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   applyCrsUnofficialPersona,
+  billingIndexesFromMessages,
   billingPromptId,
   buildBillingAttributionText,
+  ensureBillingAttribution,
   CCH_PLACEHOLDER,
   computeClaudeCodeFingerprint,
   CRS_STANDING_CONSTRAINT,
@@ -368,9 +370,35 @@ test('fingerprint is stable for the same first user text and cli version', () =>
   assert.notEqual(a, other)
   assert.equal(
     a,
-    `x-anthropic-billing-header: cc_version=2.1.234.${expectedFp(user, '2.1.234')}; cc_entrypoint=cli; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${billingPromptId('', user, '2.1.234')};`,
+    `x-anthropic-billing-header: cc_version=2.1.234.${expectedFp(user, '2.1.234')}; cc_entrypoint=sdk-cli; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${billingPromptId('', user, '2.1.234')};`,
   )
 })
+
+test('missing billing receives turn indexes without rewriting caller billing', () => {
+  const messages = [
+    { role: 'user', content: 'ping' },
+    { role: 'assistant', content: 'pong' },
+    { role: 'user', content: 'ping again' },
+  ]
+  const sessionId = '11111111-2222-4333-8444-555555555555'
+  const added = ensureBillingAttribution(
+    { messages },
+    { firstUserText: 'ping', cliVersion: '2.1.296', sessionId, indexes: billingIndexesFromMessages(messages) },
+  )
+  assert.match(
+    added.system[0].text,
+    new RegExp(
+      `^x-anthropic-billing-header: cc_version=2\\.1\\.296\\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${sessionId}; cc_turn_origin=sdk; cc_prompt_index=0; cc_turn_index=1;$`,
+    ),
+  )
+  const caller = 'x-anthropic-billing-header: cc_version=2.1.296.abc; cc_entrypoint=cli; cch=00000;'
+  const kept = ensureBillingAttribution(
+    { system: [{ type: 'text', text: caller }], messages },
+    { firstUserText: 'ping', cliVersion: '2.1.296', sessionId, indexes: billingIndexesFromMessages(messages) },
+  )
+  assert.equal(kept.system[0].text, caller)
+})
+
 
 test('fingerprint uses first user text, not discarded caller system', () => {
   const firstUser = 'original first user text xx'
@@ -517,7 +545,7 @@ test('oh-my-pi OAuth stealth prefix does not skip rewrite even with official UA 
   assert.equal(out.system.length, 4)
   assert.equal(out.system[0].text, CRS_OFFICIAL_SYSTEM)
   assert.match(out.system[1].text, /Oh My Pi coding harness/)
-  assert.match(out.system[2].text, /cc_entrypoint=cli;/)
+  assert.match(out.system[2].text, /cc_entrypoint=sdk-cli;/)
   assert.match(out.system[1].text, /<workstation>/)
   assert.ok(!JSON.stringify(out.system).includes('local-agent'))
   assert.ok(!JSON.stringify(out.system).includes('cc_entrypoint=local-agent'))
@@ -877,7 +905,7 @@ test('desktop billing and Agent SDK leftovers are dropped, not parked', () => {
   assert.equal(out.system.length, 5)
   assert.equal(out.system[1].text, CRS_AGENT_EXPANSION)
   assert.equal(out.system[4].text, 'you are a linter')
-  assert.match(out.system[2].text, /cc_entrypoint=cli;/)
+  assert.match(out.system[2].text, /cc_entrypoint=sdk-cli;/)
   assert.ok(!JSON.stringify(out.system).includes('claude-desktop'))
   assert.ok(!JSON.stringify(out.system).includes('running inside'))
   assert.ok(!firstUserContent(out).includes('claude-desktop'))

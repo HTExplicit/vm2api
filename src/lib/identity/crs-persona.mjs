@@ -376,7 +376,7 @@ export function buildBillingAttributionText(
   const fp = computeClaudeCodeFingerprint(firstUserText ?? '', ver)
   const promptId = billingPromptId(sessionId, firstUserText, ver)
   const tail = billingTurnSuffix(indexes?.promptIndex, indexes?.turnIndex)
-  return `x-anthropic-billing-header: cc_version=${ver}.${fp}; cc_entrypoint=cli; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${promptId};${tail}`
+  return `x-anthropic-billing-header: cc_version=${ver}.${fp}; cc_entrypoint=sdk-cli; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${promptId};${tail}`
 }
 
 /** Add the billing block exactly once before the cli-node hop. */
