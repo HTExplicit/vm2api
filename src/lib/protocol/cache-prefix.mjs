@@ -632,14 +632,19 @@ function withoutMarkers(message) {
   }
 }
 
-/** Cache entries this body writes: every message marker, valid for its TTL. */
+/**
+ * Cache entries this body writes: every message marker, valid for its TTL.
+ * Upstream keeps an omitted ttl for 5m; normalizeCacheTtl would read it as the
+ * gateway's 1h default and keep an expired entry as an anchor.
+ */
 function markerWrites(body, now) {
   const writes = []
   for (const [index, message] of (body.messages || []).entries()) {
     if (!Array.isArray(message?.content)) continue
     const control = message.content.findLast((block) => block?.cache_control)?.cache_control
     if (!control) continue
-    writes.push({ index, until: now + (normalizeCacheTtl(control.ttl) === '1h' ? 60 * 60_000 : 5 * 60_000) })
+    const hour = control.ttl != null && String(control.ttl).trim() !== '' && normalizeCacheTtl(control.ttl) === '1h'
+    writes.push({ index, until: now + (hour ? 60 * 60_000 : 5 * 60_000) })
   }
   return writes
 }

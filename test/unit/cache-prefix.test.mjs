@@ -419,8 +419,9 @@ function sparseBody(turns, every, budget) {
 
 // Upstream prompt cache: an entry per (marker position, exact prefix). A request
 // reads the newest entry at a marker or within 20 blocks before one, writes an
-// entry at every marker, and pays creation from the read point to its last
-// marker. Text weighs 400 tokens a message, an image 1500.
+// entry at every marker, pays creation from the read point to its last marker,
+// and full input for everything after it. Text weighs 400 tokens a message, an
+// image 1500. Billed against plain input: 1h creation 2×, uncached input 1×.
 function upstreamCache() {
   const entries = new Set()
   const strip = (value) => JSON.stringify(value, (key, nested) => (key === 'cache_control' ? undefined : nested))
@@ -446,7 +447,9 @@ function upstreamCache() {
       }
     }
     for (const marker of markers) entries.add(`${marker}:${prefix[marker]}`)
-    return tokens.slice(read + 1, Math.max(...markers) + 1).reduce((sum, n) => sum + n, 0)
+    const last = Math.max(...markers)
+    const sum = (from, to) => tokens.slice(from, to).reduce((total, n) => total + n, 0)
+    return 2 * sum(read + 1, last + 1) + sum(Math.max(read, last) + 1, messages.length)
   }
 }
 
@@ -461,7 +464,8 @@ function cacheCost(turns, every, budget) {
     const { body: sent } = prepareCachePrefix('cost', inbound, t)
     confirmCachePrefix('cost', t)
     cost.gateway += gateway(sent)
-    cost.ideal += 800 + (t % every ? 0 : 1500)
+    // Each turn's new messages written to cache once.
+    cost.ideal += 2 * (800 + (t % every ? 0 : 1500))
   }
   return cost
 }
@@ -469,10 +473,35 @@ function cacheCost(turns, every, budget) {
 test('screenshots past the client image budget no longer rewrite the history behind them', () => {
   for (const every of [1, 3, 8, 20]) {
     const cost = cacheCost(240, every, 5)
+    // The checkpoint write is what keeps this bound: without it, 4.5–15× ideal.
     // The client alone drops its oldest image far back on every new screenshot.
     assert.ok(cost.direct > 5 * cost.ideal, `every ${every}: direct ${cost.direct} ideal ${cost.ideal}`)
-    assert.ok(cost.gateway < 2.5 * cost.ideal, `every ${every}: gateway ${cost.gateway} ideal ${cost.ideal}`)
+    assert.ok(cost.gateway < 3 * cost.ideal, `every ${every}: gateway ${cost.gateway} ideal ${cost.ideal}`)
   }
+})
+
+test('an entry written with an omitted ttl is not read back after five minutes', () => {
+  const minute = 60_000
+  // Message 2 carries an explicit 1h marker; 4 and the tail the omitted 5m default.
+  const marker = (i, length) =>
+    i === 2 ? { type: 'ephemeral', ttl: '1h' } : i === 4 || i === length - 1 ? { type: 'ephemeral' } : null
+  const history = (length, edits = {}) => ({
+    messages: Array.from({ length }, (_, i) => ({
+      role: i % 2 ? 'assistant' : 'user',
+      content: [
+        { type: 'text', text: edits[i] ?? `m${i}`, ...(marker(i, length) ? { cache_control: marker(i, length) } : {}) },
+      ],
+    })),
+  })
+  // The edit at 6 leaves the entries at 2 (1h) and 4 (5m) in front of it.
+  const anchorAfter = (gap) => {
+    clearCachePrefixSessions()
+    prepareCachePrefix('ttl', history(7), 0)
+    confirmCachePrefix('ttl', 0)
+    return prepareCachePrefix('ttl', history(9, { 6: 'x' }), gap).anchor
+  }
+  assert.equal(anchorAfter(4 * minute), 4)
+  assert.equal(anchorAfter(6 * minute), 2)
 })
 
 test('the image floor follows the caller session to another account', () => {
