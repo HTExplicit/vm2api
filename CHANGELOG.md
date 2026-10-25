@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- 第三方 / 调用方 `system` 不再追加到官方 `system[]` 末段（#728）：非 `# Environment` 的 leftover 原文只包一层 `<system-reminder>` 并 prepend 到第一条 user；已带 `<system-reminder>` 的会先解包并去掉 MANDATORY 约束行，避免嵌套；空 caller system 不产生空 reminder；调用方自带的 `# Environment` 块仍留在 `system[]`（含原样空白）。官方 4 块结构下无 caller 文本时 `system` 长度为 4。
 - 模型附加句改为按档开关，默认关闭。关闭时 `{{model_sentence}}` 不渲染；打开后才取 `model_env_extra` 里当前模型的句子。清空模板块后也不追加。
 - 网关生成的 billing 与 cli-node 缺失 billing 时的兜底头改为 `cc_entrypoint=sdk-cli`，与 2.1.303 抓包一致；调用方自带的 billing 不改写。出站 UA 已是 `(external, sdk-cli)`，`cc_turn_origin` 仍为 `sdk`。所有档位的出站 billing 字节随之变化，各会话首轮重建一次缓存。
 - 请求日志的 `outbound_headers` 改为新 cli-node 在最终 fetch 前回传的脱敏请求头，新增采集来源；Node → worker 中间头另存 `worker_envelope_headers`。流式与非流式入站均支持，内部事件不发给客户端、不触发提交或上游 idle 计时；旧 CLI 未回传时明确显示未获取，旧日志不冒充最终值。需同时更新 Node、web 与新 cli-node；本轮尚未发布 payload 或部署。

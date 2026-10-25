@@ -28,8 +28,21 @@ function texts(body) {
   return (Array.isArray(body.system) ? body.system : []).map((block) => String(block?.text || ''))
 }
 
-function userText(body) {
-  return JSON.stringify(body.messages || [])
+function firstUserText(body) {
+  const message = (body.messages || []).find((entry) => entry?.role === 'user')
+  if (!message) return ''
+  const content = message.content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content.map((block) => (typeof block === 'string' ? block : block?.text || '')).join('')
+  }
+  return content == null ? '' : String(content)
+}
+
+function assertCallerReminder(body, caller) {
+  const escaped = caller.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  assert.match(firstUserText(body), new RegExp(`<system-reminder>\\n${escaped}\\n</system-reminder>`))
+  assert.ok(!texts(body).some((text) => text.includes(caller)), 'caller text must not stay in system[]')
 }
 
 function assertOfficial(body, { caller = '' } = {}) {
@@ -38,9 +51,9 @@ function assertOfficial(body, { caller = '' } = {}) {
   assert.equal(blocks[1], CRS_OFFICIAL_CLI_SYSTEM)
   assert.ok(blocks[2].includes(CRS_OFFICIAL_AGENT_PROMPT.slice(0, 48)))
   assert.match(blocks[3], /^# Environment\n/)
-  if (caller) assert.equal(blocks.at(-1), caller)
-  else assert.equal(blocks.length, 4)
-  assert.match(userText(body), new RegExp(HI))
+  assert.equal(blocks.length, 4)
+  if (caller) assertCallerReminder(body, caller)
+  assert.match(firstUserText(body), new RegExp(HI))
 }
 
 function assertZero(body, { caller = '' } = {}) {
@@ -51,8 +64,9 @@ function assertZero(body, { caller = '' } = {}) {
   assert.equal(blocks[2], '\u200b')
   assert.match(blocks[3], /^# Environment\n/)
   assert.ok(!blocks.some((text) => text.includes(CRS_OFFICIAL_AGENT_PROMPT.slice(0, 48))))
-  if (caller) assert.equal(blocks.at(-1), caller)
-  assert.match(userText(body), new RegExp(HI))
+  assert.equal(blocks.length, 4)
+  if (caller) assertCallerReminder(body, caller)
+  assert.match(firstUserText(body), new RegExp(HI))
 }
 
 const SHAPES = [

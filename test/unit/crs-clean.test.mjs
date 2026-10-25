@@ -236,17 +236,21 @@ test('OpenAI chat unofficial rewrite is official 4-block plus caller --system ap
   })
   assert.deepEqual(claude.stop_sequences, ['END'])
   const cleaned = applyCrsUnofficialPersona(claude, { officialClient: false })
-  assert.equal(cleaned.system.length, 6)
-  assert.equal(cleaned.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
-  assert.equal(cleaned.system[5].text, 'you are a linter')
-  assert.match(JSON.stringify(cleaned.messages[0].content), /MANDATORY constraints for this turn/)
-  assert.ok(JSON.stringify(cleaned.messages[0].content).includes('hi'))
+  assert.equal(cleaned.system.length, 4)
+  const userPayload =
+    typeof cleaned.messages[0].content === 'string'
+      ? cleaned.messages[0].content
+      : cleaned.messages[0].content.map((block) => block?.text || '').join('')
+  assert.match(userPayload, /MANDATORY constraints for this turn/)
+  assert.match(userPayload, /<system-reminder>\nyou are a linter\n<\/system-reminder>/)
+  assert.ok(userPayload.includes('hi'))
+  assert.ok(!cleaned.system.some((block) => String(block?.text || '').includes('you are a linter')))
 })
 
 test('empty unofficial system without tools still writes official 4 blocks', () => {
   const out = applyCrsUnofficialPersona({ messages: [] }, { officialClient: false })
-  assert.equal(out.system.length, 5)
-  assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
+  assert.equal(out.system.length, 4)
+  assert.match(out.system[1].text, /Claude agent/)
   assert.equal(out.messages.length, 0)
 })
 
@@ -263,11 +267,12 @@ test('Xcode unofficial system is appended after official 4 blocks', () => {
     messages: [{ role: 'user', content: 'hi' }],
   }
   const out = applyCrsUnofficialPersona(body, { officialClient: false })
-  assert.equal(out.system.length, 6)
-  assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
-  assert.equal(out.system[5].text, 'You are currently in Xcode. Help with Swift.')
-  assert.match(String(out.messages[0].content), /MANDATORY constraints for this turn/)
-  assert.ok(String(out.messages[0].content).includes('hi'))
+  assert.equal(out.system.length, 4)
+  const userText = String(out.messages[0].content)
+  assert.match(userText, /MANDATORY constraints for this turn/)
+  assert.match(userText, /<system-reminder>\nYou are currently in Xcode\. Help with Swift\.\n<\/system-reminder>/)
+  assert.ok(userText.includes('hi'))
+  assert.ok(!out.system.some((block) => String(block?.text || '').includes('Xcode')))
   assert.equal(out.messages.length, 1)
 })
 

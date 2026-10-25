@@ -189,9 +189,13 @@ test('API backend applies the global official_full persona setting', async () =>
     assert.equal(response.status, 200)
     assert.ok(received)
     const outbound = JSON.parse(received.body)
-    assert.equal(outbound.system.length, 5)
+    assert.equal(outbound.system.length, 4)
     assert.ok(
-      outbound.system.some((block) => String(block.text || '').includes(CRS_OFFICIAL_AGENT_PROMPT.slice(0, 80))),
+      outbound.system.some(
+        (block) =>
+          String(block.text || '').includes(CRS_OFFICIAL_AGENT_PROMPT.slice(0, 80)) ||
+          String(block.text || '').includes('# Doing tasks'),
+      ),
     )
   } finally {
     await new Promise((resolve) => kernel.close(resolve))

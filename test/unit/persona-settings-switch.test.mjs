@@ -294,9 +294,14 @@ test('official_prompt attaches caller agent and keeps leftover overlay', () => {
       ...UNOFFICIAL,
       system: '你是一个高速收费员。',
     })
-    assert.equal(withLeftover.system.length, 5)
+    assert.equal(withLeftover.system.length, 4)
     assert.ok(!withLeftover.system.some((b) => b?.text === CRS_AGENT_EXPANSION))
-    assert.equal(withLeftover.system[4].text, '你是一个高速收费员。')
+    assert.ok(!withLeftover.system.some((b) => String(b?.text || '').includes('高速收费员')))
+    const firstUser = withLeftover.messages.find((message) => message.role === 'user')
+    assert.match(
+      typeof firstUser.content === 'string' ? firstUser.content : JSON.stringify(firstUser.content),
+      /<system-reminder>\n你是一个高速收费员。\n<\/system-reminder>/,
+    )
     assert.ok(!withLeftover.messages.some((message) => message.role === 'system'))
     assert.match(envTextAt(withLeftover), /^# Environment/)
   })

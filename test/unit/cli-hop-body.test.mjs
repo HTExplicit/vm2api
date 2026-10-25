@@ -535,7 +535,8 @@ test('sonnet-5 lift keeps one context-budget reminder so the system tail stays s
   const renderedFirst = persona(first)
   const renderedSecond = persona(second)
   assert.deepEqual(renderedSecond.system, renderedFirst.system)
-  assert.equal(JSON.stringify(renderedSecond.system).match(/<total_tokens>/g)?.length, 2)
+  assert.equal(JSON.stringify(renderedSecond.system).match(/<total_tokens>/g)?.length, 1)
+  assert.equal(JSON.stringify(renderedSecond.messages).match(/<total_tokens>/g)?.length, 1)
 })
 
 test('a later budget drop leaves a mixed system-reminder wrapper intact', () => {
