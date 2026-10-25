@@ -111,6 +111,7 @@ import {
   applyCrsUnofficialPersona,
   detectProxiedOfficialCcFromRoutingFile,
   billingIndexesFromMessages,
+  ccEntrypointFromRouting,
   ensureBillingAttribution,
   extractFirstUserText,
   isOfficialClaudeCodeTraffic,
@@ -1385,6 +1386,7 @@ export function createHandleProtocol(deps) {
                 firstUserText,
                 sessionId: attemptSessionId,
                 oneM: hasClaudeCode1mSuffix(inbound?.model),
+                entrypoint: ccEntrypointFromRouting(routingNow),
               })
               // Top-level body field: kernel keeps unknown fields; cli-node reads and deletes it.
               hopBody.kin_outbound_shape = 'lean'
@@ -1395,6 +1397,7 @@ export function createHandleProtocol(deps) {
                 sessionId: attemptSessionId,
                 cliVersion: outboundProfile.cliVersion,
                 indexes: billingIndexesFromMessages(hopBody.messages),
+                entrypoint: ccEntrypointFromRouting(routingNow),
               })
             }
             hopBody = await materializeRemoteImageSources(hopBody)

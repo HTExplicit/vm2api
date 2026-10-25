@@ -473,6 +473,28 @@ test('missing billing receives sdk-cli and turn indexes; caller billing keeps en
   )
   assert.equal(kept.system[0].text, caller)
 })
+test('generated billing follows the panel entrypoint and still leaves caller billing unchanged', () => {
+  const messages = [{ role: 'user', content: 'ping' }]
+  const added = ensureBillingAttribution({ messages }, { firstUserText: 'ping', entrypoint: 'cli' })
+  assert.match(added.system[0].text, /cc_entrypoint=cli;/)
+  const caller = 'x-anthropic-billing-header: cc_version=2.1.296.abc; cc_entrypoint=sdk-cli; cch=00000;'
+  const kept = ensureBillingAttribution({ system: [{ type: 'text', text: caller }] }, { entrypoint: 'cli' })
+  assert.equal(kept.system[0].text, caller)
+})
+test('routing.json cc_entrypoint reaches the rendered template billing without a direct argument', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-entrypoint-'))
+  const file = path.join(dir, 'routing.json')
+  fs.writeFileSync(file, JSON.stringify({ compatibility: { persona_preset: 'official', cc_entrypoint: 'cli' } }))
+  try {
+    const out = applyCrsUnofficialPersona(
+      { messages: [{ role: 'user', content: 'ping' }] },
+      { officialClient: false, routingFile: file },
+    )
+    assert.match(out.system[0].text, /cc_entrypoint=cli;/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test('cliVersion can be parsed from a slot user-agent', () => {
   const out = applyCrsUnofficialPersona(

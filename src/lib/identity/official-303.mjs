@@ -224,6 +224,7 @@ export function renderOfficial303Body(
     firstUserText = '',
     sessionId = '',
     oneM = false,
+    entrypoint = 'sdk-cli',
   } = {},
 ) {
   if (!body || typeof body !== 'object' || !Array.isArray(body.messages)) return body
@@ -247,6 +248,7 @@ export function renderOfficial303Body(
     model,
     compat,
     preset: OFFICIAL_303_PRESET,
+    entrypoint,
   })
   const template = resolvePersonaTemplate(OFFICIAL_303_PRESET, compat?.persona_templates)
   let system = renderPersonaTemplate(template, vars)

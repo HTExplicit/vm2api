@@ -35,6 +35,7 @@ import {
   PersonaTemplateEditor,
   Problems,
 } from '@/features/settings/persona-editors'
+import { ccEntrypointFromCompat } from '@/features/settings/protocol-authority'
 import { InjectCard } from './inject-card'
 import { SystemPreview } from './system-preview'
 
@@ -96,6 +97,43 @@ function PresetBar({
         )
       })}
     </div>
+  )
+}
+function EntrypointSwitch({
+  compat,
+  onChange,
+}: {
+  compat: Compat
+  onChange: (next: Compat) => void
+}) {
+  const value = ccEntrypointFromCompat(compat)
+  return (
+    <Card className='gap-3 px-4 py-3'>
+      <div className='flex flex-wrap items-center justify-between gap-3'>
+        <div className='space-y-1'>
+          <p className='text-sm font-medium'>出站入口</p>
+          <p className='text-xs leading-5 text-muted-foreground'>
+            写入 billing 的 cc_entrypoint，并同步出站 UA。调用方自带的 billing
+            不改。
+          </p>
+        </div>
+        <div className='flex gap-2'>
+          {(['sdk-cli', 'cli'] as const).map((entry) => (
+            <Button
+              key={entry}
+              type='button'
+              size='sm'
+              variant={value === entry ? 'default' : 'outline'}
+              aria-pressed={value === entry}
+              className='cursor-pointer'
+              onClick={() => onChange({ ...compat, cc_entrypoint: entry })}
+            >
+              {entry}
+            </Button>
+          ))}
+        </div>
+      </div>
+    </Card>
   )
 }
 function ModelEnvExtra({
@@ -231,6 +269,7 @@ export function SystemPromptWorkspace({
 
   return (
     <div className='space-y-4'>
+      <EntrypointSwitch compat={compat} onChange={onChange} />
       <PresetBar
         active={active}
         viewing={viewing}
