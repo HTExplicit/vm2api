@@ -355,7 +355,7 @@ test('prepareCliHopBody keeps trailing message-level max on Opus 5.5', () => {
   assert.equal(body.messages[1].content.length, 0)
 })
 
-test('prepareCliHopBody lifts last effort on Sonnet 5 and strips it on Haiku', () => {
+test('prepareCliHopBody lifts last effort on unsupported models but leaves Haiku effort for cli-node', () => {
   const sonnet = prepareCliHopBody({
     model: 'claude-sonnet-5',
     max_tokens: 256,
@@ -380,7 +380,7 @@ test('prepareCliHopBody lifts last effort on Sonnet 5 and strips it on Haiku', (
       { role: 'system', content: [], output_config: { effort: 'max' } },
     ],
   })
-  assert.equal(haiku.output_config, undefined)
+  assert.equal(haiku.output_config.effort, 'max')
   assert.equal(
     haiku.messages.some((message) => message.role === 'system' || message.output_config),
     false,

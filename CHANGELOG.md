@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- cli-hop（#729）：Node 侧 `prepareCliHopBody` 不再改写 thinking / tool_choice / effort / 模型策略，也不再剥离调用方自带的 `temperature`、`top_p`、`top_k`、`context_management`；仍按路由应用 `thinking.display=summarized`，并移除已无用的 `panelRewrite`。Haiku / Opus / Sonnet 5.5 模型策略与默认 medium effort 改由 cli-node 原生 `applyNativeModelPolicy` 执行（配套 ELF 不在本 PR，须另发 cli-node 后再合入）。
 - 模型附加句改为按档开关，默认关闭。关闭时 `{{model_sentence}}` 不渲染；打开后才取 `model_env_extra` 里当前模型的句子。清空模板块后也不追加。
 - 网关生成的 billing 与 cli-node 缺失 billing 时的兜底头改为 `cc_entrypoint=sdk-cli`，与 2.1.303 抓包一致；调用方自带的 billing 不改写。出站 UA 已是 `(external, sdk-cli)`，`cc_turn_origin` 仍为 `sdk`。所有档位的出站 billing 字节随之变化，各会话首轮重建一次缓存。
 - 请求日志的 `outbound_headers` 改为新 cli-node 在最终 fetch 前回传的脱敏请求头，新增采集来源；Node → worker 中间头另存 `worker_envelope_headers`。流式与非流式入站均支持，内部事件不发给客户端、不触发提交或上游 idle 计时；旧 CLI 未回传时明确显示未获取，旧日志不冒充最终值。需同时更新 Node、web 与新 cli-node；本轮尚未发布 payload 或部署。
