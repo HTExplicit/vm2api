@@ -88,7 +88,10 @@ test('official is the system-only version of official_full, without generated en
     persona_locale_presets: { official: true },
     persona_env_instructions_presets: { official: true },
   })
-  assert.equal(DEFAULT_PERSONA_TEMPLATES.official.some((block) => block.role === 'system'), false)
+  assert.equal(
+    DEFAULT_PERSONA_TEMPLATES.official.some((block) => block.role === 'system'),
+    false,
+  )
   assert.deepEqual(
     DEFAULT_PERSONA_TEMPLATES.official.map((block) => [block.id, block.text, block.cache_control]),
     DEFAULT_PERSONA_TEMPLATES.official_full
