@@ -96,8 +96,10 @@ export async function startRealChain({
     cleanups.push(() => fs.rmSync(temp, { recursive: true, force: true }))
     const captured = []
     const upstream = http.createServer(async (req, res) => {
-      let raw = ''
-      for await (const chunk of req) raw += chunk
+      // Decode once: a TCP chunk may split a multi-byte prompt character.
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const raw = Buffer.concat(chunks).toString('utf8')
       if (!req.url.startsWith('/v1/messages')) return res.writeHead(404).end()
       const body = JSON.parse(raw)
       captured.push({ raw, body, headers: { ...req.headers } })
@@ -183,7 +185,7 @@ export async function startRealChain({
       kernel.kill('SIGKILL')
       await kernelClosed
     })
-    for (let i = 0; i < 100 && !fs.existsSync(socketPath) && kernel.exitCode == null; i++)
+    for (let i = 0; i < 400 && !fs.existsSync(socketPath) && kernel.exitCode == null; i++)
       await new Promise((resolve) => setTimeout(resolve, 50))
     if (!fs.existsSync(socketPath)) throw new Error(`kernel socket missing\n${log.slice(-1200)}`)
     const health = JSON.parse(await unixRequest(socketPath, token, '/internal/health'))

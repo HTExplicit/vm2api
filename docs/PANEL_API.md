@@ -254,6 +254,8 @@ Analytics 按官方 [`codex_thread_initialized`](https://github.com/openai/codex
 
 `persona_env_presets[当前档]=false` 同时关闭生成的 `env`、`env_timezone_only`、`env_official` 和槽位 `timezone` 模板变量；官方完整档的 Environment 不再固定开启。空的生成环境块直接省略，不保留 cache / 零宽占位。调用方或自定义模板字面提供的环境和时区原样使用；关闭时 native 不剥掉调用方 Environment，HTTP 不按所选槽位改写其时区。控制台开关、预览和 Node 出站使用同一按档规则。
 
+所有提示词档统一为 2.1.303；`official_303` 不再是可选档，兼容读写时归一到 `official_full`。`persona_templates` 的块可指定 `role: "system"` 元数据：其文字装入 `messages[].role=system` 环境消息，不进入顶层 `system`。完整版新增 `env_instructions_303` 长环境说明宏；按档开关 `persona_env_instructions_presets`、`persona_timezone_presets`、`persona_locale_presets` 均默认关闭，分别加载长说明、时区、语言。环境总开关关闭时，这些选项及模型附加句均不生成；已有调用方环境不删除。预览区明确区分两个注入区域，并不等同于最终 CLI wire 抓包。
+
 ### OpenAI 全局额度
 
 ```json

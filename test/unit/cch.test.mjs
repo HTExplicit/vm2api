@@ -8,12 +8,9 @@ import {
   projectClaudeCodeCchText,
   sealClaudeCodeCch,
 } from '../../src/lib/identity/cch.mjs'
-import {
-  CRS_OFFICIAL_AGENT_PROMPT,
-  applyCrsUnofficialPersona,
-  buildBillingAttributionText,
-} from '../../src/lib/identity/crs-persona.mjs'
+import { applyCrsUnofficialPersona, buildBillingAttributionText } from '../../src/lib/identity/crs-persona.mjs'
 import { finalizeWorkerPayload } from '../../src/lib/transport/go-worker-client.mjs'
+import { OFFICIAL_303_HARNESS, OFFICIAL_303_AGENT_IDENTITY } from '../../src/lib/identity/official-profiles.mjs'
 
 test('only the first canonical system billing block is normalized, projected and sealed', () => {
   const literal = 'x-anthropic-billing-header: cc_version=example; cch=259ed;'
@@ -235,10 +232,11 @@ test('no inbound system still emits billing, identity, official prompt, and env'
     },
     { mode: 'official_prompt', sessionId },
   )
-  assert.equal(out.system.length, 4)
+  assert.equal(out.system.length, 5)
   assert.match(out.system[0].text, /^x-anthropic-billing-header: /)
-  assert.equal(out.system[1].text, "You are Claude Code, Anthropic's official CLI for Claude.")
-  assert.equal(out.system[2].text, CRS_OFFICIAL_AGENT_PROMPT)
-  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', ttl: '1h' })
-  assert.match(out.system[3].text, /^# Environment\n/)
+  assert.equal(out.system[1].text, OFFICIAL_303_AGENT_IDENTITY)
+  assert.equal(out.system[2].text, OFFICIAL_303_HARNESS)
+  assert.equal(out.system[2].cache_control.type, 'ephemeral')
+  assert.equal(out.system[3].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
+  assert.match(out.messages.at(-1).content, /^# Environment\n/)
 })

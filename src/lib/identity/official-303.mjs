@@ -1,24 +1,26 @@
 /**
  * official_303 preset, lean models only: the single assembler of system,
- * messages and markers for the cli-hop. Shape follows the 2.1.303 capture:
+ * messages and markers for the cli-hop. Shape follows the official --print capture:
  *
  *   system[0] billing (no marker)
- *   system[1] identity (marker)
- *   system[2] lean main prompt (marker)
+ *   system[1] identity (no marker)
+ *   system[2] harness (marker; 1h also carries scope global)
+ *   system[3] guidance (marker)
  *   first user: <system-reminder> with non-official caller system, then the turn
- *   last user, and the user before it once there are 4+ messages: last non-thinking block marked
- *   trailing role=system: Environment (no marker, after the last marker)
+ *   current tail: last non-thinking block marked (including role=system Environment)
  *
- * The caller's markers never reach the wire. Every marker uses the panel TTL.
+ * The caller's markers never reach the wire. Marker TTL comes from the panel.
  * Pure: the input body is not mutated.
  */
 import { extractInboundEnvironmentSection, parseInboundEnvFacts } from './official-cc-system-2.1.241.mjs'
 import { officialSystemEnvFromIdentity, personaTemplateVars } from './crs-persona.mjs'
 import {
-  OFFICIAL_303_PRESET,
   agentStandingVar,
+  canonicalPersonaCompat,
+  presetFlagEnabled,
   renderPersonaTemplate,
   resolvePersonaTemplate,
+  selectedTemplateBlocks,
 } from './persona-template.mjs'
 import {
   OFFICIAL_PROFILES,
@@ -28,7 +30,7 @@ import {
 } from './official-profiles.mjs'
 import { modelSupportsMidConversationSystem } from '../protocol/anthropic-policy.mjs'
 import { liftMidConversationSystemMessages } from '../protocol/sanitize.mjs'
-import { normalizeCacheTtl } from '../protocol/cache-ttl.mjs'
+import { normalizeCacheTtl, applyMessageBreakpoints, listCacheMarkers } from '../protocol/cache-ttl.mjs'
 import { stabilizeOfficialContextBudget } from '../protocol/outbound-attempt.mjs'
 
 const PROFILE = OFFICIAL_PROFILES['2.1.303']
@@ -56,8 +58,9 @@ function messageTexts(message) {
   return content.filter((block) => block?.type === 'text' && typeof block.text === 'string').map((block) => block.text)
 }
 
-function panelMarker(ttl) {
-  return normalizeCacheTtl(ttl) === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' }
+function panelMarker(ttl, { scope = false } = {}) {
+  const hour = normalizeCacheTtl(ttl) === '1h'
+  return hour ? { type: 'ephemeral', ttl: '1h', ...(scope ? { scope: 'global' } : {}) } : { type: 'ephemeral' }
 }
 
 function withoutCacheControl(node) {
@@ -76,11 +79,11 @@ function stripMessageMarkers(messages) {
   })
 }
 
-/** Billing never carries a marker; template markers take the panel TTL; at most `budget` stay (latest kept). */
-function systemWithPanelMarkers(blocks, marker, budget) {
+/** Billing never carries a marker. A template scope stays only on a 1h marker. */
+function systemWithPanelMarkers(blocks, ttl, budget) {
   const next = blocks.map((block) => {
-    if (isBillingText(block.text)) return withoutCacheControl(block)
-    return block.cache_control ? { ...block, cache_control: { ...marker } } : block
+    if (isBillingText(block.text) || !block.cache_control) return withoutCacheControl(block)
+    return { ...block, cache_control: panelMarker(ttl, { scope: block.cache_control.scope === 'global' }) }
   })
   for (let i = next.length - 1; i >= 0; i--) {
     if (!next[i].cache_control) continue
@@ -134,12 +137,6 @@ function officialSystemContent(message) {
   return { ...message, content: block.text }
 }
 
-function markableUser(message) {
-  if (message?.role !== 'user') return false
-  if (typeof message.content === 'string') return Boolean(message.content.trim())
-  return Array.isArray(message.content) && message.content.some(markableBlock)
-}
-
 function lastUserIndex(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i]?.role === 'user') return i
@@ -161,41 +158,6 @@ function prependReminder(messages, leftover) {
   const next = messages.slice()
   next[index] = { ...message, content }
   return next
-}
-
-function markableBlock(block) {
-  if (!block || typeof block !== 'object') return false
-  if (block.type === 'thinking' || block.type === 'redacted_thinking') return false
-  if (block.type === 'text' && !String(block.text || '').trim()) return false
-  return true
-}
-
-function markUser(messages, index, marker) {
-  const message = messages[index]
-  if (typeof message.content === 'string') {
-    messages[index] = { ...message, content: [{ type: 'text', text: message.content, cache_control: { ...marker } }] }
-    return
-  }
-  const at = message.content.findLastIndex(markableBlock)
-  const content = message.content.slice()
-  content[at] = { ...content[at], cache_control: { ...marker } }
-  messages[index] = { ...message, content }
-}
-
-/**
- * The last user writes this turn. From 4 messages on, the user before it also
- * carries a marker: it sits on the previous request's write, so a turn longer
- * than the 20-block lookback still reads it instead of only system + tools.
- */
-function markLastUsers(messages, marker) {
-  const users = []
-  for (let i = messages.length - 1; i >= 0 && users.length < 2; i--) {
-    if (markableUser(messages[i])) users.push(i)
-  }
-  if (users.length > 1 && messages.length < 4) users.pop()
-  const next = messages.slice()
-  for (const index of users) markUser(next, index, marker)
-  return { messages: next, count: users.length }
 }
 
 function orderTopLevel(body) {
@@ -224,9 +186,13 @@ export function renderOfficial303Body(
     firstUserText = '',
     sessionId = '',
     oneM = false,
+    entrypoint = 'cli',
   } = {},
 ) {
   if (!body || typeof body !== 'object' || !Array.isArray(body.messages)) return body
+  compat = canonicalPersonaCompat(compat)
+  const preset = 'official_full'
+  const withEnv = presetFlagEnabled(compat, 'persona_env_presets', preset)
   const model = String(body.model || '')
   const marker = panelMarker(cacheTtl)
   // The reminder sits before both message markers; a live token counter there would move every turn.
@@ -235,33 +201,48 @@ export function renderOfficial303Body(
   const roleSystemTexts = body.messages.filter((message) => message?.role === 'system').flatMap(messageTexts)
   const facts = parseInboundEnvFacts([...systemTexts(callerSystem), ...roleSystemTexts])
   const env = environmentEnv(facts, { identity, model })
-  const requestEnvironment = buildOfficial303Environment(env, { model, oneM })
 
   const vars = personaTemplateVars({
     firstUserText,
     cliVersion: PROFILE.cliVersion,
     sessionId,
     env,
-    agentStanding: agentStandingVar(compat, OFFICIAL_303_PRESET),
-    withEnv: true,
+    agentStanding: agentStandingVar(compat, preset),
+    withEnv,
     model,
     compat,
-    preset: OFFICIAL_303_PRESET,
+    preset,
+    entrypoint,
   })
-  const template = resolvePersonaTemplate(OFFICIAL_303_PRESET, compat?.persona_templates)
+  const template = selectedTemplateBlocks(resolvePersonaTemplate(preset, compat?.persona_templates), compat, preset)
   let system = renderPersonaTemplate(template, vars)
+  const envExtras = withEnv
+    ? renderPersonaTemplate(
+        template.filter((block) => block.id !== 'env'),
+        vars,
+        { role: 'system' },
+      )
+        .map((block) => block.text)
+        .join('\n\n')
+    : ''
+  const requestEnvironment = [buildOfficial303Environment(env, { model, oneM }), envExtras].filter(Boolean).join('\n\n')
 
   let messages = stripMessageMarkers(body.messages).map((message) =>
     message?.role === 'system' ? officialSystemContent(message) : message,
   )
-  if (modelSupportsMidConversationSystem(model)) {
+  if (withEnv && modelSupportsMidConversationSystem(model)) {
     let replaced = false
     messages = messages.map((message) => {
       if (message?.role !== 'system') return message
       const next = replaceEnvironmentInMessage(message, (section) => {
         // Each turn renders from its own facts so history bytes stay identical on later turns.
         const own = environmentEnv(parseInboundEnvFacts([section]), { identity, model })
-        return buildOfficial303Environment(own, { model, oneM: oneM || /\(1M context\)|\[1m\]/i.test(section) })
+        return [
+          buildOfficial303Environment(own, { model, oneM: oneM || /\(1M context\)|\[1m\]/i.test(section) }),
+          envExtras,
+        ]
+          .filter(Boolean)
+          .join('\n\n')
       })
       if (!next) return message
       replaced = true
@@ -271,12 +252,12 @@ export function renderOfficial303Body(
       const at = lastUserIndex(messages)
       if (at >= 0) messages.splice(at + 1, 0, { role: 'system', content: requestEnvironment })
     }
-  } else {
-    // Official merges the session sections into the main block when role=system is unavailable.
-    const main = system.length - 1
-    if (main >= 0 && !isBillingText(system[main].text)) {
+  } else if (withEnv) {
+    // Official merges the session sections into guidance when role=system is unavailable.
+    const guidance = system.findLastIndex((block) => block?.cache_control && !isBillingText(block.text))
+    if (guidance >= 0) {
       system = system.map((block, i) =>
-        i === main ? { ...block, text: `${block.text}\n\n${requestEnvironment}` } : block,
+        i === guidance ? { ...block, text: `${block.text}\n\n${requestEnvironment}` } : block,
       )
     }
   }
@@ -286,11 +267,11 @@ export function renderOfficial303Body(
   delete out.cache_control
   // Lift before marking: merging the turns around a lifted role=system changes the user indexes.
   if (!modelSupportsMidConversationSystem(model)) out = liftMidConversationSystemMessages(out)
-  const marked = markLastUsers(out.messages, marker)
+  out = applyMessageBreakpoints(out, cacheTtl, 'tail')
+  const count = listCacheMarkers({ messages: out.messages }).length
   out = {
     ...out,
-    system: systemWithPanelMarkers(out.system, marker, PROFILE.maxMarkers - marked.count),
-    messages: marked.messages,
+    system: systemWithPanelMarkers(out.system, cacheTtl, PROFILE.maxMarkers - count),
   }
   return orderTopLevel(out)
 }

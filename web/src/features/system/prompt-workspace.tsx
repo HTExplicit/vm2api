@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { PersonaPreset } from '@/types/panel-routing'
-import { Check, ChevronDown, RotateCcw } from 'lucide-react'
+import { Check, RotateCcw } from 'lucide-react'
 import {
   DEFAULT_PERSONA_TEMPLATES,
   PERSONA_PRESET_OPTIONS,
@@ -11,18 +11,12 @@ import {
   personaPresetLabel,
   presetSeed,
   stringifyPersonaTemplate,
-  templateSlotState,
   validatePersonaTemplate,
   type RawBlock,
 } from '@/lib/persona-template'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible'
 import {
   type PersonaDrafts,
   personaDraftStoresEmpty,
@@ -35,7 +29,7 @@ import {
   PersonaTemplateEditor,
   Problems,
 } from '@/features/settings/persona-editors'
-import { InjectCard } from './inject-card'
+import { PromptFields } from './prompt-fields'
 import { SystemPreview } from './system-preview'
 
 type Compat = Record<string, unknown>
@@ -62,7 +56,7 @@ function PresetBar({
     <div
       role='tablist'
       aria-label='system 提示词档位'
-      className='grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-5'
+      className='grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-4'
     >
       {PERSONA_PRESET_OPTIONS.map(([key, label]) => {
         const selected = key === viewing
@@ -98,79 +92,6 @@ function PresetBar({
     </div>
   )
 }
-function ModelEnvExtra({
-  compat,
-  onChange,
-}: {
-  compat: Compat
-  onChange: (next: Compat) => void
-}) {
-  const stored =
-    compat.model_env_extra &&
-    typeof compat.model_env_extra === 'object' &&
-    !Array.isArray(compat.model_env_extra)
-      ? (compat.model_env_extra as Record<string, string>)
-      : {}
-  const rows = Object.entries(stored)
-  const [model, setModel] = useState('')
-  const [text, setText] = useState('')
-  const save = (next: Record<string, string>) =>
-    onChange({ ...compat, model_env_extra: next })
-  return (
-    <Card className='gap-3 px-4 py-3'>
-      <div className='space-y-1'>
-        <p className='text-sm font-medium'>按模型附加</p>
-        <p className='text-xs leading-5 text-muted-foreground'>
-          模板里的 {'{{model_sentence}}'} 取当前模型这一句，追加在 Environment
-          之后。没填的模型不追加。
-        </p>
-      </div>
-      {rows.map(([id, value]) => (
-        <label key={id} className='block space-y-1'>
-          <span className='font-mono text-xs'>{id}</span>
-          <textarea
-            value={value}
-            rows={2}
-            maxLength={4000}
-            className='w-full rounded-md border bg-background px-2 py-1.5 text-sm'
-            onChange={(event) => save({ ...stored, [id]: event.target.value })}
-          />
-        </label>
-      ))}
-      <div className='flex gap-2'>
-        <input
-          value={model}
-          placeholder='claude-sonnet-5-5'
-          className='h-8 min-w-0 flex-1 rounded-md border bg-background px-2 font-mono text-xs'
-          onChange={(event) => setModel(event.target.value.trim())}
-        />
-        <Button
-          type='button'
-          size='sm'
-          variant='outline'
-          className='cursor-pointer'
-          disabled={!/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(model)}
-          onClick={() => {
-            save({ ...stored, [model.toLowerCase()]: text })
-            setModel('')
-            setText('')
-          }}
-        >
-          添加
-        </Button>
-      </div>
-      <textarea
-        value={text}
-        rows={2}
-        maxLength={4000}
-        placeholder='这个模型要追加的句子'
-        className='w-full rounded-md border bg-background px-2 py-1.5 text-sm'
-        onChange={(event) => setText(event.target.value)}
-      />
-    </Card>
-  )
-}
-
 export function SystemPromptWorkspace({
   compat,
   server,
@@ -185,7 +106,6 @@ export function SystemPromptWorkspace({
   const [drafts, setDrafts] = useState<PersonaDrafts | null>(null)
   const active = personaPresetFromCompat(compat)
   const [viewing, setViewing] = useState<PersonaPreset>(active)
-  const [templateOpen, setTemplateOpen] = useState(false)
 
   useEffect(() => {
     if (drafts || !Object.keys(compat).length) return
@@ -263,95 +183,56 @@ export function SystemPromptWorkspace({
             </div>
           ) : null}
 
-          {viewing === 'official_303' ? (
-            <div className='space-y-1.5 rounded-xl border bg-muted/30 px-4 py-3 text-xs leading-5'>
-              <p className='font-medium'>按模型分流，版本 2.1.303</p>
-              <p className='text-muted-foreground'>
-                Opus 4.8 / 5 / 5.5、Fable、Mythos 等：下面三块 system；调用方
-                system 放进第一条 user 的 &lt;system-reminder&gt;（官方调用方的
-                system 不出站）；Environment 作为尾部
-                role=system；最后一条与上一条 user 的末尾非 thinking 块打点（共
-                3–4 个断点），TTL 取协议页的缓存 TTL。
-              </p>
-              <p className='text-muted-foreground'>
-                Sonnet、Haiku、Opus 4.0–4.7：沿用现有 cli-hop
-                结构，只把版本号换成 2.1.303，不使用这里的模板。实际生效值见
-                设置 → 协议 → 当前出站参照。
-              </p>
-            </div>
-          ) : null}
-
-          <InjectCard
-            compat={compat}
-            server={server}
-            preset={viewing}
-            blocks={blocks}
-            standing='switch'
-            env={templateSlotState(blocks, 'env')}
-            onChange={onChange}
-          />
-          <ModelEnvExtra compat={compat} onChange={onChange} />
-
-          <Collapsible open={templateOpen} onOpenChange={setTemplateOpen}>
-            <Card className='gap-0 py-0'>
-              <div className='flex items-center gap-2 px-4 py-2.5'>
-                <CollapsibleTrigger asChild>
-                  <button
-                    type='button'
-                    className='flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left'
-                  >
-                    <ChevronDown
-                      className={cn(
-                        'size-4 text-muted-foreground transition-transform duration-200',
-                        templateOpen ? 'rotate-0' : '-rotate-90'
-                      )}
-                      aria-hidden
-                    />
-                    <span className='text-sm font-medium'>模板</span>
-                    <span className='truncate text-xs text-muted-foreground'>
-                      {summaries[viewing]} · {blocks.length} 块
-                    </span>
-                  </button>
-                </CollapsibleTrigger>
-                <Button
-                  type='button'
-                  size='sm'
-                  variant='ghost'
-                  className='h-7 cursor-pointer text-xs'
-                  onClick={() =>
-                    setDraft(
-                      stringifyPersonaTemplate(
-                        presetSeed(DEFAULT_PERSONA_TEMPLATES, viewing)
-                      )
+          <Card className='gap-0 py-0'>
+            <div className='flex items-center justify-between gap-2 px-4 py-2.5'>
+              <span className='text-sm font-medium'>提示词</span>
+              <Button
+                type='button'
+                size='sm'
+                variant='ghost'
+                className='h-7 cursor-pointer text-xs'
+                onClick={() =>
+                  setDraft(
+                    stringifyPersonaTemplate(
+                      presetSeed(DEFAULT_PERSONA_TEMPLATES, viewing)
                     )
-                  }
-                >
-                  <RotateCcw />
-                  恢复预设
-                </Button>
-              </div>
-              <CollapsibleContent className='space-y-3 border-t border-border/60 px-4 py-3'>
-                {viewing === 'custom' &&
-                personaDraftStoresEmpty(text, 'custom') ? (
-                  <Notice tone='caution'>空模板会回落官方提示词。</Notice>
-                ) : null}
+                  )
+                }
+              >
+                <RotateCcw />
+                恢复预设
+              </Button>
+            </div>
+            <div className='space-y-3 border-t border-border/60 px-4 py-3'>
+              {viewing === 'custom' &&
+              personaDraftStoresEmpty(text, 'custom') ? (
+                <Notice tone='caution'>空模板会回落官方提示词。</Notice>
+              ) : null}
+              {viewing === 'custom' || hasErrors ? (
                 <PersonaTemplateEditor
                   key={viewing}
                   text={text}
-                  blocks={
-                    parsed.blocks.length
-                      ? parsed.blocks
-                      : presetSeed(DEFAULT_PERSONA_TEMPLATES, viewing)
-                  }
+                  blocks={blocks}
                   hasErrors={hasErrors}
                   onTextChange={setDraft}
                   onBlocksChange={(next) =>
                     setDraft(stringifyPersonaTemplate(next))
                   }
                 />
-              </CollapsibleContent>
-            </Card>
-          </Collapsible>
+              ) : (
+                <PromptFields
+                  preset={viewing}
+                  blocks={blocks}
+                  compat={compat}
+                  server={server}
+                  onBlocksChange={(next) =>
+                    setDraft(stringifyPersonaTemplate(next))
+                  }
+                  onCompatChange={onChange}
+                />
+              )}
+            </div>
+          </Card>
 
           <Problems items={problems} />
         </div>

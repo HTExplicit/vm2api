@@ -58,6 +58,7 @@ import {
   DEFAULT_OVERLAY_PRESET,
   DEFAULT_PERSONA_PRESET,
   agentStandingVar,
+  canonicalPersonaCompat,
   extractTemplateVars,
   presetFlagEnabled,
   normalizeOverlayPreset,
@@ -73,7 +74,14 @@ import {
   templatePresetFor,
   OFFICIAL_303_PRESET,
 } from './persona-template.mjs'
-import { buildOfficial303Environment, officialModelLine, renderOfficial303MainPrompt } from './official-profiles.mjs'
+import {
+  OFFICIAL_303_HARNESS,
+  OFFICIAL_303_ENV_INSTRUCTIONS,
+  buildOfficial303Environment,
+  officialModelLine,
+  renderOfficial303Guidance,
+  renderOfficial303MainPrompt,
+} from './official-profiles.mjs'
 
 export {
   AGENT_EXPANSION_CACHE_CONTROL,
@@ -380,24 +388,60 @@ export function stampBillingPromptId(body, sessionId, firstUserText = '') {
   })
   return changed ? { ...body, system } : body
 }
+const SUBAGENT_BILLING_RE = /\s*\bcc_is_subagent\s*=\s*true\s*;?/gi
+const BILLING_HEADER_LINE_RE = /(^\s*x-anthropic-billing-header:)([^\r\n]*)/i
+
+/** Official main requests omit cc_is_subagent. Only the first billing header line is billing. */
+export function stripSubagentBilling(body) {
+  if (!body || typeof body !== 'object') return body
+  let found = false
+  const rewrite = (text) => {
+    if (found || !BILLING_HEADER_LINE_RE.test(text)) return text
+    found = true
+    BILLING_HEADER_LINE_RE.lastIndex = 0
+    return String(text).replace(BILLING_HEADER_LINE_RE, (line) => line.replace(SUBAGENT_BILLING_RE, ''))
+  }
+  if (typeof body.system === 'string') {
+    const system = rewrite(body.system)
+    return system === body.system ? body : { ...body, system }
+  }
+  if (!Array.isArray(body.system)) return body
+  let changed = false
+  const system = body.system.map((block) => {
+    const raw = typeof block === 'string' ? block : block?.text
+    if (typeof raw !== 'string') return block
+    const text = rewrite(raw)
+    if (text === raw) return block
+    changed = true
+    return typeof block === 'string' ? text : { ...block, text }
+  })
+  return changed ? { ...body, system } : body
+}
 
 export function buildBillingAttributionText(
   firstUserText,
   cliVersion = DEFAULT_CLI_VERSION,
   sessionId = '',
   indexes = null,
+  entrypoint = 'cli',
 ) {
   const ver = parseCliVersion(cliVersion)
   const fp = computeClaudeCodeFingerprint(firstUserText ?? '', ver)
   const promptId = billingPromptId(sessionId, firstUserText, ver)
   const tail = billingTurnSuffix(indexes?.promptIndex, indexes?.turnIndex)
-  return `x-anthropic-billing-header: cc_version=${ver}.${fp}; cc_entrypoint=sdk-cli; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${promptId};${tail}`
+  const entry = entrypoint === 'sdk-cli' ? 'sdk-cli' : 'cli'
+  return `x-anthropic-billing-header: cc_version=${ver}.${fp}; cc_entrypoint=${entry}; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${promptId};${tail}`
+}
+
+/** Panel switch. Only explicit `sdk-cli` overrides the interactive CLI default. */
+export function ccEntrypointFromRouting(routing) {
+  return routing?.compatibility?.cc_entrypoint === 'sdk-cli' ? 'sdk-cli' : 'cli'
 }
 
 /** Add the billing block exactly once before the cli-node hop. */
 export function ensureBillingAttribution(
   body,
-  { firstUserText = '', cliVersion = DEFAULT_CLI_VERSION, sessionId = '', indexes = null } = {},
+  { firstUserText = '', cliVersion = DEFAULT_CLI_VERSION, sessionId = '', indexes = null, entrypoint = 'cli' } = {},
 ) {
   if (!body || typeof body !== 'object') return body
   const hasBilling = (system) => {
@@ -408,7 +452,7 @@ export function ensureBillingAttribution(
   if (hasBilling(body.system)) return body
   const block = {
     type: 'text',
-    text: buildBillingAttributionText(firstUserText, cliVersion, sessionId, indexes),
+    text: buildBillingAttributionText(firstUserText, cliVersion, sessionId, indexes, entrypoint),
   }
   if (Array.isArray(body.system)) return { ...body, system: [block, ...body.system] }
   if (body.system == null || body.system === '') return { ...body, system: [block] }
@@ -748,10 +792,15 @@ export function configuredTimezone(identity = {}, facts = {}) {
   return validTimezone(src.timezone) || validTimezone(fp.timezone) || validTimezone(inbound.timezone) || ''
 }
 
-export function buildZeroBillingText(firstUserText, cliVersion = DEFAULT_CLI_VERSION, sessionId = '') {
-  const billing = buildBillingAttributionText(firstUserText, cliVersion, sessionId)
+export function buildZeroBillingText(
+  firstUserText,
+  cliVersion = DEFAULT_CLI_VERSION,
+  sessionId = '',
+  entrypoint = 'cli',
+) {
+  const billing = buildBillingAttributionText(firstUserText, cliVersion, sessionId, null, entrypoint)
   const header = billing.endsWith(';') ? billing : `${billing};`
-  return `${header} prompt_version=<${CRS_OFFICIAL_CLI_SYSTEM}>`
+  return `${header} prompt_version=<${CRS_OFFICIAL_SYSTEM}>`
 }
 
 function timezoneEnvBlock(env = {}, sourceTexts = []) {
@@ -781,18 +830,20 @@ export function personaTemplateVars({
   preset = '',
   timezoneOnlyEnv = false,
   messages = null,
+  entrypoint = 'cli',
 } = {}) {
   const billing = buildBillingAttributionText(
     firstUserText,
     cliVersion,
     sessionId,
     billingIndexesFromMessages(messages),
+    entrypoint,
   )
   const envTimezoneOnly = () => buildOfficialEnvironmentSection(env, { sourceTexts, contextManagement: false })
   return {
     billing,
     billing_semi: billing.endsWith(';') ? billing : `${billing};`,
-    identity: CRS_OFFICIAL_SYSTEM,
+    identity: entrypoint === 'cli' ? CRS_OFFICIAL_CLI_SYSTEM : CRS_OFFICIAL_SYSTEM,
     identity_cli: CRS_OFFICIAL_CLI_SYSTEM,
     identity_compact: CRS_COMPACT_IDENTITY,
     reporting: CRS_REPORTING_OUTCOMES,
@@ -810,16 +861,37 @@ export function personaTemplateVars({
         : timezoneOnlyEnv
           ? buildOfficialEnvironmentSection({ timezone: env.timezone }, { sourceTexts: [], contextManagement: false })
           : buildOfficialContinuationText(env, sourceTexts, { overwrite: true }),
-    timezone: withEnv ? String(env?.timezone || '').trim() : '',
-    locale: String(env?.locale || '').trim(),
+    timezone:
+      withEnv && presetFlagEnabled(compat, 'persona_timezone_presets', preset)
+        ? String(env?.timezone || '').trim()
+        : '',
+    locale:
+      withEnv && presetFlagEnabled(compat, 'persona_locale_presets', preset) ? String(env?.locale || '').trim() : '',
     model: String(model || env?.modelId || '').trim(),
     cwd: String(env?.cwd || '').trim(),
     cli_version: parseCliVersion(cliVersion),
     session_id: String(sessionId || '').trim(),
-    main_prompt_303: () => renderOfficial303MainPrompt({ cwd: env?.cwd }),
+    keep_dynamic_boundary: ['official', 'official_full', OFFICIAL_303_PRESET].includes(preset),
+    main_prompt_303: () => renderOfficial303MainPrompt({ cwd: env?.cwd, entrypoint }),
+    harness_303: OFFICIAL_303_HARNESS,
+    guidance_303: () => renderOfficial303Guidance({ cwd: env?.cwd, entrypoint }),
     env_303: () => (withEnv ? buildOfficial303Environment(env, { model: model || env?.modelId }) : ''),
+    env_instructions_303: () =>
+      withEnv && presetFlagEnabled(compat, 'persona_env_instructions_presets', preset)
+        ? OFFICIAL_303_ENV_INSTRUCTIONS
+        : '',
+    env_timezone: () =>
+      withEnv && presetFlagEnabled(compat, 'persona_timezone_presets', preset) && env?.timezone
+        ? ` - Timezone: ${String(env.timezone).trim()}`
+        : '',
+    env_locale: () =>
+      withEnv && presetFlagEnabled(compat, 'persona_locale_presets', preset) && env?.locale
+        ? ` - Language: ${String(env.locale).trim()}`
+        : '',
     model_sentence: () =>
-      presetFlagEnabled(compat, 'model_env_extra_presets', preset) ? modelEnvExtra(compat, model || env?.modelId) : '',
+      withEnv && presetFlagEnabled(compat, 'model_env_extra_presets', preset)
+        ? modelEnvExtra(compat, model || env?.modelId)
+        : '',
   }
 }
 
@@ -843,7 +915,12 @@ export function personaPreviewVars({ timezone = 'UTC', model = 'claude-sonnet-5'
     model: vars.model,
     cli_version: vars.cli_version,
     main_prompt_303: vars.main_prompt_303(),
+    harness_303: vars.harness_303,
+    guidance_303: vars.guidance_303(),
     env_303: vars.env_303(),
+    env_instructions_303: OFFICIAL_303_ENV_INSTRUCTIONS,
+    env_timezone: ` - Timezone: ${timezone}`,
+    env_locale: ' - Language: en-US',
     model_sentence: vars.model_sentence(),
   }
 }
@@ -880,7 +957,7 @@ export function officialSystemEnvFromIdentity(identity = {}, modelId = '', facts
     kernel: inbound.kernel || '',
     modelId: modelId || 'claude-sonnet-5-5',
     timezone: src.timezone || fp.timezone || '',
-    locale: inbound.locale || '',
+    locale: src.locale || fp.locale || inbound.locale || '',
   }
 }
 
@@ -1335,7 +1412,7 @@ function presetFromUnsetCompat(compat = {}) {
 }
 
 export function personaTemplateSettingsFromRouting(routing = {}) {
-  const compat = routing?.compatibility || {}
+  const compat = canonicalPersonaCompat(routing?.compatibility || {})
   const raw = compat.persona_preset
   const explicit = raw != null && String(raw).trim() !== ''
   return {
@@ -1352,6 +1429,11 @@ export function personaTemplateSettingsFromRouting(routing = {}) {
       persona_env_presets: compat.persona_env_presets,
       persona_hide_presets: compat.persona_hide_presets,
       persona_block_presets: compat.persona_block_presets,
+      model_env_extra: compat.model_env_extra,
+      model_env_extra_presets: compat.model_env_extra_presets,
+      persona_env_instructions_presets: compat.persona_env_instructions_presets,
+      persona_timezone_presets: compat.persona_timezone_presets,
+      persona_locale_presets: compat.persona_locale_presets,
     },
   }
 }
@@ -1404,7 +1486,7 @@ export function personaPresetFromHopMode(mode) {
     return 'official'
   if (raw === 'zero' || raw === 'zero_inject' || raw === '0inject' || raw === '0-inject') return 'zero'
   if (raw === 'custom' || raw === 'diy' || raw === 'manual') return 'custom'
-  if (raw === OFFICIAL_303_PRESET || raw === '303' || raw === 'official-303') return OFFICIAL_303_PRESET
+  if (raw === OFFICIAL_303_PRESET || raw === '303' || raw === 'official-303') return 'official_full'
   return null
 }
 
@@ -1422,7 +1504,7 @@ export function personaHidesUsageFromRoutingFile(filePath, mode) {
   if (map && typeof map === 'object' && typeof map[preset] === 'boolean') return map[preset]
   if (typeof settings.hides === 'boolean') return settings.hides
   if (!hopPreset && !personaUsesTemplate(settings)) return null
-  return templateHidesAnything(resolvePersonaTemplate(preset, settings.templates))
+  return preset === 'zero' || templateHidesAnything(resolvePersonaTemplate(preset, settings.templates))
 }
 
 /**
@@ -1718,32 +1800,37 @@ function applyTemplatePersona(
     identity,
     model,
     callerAgent: rawCallerAgent = '',
+    entrypoint = 'cli',
   } = {},
 ) {
   const messages = Array.isArray(body.messages) ? body.messages : []
   const zero = preset === 'zero'
   const blocks = selectedTemplateBlocks(resolvePersonaTemplate(preset, templates), switches, preset)
   const withEnv = presetFlagEnabled(switches, 'persona_env_presets', preset)
-  const timezoneOnlyEnv = preset === 'official_full' && withEnv && !blocks.some((block) => block?.id === 'env_official')
+  const timezoneOnlyEnv = false
   const callerOptions = { preserveEnvironment: !withEnv }
   const usesEnv = blocks.some((block) => extractTemplateVars(block?.text).includes('env'))
   const { env, sourceTexts, facts } = personaEnvForBody(body, {
     identity,
     model,
-    overwrite: false,
+    overwrite: blocks.some((block) => block.role === 'system' && extractTemplateVars(block?.text).includes('env_303')),
     forceTimezone: zero || usesEnv,
   })
   const harness = thirdPartyClientPrompt(body.system, callerOptions)
   if (harness) env.timezone = requiredTimezone(identity, facts)
   env.timezone = String(env.timezone || '').trim() || requiredTimezone(identity, facts)
-  // official always keeps the extracted prompt. A stored template that never
-  // mentions {{caller_agent}} would otherwise drop it and leave only the identity line.
+  const templateHasHarness = blocks.some(
+    (block) =>
+      ['harness', 'guidance'].includes(String(block?.id || '')) ||
+      extractTemplateVars(block?.text).some((name) => ['harness_303', 'guidance_303', 'agent_official'].includes(name)),
+  )
   const templateWantsCallerAgent = blocks.some((block) => extractTemplateVars(block?.text).includes('caller_agent'))
-  const usesCallerAgent = !harness && (preset === 'official' || templateWantsCallerAgent)
+  const usesCallerAgent = !harness && !templateHasHarness && (preset === 'official' || templateWantsCallerAgent)
   const suppliedAgent = usesCallerAgent ? String(rawCallerAgent || '').trim() : ''
-  const callerAgent = suppliedAgent || (preset === 'official' && !harness ? CRS_OFFICIAL_AGENT_PROMPT : '')
+  const callerAgent =
+    suppliedAgent || (preset === 'official' && !harness && !templateHasHarness ? CRS_OFFICIAL_AGENT_PROMPT : '')
   const leftover = harness
-    ? ''
+    ? harness
     : usesCallerAgent
       ? parkableSystemTexts(body.system, callerOptions)
           .filter((text) => !looksLikeAgentPrompt(text))
@@ -1751,34 +1838,42 @@ function applyTemplatePersona(
       : collectCallerSystemAppend(body, callerOptions)
   const modelId = model || body.model
   const midSystem = leftoverGoesToMidSystem(preset, modelId)
-  let system = renderPersonaTemplate(
-    blocks,
-    personaTemplateVars({
-      firstUserText: extractFirstUserText(messages),
-      cliVersion,
-      sessionId,
-      env,
-      sourceTexts,
-      agentStanding: agentStandingVar(switches, preset),
-      withEnv,
-      callerAgent,
-      agentOfficial: harness,
-      timezoneOnlyEnv: Boolean(harness) || timezoneOnlyEnv,
-      leftover: midSystem ? '' : leftover,
-      preset,
-      model: modelId,
-      compat: switches,
-      messages,
-    }),
-  )
-  if (timezoneOnlyEnv) {
-    system.push({
-      type: 'text',
-      text: buildOfficialEnvironmentSection({ timezone: env.timezone }, { sourceTexts: [], contextManagement: false }),
-    })
-  }
+  const vars = personaTemplateVars({
+    firstUserText: extractFirstUserText(messages),
+    cliVersion,
+    sessionId,
+    env,
+    sourceTexts,
+    agentStanding: agentStandingVar(switches, preset),
+    withEnv,
+    callerAgent,
+    agentOfficial: harness,
+    timezoneOnlyEnv: Boolean(harness) || timezoneOnlyEnv,
+    leftover: midSystem ? '' : leftover,
+    preset,
+    model: modelId,
+    compat: switches,
+    messages,
+    entrypoint,
+  })
+  let system = renderPersonaTemplate(blocks, vars)
+
   if (preset === 'official') system = insertOfficialCallerAgent(system, callerAgent)
   let outMessages = messages
+  if (withEnv) {
+    const environment = renderPersonaTemplate(blocks, vars, { role: 'system' })
+      .map((block) => block.text)
+      .join('\n\n')
+    if (environment) {
+      const at = messages.findLastIndex((message) => message?.role === 'user')
+      if (at >= 0)
+        outMessages = [
+          ...messages.slice(0, at + 1),
+          { role: 'system', content: environment },
+          ...messages.slice(at + 1),
+        ]
+    }
+  }
   if (midSystem) {
     outMessages = wrapExistingMidConversationSystem(insertMidConversationSystem(outMessages, leftover))
   }
@@ -1787,6 +1882,54 @@ function applyTemplatePersona(
   const overlay = renderOverlayTemplate(overlayBlocks, collectOverlayParts(routingFile))
   if (!overlay) return { ...body, system, messages: outMessages }
   return { ...body, system, messages: prependRawToFirstUserMessage(outMessages, overlay) }
+}
+
+/** Re-render persona fields without restoring history or tools already filtered/repaired for this attempt. */
+export function callerPersonaInputForAttempt(body, callerBody, renderedBody) {
+  const callerMessages = Array.isArray(callerBody?.messages) ? callerBody.messages : []
+  const generated = renderedBody?.messages?.find(
+    (message) => message?.role === 'system' && !callerMessages.includes(message),
+  )
+  let messages = body.messages
+  if (generated && typeof generated.content === 'string' && Array.isArray(messages)) {
+    const at = messages.findLastIndex((message) => message?.role === 'user') + 1
+    const candidate = messages[at]
+    const content =
+      Array.isArray(candidate?.content) && candidate.content.length === 1
+        ? candidate.content[0]?.text
+        : candidate?.content
+    if (at > 0 && candidate?.role === 'system' && content === generated.content) {
+      messages = [...messages.slice(0, at), ...messages.slice(at + 1)]
+    }
+  }
+  const callerUser = callerMessages.find((message) => message?.role === 'user')?.content
+  const renderedUser = renderedBody?.messages?.find((message) => message?.role === 'user')?.content
+  let overlay = ''
+  if (typeof callerUser === 'string' && typeof renderedUser === 'string' && renderedUser.endsWith(callerUser)) {
+    overlay = renderedUser.slice(0, renderedUser.length - callerUser.length)
+  }
+  if (
+    Array.isArray(callerUser) &&
+    Array.isArray(renderedUser) &&
+    renderedUser.length === callerUser.length + 1 &&
+    renderedUser.slice(1).every((block, index) => block === callerUser[index])
+  ) {
+    overlay = renderedUser[0]?.text || ''
+  }
+  const firstUser = messages?.findIndex((message) => message?.role === 'user') ?? -1
+  if (overlay && firstUser >= 0) {
+    const message = messages[firstUser]
+    const content = message.content
+    let next = content
+    if (typeof content === 'string' && content.startsWith(overlay)) next = content.slice(overlay.length)
+    if (Array.isArray(content) && content[0]?.type === 'text' && content[0].text?.startsWith(overlay)) {
+      const text = content[0].text.slice(overlay.length)
+      next = text ? [{ ...content[0], text }, ...content.slice(1)] : content.slice(1)
+    }
+    if (next !== content)
+      messages = messages.map((value, index) => (index === firstUser ? { ...message, content: next } : value))
+  }
+  return { ...body, system: callerBody?.system, messages }
 }
 
 export function applyCrsUnofficialPersona(
@@ -1804,6 +1947,7 @@ export function applyCrsUnofficialPersona(
     sessionId,
     identity,
     model,
+    entrypoint,
   } = {},
 ) {
   if (!body || typeof body !== 'object') return body
@@ -1813,6 +1957,14 @@ export function applyCrsUnofficialPersona(
   // Read the caller's agent prompt before stripLeakySystem drops it as known official text.
   const rawCallerAgent = extractCallerAgentPrompt(body.system)
   const fileSettings = personaTemplateSettingsFromRoutingFile(routingFile)
+  let routing = null
+  try {
+    routing = routingFile ? JSON.parse(fs.readFileSync(routingFile, 'utf8')) : null
+  } catch {
+    routing = null
+  }
+  const resolvedEntrypoint =
+    entrypoint === 'cli' || entrypoint === 'sdk-cli' ? entrypoint : ccEntrypointFromRouting(routing)
   const hopPreset = mode != null ? personaPresetFromHopMode(mode) : null
   const chosen = hopPreset
     ? { ...fileSettings, explicit: true, preset: hopPreset }
@@ -1843,6 +1995,7 @@ export function applyCrsUnofficialPersona(
       identity,
       model,
       callerAgent: rawCallerAgent,
+      entrypoint: resolvedEntrypoint,
     })
   }
   const doPark =

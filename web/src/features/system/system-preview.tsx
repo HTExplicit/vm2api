@@ -18,7 +18,6 @@ import {
   previewModelSentence,
   previewSystemBlocks,
   selectedPreviewBlocks,
-  templateBlockEnabled,
   type RawBlock,
 } from '@/lib/persona-template'
 import { isCodexVm } from '@/lib/vm-kind'
@@ -104,32 +103,41 @@ export function SystemPreview({
     presetFlagEnabled(compat, 'agent_standing_hide_presets', preset)
   const blocksMasked = personaHideEnabled(compat, preset, blocks)
   const selected = selectedPreviewBlocks(blocks, compat, preset)
-  const timezoneOnly =
-    preset === 'official_full' &&
-    presetFlagEnabled(compat, 'persona_env_presets', preset) &&
-    !templateBlockEnabled(compat, preset, 'env_official')
+  const withEnvironment = selected.some((block) => block.role === 'system')
   const env = envTimezoneText(timezone)
-  const rendered = vars.data
-    ? previewSystemBlocks(
-        dropLegacyAutoScope(preset, selected),
-        applyPersonaEnvVars(
-          {
-            ...vars.data.vars,
-            ...PREVIEW_REQUEST_VARS,
-            timezone,
-            env_timezone_only: env,
-            env_official: timezoneOnly ? env : vars.data.vars.env_official,
-            env,
-            agent_standing: agentStandingVar(compat, preset),
-            caller_agent: withCaller ? PREVIEW_CALLER_AGENT : '',
-            caller_system: withCaller ? PREVIEW_CALLER_SYSTEM : '',
-            model: previewModel,
-            model_sentence: previewModelSentence(compat, previewModel, preset),
-          },
-          compat,
-          preset
-        )
+  const previewVars = vars.data
+    ? applyPersonaEnvVars(
+        {
+          ...vars.data.vars,
+          ...PREVIEW_REQUEST_VARS,
+          timezone,
+          env_timezone_only: env,
+          env_official: vars.data.vars.env_official,
+          env_timezone: ` - Timezone: ${timezone}`,
+          env,
+          agent_standing: agentStandingVar(compat, preset),
+          caller_agent: withCaller ? PREVIEW_CALLER_AGENT : '',
+          caller_system: withCaller ? PREVIEW_CALLER_SYSTEM : '',
+          model: previewModel,
+          model_sentence: previewModelSentence(compat, previewModel, preset),
+        },
+        compat,
+        preset
       )
+    : null
+  const source = dropLegacyAutoScope(preset, selected)
+  const rendered = previewVars
+    ? [
+        ...previewSystemBlocks(source, previewVars).map((block) => ({
+          ...block,
+          region: 'system',
+        })),
+        ...(presetFlagEnabled(compat, 'persona_env_presets', preset)
+          ? previewSystemBlocks(source, previewVars, { role: 'system' }).map(
+              (block) => ({ ...block, region: 'messages · role=system' })
+            )
+          : []),
+      ]
     : []
   const plain = rendered.map((block) => block.text).join('\n\n')
   const marks = [standing, PREVIEW_CALLER_AGENT, PREVIEW_CALLER_SYSTEM]
@@ -139,7 +147,7 @@ export function SystemPreview({
       <CardHeader className='space-y-2 px-4'>
         <div className='flex items-center gap-2'>
           <FileText className='size-4 text-muted-foreground' aria-hidden />
-          <CardTitle className='text-sm'>最终 system prompt</CardTitle>
+          <CardTitle className='text-sm'>预览</CardTitle>
           <Badge variant='secondary' className='font-normal'>
             {personaPresetLabel(preset)}
           </Badge>
@@ -159,58 +167,65 @@ export function SystemPreview({
           </Button>
         </div>
         <div className='flex flex-wrap items-center gap-x-3 gap-y-2'>
-          <span className='text-[11px] text-muted-foreground'>
-            不含 billing
-          </span>
-          <Select value={timezone} onValueChange={setPicked}>
-            <SelectTrigger
-              size='sm'
-              className='h-7 cursor-pointer font-mono text-[11px]'
-              aria-label='预览用槽位时区'
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {(zones.length ? zones : ['UTC']).map((zone) => (
-                <SelectItem
-                  key={zone}
-                  value={zone}
-                  className='font-mono text-xs'
-                >
-                  {zone}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Select value={previewModel} onValueChange={setPreviewModel}>
-            <SelectTrigger
-              size='sm'
-              className='h-7 cursor-pointer font-mono text-[11px]'
-              aria-label='预览用模型'
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {[
-                'claude-sonnet-5-5',
-                'claude-haiku-5-5',
-                'claude-opus-5-5',
-                ...Object.keys(
-                  compat.model_env_extra &&
-                    typeof compat.model_env_extra === 'object' &&
-                    !Array.isArray(compat.model_env_extra)
-                    ? (compat.model_env_extra as Record<string, string>)
-                    : {}
-                ),
-              ]
-                .filter((id, index, all) => all.indexOf(id) === index)
-                .map((id) => (
-                  <SelectItem key={id} value={id} className='font-mono text-xs'>
-                    {id}
+          {withEnvironment &&
+          presetFlagEnabled(compat, 'persona_timezone_presets', preset) ? (
+            <Select value={timezone} onValueChange={setPicked}>
+              <SelectTrigger
+                size='sm'
+                className='h-7 cursor-pointer font-mono text-[11px]'
+                aria-label='预览用槽位时区'
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(zones.length ? zones : ['UTC']).map((zone) => (
+                  <SelectItem
+                    key={zone}
+                    value={zone}
+                    className='font-mono text-xs'
+                  >
+                    {zone}
                   </SelectItem>
                 ))}
-            </SelectContent>
-          </Select>
+              </SelectContent>
+            </Select>
+          ) : null}
+          {withEnvironment &&
+          presetFlagEnabled(compat, 'model_env_extra_presets', preset) ? (
+            <Select value={previewModel} onValueChange={setPreviewModel}>
+              <SelectTrigger
+                size='sm'
+                className='h-7 cursor-pointer font-mono text-[11px]'
+                aria-label='预览用模型'
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {[
+                  'claude-sonnet-5-5',
+                  'claude-haiku-5-5',
+                  'claude-opus-5-5',
+                  ...Object.keys(
+                    compat.model_env_extra &&
+                      typeof compat.model_env_extra === 'object' &&
+                      !Array.isArray(compat.model_env_extra)
+                      ? (compat.model_env_extra as Record<string, string>)
+                      : {}
+                  ),
+                ]
+                  .filter((id, index, all) => all.indexOf(id) === index)
+                  .map((id) => (
+                    <SelectItem
+                      key={id}
+                      value={id}
+                      className='font-mono text-xs'
+                    >
+                      {id}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          ) : null}
           <label className='ml-auto flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground'>
             <Switch checked={withCaller} onCheckedChange={setWithCaller} />
             含调用方
@@ -241,6 +256,7 @@ export function SystemPreview({
                   <div className='flex items-center gap-2 border-b border-border/40 bg-muted/30 px-2.5 py-1 font-mono text-[10px] text-muted-foreground'>
                     <span className='tabular-nums'>{i + 1}</span>
                     <span className='truncate'>{block.id || '—'}</span>
+                    <span>{block.region}</span>
                     <span className='ml-auto flex items-center gap-1.5'>
                       {block.ttl ? <span>{block.ttl}</span> : null}
                       {block.scope ? <span>{block.scope}</span> : null}

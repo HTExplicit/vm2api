@@ -85,8 +85,7 @@ import {
 import { resolveWorkspaceMode, isOfficialClaudeClient } from './workspace-mode.mjs'
 import { officialMessagesBody } from './anthropic-messages.mjs'
 import { prepareOutboundEnvelope, prepareCliHopBody } from './outbound-attempt.mjs'
-import { OFFICIAL_303_PRESET, officialPromptShape, profileForPreset } from '../identity/official-profiles.mjs'
-import { renderOfficial303Body } from '../identity/official-303.mjs'
+import { profileForPreset } from '../identity/official-profiles.mjs'
 import { loadVmIdentity, OFFICIAL_CLI_VERSION } from '../identity/vm-identity.mjs'
 import { touchTelemetrySession } from '../vm/worker-telemetry.mjs'
 import {
@@ -109,8 +108,10 @@ import {
 } from '../pool/sticky-router.mjs'
 import {
   applyCrsUnofficialPersona,
+  callerPersonaInputForAttempt,
   detectProxiedOfficialCcFromRoutingFile,
   billingIndexesFromMessages,
+  ccEntrypointFromRouting,
   ensureBillingAttribution,
   extractFirstUserText,
   isOfficialClaudeCodeTraffic,
@@ -142,7 +143,6 @@ import {
 import {
   applyCacheTtlToUsage,
   cacheBreakpointsFromRoutingFile,
-  cacheTtlFromRouting,
   pinConversationCacheTtl,
   resolveCacheTtl,
   fillMissingCacheTtl,
@@ -437,6 +437,7 @@ export function createHandleProtocol(deps) {
     want1m = false,
     preserveCacheBreakpoints = false,
     cliHop = false,
+    repaired = false,
     requestContext = null,
     routing = {},
     noGoFallback = false,
@@ -457,6 +458,7 @@ export function createHandleProtocol(deps) {
       routing,
       preserveCacheBreakpoints,
       cliHop,
+      repaired,
       requestContext,
       slotWaitMs: candidate.slotWaitMs,
       noGoFallback,
@@ -1360,9 +1362,18 @@ export function createHandleProtocol(deps) {
             // The front rewrite already produces the official two-block shape.
             const panelRewrite = false
             const outboundProfile = profileForPreset(resolvedPersona)
-            // official_303: lean models get the 2.1.303 assembler; full-prompt models keep this path at 2.1.303.
-            const outboundShape =
-              !requestContext && resolvedPersona === OFFICIAL_303_PRESET ? officialPromptShape(body?.model) : null
+            // Render once from caller input with the selected slot's identity, not the pre-selection environment.
+            if (!requestContext && !officialTraffic && !repaired) {
+              hopBody = applyCrsUnofficialPersona(callerPersonaInputForAttempt(body, personaIn, ctx.body), {
+                forceConfigured: true,
+                routingFile: routingConfigPath,
+                mode: resolvedPersona,
+                sessionId: attemptSessionId,
+                model: hopBody?.model,
+                cliVersion: outboundProfile.cliVersion,
+                identity,
+              })
+            }
             hopBody = prepareCliHopBody(repaired ? body : hopBody, {
               stream: upstreamStream,
               repaired,
@@ -1373,28 +1384,14 @@ export function createHandleProtocol(deps) {
               preserveCallerEnvironment,
               autoCompactWindow: ctx.autoCompactWindow,
               routing: routingNow,
-              outboundShape,
             })
-            if (outboundShape === 'lean') {
-              hopBody = renderOfficial303Body(hopBody, {
-                callerSystem: personaIn?.system,
-                officialCaller: officialTraffic,
-                identity,
-                compat: routingNow?.compatibility || {},
-                cacheTtl: cacheTtlFromRouting(routingNow),
-                firstUserText,
-                sessionId: attemptSessionId,
-                oneM: hasClaudeCode1mSuffix(inbound?.model),
-              })
-              // Top-level body field: kernel keeps unknown fields; cli-node reads and deletes it.
-              hopBody.kin_outbound_shape = 'lean'
-            }
             if (!requestContext) {
               hopBody = ensureBillingAttribution(hopBody, {
                 firstUserText,
                 sessionId: attemptSessionId,
                 cliVersion: outboundProfile.cliVersion,
                 indexes: billingIndexesFromMessages(hopBody.messages),
+                entrypoint: ccEntrypointFromRouting(routingNow),
               })
             }
             hopBody = await materializeRemoteImageSources(hopBody)
@@ -1439,9 +1436,7 @@ export function createHandleProtocol(deps) {
             if (!panelRewrite) personaHideTokens = 0
             logBag.inference_engine = resolveInferenceEngine(selected.vm, routingNow)
             logBag.persona_preset = resolveSlotPersonaPreset(selected.vm, routingNow)
-            if (outboundShape) {
-              logBag.outbound_profile = { cli_version: outboundProfile.cliVersion, shape: outboundShape }
-            }
+            logBag.outbound_profile = { cli_version: outboundProfile.cliVersion }
             logBag.official_cc_inference = 'cli-hop'
             logBag.provider = 'local_cli'
             hopBody = noteCachePrefix(selected, attemptSessionId, hopBody)
@@ -1457,7 +1452,10 @@ export function createHandleProtocol(deps) {
               requestId: logCtx.request_id,
             })
             logBag.outbound_session_id = sessionIdForLog(sessionIdFromOutboundBody(hopBody) || attemptSessionId)
-            return { body: hopBody, meta: { toolNames: {}, sessionId: attemptSessionId, cliHop: true, requestContext } }
+            return {
+              body: hopBody,
+              meta: { toolNames: {}, sessionId: attemptSessionId, cliHop: true, requestContext, repaired },
+            }
           }
 
           cacheTtl = requestedCacheTtl
@@ -1531,7 +1529,7 @@ export function createHandleProtocol(deps) {
             requestId: logCtx.request_id,
           })
           logBag.outbound_session_id = sessionIdForLog(sessionIdFromOutboundBody(outbound) || attemptSessionId)
-          return { body: outbound, meta: { toolNames: prepared.toolNames, sessionId: attemptSessionId } }
+          return { body: outbound, meta: { toolNames: prepared.toolNames, sessionId: attemptSessionId, repaired } }
         },
         callAttempt: async ({ candidate, body, attemptMeta, deliveryMode: attemptDelivery, signal, onCommit }) => {
           if (!clientStream) {
@@ -1547,6 +1545,7 @@ export function createHandleProtocol(deps) {
               cacheTtl,
               preserveCacheBreakpoints,
               cliHop: attemptMeta?.cliHop === true,
+              repaired: attemptMeta?.repaired === true,
               requestContext: attemptMeta?.requestContext || requestContext,
               want1m,
               routing: getRouting(),
@@ -1586,6 +1585,7 @@ export function createHandleProtocol(deps) {
               cacheTtl,
               preserveCacheBreakpoints,
               cliHop: attemptMeta?.cliHop === true,
+              repaired: attemptMeta?.repaired === true,
               requestContext: attemptMeta?.requestContext || requestContext,
               body,
               reqHeaders: req.headers,

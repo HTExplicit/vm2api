@@ -1,12 +1,11 @@
 export type SlotPersonaPreset =
-  'inherit' | 'official' | 'official_full' | 'zero' | 'official_303'
+  'inherit' | 'official' | 'official_full' | 'zero'
 
 const SLOT_LABELS: Record<SlotPersonaPreset, string> = {
   inherit: '跟随全局',
   official: '官方提示词',
   official_full: '官方完整提示词',
   zero: '0注入',
-  official_303: '官方 2.1.303（按模型）',
 }
 
 export const SLOT_PERSONA_OPTIONS: {
@@ -48,7 +47,7 @@ export function normalizeSlotPersonaPreset(
     return 'zero'
   }
   if (raw === 'official_303' || raw === '303' || raw === 'official-303') {
-    return 'official_303'
+    return 'official_full'
   }
   return fallback
 }

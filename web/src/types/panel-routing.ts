@@ -1,8 +1,7 @@
 import type { RuntimeType } from '@/types/panel-vm'
 
 /** `routing.compatibility.persona_preset`。PUT 严格匹配，不做别名归一化。 */
-export type PersonaPreset =
-  'official' | 'official_full' | 'zero' | 'custom' | 'official_303'
+export type PersonaPreset = 'official' | 'official_full' | 'zero' | 'custom'
 
 /** `routing.compatibility.overlay_preset`。`off` 没有模板体。 */
 export type OverlayPreset = 'off' | 'official' | 'minimal' | 'custom'
@@ -21,6 +20,8 @@ export const SESSION_IDLE_TTL_SECONDS_DEFAULT = 600
  * 只有 `type` / `text` / `cache_control` 会到达 Anthropic。
  */
 export type PersonaBlock = {
+  /** role=system routes this block to messages, not the top-level system field. */
+  role?: 'system'
   id?: string
   note?: string
   /** persona 只能是 'text'（或缺省）；overlay 必须是 'wrapper' 或 'body'。 */

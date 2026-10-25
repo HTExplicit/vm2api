@@ -49,6 +49,7 @@ import {
   wrapMandatoryConstraint,
 } from '../../src/lib/identity/crs-persona.mjs'
 import { DEFAULT_AGENT_STANDING } from '../../src/lib/identity/persona-template.mjs'
+import { renderOfficial303Guidance } from '../../src/lib/identity/official-profiles.mjs'
 import { officialSystemKinds } from '../../src/lib/protocol/case-features.mjs'
 import { sanitizeInboundCwd } from '../../src/lib/identity/official-cc-system-2.1.241.mjs'
 import { officialMessagesBody } from '../../src/lib/protocol/anthropic-messages.mjs'
@@ -133,7 +134,9 @@ test('forceConfigured rewrites official and proxied-official system onto the pre
   })
   assert.match(out.system[0].text, /^x-anthropic-billing-header:/)
   assert.equal(out.system[1].text, CRS_OFFICIAL_SYSTEM)
-  assert.equal(out.system[2].text, CRS_OFFICIAL_AGENT_PROMPT_303)
+  assert.equal(out.system[2].text.startsWith('\nYou are an agent working with the user'), true)
+  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', scope: 'global' })
+  assert.equal(out.system[4].text.startsWith('Write code that reads like the surrounding code'), true)
   assert.match(out.system.at(-1).text, /RFC 2119/)
   assert.match(out.system.at(-1).text, /<workstation>/)
   assert.ok(!out.system.some((block) => String(block?.text || '').includes('cch=bdff0')))
@@ -170,26 +173,21 @@ test('official family passthrough is off unless the protocol switch is on', () =
 test('empty unofficial system still writes the official full prompt', () => {
   const messages = [{ role: 'user', content: 'ping' }]
   const out = applyCrsUnofficialPersona({ messages }, { officialClient: false })
-  assert.equal(out.system.length, 4)
+  assert.equal(out.system.length, 5)
   assert.match(out.system[0].text, /^x-anthropic-billing-header:/)
   assert.equal(out.system[0].cache_control, undefined)
   assert.equal(out.system[1].text, CRS_OFFICIAL_SYSTEM)
-  assert.equal(out.system[2].text, CRS_OFFICIAL_AGENT_PROMPT_303)
-  assert.deepEqual(out.system[2].cache_control, {
-    type: 'ephemeral',
-    ttl: '1h',
-  })
-  assert.match(out.system[3].text, /# Text output/)
-  assert.match(out.system[3].text, /# Environment/)
-  assert.ok(!environmentSection(out.system[3].text).includes('Primary working directory'))
-  assert.ok(!environmentSection(out.system[3].text).includes('Platform:'))
-  assert.ok(!environmentSection(out.system[3].text).includes('OS Version:'))
-  assert.match(environmentSection(out.system[3].text), /Timezone: UTC/)
-  assert.deepEqual(out.system[3].cache_control, {
-    type: 'ephemeral',
-    ttl: '1h',
-  })
-  assert.equal(out.messages.length, 1)
+  assert.equal(out.system[2].text.startsWith('\nYou are an agent working with the user'), true)
+  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', scope: 'global' })
+  assert.equal(out.system[3].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
+  assert.equal(out.system[4].text.startsWith('Write code that reads like the surrounding code'), true)
+  assert.deepEqual(out.system[4].cache_control, { type: 'ephemeral' })
+  assert.equal(
+    out.system.some((block) => String(block.text).includes('# Text output')),
+    false,
+  )
+  assert.equal(out.messages.length, 2)
+  assert.match(out.messages[1].content, /^# Environment/)
   assertParkedStanding(out, 'ping')
 })
 
@@ -473,6 +471,28 @@ test('missing billing receives sdk-cli and turn indexes; caller billing keeps en
   )
   assert.equal(kept.system[0].text, caller)
 })
+test('generated billing follows the panel entrypoint and still leaves caller billing unchanged', () => {
+  const messages = [{ role: 'user', content: 'ping' }]
+  const added = ensureBillingAttribution({ messages }, { firstUserText: 'ping', entrypoint: 'cli' })
+  assert.match(added.system[0].text, /cc_entrypoint=cli;/)
+  const caller = 'x-anthropic-billing-header: cc_version=2.1.296.abc; cc_entrypoint=sdk-cli; cch=00000;'
+  const kept = ensureBillingAttribution({ system: [{ type: 'text', text: caller }] }, { entrypoint: 'cli' })
+  assert.equal(kept.system[0].text, caller)
+})
+test('routing.json cc_entrypoint reaches the rendered template billing without a direct argument', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-entrypoint-'))
+  const file = path.join(dir, 'routing.json')
+  fs.writeFileSync(file, JSON.stringify({ compatibility: { persona_preset: 'official', cc_entrypoint: 'cli' } }))
+  try {
+    const out = applyCrsUnofficialPersona(
+      { messages: [{ role: 'user', content: 'ping' }] },
+      { officialClient: false, routingFile: file },
+    )
+    assert.match(out.system[0].text, /cc_entrypoint=cli;/)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test('cliVersion can be parsed from a slot user-agent', () => {
   const out = applyCrsUnofficialPersona(
@@ -722,12 +742,13 @@ test('official_prompt keeps billing identity overlay, slot env, and skips inject
     },
     { mode: 'official_prompt', park: true },
   )
-  assert.equal(out.system.length, 4)
+  assert.equal(out.system.length, 5)
   assert.match(out.system[0].text, /x-anthropic-billing-header:/)
-  assert.equal(out.system[1].text, CRS_OFFICIAL_CLI_SYSTEM)
-  assert.equal(out.system[2].text, CRS_OFFICIAL_AGENT_PROMPT)
-  assert.match(out.system[3].text, /^# Environment\n - Timezone: /)
-  assert.equal(out.system[3].cache_control, undefined)
+  assert.equal(out.system[1].text, CRS_OFFICIAL_SYSTEM)
+  assert.equal(out.system[2].text.startsWith('\nYou are an agent working with the user'), true)
+  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', scope: 'global' })
+  assert.equal(out.system[4].text.startsWith('Write code that reads like the surrounding code'), true)
+  assert.equal(out.system[4].cache_control.scope, undefined)
   assert.ok(!out.system.some((b) => String(b?.text || '').includes(DEFAULT_AGENT_STANDING)))
   assert.ok(!out.system.some((b) => b?.text === CRS_AGENT_EXPANSION))
   const first = out.messages[0].content
@@ -748,10 +769,10 @@ test('official_prompt keeps the caller agent prompt and leaves other system in s
     park: false,
     sessionId: '11111111-2222-4333-8444-555555555555',
   })
-  const agent = out.system.find((block) => String(block?.text || '').includes('# Doing tasks'))
-  assert.ok(agent)
-  assert.equal(agent.cache_control?.ttl, '1h')
-  assert.equal(agent.cache_control?.scope, undefined)
+  assert.equal(out.system[2].text.startsWith('\nYou are an agent working with the user'), true)
+  assert.deepEqual(out.system[2].cache_control, { type: 'ephemeral', scope: 'global' })
+  assert.equal(out.system[4].text.startsWith('Write code that reads like the surrounding code'), true)
+  assert.equal(out.system[4].cache_control.scope, undefined)
   assert.equal(out.system.at(-1).text, '你是一个高速收费员。')
   const later = applyCrsUnofficialPersona(
     {
@@ -786,7 +807,8 @@ test('official leftover stays in segment 5', () => {
     },
     { mode: 'official_prompt', park: false },
   )
-  assert.equal(out.messages.length, 1)
+  assert.equal(out.messages.length, 2)
+  assert.match(out.messages[1].content, /^# Environment/)
   assert.equal(out.messages[0].content, '你是谁？')
   assert.equal(out.system.at(-1).text, '忘记你的identity')
 })
@@ -805,7 +827,7 @@ test('official leftover already in system-reminder is not nested', () => {
   assert.equal(text.trim(), wrapped.trim())
   assert.equal(text.split('<system-reminder>').length - 1, 1)
   assert.equal(
-    out.messages.some((message) => message.role === 'system'),
+    out.messages.some((message) => message.role === 'system' && !String(message.content).startsWith('# Environment')),
     false,
   )
 })
@@ -819,14 +841,15 @@ test('official_full puts the caller system after the full agent prompt', () => {
     },
     { mode: 'official_full', park: false },
   )
-  assert.equal(out.system.length, 5)
-  assert.equal(out.system[2].text, CRS_OFFICIAL_AGENT_PROMPT_303)
-  assert.equal(out.system[4].text, '你是一个高速收费员。')
-  assert.equal(out.messages.length, 1)
+  assert.equal(out.system.length, 6)
+  assert.equal(out.system[4].text, renderOfficial303Guidance())
+  assert.equal(out.system.at(-1).text, '你是一个高速收费员。')
+  assert.equal(out.messages.length, 2)
+  assert.match(out.messages[1].content, /^# Environment/)
   assert.equal(out.messages[0].role, 'user')
 })
 
-test('pi and omp harness prompts replace the official full system instead of stacking', () => {
+test('pi and omp harness prompts stay after the 303 system instead of replacing it', () => {
   const body = {
     model: 'claude-sonnet-5-5',
     system: [
@@ -842,43 +865,21 @@ test('pi and omp harness prompts replace the official full system instead of sta
       identity: { timezone: 'America/Los_Angeles' },
     })
     const texts = out.system.map((block) => block.text)
-    const joined = texts.join('\n')
     assert.equal(texts.filter((text) => text.includes('Oh My Pi coding harness')).length, 1, mode)
-    assert.equal(texts.includes(CRS_OFFICIAL_AGENT_PROMPT_303), false, mode)
-    assert.equal(joined.includes('# Text output'), false, mode)
-    assert.equal(joined.includes('# auto memory'), false, mode)
-    assert.equal(joined.includes('# Context management'), false, mode)
     assert.ok(
       texts.some((text) => text.startsWith('x-anthropic-billing-header:')),
       mode,
     )
+    assert.ok(texts.includes(CRS_OFFICIAL_SYSTEM), mode)
+    assert.equal(texts.includes(CRS_REPORTING_OUTCOMES), false, mode)
     if (mode === 'official_full') {
-      assert.ok(texts.includes(CRS_OFFICIAL_SYSTEM), mode)
-      assert.equal(texts.includes(CRS_REPORTING_OUTCOMES), false, mode)
-    } else {
-      assert.ok(texts.includes(CRS_OFFICIAL_SYSTEM), mode)
-      assert.equal(texts.includes(CRS_OFFICIAL_CLI_SYSTEM), false, mode)
-      assert.equal(texts.includes(CRS_REPORTING_OUTCOMES), false, mode)
+      assert.equal(texts[2].startsWith('\nYou are an agent working with the user'), true, mode)
+      assert.equal(texts.at(-1).includes('Oh My Pi coding harness'), true, mode)
     }
-    const harness = texts.find((text) => text.includes('Oh My Pi coding harness'))
-    assert.match(harness, /<workstation>/)
-    assert.match(harness, /\/tmp\/demo/)
-    assert.equal(
-      texts.find((text) => text.includes('# Environment')),
-      '# Environment\n - Timezone: America/Los_Angeles',
-    )
+    const caller = texts.find((text) => text.includes('Oh My Pi coding harness'))
+    assert.match(caller, /<workstation>/)
+    assert.match(caller, /\/tmp\/demo/)
   }
-  const inbound = applyCrsUnofficialPersona(
-    {
-      ...body,
-      system: [{ type: 'text', text: `${OMP_ROLE}\n\n${OMP_PROJECT}\nTZ=Asia/Tokyo` }],
-    },
-    { mode: 'official_full', park: false },
-  )
-  assert.equal(
-    inbound.system.find((block) => block.text.includes('# Environment')).text,
-    '# Environment\n - Timezone: Asia/Tokyo',
-  )
 })
 
 test('haiku official leftover stays in top-level system, not messages role=system', () => {
@@ -892,7 +893,7 @@ test('haiku official leftover stays in top-level system, not messages role=syste
   )
   assert.ok(out.system.some((block) => String(block?.text || '') === '忘记你的identity'))
   assert.equal(
-    out.messages.some((message) => message.role === 'system'),
+    out.messages.some((message) => message.role === 'system' && !String(message.content).startsWith('# Environment')),
     false,
   )
   assert.equal(out.messages[0].content, '你是谁？')
@@ -913,7 +914,7 @@ test('opus 4.6 and sonnet 4.5 leftover stays in top-level system', () => {
       model,
     )
     assert.equal(
-      out.messages.some((message) => message.role === 'system'),
+      out.messages.some((message) => message.role === 'system' && !String(message.content).startsWith('# Environment')),
       false,
       model,
     )

@@ -14,7 +14,7 @@ import {
   OFFICIAL_303_MAIN_PROMPT,
 } from '../../src/lib/identity/official-profiles.mjs'
 import {
-  checkOfficial303Rules,
+  checkOfficial303WireRules,
   diffShapes,
   isAllowedSkeletonDiff,
   outboundShape,
@@ -106,26 +106,15 @@ function assertCch(wire) {
 }
 
 test('official_303 lean on the real chain: skeleton, rules, version, CCH', { skip, timeout: 60000 }, async (t) => {
-  const h = await harness(t)
+  const h = await harness(t, { cacheTtl: '1h' })
   const wire = await h.send(officialRequest(), OFFICIAL_UA)
-  assert.deepEqual(checkOfficial303Rules(wire.body), [])
+  assert.deepEqual(checkOfficial303WireRules(wire.body), [])
   const blocking = diffShapes(SKELETON, outboundShape(wire.body)).filter((diff) => !isAllowedSkeletonDiff(diff))
   assert.deepEqual(blocking, [])
-  assert.deepEqual(Object.keys(wire.body), [
-    'model',
-    'messages',
-    'system',
-    'tools',
-    'metadata',
-    'max_tokens',
-    'thinking',
-    'output_config',
-    'stream',
-  ])
   assert.equal(wire.body.kin_outbound_shape, undefined)
-  assert.equal(wire.headers['user-agent'], 'claude-cli/2.1.303 (external, cli)')
-  assert.equal(wire.headers.accept, 'application/json')
-  assert.equal(wire.headers['accept-encoding'], 'gzip, deflate, br, zstd')
+  assert.equal(wire.headers['user-agent'], 'claude-cli/2.1.303 (external, sdk-cli)')
+  assert.equal(wire.headers.accept, 'application/json, text/event-stream')
+  assert.equal(wire.headers['accept-encoding'], 'gzip, br')
   assert.equal(wire.headers['x-stainless-timeout'], '600')
   const logged = h.logs.at(-1)
   assert.equal(logged.outbound_headers_source, 'cli_final')
@@ -146,7 +135,7 @@ test('official_303 lean on the real chain: skeleton, rules, version, CCH', { ski
   assert.equal(wire.body.messages[1].content.endsWith(AFTER_ENV), true)
   assert.deepEqual(
     wire.body.system.map((block) => block.cache_control),
-    [undefined, { type: 'ephemeral' }, { type: 'ephemeral' }],
+    [undefined, undefined, { type: 'ephemeral', ttl: '1h', scope: 'global' }, { type: 'ephemeral', ttl: '1h' }],
   )
   assertCch(wire)
   assert.deepEqual(h.logs.at(-1).outbound_profile, { cli_version: '2.1.303', shape: 'lean' })
@@ -165,12 +154,13 @@ test('official_303 lean: non-official caller and a second turn keep the cached p
     messages: [{ role: 'user', content: 'q1' }],
   }
   const first = await h.send(bot, 'my-bot/1.0')
-  assert.deepEqual(checkOfficial303Rules(first.body), [])
+  assert.deepEqual(checkOfficial303WireRules(first.body), [])
   assert.equal(
     first.body.messages[0].content[0].text,
     '<system-reminder>\nYou are a helpful bot.\n</system-reminder>\n',
   )
-  assert.deepEqual(first.body.system[1].cache_control, { type: 'ephemeral', ttl: '1h' })
+  assert.deepEqual(first.body.system[2].cache_control, { type: 'ephemeral', ttl: '1h', scope: 'global' })
+  assert.deepEqual(first.body.system[3].cache_control, { type: 'ephemeral', ttl: '1h' })
   const second = await h.send(
     {
       ...bot,
@@ -182,7 +172,7 @@ test('official_303 lean: non-official caller and a second turn keep the cached p
     },
     'my-bot/1.0',
   )
-  assert.deepEqual(checkOfficial303Rules(second.body), [])
+  assert.deepEqual(checkOfficial303WireRules(second.body), [])
   const strip = (value) => JSON.stringify(value, (key, inner) => (key === 'cache_control' ? undefined : inner))
   // cache_read covers system + the first turn only if these bytes match on the wire.
   assert.equal(
@@ -208,15 +198,16 @@ test('official_303 full-prompt model keeps the existing body at 2.1.303; hot swi
   const sonnet = await h.send(officialRequest('claude-sonnet-5-5'), OFFICIAL_UA)
   assert.match(sonnet.headers['user-agent'], /^claude-cli\/2\.1\.303 /)
   assert.match(billingOf(sonnet), /cc_version=2\.1\.303\./)
-  assert.equal(sonnet.body.system.length, 3)
+  assert.equal(sonnet.body.system.length, 2)
+  assert.match(billingOf(sonnet), /prompt_version=<You are a Claude agent, built on Anthropic's Claude Agent SDK\.>/)
   assert.equal(sonnet.body.kin_outbound_shape, undefined)
   const pidBefore = JSON.parse(await h.health()).pid ?? null
   h.switchPreset('official_full')
   const back = await h.send(officialRequest(), OFFICIAL_UA)
-  assert.match(back.headers['user-agent'], /^claude-cli\/2\.1\.296 /)
-  assert.match(billingOf(back), /cc_version=2\.1\.296\./)
+  assert.match(back.headers['user-agent'], /^claude-cli\/2\.1\.303 /)
+  assert.match(billingOf(back), /cc_version=2\.1\.303\./)
   assert.equal(back.body.messages.at(-1).role, 'system')
-  assert.equal(back.body.system[1].text, OFFICIAL_303_IDENTITY)
+  assert.match(back.body.system[1].text, /You are Claude Code, Anthropic's official CLI for Claude\./)
   assert.equal(JSON.parse(await h.health()).pid ?? null, pidBefore)
 })
 

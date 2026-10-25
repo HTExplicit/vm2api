@@ -582,8 +582,11 @@ function hasMessageBreakpoint(messages) {
 function dropMessageBreakpoints(messages) {
   let changed = false
   const next = messages.map((message) => {
-    if (!Array.isArray(message?.content)) return message
-    let touched = false
+    if (!message || typeof message !== 'object') return message
+    const { cache_control: messageControl, ...rest } = message
+    if (messageControl != null) changed = true
+    if (!Array.isArray(message.content)) return messageControl != null ? rest : message
+    let touched = messageControl != null
     const content = message.content.map((block) => {
       if (!block || typeof block !== 'object' || !block.cache_control) return block
       touched = true
@@ -592,7 +595,7 @@ function dropMessageBreakpoints(messages) {
     })
     if (!touched) return message
     changed = true
-    return { ...message, content }
+    return { ...rest, content }
   })
   return changed ? next : messages
 }
@@ -611,7 +614,7 @@ function stampMessageTail(messages, idx, ttl) {
   if (!Array.isArray(content) || content.length === 0) return messages
   let target = -1
   for (let i = content.length - 1; i >= 0; i--) {
-    if (content[i]?.type === 'thinking' || content[i]?.type === 'redacted_thinking') continue
+    if (!stampableBlock(content[i])) continue
     target = i
     break
   }
@@ -642,11 +645,21 @@ function penultimateUserIndex(messages) {
 }
 
 /** Empty control turns have no block to hang cache_control on. */
+function stampableBlock(block) {
+  return (
+    block &&
+    typeof block === 'object' &&
+    block.type !== 'thinking' &&
+    block.type !== 'redacted_thinking' &&
+    (block.type !== 'text' || Boolean(block.text))
+  )
+}
+
 function lastStampableMessageIndex(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const content = messages[i]?.content
     if (typeof content === 'string' && content) return i
-    if (Array.isArray(content) && content.length > 0) return i
+    if (Array.isArray(content) && content.some(stampableBlock)) return i
   }
   return -1
 }

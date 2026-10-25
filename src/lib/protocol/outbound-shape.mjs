@@ -6,6 +6,8 @@
 import { createHash } from 'node:crypto'
 import { computeClaudeCodeCch, projectClaudeCodeCchText } from '../identity/cch.mjs'
 import {
+  OFFICIAL_303_GUIDANCE,
+  OFFICIAL_303_HARNESS,
   OFFICIAL_303_IDENTITY,
   OFFICIAL_303_MAIN_PROMPT,
   OFFICIAL_PROFILES,
@@ -162,42 +164,62 @@ export function diffShapes(expected, actual, path = '') {
 }
 
 /**
- * 2.1.303 lean rules a capture must satisfy, beyond the skeleton's top level and system.
- * Messages are checked by rule because turn counts differ from the one-turn skeleton.
+ * Node body handed to cli-node. The boundary stays between harness and guidance
+ * so the CLI can split them. It is not the Anthropic wire.
  */
 export function checkOfficial303Rules(body) {
+  return checkOfficial303Shape(body, { stage: 'node' })
+}
+
+/**
+ * Body after cli-node splitSysPromptPrefix. Four blocks, no boundary literal.
+ * Harness is system[2]; guidance is system[3].
+ */
+export function checkOfficial303WireRules(body) {
+  return checkOfficial303Shape(body, { stage: 'wire' })
+}
+
+function checkOfficial303Shape(body, { stage }) {
   const problems = []
   const shape = outboundShape(body)
   const system = shape.system || []
   const kinds = system.map((block) => block.kind)
-  if (kinds.join(',') !== 'billing,identity,main')
-    problems.push(`system kinds ${kinds.join(',')} != billing,identity,main`)
+  const expected = stage === 'wire' ? 'billing,identity,harness,guidance' : 'billing,identity,harness,boundary,guidance'
+  if (kinds.join(',') !== expected) problems.push(`system kinds ${kinds.join(',')} != ${expected}`)
+  const guidanceAt = stage === 'wire' ? 3 : 4
   if (system[0]?.cache_control) problems.push('billing carries a marker')
-  if (!system[1]?.cache_control || !system[2]?.cache_control) problems.push('identity / main must carry markers')
+  if (system[1]?.cache_control) problems.push('identity carries a marker')
+  if (stage === 'node' && system[3]?.cache_control) problems.push('dynamic boundary carries a marker')
+  if (stage === 'wire' && kinds.includes('boundary')) problems.push('dynamic boundary reached the wire')
+  if (!system[2]?.cache_control || !system[guidanceAt]?.cache_control)
+    problems.push('harness / guidance must carry markers')
+  if (system[2]?.cache_control?.ttl === '1h' && system[2].cache_control.scope !== 'global')
+    problems.push('1h harness marker must carry scope global')
+  if (system[2]?.cache_control?.ttl !== '1h' && system[2]?.cache_control?.scope)
+    problems.push('5m harness marker must not carry scope')
   if (shape.tools?.markers) problems.push('tools carry markers')
   const messages = shape.messages || []
-  let lastUser = -1
-  messages.forEach((message, i) => {
-    if (message.role === 'user') lastUser = i
-  })
-  messages.forEach((message, i) => {
-    if (message.role !== 'system') return
-    const marked = message.cache_control || (message.blocks || []).some((block) => block.cache_control)
-    if (marked) problems.push(`messages[${i}] role=system carries a marker`)
-  })
-  const userAt = messages.flatMap((message, i) => (message.role === 'user' ? [i] : []))
-  const expectedUsers = messages.length >= 4 && userAt.length >= 2 ? userAt.slice(-2) : userAt.slice(-1)
+  const tail = messages.findLastIndex((message) =>
+    message.content === 'string'
+      ? message.len > 0
+      : (message.blocks || []).some(
+          (block) =>
+            block.type !== 'thinking' && block.type !== 'redacted_thinking' && (block.type !== 'text' || block.len > 0),
+        ),
+  )
+  const expectedTails = tail < 0 ? [] : [tail]
   const messageMarkers = shape.markers.at.filter((m) => m.where.startsWith('messages['))
-  const markedUsers = messageMarkers.map((m) => Number(/^messages\[(\d+)\]/.exec(m.where)[1]))
-  if (markedUsers.join(',') !== expectedUsers.join(',')) {
-    problems.push(`message markers at [${markedUsers.join(',')}], expected users [${expectedUsers.join(',')}]`)
+  const markedTails = messageMarkers.map((m) => Number(/^messages\[(\d+)\]/.exec(m.where)[1]))
+  if (markedTails.join(',') !== expectedTails.join(',')) {
+    problems.push(`message markers at [${markedTails.join(',')}], expected tail [${expectedTails.join(',')}]`)
   }
-  const total = 2 + expectedUsers.length
+  const total = 2 + expectedTails.length
   if (shape.markers.total !== total) problems.push(`markers ${shape.markers.total} != ${total}`)
   const ttls = new Set(shape.markers.at.map((m) => m.ttl))
   if (ttls.size > 1) problems.push(`mixed marker TTLs ${[...ttls].join(',')}`)
-  const tail = messages.slice(lastUser + 1)
-  if (tail.some((message) => message.role !== 'system')) problems.push('non-system message after the last user')
+  const lastUser = messages.findLastIndex((message) => message.role === 'user')
+  if (messages.slice(lastUser + 1).some((message) => message.role !== 'system'))
+    problems.push('non-system message after the last user')
   // Reminders (caller system, then any panel overlay) lead the first user turn, contiguous from index 0.
   const firstUser = messages.findIndex((message) => message.role === 'user')
   messages.forEach((message, i) => {
@@ -222,7 +244,7 @@ export function isAllowedSkeletonDiff(diff) {
   if (at === 'messages' || at.startsWith('messages[')) return true
   if (at === 'top_level') {
     const allowed = new Set(['context_management', 'temperature', 'tool_choice', 'kin_outbound_shape'])
-    const strip = (keys) => (Array.isArray(keys) ? keys.filter((key) => !allowed.has(key)) : keys)
+    const strip = (keys) => (Array.isArray(keys) ? keys.filter((key) => !allowed.has(key)).sort() : keys)
     return JSON.stringify(strip(diff.expected)) === JSON.stringify(strip(diff.actual))
   }
   if (at === 'tools.count') return true
@@ -266,15 +288,6 @@ export function checkOfficial303Wire(wire, { profile = OFFICIAL_PROFILES['2.1.30
   const ua = String(wire?.headers?.['user-agent'] || '')
   if (!new RegExp(`^claude-cli/${escapeRegExp(profile.cliVersion)} `).test(ua))
     problems.push({ id: 'wire.user_agent', ua: /^claude-cli\/[^\s]+/.exec(ua)?.[0] || '' })
-  const messages = Array.isArray(body.messages) ? body.messages : []
-  let lastUser = -1
-  messages.forEach((message, i) => {
-    if (message?.role === 'user') lastUser = i
-  })
-  messages.forEach((message, index) => {
-    if (index > lastUser && message?.role === 'system' && typeof message.content !== 'string')
-      problems.push({ id: 'wire.tail_system_not_string', index })
-  })
   if (billing) {
     const cch = /\bcch=([0-9a-f]{5});/.exec(billing)?.[1]
     let expectedCch = null
@@ -365,7 +378,12 @@ export function checkCallerPlacement(outBody, inbound, { officialCaller, protoco
       .map((part) => part.trim())) {
       if (para.length < 40) continue
       if (isBillingText(para) || isOfficialIdentityText(para)) continue
-      if (OFFICIAL_303_MAIN_PROMPT.includes(para) || OFFICIAL_303_IDENTITY.includes(para)) {
+      if (
+        OFFICIAL_303_MAIN_PROMPT.includes(para) ||
+        OFFICIAL_303_HARNESS.includes(para) ||
+        OFFICIAL_303_GUIDANCE.includes(para) ||
+        OFFICIAL_303_IDENTITY.includes(para)
+      ) {
         skipped++
         continue
       }

@@ -418,8 +418,8 @@ test('a caller breakpoint on system reaches the wire through the official person
     const personaHits = breakpoints(persona)
     assert.ok(personaHits.length >= 1, 'official persona must keep a cache boundary on the agent prefix')
     assert.ok(
-      personaHits.some((h) => h.where.startsWith('system[') && h.ttl === '1h'),
-      'agent slot carries 1h global cache instead of dropping caller breakpoints',
+      personaHits.some((h) => h.where.startsWith('system[')),
+      'prepared harness carries a cache marker; the hop applies the panel TTL',
     )
     const envelope = prepareOutboundEnvelope({
       canonicalBody: persona,

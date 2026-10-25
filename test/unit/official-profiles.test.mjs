@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  OFFICIAL_303_AGENT_IDENTITY,
+  OFFICIAL_303_GUIDANCE,
+  OFFICIAL_303_HARNESS,
   OFFICIAL_303_IDENTITY,
   OFFICIAL_303_MAIN_PROMPT,
   OFFICIAL_PROFILES,
@@ -10,6 +13,7 @@ import {
   officialModelLine,
   officialPromptShape,
   profileForPreset,
+  renderOfficial303Guidance,
   renderOfficial303MainPrompt,
 } from '../../src/lib/identity/official-profiles.mjs'
 import {
@@ -59,12 +63,12 @@ test('model shape follows official 2.1.303 he(model)', () => {
   assert.equal(canonicalPromptModel('Test-Pro/Claude-Opus-5-5[1m]'), 'claude-opus-5-5')
 })
 
-test('official presets bind 2.1.303 while legacy presets retain 2.1.296', () => {
+test('all presets bind 2.1.303, including migrated selections', () => {
   for (const preset of ['official', 'official_full', 'official_303', '303', 'official-303']) {
     assert.equal(profileForPreset(preset).cliVersion, '2.1.303', String(preset))
   }
   for (const preset of ['zero', 'custom', '', undefined]) {
-    assert.equal(profileForPreset(preset).cliVersion, '2.1.296', String(preset))
+    assert.equal(profileForPreset(preset).cliVersion, '2.1.303', String(preset))
   }
   const profile = OFFICIAL_PROFILES['2.1.303']
   assert.deepEqual(profile.topLevelOrder, [
@@ -79,56 +83,80 @@ test('official presets bind 2.1.303 while legacy presets retain 2.1.296', () => 
     'stream',
   ])
   assert.equal(profile.maxMarkers, 4)
+  assert.equal(profile.messages.marker, 'current_tail')
   assert.deepEqual(profile.autoFill, [])
 })
 
-test('official_303 is a selectable preset; the default stays official_full', () => {
-  assert.ok(PERSONA_PRESETS.includes('official_303'))
+test('official_303 migrates to official_full and is no longer selectable', () => {
+  assert.ok(!PERSONA_PRESETS.includes('official_303'))
   assert.equal(DEFAULT_PERSONA_PRESET, 'official_full')
   for (const raw of ['official_303', 'OFFICIAL_303', '303', 'official-303']) {
-    assert.equal(normalizePersonaPreset(raw), 'official_303')
-    assert.equal(normalizeSlotPersonaPreset(raw), 'official_303')
+    assert.equal(normalizePersonaPreset(raw), 'official_full')
+    assert.equal(normalizeSlotPersonaPreset(raw), 'official_full')
     assert.deepEqual(parseSlotPersonaPresetPatch(raw), {
       ok: true,
-      value: 'official_303',
+      value: 'official_full',
     })
   }
   assert.equal(templatePresetFor('official_303'), 'official_full')
   assert.equal(templatePresetFor('zero'), 'zero')
-  assert.equal(resolveSlotPersonaPreset({}, { compatibility: { persona_preset: 'official_303' } }), 'official_303')
+  assert.equal(resolveSlotPersonaPreset({}, { compatibility: { persona_preset: 'official_303' } }), 'official_full')
   assert.equal(
     resolveSlotPersonaPreset({ persona_preset: 'official_303' }, { compatibility: { persona_preset: 'zero' } }),
-    'official_303',
+    'official_full',
   )
-  assert.equal(slotPersonaModeOverride({ persona_preset: 'official_303' }), 'official_303')
+  assert.equal(slotPersonaModeOverride({ persona_preset: 'official_303' }), 'official_full')
   assert.equal(parseSlotPersonaPresetPatch('nope').ok, false)
 })
 
-test('built-in 303 template: billing, identity (marker), main (marker) and valid placeholders', () => {
+test('built-in 303 template: billing, identity, harness, guidance and valid placeholders', () => {
   const blocks = resolvePersonaTemplate('official_303')
   assert.deepEqual(
     blocks.map((block) => [block.id, block.text, block.cache_control ?? null]),
     [
       ['billing', '{{billing}}', null],
-      ['identity', '{{identity_cli}}', { type: 'ephemeral' }],
-      ['main', '{{agent_standing}}{{main_prompt_303}}', { type: 'ephemeral' }],
+      ['identity', '{{identity}}', null],
+      ['harness', '{{agent_standing}}{{harness_303}}', { type: 'ephemeral', scope: 'global' }],
+      ['dynamic_boundary', '{{dynamic_boundary}}', null],
+      ['guidance', '{{guidance_303}}', { type: 'ephemeral' }],
+      ['env', '{{env_303}}', null],
       ['env_extra', '{{model_sentence}}', null],
+      ['env_instructions', '{{env_instructions_303}}', null],
+      ['env_timezone', '{{env_timezone}}', null],
+      ['env_locale', '{{env_locale}}', null],
+      ['caller_system', '{{caller_system}}', null],
     ],
   )
   assert.deepEqual(validatePersonaTemplate(blocks), [])
   assert.deepEqual(validatePersonaTemplate([{ type: 'text', text: '{{env_303}}' }]), [])
 })
 
-test('2.1.303 main prompt keeps the captured bytes and fills the memory directory per cwd', () => {
+test('2.1.303 harness and guidance keep the captured split and fill the memory directory per cwd', () => {
   assert.equal(OFFICIAL_303_IDENTITY, "You are Claude Code, Anthropic's official CLI for Claude.")
-  assert.ok(OFFICIAL_303_MAIN_PROMPT.startsWith('\nYou are an agent working with the user toward their goals'))
-  assert.ok(OFFICIAL_303_MAIN_PROMPT.endsWith('<total_tokens>15000000 tokens left</total_tokens>'))
-  assert.equal(OFFICIAL_303_MAIN_PROMPT.split('{{memory_dir}}').length, 2)
-  const rendered = renderOfficial303MainPrompt({ cwd: '/srv/app' })
+  assert.equal(OFFICIAL_303_AGENT_IDENTITY, "You are a Claude agent, built on Anthropic's Claude Agent SDK.")
+  assert.ok(OFFICIAL_303_HARNESS.startsWith('\nYou are an agent working with the user toward their goals'))
+  assert.ok(OFFICIAL_303_HARNESS.trimEnd().endsWith("it's clickable."))
+  assert.ok(OFFICIAL_303_GUIDANCE.startsWith('Write code that reads like the surrounding code'))
+  assert.ok(OFFICIAL_303_GUIDANCE.endsWith('<total_tokens>15000000 tokens left</total_tokens>'))
+  assert.equal(OFFICIAL_303_MAIN_PROMPT, `${OFFICIAL_303_HARNESS}${OFFICIAL_303_GUIDANCE}`)
+  assert.equal(OFFICIAL_303_GUIDANCE.split('{{memory_dir}}').length, 2)
+  const rendered = renderOfficial303Guidance({ cwd: '/srv/app', entrypoint: 'sdk-cli' })
   assert.match(rendered, /persistent file-based memory at `\/home\/kincli\/\.claude\/projects\/-srv-app\/memory\/`/)
   assert.doesNotMatch(rendered, /\{\{memory_dir\}\}/)
-  assert.match(renderOfficial303MainPrompt(), /projects\/-home-kincli\/memory\//)
-  assert.equal(renderOfficial303MainPrompt({ cwd: '/srv/app' }), rendered)
+  assert.doesNotMatch(rendered, /! <command>/)
+  const interactive = renderOfficial303Guidance({ cwd: '/srv/app', entrypoint: 'cli' })
+  assert.match(interactive, /! <command>/)
+  assert.match(renderOfficial303Guidance(), /projects\/-home-kincli\/memory\//)
+  assert.equal(renderOfficial303Guidance({ cwd: '/srv/app' }), interactive)
+  assert.equal(renderOfficial303MainPrompt({ cwd: '/srv/app' }), `${OFFICIAL_303_HARNESS}${interactive}`)
+  assert.equal(
+    renderOfficial303MainPrompt({ cwd: '/srv/app', entrypoint: 'sdk-cli' }),
+    `${OFFICIAL_303_HARNESS}${rendered}`,
+  )
+  assert.equal(
+    renderOfficial303MainPrompt({ cwd: '/srv/app', entrypoint: 'cli' }),
+    `${OFFICIAL_303_HARNESS}${interactive}`,
+  )
 })
 
 test('model line follows the 2.1.303 catalog; unknown models omit name and cutoff', () => {
@@ -148,6 +176,18 @@ test('model line follows the 2.1.303 catalog; unknown models omit name and cutof
   assert.equal(
     officialModelLine('claude-haiku-5-5'),
     'You are powered by the model named Haiku 5.5. The exact model ID is claude-haiku-5-5. Assistant knowledge cutoff is June 2026.',
+  )
+  assert.equal(
+    officialModelLine('claude-sonnet-4'),
+    'You are powered by the model named Sonnet 4. The exact model ID is claude-sonnet-4. Assistant knowledge cutoff is January 2025.',
+  )
+  assert.equal(
+    officialModelLine('claude-opus-4'),
+    'You are powered by the model named Opus 4. The exact model ID is claude-opus-4-0. Assistant knowledge cutoff is January 2025.',
+  )
+  assert.equal(
+    officialModelLine('claude-haiku-4'),
+    'You are powered by the model named Haiku 4.5. The exact model ID is claude-haiku-4. Assistant knowledge cutoff is February 2025.',
   )
   assert.equal(officialModelLine('auto'), 'You are powered by the model auto.')
 })
@@ -187,7 +227,10 @@ test('2.1.303 Environment section uses caller facts and the official field order
 test('system text classifier for the shape tool', () => {
   assert.equal(classifySystemText('x-anthropic-billing-header: cc_version=2.1.303.abc;'), 'billing')
   assert.equal(classifySystemText(OFFICIAL_303_IDENTITY), 'identity')
-  assert.equal(classifySystemText(OFFICIAL_303_MAIN_PROMPT), 'main')
+  assert.equal(classifySystemText(OFFICIAL_303_AGENT_IDENTITY), 'identity')
+  assert.equal(classifySystemText(OFFICIAL_303_HARNESS), 'harness')
+  assert.equal(classifySystemText(OFFICIAL_303_GUIDANCE), 'guidance')
+  assert.equal(classifySystemText(OFFICIAL_303_MAIN_PROMPT), 'harness')
   assert.equal(classifySystemText('# Environment\n - Platform: linux'), 'env')
   assert.equal(classifySystemText('caller notes'), 'other')
 })

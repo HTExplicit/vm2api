@@ -21,7 +21,6 @@ describe('persona drafts payload', () => {
       official_full: [],
       zero: [],
       custom: [],
-      official_303: [],
     })
   })
 

@@ -14,15 +14,14 @@ vi.mock('@/lib/session', () => ({
 }))
 
 describe('VM persona preset contract', () => {
-  it('exposes inherit, official, official_full, zero, and official_303', () => {
+  it('exposes inherit, official, official_full, zero, without a separate 303 option', () => {
     expect(SLOT_PERSONA_OPTIONS.map((option) => option.value)).toEqual([
       'inherit',
       'official',
       'official_full',
       'zero',
-      'official_303',
     ])
-    expect(normalizeSlotPersonaPreset('303')).toBe('official_303')
+    expect(normalizeSlotPersonaPreset('303')).toBe('official_full')
   })
 
   it.each([
@@ -30,7 +29,6 @@ describe('VM persona preset contract', () => {
     ['official', 'official'],
     ['official_full', 'official_full'],
     ['zero', 'zero'],
-    ['official_303', 'official_303'],
   ] as const)('maps %s to the Gateway PATCH value %s', (preset, expected) => {
     expect(slotPersonaPatchValue(preset)).toBe(expected)
   })

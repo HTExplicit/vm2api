@@ -241,7 +241,7 @@ test('prepareCliHopBody drops thinking without a usable signature on the preserv
     { preserveThinkingBlocks: true },
   )
   assert.equal(body.messages[1].content.at(-1).text, 'hello')
-  assert.equal(body.messages[1].content.at(-1).cache_control, undefined)
+  assert.deepEqual(body.messages[1].content.at(-1).cache_control, { type: 'ephemeral', ttl: '1h' })
 })
 
 test('prepareCliHopBody keeps a short non-dummy signature on Opus 5.5', () => {
@@ -356,7 +356,7 @@ function messageMarkers(body) {
   return hits
 }
 
-test('cli-hop drops caller system/tools markers and restamps last plus penultimate user', () => {
+test('cli-hop drops caller system/tools markers and restamps the current tail', () => {
   const body = prepareCliHopBody(
     {
       model: 'claude-sonnet-5',
@@ -377,10 +377,7 @@ test('cli-hop drops caller system/tools markers and restamps last plus penultima
   assert.equal(body.tools[0].cache_control, undefined)
   assert.equal(body.system[0].text, CRS_OFFICIAL_CLI_SYSTEM)
   assert.deepEqual(body.system[0].cache_control, { type: 'ephemeral', ttl: '5m' })
-  assert.deepEqual(messageMarkers(body), [
-    { index: 0, blockIndex: 0, type: 'text', ttl: '5m' },
-    { index: 2, blockIndex: 0, type: 'text', ttl: '5m' },
-  ])
+  assert.deepEqual(messageMarkers(body), [{ index: 3, blockIndex: 0, type: 'text', ttl: '5m' }])
 })
 
 test('cli-hop short history only marks the last message', () => {
@@ -418,12 +415,12 @@ test('cli-hop does not mark thinking blocks', () => {
     },
     { cacheTtl: '1h' },
   )
-  assert.equal(body.messages.at(-1).content[0].cache_control, undefined)
+  assert.deepEqual(body.messages.at(-1).content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
   assert.equal(body.messages.at(-1).content[1].type, 'thinking')
   assert.equal(body.messages.at(-1).content[1].cache_control, undefined)
 })
 
-test('cli-hop uses the inbound session TTL on both message anchors', () => {
+test('cli-hop uses the inbound session TTL on the tail marker', () => {
   const body = prepareCliHopBody(
     {
       model: 'claude-sonnet-5',
@@ -439,7 +436,7 @@ test('cli-hop uses the inbound session TTL on both message anchors', () => {
   )
   assert.deepEqual(
     messageMarkers(body).map((hit) => hit.ttl),
-    ['1h', '1h'],
+    ['1h'],
   )
 })
 

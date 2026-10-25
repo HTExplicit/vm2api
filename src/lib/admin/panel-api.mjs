@@ -83,6 +83,7 @@ import {
   PRESET_FLAG_FIELDS,
   OVERLAY_PRESETS,
   PERSONA_PRESETS,
+  canonicalPersonaCompat,
   parsePersonaHides,
   validatePersonaTemplate,
 } from '../identity/persona-template.mjs'
@@ -419,7 +420,7 @@ function releaseStaleHeaderBlock(unified) {
  * Bad templates must 400 rather than silently degrade at request time.
  */
 export function validatePersonaRoutingPatch(body = {}) {
-  const compat = body?.compatibility
+  const compat = canonicalPersonaCompat(body?.compatibility)
   if (!compat || typeof compat !== 'object') return []
   const problems = []
   if (compat.persona_preset != null && String(compat.persona_preset).trim() !== '') {
@@ -501,6 +502,13 @@ export function validatePersonaRoutingPatch(body = {}) {
   }
   if (compat.cache_ttl != null && !['5m', '1h'].includes(String(compat.cache_ttl).trim())) {
     problems.push(`cache_ttl 必须是 5m / 1h，收到 ${compat.cache_ttl}`)
+  }
+  if (
+    compat.cc_entrypoint != null &&
+    compat.cc_entrypoint !== '' &&
+    !['sdk-cli', 'cli'].includes(String(compat.cc_entrypoint).trim())
+  ) {
+    problems.push(`cc_entrypoint 必须是 sdk-cli / cli，收到 ${compat.cc_entrypoint}`)
   }
   if (compat.claude_code_only != null && typeof compat.claude_code_only !== 'boolean') {
     problems.push('claude_code_only 必须是布尔')

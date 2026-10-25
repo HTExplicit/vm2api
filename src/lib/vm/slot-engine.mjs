@@ -17,7 +17,7 @@ import {
 import { isCodexVm } from './vm-kind.mjs'
 
 export const INFERENCE_ENGINES = Object.freeze(['rust'])
-export const SLOT_PERSONA_PRESETS = Object.freeze(['official', 'official_full', 'zero', OFFICIAL_303_PRESET])
+export const SLOT_PERSONA_PRESETS = Object.freeze(['official', 'official_full', 'zero'])
 export const OFFICIAL_CC_INFERENCES = Object.freeze(['http', 'cli-hop'])
 export const KERNEL_DATAPLANES = Object.freeze(['wrap', 'cc', 'crag'])
 export const CONTAINER_CLI_NODE_BIN = '/home/kincli/.kin/cli-node'
@@ -101,7 +101,7 @@ export function normalizeSlotPersonaPreset(value, { inherit = false } = {}) {
   )
     return 'official'
   if (raw === 'zero' || raw === 'zero_inject' || raw === '0inject' || raw === '0-inject') return 'zero'
-  if (raw === OFFICIAL_303_PRESET || raw === '303' || raw === 'official-303') return OFFICIAL_303_PRESET
+  if (raw === OFFICIAL_303_PRESET || raw === '303' || raw === 'official-303') return 'official_full'
   return inherit ? '' : null
 }
 
@@ -226,11 +226,11 @@ export function personaModeFromPreset(preset) {
   if (preset === 'zero') return 'zero'
   if (preset === 'official') return 'official_prompt'
   if (preset === 'official_full') return 'official_full'
-  if (preset === OFFICIAL_303_PRESET) return OFFICIAL_303_PRESET
+  if (preset === OFFICIAL_303_PRESET) return 'official_full'
   return null
 }
 
-/** Wrap CLI layout follows the resolved persona preset. zero stays zero; official / custom → identity. */
+/** zero stays zero. Other presets stay identity; the CLI preserves a 303-shaped system there. */
 export function resolveCliSystemLayout(vm, routing = {}) {
   const preset = resolveSlotPersonaPreset(vm, routing)
   if (preset === 'zero') return 'zero'
@@ -269,7 +269,7 @@ export function parseSlotPersonaPresetPatch(value) {
   }
   const preset = normalizeSlotPersonaPreset(raw)
   if (preset) return { ok: true, value: preset }
-  return { ok: false, error: 'persona_preset must be official, official_full, zero, official_303, or empty' }
+  return { ok: false, error: 'persona_preset must be official, official_full, zero, or empty' }
 }
 
 export function parseSlotEnginePolicyPatch(body = {}) {
