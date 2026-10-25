@@ -1358,7 +1358,6 @@ export function createHandleProtocol(deps) {
           let hopBody = body
           if (cliHop) {
             // The front rewrite already produces the official two-block shape.
-            const panelRewrite = false
             const outboundProfile = profileForPreset(resolvedPersona)
             // official_303: lean models get the 2.1.303 assembler; full-prompt models keep this path at 2.1.303.
             const outboundShape =
@@ -1398,27 +1397,6 @@ export function createHandleProtocol(deps) {
               })
             }
             hopBody = await materializeRemoteImageSources(hopBody)
-            if (panelRewrite) {
-              hopBody = applyCrsUnofficialPersona(hopBody, {
-                officialClient: false,
-                forceConfigured: true,
-                routingFile: routingConfigPath,
-                mode: resolvedPersona,
-                sessionId: attemptSessionId,
-                model: hopBody?.model || personaIn?.model,
-                cliVersion: OFFICIAL_CLI_VERSION,
-                identity,
-              })
-              hopBody = fillMissingCacheTtl(hopBody, requestedCacheTtl)
-              enforceCacheLimit(hopBody)
-              validateCacheBreakpoints(hopBody)
-              personaHideTokens = personaHideForUnofficial(personaIn, hopBody, {
-                officialClient: false,
-                mode: resolvedPersona,
-                hides: personaHidesUsageFromRoutingFile(routingConfigPath, resolvedPersona),
-                standing: standingUsageFromRoutingFile(routingConfigPath, resolvedPersona),
-              })
-            }
             if (identity) {
               hopBody = applyCrsIdentityReplace(hopBody, identity, inbound, req.headers, {
                 officialClient: officialTraffic,
@@ -1436,7 +1414,7 @@ export function createHandleProtocol(deps) {
             // not an accounting authority; retain the upstream 5m/1h split.
             cacheTtl = null
 
-            if (!panelRewrite) personaHideTokens = 0
+            personaHideTokens = 0
             logBag.inference_engine = resolveInferenceEngine(selected.vm, routingNow)
             logBag.persona_preset = resolveSlotPersonaPreset(selected.vm, routingNow)
             if (outboundShape) {
