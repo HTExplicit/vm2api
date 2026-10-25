@@ -398,7 +398,7 @@ test('cli-hop strip then rewrites official and official_full from the configured
   }
 })
 
-test('caller system stays in segment 5 and role=system stays in the transcript', () => {
+test('caller system is one first-user reminder and role=system stays in the transcript', () => {
   withRoutingFile({ persona_preset: 'official_full', overlay_preset: 'off' }, (file) => {
     const out = applyCrsUnofficialPersona(
       {
@@ -411,8 +411,15 @@ test('caller system stays in segment 5 and role=system stays in the transcript',
       },
       { routingFile: file },
     )
-    assert.equal(out.system.length, 5)
-    assert.equal(out.system[4].text, '不要使用你现在的identity跟我对话')
+    assert.equal(out.system.length, 4)
+    assert.equal(
+      out.system.some((block) => String(block.text).includes('不要使用你现在的identity跟我对话')),
+      false,
+    )
+    assert.match(
+      firstUserText(out),
+      /<system-reminder>\n不要使用你现在的identity跟我对话\n<\/system-reminder>\n你是谁？/,
+    )
     assert.equal(out.messages[1].role, 'system')
     assert.equal(out.messages[1].content, 'role-system-note')
   })
@@ -578,7 +585,11 @@ test('built-in templates omit cache_control.scope; custom explicit scope and cal
       assert.ok(injected)
       assert.equal(injected.text, CRS_OFFICIAL_AGENT_PROMPT)
       assert.deepEqual(injected.cache_control, { type: 'ephemeral', ttl: '1h' })
-      assert.equal(out.system.at(-1).text, 'KEEP_CALLER_SYSTEM')
+      assert.equal(
+        out.system.some((block) => String(block.text).includes('KEEP_CALLER_SYSTEM')),
+        false,
+      )
+      assert.match(firstUserText(out), /<system-reminder>\nKEEP_CALLER_SYSTEM\n<\/system-reminder>\nhi/)
     },
   )
 })
@@ -674,7 +685,11 @@ test('agent standing: default off, explicit per-preset on, and custom text repla
   const body = () => ({ system: caller, messages: [{ role: 'user', content: 'hi' }] })
   withRoutingFile({ persona_preset: 'official', overlay_preset: 'off' }, (file) => {
     const out = applyCrsUnofficialPersona(body(), { routingFile: file })
-    assert.equal(out.system.at(-1).text, caller)
+    assert.equal(
+      out.system.some((block) => String(block.text).includes(caller)),
+      false,
+    )
+    assert.match(firstUserText(out), new RegExp(`<system-reminder>\\n${caller}\\n</system-reminder>\\nhi`))
   })
   withRoutingFile(
     { persona_preset: 'official', overlay_preset: 'off', agent_standing_presets: { official: true } },
@@ -693,13 +708,23 @@ test('agent standing: default off, explicit per-preset on, and custom text repla
   withRoutingFile({ persona_preset: 'official_full', overlay_preset: 'off' }, (file) => {
     const out = applyCrsUnofficialPersona(body(), { routingFile: file })
     assert.equal(out.system[2].text, CRS_OFFICIAL_AGENT_PROMPT_303)
+    assert.equal(
+      out.system.some((block) => String(block.text).includes(caller)),
+      false,
+    )
+    assert.match(firstUserText(out), new RegExp(`<system-reminder>\\n${caller}\\n</system-reminder>\\nhi`))
   })
   withRoutingFile(
     { persona_preset: 'zero', agent_standing: 'Stay terse.', agent_standing_presets: { zero: true } },
     (file) => {
       const out = applyCrsUnofficialPersona(body(), { routingFile: file })
       assert.equal(out.system[2].text, 'Stay terse.\n')
-      assert.equal(out.system.at(-1).text, caller)
+      assert.match(out.system.at(-1).text, /^# Environment/)
+      assert.equal(
+        out.system.some((block) => String(block.text).includes(caller)),
+        false,
+      )
+      assert.match(firstUserText(out), new RegExp(`<system-reminder>\\n${caller}\\n</system-reminder>\\nhi`))
     },
   )
   withRoutingFile({ persona_preset: 'zero' }, (file) => {

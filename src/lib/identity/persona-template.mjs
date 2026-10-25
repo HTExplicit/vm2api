@@ -441,8 +441,8 @@ function withStandingSlot(blocks, standingText) {
  * other blank blocks keep their slot as a zero-width space because upstream
  * rejects empty text (0注入 agent slot with standing off and no caller agent).
  */
-export function renderPersonaTemplate(blocks, vars = {}) {
-  const source = withStandingSlot(blocks, vars?.agent_standing)
+export function renderPersonaTemplate(blocks, vars = {}, { standing = true } = {}) {
+  const source = standing ? withStandingSlot(blocks, vars?.agent_standing) : blocks
   if (!Array.isArray(source)) return []
   const out = []
   for (const block of source) {

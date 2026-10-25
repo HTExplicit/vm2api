@@ -1751,26 +1751,35 @@ function applyTemplatePersona(
       : collectCallerSystemAppend(body, callerOptions)
   const modelId = model || body.model
   const midSystem = leftoverGoesToMidSystem(preset, modelId)
-  let system = renderPersonaTemplate(
-    blocks,
-    personaTemplateVars({
-      firstUserText: extractFirstUserText(messages),
-      cliVersion,
-      sessionId,
-      env,
-      sourceTexts,
-      agentStanding: agentStandingVar(switches, preset),
-      withEnv,
-      callerAgent,
-      agentOfficial: harness,
-      timezoneOnlyEnv: Boolean(harness) || timezoneOnlyEnv,
-      leftover: midSystem ? '' : leftover,
-      preset,
-      model: modelId,
-      compat: switches,
-      messages,
-    }),
+  const callerOnly = blocks.filter(
+    (block) =>
+      block?.id === 'caller_system' && !extractTemplateVars(block?.text).some((name) => name !== 'caller_system'),
   )
+  const officialBlocks = blocks
+    .filter((block) => !callerOnly.includes(block))
+    .map((block) =>
+      callerOnly.length && String(block?.text || '').includes('{{caller_system}}')
+        ? { ...block, text: String(block.text).replaceAll('{{caller_system}}', '') }
+        : block,
+    )
+  const vars = personaTemplateVars({
+    firstUserText: extractFirstUserText(messages),
+    cliVersion,
+    sessionId,
+    env,
+    sourceTexts,
+    agentStanding: agentStandingVar(switches, preset),
+    withEnv,
+    callerAgent,
+    agentOfficial: harness,
+    timezoneOnlyEnv: Boolean(harness) || timezoneOnlyEnv,
+    leftover: midSystem ? '' : leftover,
+    preset,
+    model: modelId,
+    compat: switches,
+    messages,
+  })
+  let system = renderPersonaTemplate(officialBlocks, vars)
   if (timezoneOnlyEnv) {
     system.push({
       type: 'text',
@@ -1781,6 +1790,21 @@ function applyTemplatePersona(
   let outMessages = messages
   if (midSystem) {
     outMessages = wrapExistingMidConversationSystem(insertMidConversationSystem(outMessages, leftover))
+  }
+  // Saved templates still carry a bare {{caller_system}} block. An environment the
+  // caller supplied stays in system with its original whitespace; the rest is one first-user reminder.
+  const callerParts = renderPersonaTemplate(callerOnly, vars, { standing: false })
+    .map((block) => block.text)
+    .filter(Boolean)
+  const environmentParts = withEnv ? [] : callerParts.filter((text) => hasEnvironmentSection(text))
+  const callerText = callerParts
+    .filter((text) => !environmentParts.includes(text))
+    .map((text) => unwrapSystemReminder(text))
+    .filter(Boolean)
+    .join('\n\n')
+  if (environmentParts.length) system.push(...environmentParts.map((text) => ({ type: 'text', text })))
+  if (callerText) {
+    outMessages = prependRawToFirstUserMessage(outMessages, `<system-reminder>\n${callerText}\n</system-reminder>\n`)
   }
   const overlayBlocks = zero ? [] : resolveOverlayTemplate(overlayPreset, overlayTemplates)
   if (!overlayBlocks.length) return { ...body, system, messages: outMessages }
