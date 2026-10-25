@@ -425,6 +425,44 @@ test('caller system is one first-user reminder and role=system stays in the tran
   })
 })
 
+test('default official templates wrap caller text once and strip an existing mandatory reminder', () => {
+  const caller = '你是一个高速收费员。'
+  const wrapped = wrapMandatoryConstraint(caller)
+  for (const preset of ['official', 'official_full']) {
+    for (const [kind, system] of [
+      ['blank', undefined],
+      ['plain', caller],
+      ['wrapped', wrapped],
+    ]) {
+      withRoutingFile({ persona_preset: preset, overlay_preset: 'off' }, (file) => {
+        const out = applyCrsUnofficialPersona(
+          {
+            ...(system ? { system } : {}),
+            messages: [{ role: 'user', content: '你好呀。' }],
+          },
+          { routingFile: file },
+        )
+        const where = `${preset} ${kind}`
+        const texts = out.system.map((block) => String(block.text))
+        assert.equal(
+          texts.some((text) => text.includes(caller) || text.includes('MANDATORY')),
+          false,
+          where,
+        )
+        const user = firstUserText(out)
+        if (kind === 'blank') {
+          assert.equal(user.includes('<system-reminder>'), false, where)
+          assert.equal(user, '你好呀。', where)
+        } else {
+          assert.equal(user.split('<system-reminder>').length - 1, 1, where)
+          assert.equal(user.includes('MANDATORY'), false, where)
+          assert.match(user, new RegExp(`^<system-reminder>\\n${caller}\\n</system-reminder>\\n你好呀。$`), where)
+        }
+      })
+    }
+  }
+})
+
 test('hop mode official_full is a template preset, not overwrite', () => {
   assert.equal(personaPresetFromHopMode('official_full'), 'official_full')
   assert.equal(personaPresetFromHopMode('official_prompt'), 'official')
