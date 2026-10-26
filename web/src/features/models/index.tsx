@@ -189,7 +189,7 @@ export function ModelsPage() {
         return
       }
       if (key === 'on_adaptive' || key === 'default_effort') {
-        rec.params[key] = String(value) as ModelParams[typeof key]
+        rec.params[key] = value as ModelParams[typeof key]
         return
       }
       rec.params[key] = Number(value) || 0
