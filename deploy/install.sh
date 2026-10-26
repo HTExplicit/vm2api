@@ -544,8 +544,19 @@ fetch_release_files() {
 # 不会退回基础服务和 ./vms、./data。
 prepare_arch_env() {
   local mode="$1"
+  local cf
   env_set_if_empty VM2API_HOST_ROOT "${INSTALL_DIR}" || true
-  if [ "$mode" != source ]; then
+  if [ "$mode" = image ]; then
+    # Prebuilt ghcr installs must not use the source-build ARM64 override (local image name).
+    if [ "$HOST_ARCH" = arm64 ]; then
+      cf="$(env_get COMPOSE_FILE)"
+      if [ -n "$cf" ] && printf '%s' "$cf" | grep -q 'docker-compose.arm64.yml'; then
+        warn "预构建镜像安装不使用 docker-compose.arm64.yml（仅源码构建）；已改回 docker-compose.yml"
+        env_set COMPOSE_FILE "docker-compose.yml"
+      else
+        env_set_if_empty COMPOSE_FILE "docker-compose.yml" || true
+      fi
+    fi
     return 0
   fi
   if [ "$HOST_ARCH" != arm64 ]; then

@@ -69,6 +69,11 @@ sudo bash /opt/vm2api/deploy/install.sh status
 （见下一节），然后拉取 `-arm64` 镜像。没有 ARM64 发布的旧版本会明确报错，
 不会回退到 amd64 镜像。`status` 显示宿主架构和当前镜像 tag。
 
+预构建镜像安装只使用 `docker-compose.yml` 与 `VM2API_IMAGE_TAG=vX.Y.Z-arm64`。
+若 `.env` 里仍写着源码构建用的 `COMPOSE_FILE=...docker-compose.arm64.yml`
+（例如先跑过 `deploy/init-arm64-env.py`），一键脚本会改回 `docker-compose.yml`，
+否则会去拉/构建 `vm2api-arm64-control:local` 而不是 ghcr 镜像。
+
 ## 准备主机
 
 一键脚本会自动执行；源码构建时在仓库根目录手动执行：

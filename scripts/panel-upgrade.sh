@@ -17,7 +17,7 @@ for file do
 done
 
 compose() {
-  COMPOSE_FILE="$COMPOSE_FILE_LIST" docker compose \
+  COMPOSE_FILE="$COMPOSE_FILE_LIST" env -u DOCKER_DEFAULT_PLATFORM docker compose \
     --project-directory "$ROOT" --project-name "$PROJECT" "$@"
 }
 
