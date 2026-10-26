@@ -861,15 +861,16 @@ test('named slot ids keep the shared runtime owner when kernel config is rewritt
   const chown = mock.method(fs, 'chownSync', (file, uid, gid) => {
     calls.push({ file, uid, gid })
   })
+  const getuid = mock.method(process, 'getuid', () => 0)
   try {
     writeKernelConfig(root, vm, { token: 'tok', routing: {} })
     const runOwned = calls.filter((call) => call.file === runDir)
     assert.equal(runOwned.length, 1)
-    const expectedUid = typeof process.getuid === 'function' && process.getuid() === 0 ? owner.uid : -1
-    assert.equal(runOwned[0].uid, expectedUid)
-    assert.equal(owner.uid, Number(process.env.KIN_VM_UID_BASE || 10000) + 1)
-    assert.notEqual(owner.uid, Number(process.env.KIN_VM_UID_BASE || 10000) + 3)
+    assert.equal(runOwned[0].uid, 10001)
+    assert.equal(owner.uid, 10001)
+    assert.notEqual(runOwned[0].uid, Number(process.env.KIN_VM_UID_BASE || 10000) + 3)
   } finally {
+    getuid.mock.restore()
     chown.mock.restore()
     fs.rmSync(root, { recursive: true, force: true })
   }
