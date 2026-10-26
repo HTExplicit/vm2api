@@ -2,7 +2,11 @@
 
 ## 未发布
 
+## 1.4.006 — 2026-10-26
+
 - #749：`run/` 目录属主与目录内文件一致（Fixes #740）——`writeKernelConfig` 目录 chown 改用 `runtimeFileOwner`，避免命名槽 ID（如 account2example）目录/文件 uid 不一致导致 Permission denied。
+
+已部署机升级：仅需更新 Node 控制面后重启；不必 `fetch:payload`，不必 `wrap-cli/sync`，不必重建槽，无 DB 迁移。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
 
 ## 1.4.005 — 2026-10-26
 
