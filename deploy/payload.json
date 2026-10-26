@@ -47,8 +47,8 @@
     {
       "path": "share/wrap-cli/cli-node",
       "asset": "cli-node",
-      "size": 27789284,
-      "sha256": "01740e5451aacee8376d324b685ab878af524a8d31ffd13584176166256e7a63"
+      "size": 27789508,
+      "sha256": "f29bbfa45b68308367f4091699cbeb3a0baba860d327d349d6d55cc11408fb68"
     },
     {
       "path": "share/wrap-cli/cc-node",
