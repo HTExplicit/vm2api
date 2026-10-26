@@ -271,8 +271,11 @@ gen_secret() {
 env_get() {
   local name="$1"
   local envf="${2:-${INSTALL_DIR}/.env}"
+  local line
   [ -f "$envf" ] || return 0
-  grep -E "^${name}=" "$envf" 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d "'" | tr -d '"' | tr -d '\r'
+  line="$(grep -E "^${name}=" "$envf" 2>/dev/null | tail -n1 || true)"
+  [ -n "$line" ] || return 0
+  printf '%s' "$line" | cut -d= -f2- | tr -d "'" | tr -d '"' | tr -d '\r'
 }
 
 env_set() {
@@ -538,23 +541,47 @@ fetch_release_files() {
     "${INSTALL_DIR}/share" "${INSTALL_DIR}/src/config"
 }
 
+# 从 COMPOSE_FILE 去掉源码 ARM64 override 段，保留其它 overlay；全去掉后只剩 docker-compose.yml。
+compose_file_without_arm64_override() {
+  local cf="$1" part base out=""
+  local -a parts=()
+  IFS=':' read -ra parts <<< "$cf"
+  for part in "${parts[@]}"; do
+    [ -z "$part" ] && continue
+    base="${part##*/}"
+    if [ "$base" = "docker-compose.arm64.yml" ]; then
+      continue
+    fi
+    if [ -n "$out" ]; then
+      out="${out}:"
+    fi
+    out="${out}${part}"
+  done
+  if [ -z "$out" ]; then
+    echo "docker-compose.yml"
+  else
+    echo "$out"
+  fi
+}
+
 # 安装目录写进 .env：面板一键更新的 helper 容器按它挂载宿主目录。
 # 源码安装再写 COMPOSE_FILE，让裸 docker compose（包括面板更新）也按本机 checkout 构建：
 # amd64 叠 docker-compose.build.yml（基础文件只拉镜像），ARM64 叠 arm64 override，
 # 不会退回基础服务和 ./vms、./data。
 prepare_arch_env() {
   local mode="$1"
-  local cf
+  local cf new_cf
   env_set_if_empty VM2API_HOST_ROOT "${INSTALL_DIR}" || true
   if [ "$mode" = image ]; then
     # Prebuilt ghcr installs must not use the source-build ARM64 override (local image name).
     if [ "$HOST_ARCH" = arm64 ]; then
       cf="$(env_get COMPOSE_FILE)"
-      if [ -n "$cf" ] && printf '%s' "$cf" | grep -q 'docker-compose.arm64.yml'; then
-        warn "预构建镜像安装不使用 docker-compose.arm64.yml（仅源码构建）；已改回 docker-compose.yml"
-        env_set COMPOSE_FILE "docker-compose.yml"
-      else
-        env_set_if_empty COMPOSE_FILE "docker-compose.yml" || true
+      if [ -n "$cf" ] && printf '%s' "$cf" | grep -Fq 'docker-compose.arm64.yml'; then
+        new_cf="$(compose_file_without_arm64_override "$cf")"
+        if [ "$new_cf" != "$cf" ]; then
+          warn "预构建镜像安装不使用 docker-compose.arm64.yml（仅源码构建）；已从 COMPOSE_FILE 移除该项"
+          env_set COMPOSE_FILE "$new_cf"
+        fi
       fi
     fi
     return 0
