@@ -350,10 +350,20 @@ test('remote iptables script mirrors applyIptables semantics', () => {
   const script = remoteIptablesScript(plan, { sudo: true })
   const lines = script.split('\n')
   assert.equal(lines[0], 'set -e')
-  assert.match(lines[1], /^sudo -n iptables '-t' 'nat' '-N' 'KEGabc' 2>\/dev\/null \|\| true$/)
   // -C guards exactly the following -A/-I; both halves on one line.
-  assert.match(lines[2], /'-C' 'PREROUTING'.*\|\| sudo -n iptables .*'-A' 'PREROUTING'/)
-  assert.ok(lines.at(-1).includes("'-C' 'FORWARD'") && lines.at(-1).includes("'-I' 'FORWARD' '1'"))
+  const forwardLine = lines.find((l) => l.includes("'-C' 'FORWARD'") && l.includes("'-I' 'FORWARD' '1'"))
+  assert.ok(forwardLine, 'FORWARD DROP is emitted as a guarded -C||-I pair')
+  const natChainLine = lines.find((l) => l.includes("'-N' 'KEGabc'"))
+  assert.ok(natChainLine)
+  assert.match(natChainLine, /^sudo -n iptables '-t' 'nat' '-N' 'KEGabc' 2>\/dev\/null \|\| true$/)
+  assert.ok(
+    lines.indexOf(forwardLine) < lines.indexOf(natChainLine),
+    'FORWARD block is installed before NAT chain setup (same order as iptablesPlan.add)',
+  )
+  assert.match(
+    lines.find((l) => l.includes("'-C' 'PREROUTING'")),
+    /'-C' 'PREROUTING'.*\|\| sudo -n iptables .*'-A' 'PREROUTING'/,
+  )
   assert.ok(script.includes("'!'"), 'negation is passed as its own quoted arg')
   const guards = plan.add.filter((row) => row.includes('-C')).length
   assert.equal(lines.length, 1 + plan.add.length - guards, '-C rows fold into their guarded row')
