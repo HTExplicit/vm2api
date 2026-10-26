@@ -21,6 +21,7 @@ import { rustKernelBusy, rustKernelReachable } from '../../src/lib/transport/rus
 import {
   ensureRustKernel,
   writeKernelConfig,
+  syncClaudeKernelConfigs,
   syncClaudeKernelConfigsFromFile,
   reconcileCliHopRuntime,
   wrapSlotCount,
@@ -36,7 +37,9 @@ import {
 } from '../../src/lib/transport/rust-kernel-supervisor.mjs'
 import { rustKernelPaths, isNeedsRefreshResult } from '../../src/lib/transport/rust-kernel-client.mjs'
 import { OFFICIAL_CLI_VERSION } from '../../src/lib/identity/vm-identity.mjs'
+import { resetModelPolicy, saveModelPolicy } from '../../src/lib/protocol/model-policy.mjs'
 import { slotRuntimeOwner } from '../../src/lib/oauth/oauth-credentials.mjs'
+import { closeDatabase, openDatabase } from '../../src/lib/db/database.mjs'
 import { socksUidFor } from '../../src/lib/vm/vm-runtime.mjs'
 
 const unix = process.platform !== 'win32'
@@ -637,6 +640,36 @@ test('writeKernelConfig separates container paths from host socket paths', () =>
   const exec = { vmId: 'vm-09', homeDir: path.join(root, 'vms', 'vm-09', 'cli-home'), vm: { id: 'vm-09' } }
   assert.equal(rustKernelPaths(exec).socketPath, written.socketPath)
   fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('model effort changes rewrite kernel.json without a routing save or restart', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-effort-'))
+  const routing = { compatibility: { persona_preset: 'official' } }
+  const vm = { id: 'vm-09' }
+  const configPath = path.join(root, 'vms', 'vm-09', 'run', 'kernel.json')
+  const read = () => JSON.parse(fs.readFileSync(configPath, 'utf8'))
+  openDatabase({ dbPath: ':memory:' })
+  fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'vms', 'vm-09.json'), JSON.stringify({ id: 'vm-09', status: 'running' }))
+  try {
+    saveModelPolicy({
+      models: { 'claude-haiku-5-5': { params: { default_effort: 'high' } } },
+    })
+    writeKernelConfig(root, vm, { token: 'tok', routing })
+    assert.equal(read().model_effort['claude-haiku-5-5'], 'high')
+    const before = fs.statSync(configPath).mtimeMs
+    saveModelPolicy({
+      models: { 'claude-haiku-5-5': { params: { default_effort: 'off' } } },
+    })
+    const synced = syncClaudeKernelConfigs(root, routing)
+    assert.equal(synced.updated, 1)
+    assert.equal(read().model_effort['claude-haiku-5-5'], 'off')
+    assert.ok(fs.statSync(configPath).mtimeMs >= before)
+  } finally {
+    resetModelPolicy()
+    closeDatabase()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('writeKernelConfig idle timeout follows the panel stream idle timeout', () => {

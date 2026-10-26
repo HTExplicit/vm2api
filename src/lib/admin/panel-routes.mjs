@@ -269,7 +269,7 @@ import {
 import { inspectClusterPayloadChanges, refreshClusterSlotPayloads } from '../cluster/remote-slot.mjs'
 import { readRawBody as defaultReadRawBody } from '../http/respond.mjs'
 import { corsHeadersForRequest } from '../http/cors.mjs'
-import { restartRustKernel, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
+import { restartRustKernel, syncClaudeKernelConfigs, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
 
 import { countTokensViaWorker } from '../transport/go-worker-client.mjs'
 import { apiKeyBetaHeader, setupTokenBetaHeader } from '../protocol/claude-code-betas.mjs'
@@ -5010,6 +5010,7 @@ export function createPanelHandler(ctx) {
         }
         const saved = saveModelPolicy(body.policy || body)
         seedModelCatalog()
+        syncClaudeKernelConfigs(cfg.paths.project, ctx.routingConfig)
         return json(
           res,
           200,
@@ -5042,6 +5043,7 @@ export function createPanelHandler(ctx) {
         }
         const saved = resetModelPolicy()
         seedModelCatalog()
+        syncClaudeKernelConfigs(cfg.paths.project, ctx.routingConfig)
         return json(
           res,
           200,
