@@ -188,8 +188,8 @@ export function ModelsPage() {
           value === 'convert_to_adaptive' ? 'passthrough' : String(value)
         return
       }
-      if (key === 'on_adaptive') {
-        rec.params.on_adaptive = String(value)
+      if (key === 'on_adaptive' || key === 'default_effort') {
+        rec.params[key] = String(value) as ModelParams[typeof key]
         return
       }
       rec.params[key] = Number(value) || 0

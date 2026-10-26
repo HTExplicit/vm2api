@@ -293,7 +293,7 @@ export function stripUnsupportedEffort(body = {}) {
   return { ...out, messages: mergeConsecutiveAnthropicMessages(messages) }
 }
 
-/** Official fill: missing output_config.effort. Never overwrite. Opus 5.5 defaults to medium. */
+/** Official fill: missing output_config.effort. `default_effort: off` adds nothing. */
 export function ensureUnofficialEffortHigh(body = {}) {
   if (!body || typeof body !== 'object') return body
   if (!modelSupportsEffort(body.model)) return stripUnsupportedEffort(body)
@@ -303,6 +303,7 @@ export function ensureUnofficialEffortHigh(body = {}) {
   } catch {
     effort = 'high'
   }
+  if (effort === 'off') return body
   if (body.output_config && typeof body.output_config === 'object') {
     if (body.output_config.effort != null && body.output_config.effort !== '') return body
     return { ...body, output_config: { ...body.output_config, effort } }
