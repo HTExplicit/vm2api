@@ -4,7 +4,7 @@
 
 - #757：升级/安装后槽刷新改经控制面（等节点 ready → `wrap-cli/sync` restart:true → fleet-update telemetry），修复远程槽 `cluster_unavailable` 且不同步 cli-node；同内容哈希镜像的远程运行中槽跳过重建；`syncInstalledKernels` 串行防并发。无 `deploy/payload.json` / cli-node 哈希变更。
 
-已部署机升级：更新 Node 控制面后重启即可，一键安装 / 面板升级会在控制面验证通过后自动执行上述槽刷新。`deploy/payload.json` 相对 1.4.008 **未变**，不必 `fetch:payload`。集群节点上运行中、且镜像不是当前 payload 内容哈希的远程槽会被重建一次（进行中的会话中断），已在当前镜像上的槽不动。无 DB 迁移。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+已部署机升级：须更新 Node 控制面镜像（含新 `fleet-services`）后重启。`panel-upgrade` / `install` 升级路径会经控制面执行 `wrap-cli/sync`（restart:true）再 telemetry。cli-node 哈希相对 1.4.008 **未变**（仍 f29bbfa45b68308367f4091699cbeb3a0baba860d327d349d6d55cc11408fb68），故 **不必** `fetch:payload`。无 DB 迁移。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
 
 ## 1.4.008 — 2026-10-27
 
