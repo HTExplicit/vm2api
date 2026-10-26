@@ -850,6 +850,31 @@ test('kernel.json rename keeps the control-plane gid while adopting the slot uid
   }
 })
 
+test('named slot ids keep the shared runtime owner when kernel config is rewritten', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-named-owner-'))
+  const vm = { id: 'loutish-arches-3gicloudcom' }
+  const runDir = path.join(root, 'vms', vm.id, 'run')
+  const owner = slotRuntimeOwner(vm)
+  fs.mkdirSync(runDir, { recursive: true })
+  fs.writeFileSync(path.join(runDir, 'worker.json'), '{"ok":true}\n', { mode: 0o644 })
+  const calls = []
+  const chown = mock.method(fs, 'chownSync', (file, uid, gid) => {
+    calls.push({ file, uid, gid })
+  })
+  try {
+    writeKernelConfig(root, vm, { token: 'tok', routing: {} })
+    const runOwned = calls.filter((call) => call.file === runDir)
+    assert.equal(runOwned.length, 1)
+    const expectedUid = typeof process.getuid === 'function' && process.getuid() === 0 ? owner.uid : -1
+    assert.equal(runOwned[0].uid, expectedUid)
+    assert.equal(owner.uid, Number(process.env.KIN_VM_UID_BASE || 10000) + 1)
+    assert.notEqual(owner.uid, Number(process.env.KIN_VM_UID_BASE || 10000) + 3)
+  } finally {
+    chown.mock.restore()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('routing.json mtime projects persona_preset into Claude kernel.json only', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-persona-file-'))
   const vms = path.join(root, 'vms')

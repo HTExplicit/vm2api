@@ -34,6 +34,7 @@ import {
   ensureOfficialCredentialLink,
   ensureSlotSubscriptionType,
   slotUidGidFromHomeDir,
+  slotRuntimeOwner,
   chownSlotRuntimeFile,
   replaceSlotOwnedFile,
 } from '../oauth/oauth-credentials.mjs'
@@ -701,12 +702,9 @@ export function writeKernelConfig(
   const dirMode = privileged ? 0o700 : 0o2770
   fs.mkdirSync(runDir, { recursive: true, mode: dirMode })
   fs.chmodSync(runDir, dirMode)
+  const owner = privileged ? slotRuntimeOwner(vm) : { uid: -1, gid: process.getgid() }
   try {
-    fs.chownSync(
-      runDir,
-      privileged ? Number(process.env.KIN_VM_UID_BASE || 10000) + Number(String(vm.id).replace(/\D/g, '') || 1) : -1,
-      privileged ? Number(process.env.KIN_VM_GID || 987) : process.getgid(),
-    )
+    fs.chownSync(runDir, owner.uid, owner.gid)
   } catch {}
   const socketPath = path.join(runDir, 'kernel.sock')
   const configPath = path.join(runDir, 'kernel.json')
