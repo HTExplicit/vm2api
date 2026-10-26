@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.010 — 2026-10-27
+
+- #759：默认身份句与 0注入 `prompt_version` 改为 `You are Claude Code, Anthropic's official CLI for Claude.`。页面摘要、预览和 cli-node 读取的 `{{identity}}` / `{{identity_cli}}` 都是这句；已保存的自定义模板不变。
+
+已部署机升级：须更新 Node 控制面 + `web/dist` 后重启。cli-node 哈希相对 1.4.009 **未变**（仍 f29bbfa45b68308367f4091699cbeb3a0baba860d327d349d6d55cc11408fb68），故 **不必** `fetch:payload` / `wrap-cli/sync`。无 DB 迁移、不必重建槽。已保存自定义 persona 不变，仅默认/重置路径吃新身份。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
 ## 1.4.009 — 2026-10-27
 
 - #757：升级/安装后槽刷新改经控制面（等节点 ready → `wrap-cli/sync` restart:true → fleet-update telemetry），修复远程槽 `cluster_unavailable` 且不同步 cli-node；同内容哈希镜像的远程运行中槽跳过重建；`syncInstalledKernels` 串行防并发。无 `deploy/payload.json` / cli-node 哈希变更。
@@ -11,12 +17,6 @@
 - #754：面板可配置每模型缺省 effort（off=不向上游补）；保存/重置模型策略后热写运行中 Claude 槽 kernel.json 的 model_effort；Node ensureUnofficialEffortHigh 对 off 不补 output_config.effort。Supersedes #748。
 
 已部署机升级：须更新 Node 控制面 + `web/dist` 后重启。`deploy/payload.json` 的 cli-node 哈希相对 1.4.007 **未变**（仍 f29bbfa45b68308367f4091699cbeb3a0baba860d327d349d6d55cc11408fb68 / payload-2026.10.26-cli-effort），故本版 **不必** `fetch:payload` / `wrap-cli/sync`。完整「cli-node 热读 model_effort」依赖更新的 ELF，本 tip 未换附件；仅 Node/面板路径的 off 不补与 kernel.json 投影已生效。无 DB 迁移、不必重建槽。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
-
-## Unreleased
-
-- system提示词：默认身份句与 0注入 `prompt_version` 改为 `You are Claude Code, Anthropic's official CLI for Claude.`。页面摘要、预览和 cli-node 读取的 `{{identity}}` / `{{identity_cli}}` 都是这句；已保存的自定义模板不变。
-
-- 代理探测：TCP 已连上但收不到 SOCKS5 方法选择回应（例如填了 HTTP 端口）不再显示「正常」。超时或对端直接关掉连接记为失败，错误为 `not_socks5：请填写 SOCKS5 端口`；收到非 SOCKS5 字节同样失败。合法方法 `0x00` / `0x02` / `0xff` 仍算探测成功。
 
 ## 1.4.007 — 2026-10-26
 
@@ -87,7 +87,6 @@
 - 动态 profile 按出站入口分成两套。`cc_entrypoint=cli` 用交互身份句，并保留 guidance 里的 `! <command>` 提示。缺省 `sdk-cli` 用 Agent SDK 身份句，去掉这句，对齐 `--print` 抓包。billing、UA 和兜底头仍走原来的入口开关。
 
 - 设置 → 协议和 system提示词可切换出站入口 `sdk-cli` / `cli`。网关生成的 billing、出站 UA、cli-node 兜底 billing 使用同一个值。调用方自带的 billing 入口不改，CCH 密封只改 `cch`。保存后写入各 Claude 槽 `kernel.json` 的 `cc_entrypoint`，当前本机 cli-node 每次请求热读，不重启槽。缺省仍是 `sdk-cli`。plain ELF 已验证两个值同步切换，非法值回到 `sdk-cli`。
-
 
 - cli-node 对齐 2.1.303 计费行和 beta 选择器后重编。源码 `9a0f53da`，协议 `850b57aa`。plain ELF 五模型最终 beta 与 API key 路径的抓包顺序一致，haiku 的 `claude-code` 在第 6 位，auto 为 12 项。plain 117487744 字节 `56f068f0…`；UPX 5.0.2 `--best --lzma` 后 27794232 字节，SHA256 `d9f0ba21f2b12f2b00117e0f2fc8862ac8569477f5a4f5797324d9336c523e0b`。`upx -t` 与压缩后 cli-hop e2e 7/7 通过，`--version` 为 `2.1.303 (Claude Code)`。已替换本机 `share/wrap-cli/cli-node`。payload 未更新，未部署。
 - 官方档和完整档的 system 对齐 2.1.303：billing、身份、harness（`1h` + `scope global`）、guidance（`1h`）。拆分边界只交给 cli-node，最终请求不出站。调用方 system 和第三方 harness 接在 guidance 后，不替换官方提示。
@@ -292,7 +291,6 @@
 - 集群槽 prepareRemoteDir：程序目录 slot-bin 改为 0755（私有 run/claude/cli-home 仍 0700），使 CapDrop ALL 的 egress 能 traverse /opt/kin-live，避免迁 live 后容器停在 Created / permission denied。（#632）
 
 已部署机升级：更新 Node 控制面后重启一次。cli-node 字节已变，需要 `wrap-cli/sync`（逐槽重启 dataplane，不要 `docker rm`）。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
-
 
 ## 1.3.201 — 2026-10-20
 
