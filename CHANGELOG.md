@@ -1,8 +1,10 @@
 # Changelog
 
-## 未发布
+## 1.4.007 — 2026-10-26
 
 - #752：`deploy/payload.json` 的 `cli-node` 对齐线上哈希（size 27789508，sha256 f29bbfa45b68308367f4091699cbeb3a0baba860d327d349d6d55cc11408fb68）——已部署机升级须 `npm run fetch:payload` + `wrap-cli/sync`（restart:true）后重启 Node；仅更 Node 不够。
+
+已部署机升级：须 `npm run fetch:payload` 拉取更新后的 payload 后执行 `wrap-cli/sync`（`restart:true`），再重启 Node 控制面；仅更新 Node 不够。不必重建槽，无 DB 迁移。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
 
 ## 1.4.006 — 2026-10-26
 
