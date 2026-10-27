@@ -17,6 +17,7 @@ import {
   renderOfficial303MainPrompt,
 } from '../../src/lib/identity/official-profiles.mjs'
 import {
+  applyCrsUnofficialPersona,
   ensureBillingAttribution,
   personaTemplateVars,
   stripSubagentBilling,
@@ -408,13 +409,14 @@ test('model without mid-conversation system merges Environment into guidance', (
 })
 
 test('standing switch and edited 303 template still obey the panel TTL', () => {
+  // official_303 is retired; saved switches/templates are canonicalized onto official_full.
   const out = lean(officialCaller(), {
     ttl: '5m',
     compat: {
       agent_standing: 'STANDING',
-      agent_standing_presets: { official_303: true },
+      agent_standing_presets: { official_full: true },
       persona_templates: {
-        official_303: [
+        official_full: [
           { id: 'billing', type: 'text', text: '{{billing}}', cache_control: { type: 'ephemeral', ttl: '1h' } },
           { id: 'identity', type: 'text', text: '{{identity}}', cache_control: { type: 'ephemeral', ttl: '1h' } },
           {
@@ -470,39 +472,63 @@ test('full-prompt models keep the existing cli-hop body; only the billing versio
   assert.match(v303.system[0].text, /cc_version=2\.1\.303\./)
 })
 
-test('renderOfficial303Body adds only the editable extra for the current model', () => {
-  const wire = (model, compat = {}) => JSON.stringify(lean(officialCaller(model), { compat }))
-  const empty = wire('claude-opus-5-5')
-  assert.equal(empty.includes('Sonnet extra.'), false)
-  assert.equal(empty.includes('Haiku extra.'), false)
-  const compat = {
-    model_env_extra_presets: { official_303: true },
-    model_env_extra: {
-      'claude-sonnet-5-5': 'Sonnet extra.',
-      'claude-haiku-5-5': 'Haiku extra.',
-    },
+test('official_full Environment adds only the editable extra for the current model', () => {
+  // e358143c moved env_extra into the role=system Environment; the live persona path renders it there.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-303-extra-'))
+  const file = path.join(dir, 'routing.json')
+  const environment = (model, compat = {}) => {
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ compatibility: { persona_preset: 'official_full', overlay_preset: 'off', ...compat } }),
+    )
+    const out = applyCrsUnofficialPersona({ model, messages: [{ role: 'user', content: 'hi' }] }, { routingFile: file })
+    assert.equal(
+      out.system.some((block) => /Sonnet extra\.|Haiku extra\./.test(String(block.text))),
+      false,
+    )
+    return out.messages
+      .filter((message) => message.role === 'system')
+      .map((message) => String(message.content))
+      .join('\n')
   }
-  assert.equal(wire('claude-sonnet-5-5', { model_env_extra: compat.model_env_extra }).includes('Sonnet extra.'), false)
-  const sonnet = wire('claude-sonnet-5-5', compat)
-  const haiku = wire('claude-haiku-5-5', compat)
-  assert.equal(sonnet.includes('Sonnet extra.'), true)
-  assert.equal(sonnet.includes('Haiku extra.'), false)
-  assert.equal(haiku.includes('Haiku extra.'), true)
-  assert.equal(haiku.includes('Sonnet extra.'), false)
-  const cleared = wire('claude-sonnet-5-5', {
-    ...compat,
-    persona_templates: {
-      official_303: [
-        { id: 'billing', type: 'text', text: '{{billing}}' },
-        { id: 'identity', type: 'text', text: '{{identity}}' },
-        { id: 'harness', type: 'text', text: '{{harness_303}}' },
-        { id: 'guidance', type: 'text', text: '{{guidance_303}}' },
-        { id: 'env_extra', type: 'text', text: '' },
-      ],
-    },
-  })
-  assert.equal(cleared.includes('Sonnet extra.'), false)
-  assert.equal(cleared.includes('Haiku extra.'), false)
+  try {
+    const empty = environment('claude-opus-5-5')
+    assert.match(empty, /^# Environment/)
+    assert.equal(empty.includes('Sonnet extra.'), false)
+    assert.equal(empty.includes('Haiku extra.'), false)
+    const compat = {
+      model_env_extra_presets: { official_full: true },
+      model_env_extra: {
+        'claude-sonnet-5-5': 'Sonnet extra.',
+        'claude-haiku-5-5': 'Haiku extra.',
+      },
+    }
+    assert.equal(
+      environment('claude-sonnet-5-5', { model_env_extra: compat.model_env_extra }).includes('Sonnet extra.'),
+      false,
+    )
+    const sonnet = environment('claude-sonnet-5-5', compat)
+    const haiku = environment('claude-haiku-5-5', compat)
+    assert.equal(sonnet.includes('Sonnet extra.'), true)
+    assert.equal(sonnet.includes('Haiku extra.'), false)
+    assert.equal(haiku.includes('Haiku extra.'), true)
+    assert.equal(haiku.includes('Sonnet extra.'), false)
+    // Saved official_303 switches are canonicalized onto official_full.
+    assert.equal(
+      environment('claude-sonnet-5-5', { ...compat, model_env_extra_presets: { official_303: true } }).includes(
+        'Sonnet extra.',
+      ),
+      true,
+    )
+    const cleared = environment('claude-sonnet-5-5', {
+      ...compat,
+      persona_block_presets: { official_full: { env_extra: false } },
+    })
+    assert.equal(cleared.includes('Sonnet extra.'), false)
+    assert.equal(cleared.includes('Haiku extra.'), false)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('kernel.json cli_version follows the slot profile', () => {
