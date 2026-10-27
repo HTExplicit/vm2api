@@ -1110,7 +1110,7 @@ export async function startRemoteSlot(vm, projectRoot, { recreate = false, routi
       return { ok: true, action: 'already-running', runtime: vm.runtime }
     }
     let previousNetwork = null
-    const envBroken = kvm && existing && kvmEnvMapIncomplete(dockerEnvMap(existing.Config?.Env))
+    const envBroken = kvm && existing && kvmEnvMapIncomplete(dockerEnvMap(existing.Config?.Env), existing.Config?.Env)
     if (existing && (!matches || envBroken)) {
       previousNetwork = existing.HostConfig?.NetworkMode
       await removeContainer(session.docker, name)

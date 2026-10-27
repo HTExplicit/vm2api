@@ -57,8 +57,15 @@ test('ensureKvmMachineRecord prefers slot record over container env', () => {
 })
 
 test('kvmEnvMapIncomplete detects missing runner env', () => {
-  assert.equal(kvmEnvMapIncomplete({ KIN_KVM_MAC: '52:54:00:11:22:33' }), true)
-  assert.equal(kvmEnvMapIncomplete({ KIN_KVM_MAC: '52:54:00:11:22:33', KIN_KVM_DISK_SERIAL: 'KIN1' }), false)
+  assert.equal(kvmEnvMapIncomplete({ KIN_KVM_MAC: '52:54:00:11:22:33' }, ['KIN_KVM_MAC=52:54:00:11:22:33']), true)
+  assert.equal(kvmEnvMapIncomplete({}, undefined), false)
+  assert.equal(
+    kvmEnvMapIncomplete({ KIN_KVM_MAC: '52:54:00:11:22:33', KIN_KVM_DISK_SERIAL: 'KIN1' }, [
+      'KIN_KVM_MAC=52:54:00:11:22:33',
+      'KIN_KVM_DISK_SERIAL=KIN1',
+    ]),
+    false,
+  )
 })
 
 test('buildKvmRunArgs uses backfilled machine identity', () => {

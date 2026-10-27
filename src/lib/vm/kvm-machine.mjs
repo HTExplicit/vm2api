@@ -98,17 +98,22 @@ export function ensureKvmMachineRecord(
   return true
 }
 
-/** True when runner env on an inspect/env map is missing MAC or disk serial. */
-export function kvmEnvMapIncomplete(envMap) {
-  if (!envMap || typeof envMap !== 'object') return false
-  return !macOk(envMap.KIN_KVM_MAC) || !diskSerialOk(envMap.KIN_KVM_DISK_SERIAL)
+/**
+ * True when runner env is present but MAC or disk serial is empty.
+ * @param {Record<string, string>|null|undefined} envMap
+ * @param {string[]|null|undefined} envRows raw Config.Env from inspect (undefined = not in payload)
+ */
+export function kvmEnvMapIncomplete(envMap, envRows) {
+  if (!Array.isArray(envRows)) return false
+  const map = envMap && typeof envMap === 'object' ? envMap : {}
+  return !macOk(map.KIN_KVM_MAC) || !diskSerialOk(map.KIN_KVM_DISK_SERIAL)
 }
 
 /** True when a stopped/running kvm container is missing runner env the entry script requires. */
 export function kvmContainerEnvIncomplete(containerName, { run } = {}) {
   const env = readDockerContainerEnv(containerName, { run })
   if (!env) return false
-  return kvmEnvMapIncomplete(env)
+  return kvmEnvMapIncomplete(env, env ? Object.entries(env).map(([k, v]) => `${k}=${v}`) : [])
 }
 
 export function kvmMachineFields(vm) {
