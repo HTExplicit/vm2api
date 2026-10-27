@@ -1013,3 +1013,45 @@ test('legacy rewrite Environment never adds the slot locale but keeps a caller L
     false,
   )
 })
+
+test('Environment is a role=system message only for models that accept mid-conversation system', () => {
+  withRoutingFile({ persona_preset: 'official_full', overlay_preset: 'off' }, (file) => {
+    for (const model of ['claude-haiku-4-5', 'claude-opus-4-6', 'claude-sonnet-4-5']) {
+      const out = applyCrsUnofficialPersona(
+        { model, system: 'CALLER', messages: [{ role: 'user', content: 'hi' }] },
+        { routingFile: file },
+      )
+      assert.equal(
+        out.messages.some((message) => message.role === 'system'),
+        false,
+        model,
+      )
+      assert.match(out.system.at(-1).text, /^# Environment/, model)
+      assert.ok(firstUserText(out).startsWith('<system-reminder>\nCALLER\n</system-reminder>\n'), model)
+    }
+    for (const model of ['claude-sonnet-5-5', 'claude-opus-5-5']) {
+      const out = applyCrsUnofficialPersona(
+        {
+          model,
+          messages: [
+            { role: 'user', content: 'a' },
+            { role: 'assistant', content: 'b' },
+            { role: 'user', content: 'c' },
+          ],
+        },
+        { routingFile: file },
+      )
+      assert.deepEqual(
+        out.messages.map((message) => message.role),
+        ['user', 'assistant', 'user', 'system'],
+        model,
+      )
+      assert.match(out.messages.at(-1).content, /^# Environment/, model)
+      assert.equal(
+        out.system.some((block) => String(block.text).includes('# Environment')),
+        false,
+        model,
+      )
+    }
+  })
+})

@@ -1882,7 +1882,10 @@ function applyTemplatePersona(
     const environment = renderPersonaTemplate(officialBlocks, vars, { role: 'system' })
       .map((block) => block.text)
       .join('\n\n')
-    if (environment) {
+    if (environment && !modelSupportsMidConversationSystem(modelId)) {
+      // Haiku 4.5 / Sonnet 5 / Claude 4.x reject mid-conversation role=system: keep it in top-level system.
+      system = [...system, { type: 'text', text: environment }]
+    } else if (environment) {
       const at = messages.findLastIndex((message) => message?.role === 'user')
       if (at >= 0)
         outMessages = [
