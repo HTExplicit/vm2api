@@ -34,7 +34,12 @@ import {
   kvmImageForKernel,
   KVM_BUILD_DIR,
 } from './os-catalog.mjs'
-import { slotMemory, slotDockerCpus, memoryMiB, VM_CONFIG_DEFAULTS } from './machine-spec.mjs'
+import { slotMemory, slotDockerCpus, memoryMiB } from './machine-spec.mjs'
+import {
+  ensureKvmMachineRecord,
+  kvmContainerEnvIncomplete,
+  kvmMachineFields,
+} from './kvm-machine.mjs'
 import { probeLocalKvm } from './kvm-host.mjs'
 import { slotExecArgv } from './slot-exec.mjs'
 import { isDockerInspectNotFound } from './docker-container.mjs'
@@ -655,27 +660,6 @@ export function shouldReplaceSlotContainer({ existing, recreate = false, network
   return !!(wrongNet || wrongImg || wrongRuntime)
 }
 
-function kvmMachineFields(vm) {
-  const m = vm.machine && typeof vm.machine === 'object' ? vm.machine : {}
-  const smbios = m.smbios && typeof m.smbios === 'object' ? m.smbios : {}
-  const d = VM_CONFIG_DEFAULTS
-  return {
-    vcpus: Number.isInteger(m.vcpus) ? m.vcpus : d.vcpus,
-    disk_gb: Number.isInteger(m.disk_gb) ? m.disk_gb : d.disk_gb,
-    cpu_model: m.cpu_model || d.cpu_model,
-    mac: m.mac || '',
-    smbios: {
-      manufacturer: smbios.manufacturer || d.smbios.manufacturer,
-      product: smbios.product || d.smbios.product,
-      version: smbios.version || d.smbios.version,
-      family: smbios.family || d.smbios.family,
-      serial: smbios.serial || '',
-      uuid: smbios.uuid || '',
-    },
-    disk_serial: m.disk_serial || '',
-  }
-}
-
 function kvmEnvPairs(vm, { uid, gid, memMb, accel, hostName, machineId, shares, smbios }) {
   const m = kvmMachineFields(vm)
   // Current kin-kvm-entry requires these vars, then uses qemu-smbios.args for -smbios.
@@ -1003,6 +987,9 @@ export async function startVmRuntime(vm, projectRoot, { recreate = false, routin
   if (!eg.network && !eg.name) return { ok: false, error: 'egress network missing; refusing host fallback' }
 
   let existing = inspectContainer(name)
+  if (kvm && existing) {
+    ensureKvmMachineRecord(vm, { projectRoot, containerName: name, run: sh, persist: true })
+  }
   const restartPolicy = updateSlotRestartPolicy(vm, existing, sh)
   if (!restartPolicy.ok) return { ok: false, error: restartPolicy.stderr || 'slot restart policy update failed' }
   const paths = workerPaths(projectRoot, vm.id)
@@ -1043,15 +1030,16 @@ export async function startVmRuntime(vm, projectRoot, { recreate = false, routin
     fs.chownSync(home, runtimeUidNum(vm), Number(GID))
   } catch {}
 
-  if (
+  const replaceContainer =
     shouldReplaceSlotContainer({
       existing,
       recreate: replace,
       network: slotNetworkForVm(vm),
       image,
       runtime: runtimeKind(vm),
-    })
-  ) {
+    }) ||
+    (kvm && existing && kvmContainerEnvIncomplete(name, { run: sh }))
+  if (replaceContainer) {
     // Container only. Host bind mounts (cli-home, run, kvm/, machine-id) stay.
     sh(['docker', 'rm', '-f', name])
     existing = null
