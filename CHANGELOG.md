@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## 1.4.020 — 2026-10-28
+
 - Fixes #768：槽终端交互式启动 `claude` 时 cli-node 在 REPL 渲染阶段报 `SandboxManager.isSupportedPlatform is not a function` 退出。构建用的 `@anthropic-ai/sandbox-runtime` 桩只有 `start/stop`，适配层转发的静态方法全为 undefined；补齐后平台报不支持沙箱，`isSandboxingEnabled` 为 false，Bash 不进沙箱，与此前非交互路径行为一致。cli-node 其余源码与 `f29bbfa4` 相同（嵌入 JS 逐行比对仅桩不同）。payload 钉到 `payload-2026.10.28-cli-sandbox`，cli-node `eb54f0ce`（27790092）。
 
 已部署机升级：须 `npm run fetch:payload` 后 `wrap-cli/sync`（`restart:true`），再重启 Node；仅更新 Node 不够。只读根文件系统的集群槽需按现有流程换镜像。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
