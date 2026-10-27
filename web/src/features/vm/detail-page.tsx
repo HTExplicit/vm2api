@@ -57,6 +57,12 @@ import { dashboardQueryOptions } from '@/features/overview/queries'
 import { proxiesForVmBind } from '@/features/proxies/proxy-sort'
 import { proxiesQueryOptions } from '@/features/proxies/queries'
 import { routingQueryOptions } from '@/features/settings/queries'
+import {
+  planDeleteActiveVm,
+  type DeleteActiveVmPlan,
+} from '@/features/vm/active-vm'
+import { ActiveVmBadge } from '@/features/vm/active-vm-badge'
+import { DeleteActiveVmHint } from '@/features/vm/delete-active-hint'
 import { VmAccountTab } from '@/features/vm/detail-account-tab'
 import { VmOpsTab } from '@/features/vm/detail-ops-tab'
 import { VmOverviewTab } from '@/features/vm/detail-overview-tab'
@@ -64,12 +70,6 @@ import { VmProxyTab } from '@/features/vm/detail-proxy-tab'
 import { VmDetailSkeleton } from '@/features/vm/detail-skeleton'
 import { VmTestTab } from '@/features/vm/detail-test-tab'
 import { bootOutcome, vmTodayCounts } from '@/features/vm/detail-today'
-import { ActiveVmBadge } from '@/features/vm/active-vm-badge'
-import {
-  planDeleteActiveVm,
-  type DeleteActiveVmPlan,
-} from '@/features/vm/active-vm'
-import { DeleteActiveVmHint } from '@/features/vm/delete-active-hint'
 import { NodeChip } from '@/features/vm/node-chip'
 import { probeOutcome, type ProbeCheck } from '@/features/vm/probe-status'
 import {
@@ -649,9 +649,7 @@ function VmDetailBody({
               <DeleteActiveVmHint target={vm} vms={slotList} />
             </>
           }
-          confirmText={
-            deletePlan.kind === 'switch' ? '切换活跃并删除' : '删除'
-          }
+          confirmText={deletePlan.kind === 'switch' ? '切换活跃并删除' : '删除'}
           cancelBtnText='取消'
           destructive
           disabled={deletePlan.kind === 'blocked'}

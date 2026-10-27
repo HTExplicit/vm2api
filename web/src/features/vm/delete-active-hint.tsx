@@ -2,13 +2,7 @@ import type { Vm } from '@/types/panel-vm'
 import { SlotIdentity } from '@/components/platform-chip'
 import { planDeleteActiveVm } from '@/features/vm/active-vm'
 
-export function DeleteActiveVmHint({
-  target,
-  vms,
-}: {
-  target: Vm
-  vms: Vm[]
-}) {
+export function DeleteActiveVmHint({ target, vms }: { target: Vm; vms: Vm[] }) {
   const plan = planDeleteActiveVm(target, vms)
   if (plan.kind === 'normal' || plan.kind === 'sole_active') {
     return (

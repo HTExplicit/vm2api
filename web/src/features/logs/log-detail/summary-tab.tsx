@@ -627,7 +627,8 @@ export function SummaryTab({
             决策模型送审正文
           </SectionTitle>
           <p className='text-xs text-muted-foreground'>
-            这是当时 POST 给模型的 state，含历史用户句。模型只返回题目分数，没有指出其中哪一句。
+            这是当时 POST 给模型的
+            state，含历史用户句。模型只返回题目分数，没有指出其中哪一句。
           </p>
           <pre className='max-h-64 overflow-auto rounded-lg border bg-card p-3 font-mono text-xs break-words whitespace-pre-wrap'>
             {row.jevState}

@@ -34,9 +34,9 @@ describe('active vm replacement', () => {
         refresh_error: 'oauth_revoked',
       }),
     ]
-    expect(activeVmReplacementCandidates(rows, 'active').map((v) => v.id)).toEqual(
-      ['good']
-    )
+    expect(
+      activeVmReplacementCandidates(rows, 'active').map((v) => v.id)
+    ).toEqual(['good'])
     expect(pickActiveVmReplacement(rows, 'active')?.id).toBe('good')
   })
 

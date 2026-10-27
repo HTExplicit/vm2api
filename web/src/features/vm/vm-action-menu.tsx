@@ -26,11 +26,11 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { meQueryOptions } from '@/features/auth/queries'
+import { isActiveVmPointer } from '@/features/vm/active-vm'
 import { restrictionTitle } from '@/features/vm/clear-restriction'
 import { useVmActions } from '@/features/vm/vm-actions-context'
 import { canReclaimVm } from '@/features/vm/vm-owner'
 import { VmPackageDialog } from '@/features/vm/vm-package-dialog'
-import { isActiveVmPointer } from '@/features/vm/active-vm'
 import { useVmPerms } from '@/features/vm/vm-perms'
 
 /** 无法刷新时给出原因，与详情页 refreshBlocked 文案一致。 */
@@ -130,9 +130,7 @@ export function VmActionMenu({
           ) : null}
           {actions.activate ? (
             <DropdownMenuItem
-              disabled={
-                isActiveVmPointer(vm) || actions.activatingId === vm.id
-              }
+              disabled={isActiveVmPointer(vm) || actions.activatingId === vm.id}
               title={
                 isActiveVmPointer(vm)
                   ? '已是当前活跃槽'

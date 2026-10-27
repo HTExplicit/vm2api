@@ -19,10 +19,7 @@ export function activeVmReplacementCandidates(
   excludeId: string
 ): Vm[] {
   return vms.filter(
-    (v) =>
-      v.id !== excludeId &&
-      v.schedulable !== false &&
-      accountUsable(v)
+    (v) => v.id !== excludeId && v.schedulable !== false && accountUsable(v)
   )
 }
 

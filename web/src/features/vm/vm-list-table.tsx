@@ -28,6 +28,7 @@ import {
 import { CredLaneChip, SlotIdentity } from '@/components/platform-chip'
 import { StatusMark } from '@/components/status-mark'
 import { ProxyChip } from '@/features/proxies/proxy-chip'
+import { ActiveVmBadge } from '@/features/vm/active-vm-badge'
 import { NodeChip } from '@/features/vm/node-chip'
 import { OpenaiPlanBadge } from '@/features/vm/openai-plan-badge'
 import { RuntimeChip } from '@/features/vm/runtime-chip'
@@ -49,7 +50,6 @@ import {
   useVmColumnOrder,
   type VmColumnKey,
 } from '@/features/vm/use-vm-column-order'
-import { ActiveVmBadge } from '@/features/vm/active-vm-badge'
 import { VmActionMenu } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
 import { VmOwnerLine } from '@/features/vm/vm-owner-line'

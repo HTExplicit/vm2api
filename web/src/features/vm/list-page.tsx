@@ -30,8 +30,8 @@ import { QueryGate } from '@/components/query-gate'
 import { meQueryOptions } from '@/features/auth/queries'
 import { usageQueryOptions } from '@/features/overview/queries'
 import { planDeleteActiveVm } from '@/features/vm/active-vm'
-import { DeleteActiveVmHint } from '@/features/vm/delete-active-hint'
 import { CreateVmDialog } from '@/features/vm/create-vm-dialog'
+import { DeleteActiveVmHint } from '@/features/vm/delete-active-hint'
 import { FleetPulse } from '@/features/vm/fleet-pulse'
 import { VmListSkeleton } from '@/features/vm/list-skeleton'
 import { vmsListQueryOptions } from '@/features/vm/queries'
@@ -139,13 +139,7 @@ export function VmListPage() {
     onError: (error: Error) => toast.error(error.message),
   })
   const deleteVm = useMutation({
-    mutationFn: async ({
-      id,
-      switchTo,
-    }: {
-      id: string
-      switchTo?: string
-    }) => {
+    mutationFn: async ({ id, switchTo }: { id: string; switchTo?: string }) => {
       if (switchTo) {
         await api(`/api/panel/vms/${encodeURIComponent(switchTo)}/activate`, {
           method: 'POST',
@@ -451,14 +445,10 @@ export function VmListPage() {
             ''
           )
         }
-        confirmText={
-          deletePlan.kind === 'switch' ? '切换活跃并删除' : '删除'
-        }
+        confirmText={deletePlan.kind === 'switch' ? '切换活跃并删除' : '删除'}
         cancelBtnText='取消'
         destructive
-        disabled={
-          deleteBlocked || deleteInput.trim() !== deleteTarget?.id
-        }
+        disabled={deleteBlocked || deleteInput.trim() !== deleteTarget?.id}
         isLoading={deleteVm.isPending}
         handleConfirm={() => {
           if (deleteTarget && !deleteBlocked) {
