@@ -1,5 +1,9 @@
 # Changelog
 
+## 未发布
+
+- #766：`anthropic_to_codex` 路径保留 Anthropic→Codex 转换中的工具调用历史（assistant `tool_use` / user `tool_result`）与列表形式 system 提示，避免下一轮丢工具结果导致重复调用。
+
 ## 1.4.011 — 2026-10-27
 
 - #736：修复 KVM 槽在关机或「恢复服务」时因换镜像重建容器却未回填 `KIN_KVM_MAC` / `KIN_KVM_DISK_SERIAL` 导致 kin-kvm 启动失败；停/启与恢复路径会从槽配置、旧容器 env 或已采集的 guest hardware 回填并写回 `vm.machine`，env 不完整的容器会强制重建。
