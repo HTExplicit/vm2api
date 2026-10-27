@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- #782：CI：main 自 1.3.154 起 `npm run test:unit` 一直红（20 个文件 80 项），后续 Go / web 步骤从未执行。本次逐项二分到引入提交，过时断言改为当前设计，下面几处是真回归，已修：
+- #782：出口（kin-egress）：端口 0 启动时按字面 `:0` 等监听者，永远失败；二进制被替换后旧进程仍被当作可复用、`/proc` 扫描在最后一项不匹配时整体返回空，旧出口不回收导致 `egress_port_busy`（91acb94e 引入）。
+- #782：换号 thinking 归属：cli-hop 从原始请求重渲染时绕过了按账号过滤，别的账号签名的 thinking 原样发出（5a4f2f1d 引入）。
+- #782：人设：`official` 档丢掉调用方顶层 system（既不在 system 也不在 messages）；面板 `persona_guidance_presets` 不生效；旧 rewrite 路径总带槽位 ` - Locale:`；不支持 mid-conversation system 的模型（如 haiku-4-5）在 API 后端出站带 `role=system` Environment，会被上游 400。均为 e358143c 引入。
+- #782：面板：0注入档的 usage 遮罩显示与网关一致（网关按档默认遮罩）。
+- #782：已知未改：0注入档按 d917dd2a 设计不保留调用方顶层 system；人设重复渲染不幂等（生产只渲染一次）。
+
+已部署机升级：更新 Node 控制面与 `web/dist` 后重启。无迁移，不必 `fetch:payload` / `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
 ## 1.4.016 — 2026-10-27
 
 - #778：zero 档已带 billing `prompt_version`、调用方未提供 cache 标记时，恢复消息 `cache_control` 断点兜底（单轮 1 个、多轮最多 2 个，复用 `officialMessageMarker` 与解析后 TTL；不追加 system 模板；已有 system/tools/消息断点则保留不补点；lean/shaped/preserveSystem/requestContext 路径不启用）。
