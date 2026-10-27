@@ -52,12 +52,7 @@ export function readDockerContainerEnv(containerName, { run } = {}) {
 }
 
 function pickMac(vm, containerEnv) {
-  return (
-    macOk(vm?.machine?.mac) ||
-    macOk(containerEnv?.KIN_KVM_MAC) ||
-    macOk(vm?.fingerprint?.hardware?.mac) ||
-    ''
-  )
+  return macOk(vm?.machine?.mac) || macOk(containerEnv?.KIN_KVM_MAC) || macOk(vm?.fingerprint?.hardware?.mac) || ''
 }
 
 function pickDiskSerial(vm, containerEnv) {

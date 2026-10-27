@@ -35,11 +35,7 @@ import {
   KVM_BUILD_DIR,
 } from './os-catalog.mjs'
 import { slotMemory, slotDockerCpus, memoryMiB } from './machine-spec.mjs'
-import {
-  ensureKvmMachineRecord,
-  kvmContainerEnvIncomplete,
-  kvmMachineFields,
-} from './kvm-machine.mjs'
+import { ensureKvmMachineRecord, kvmContainerEnvIncomplete, kvmMachineFields } from './kvm-machine.mjs'
 import { probeLocalKvm } from './kvm-host.mjs'
 import { slotExecArgv } from './slot-exec.mjs'
 import { isDockerInspectNotFound } from './docker-container.mjs'

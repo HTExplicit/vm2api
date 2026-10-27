@@ -33,12 +33,7 @@ import { isCodexVm } from '../vm/vm-kind.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { isKvmRuntime, runtimeKind } from '../vm/runtime-kind.mjs'
 import { slotMemory, slotDockerCpus, memoryMiB, normalizeVmConfig } from '../vm/machine-spec.mjs'
-import {
-  dockerEnvMap,
-  ensureKvmMachineRecord,
-  kvmEnvMapIncomplete,
-  kvmMachineFields,
-} from '../vm/kvm-machine.mjs'
+import { dockerEnvMap, ensureKvmMachineRecord, kvmEnvMapIncomplete, kvmMachineFields } from '../vm/kvm-machine.mjs'
 import { logTelemetryContainerSkip, telemetryContainerSkip } from '../vm/docker-container.mjs'
 import { slotExecArgv, slotExecCmd } from '../vm/slot-exec.mjs'
 import {
