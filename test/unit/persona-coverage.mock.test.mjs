@@ -71,7 +71,10 @@ const SHAPES = [
 test('official preset appends the configured prompt on every empty-system shape', () => {
   withRouting({ persona_preset: 'official', overlay_preset: 'off' }, (file) => {
     for (const [name, body] of SHAPES) {
-      const out = applyCrsUnofficialPersona(structuredClone(body), { routingFile: file })
+      const out = applyCrsUnofficialPersona(
+        { model: 'claude-opus-5-5', ...structuredClone(body) },
+        { routingFile: file },
+      )
       assertOfficial(out, { caller: name === 'caller leftover' ? 'keep-this-caller' : '' })
     }
   })

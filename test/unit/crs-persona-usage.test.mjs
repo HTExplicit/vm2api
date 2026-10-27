@@ -141,7 +141,7 @@ test('none mode hides nothing', () => {
 })
 
 test('official_prompt does not start usage hide, even with standing and env', () => {
-  const before = { messages: helloBody.messages }
+  const before = { model: 'claude-opus-5-5', messages: helloBody.messages }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-official-standing-'))
   const routingFile = path.join(dir, 'routing.json')
   fs.writeFileSync(routingFile, JSON.stringify({ compatibility: { agent_standing_presets: { official: true } } }))

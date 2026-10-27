@@ -208,7 +208,7 @@ test('official family passthrough is off unless the protocol switch is on', () =
 
 test('empty unofficial system writes billing, CLI identity, 303 harness and boundary; guidance stays off', () => {
   const messages = [{ role: 'user', content: 'ping' }]
-  const out = applyCrsUnofficialPersona({ messages }, { officialClient: false })
+  const out = applyCrsUnofficialPersona({ model: 'claude-opus-5-5', messages }, { officialClient: false })
   assert.equal(out.system.length, 4)
   assert.match(out.system[0].text, /^x-anthropic-billing-header:/)
   assert.equal(out.system[0].cache_control, undefined)
@@ -823,6 +823,7 @@ test('personaModeFromRoutingFile rereads disk so scp applies without restart', (
 test('official_prompt keeps billing identity overlay, slot env, and skips injected agent', () => {
   const out = applyCrsUnofficialPersona(
     {
+      model: 'claude-opus-5-5',
       messages: [{ role: 'user', content: 'hello official prompt' }],
     },
     { mode: 'official_prompt', park: true },
@@ -1354,6 +1355,7 @@ test('test14 forced weather converts to official 4-block and keeps caller tools'
 
 test('harness environment uses the slot timezone and keeps cwd inside the client prompt', () => {
   const body = {
+    model: 'claude-opus-5-5',
     system: [
       { type: 'text', text: OMP_ROLE },
       { type: 'text', text: `${OMP_PROJECT}\nTimezone: Asia/Tokyo\n` },
@@ -1401,6 +1403,7 @@ test('Environment inherits caller platform/OS and rewrites timezone to the slot'
   withRoutingCompat({ persona_timezone_presets: { official_full: true } }, (routingFile) => {
     const out = applyCrsUnofficialPersona(
       {
+        model: 'claude-opus-5-5',
         system: leftover,
         messages: [{ role: 'user', content: 'hi' }],
       },
@@ -1499,6 +1502,7 @@ test('Environment rejects casual paths and newline cwd injection', () => {
   assert.equal(sanitizeInboundCwd('/tmp/ok\ninjected'), '')
   const casual = applyCrsUnofficialPersona(
     {
+      model: 'claude-opus-5-5',
       system: 'please look at /tmp/secret and then answer',
       messages: [{ role: 'user', content: 'hi' }],
     },
