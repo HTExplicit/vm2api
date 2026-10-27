@@ -257,8 +257,22 @@ function listenerPid(port) {
   return match ? Number(match[1]) : 0
 }
 
-function ownsEgressProcess(pid, configPath) {
+function processExeDeleted(pid) {
+  const probe = pidNamespaceCommand(['sh', '-c', `readlink /proc/${Number(pid)}/exe 2>/dev/null`])
+  const result = sh(probe)
+  return (
+    result.ok &&
+    String(result.stdout || '')
+      .trim()
+      .endsWith(' (deleted)')
+  )
+}
+
+function ownsEgressProcess(pid, configPath, { allowDeleted = false } = {}) {
   if (!pidAlive(pid)) return false
+  // A replaced binary keeps the old inode in this process. Reusing it leaves
+  // the new file unrun and its listen port permanently busy.
+  if (!allowDeleted && processExeDeleted(pid)) return false
   const args = processText(pid, 'cmdline').split('\0').filter(Boolean)
   const configIndex = args.indexOf('-config')
   if (configIndex < 0 || !args[configIndex + 1]) return false
@@ -274,7 +288,8 @@ function egressProcessPids() {
   const probe = pidNamespaceCommand([
     'sh',
     '-c',
-    'for dir in /proc/[1-9]*; do tr "\\0" " " < "$dir/cmdline" 2>/dev/null | grep -q kin-egress && basename "$dir"; done',
+    // The loop's status is the last /proc entry's grep; end with true so a non-matching tail is not a failed scan.
+    'for dir in /proc/[1-9]*; do tr "\\0" " " < "$dir/cmdline" 2>/dev/null | grep -q kin-egress && basename "$dir"; done; true',
   ])
   const result = sh(probe)
   if (!result.ok) return []
@@ -487,7 +502,7 @@ export async function startEgressProcess({
     } catch {}
   }
   const portOwner = listenerPid(tcpPort)
-  if (portOwner && !ownsEgressProcess(portOwner, cfgPath)) {
+  if (portOwner && !ownsEgressProcess(portOwner, cfgPath, { allowDeleted: true })) {
     return { ok: false, error: 'egress_port_busy', pid: portOwner }
   }
   const superseded = [
@@ -520,7 +535,8 @@ export async function startEgressProcess({
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 })
   const spawned = await spawnDetachedEgress(bin, cfgPath)
   if (!spawned.ok) return spawned
-  const realPid = await waitForListenerPid(listenHost, tcpPort)
+  // Port 0 is ephemeral: no fixed port to resolve a listener from, so the spawned helper is the owner.
+  const realPid = tcpPort > 0 ? await waitForListenerPid(listenHost, tcpPort) : spawned.pid
   if (!realPid) return { ok: false, error: `kin-egress ${listenTcp} did not listen` }
   fs.writeFileSync(pidFile, String(realPid) + '\n', { mode: 0o600 })
   return { ok: true, pid: realPid, reused: false, configPath: cfgPath, listen_tcp: listenTcp }
@@ -535,7 +551,7 @@ export function stopEgressProcess(projectRoot, proxyId) {
   for (const pid of pids) {
     const signaled = sh(pidNamespaceCommand(['sh', '-c', `kill -TERM ${Number(pid)} 2>/dev/null`]))
     if (!signaled.ok && pidAlive(pid)) return { ok: false, error: 'egress_stop_failed' }
-    if (ownsEgressProcess(pid, cfgPath)) pending.push(pid)
+    if (ownsEgressProcess(pid, cfgPath, { allowDeleted: true })) pending.push(pid)
   }
   if (pending.length) return { ok: true, pending }
   try {
