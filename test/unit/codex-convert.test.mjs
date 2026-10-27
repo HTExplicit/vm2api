@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   chatToCodexResponses,
+  anthropicToCodexResponses,
   responsesToolChoice,
   createChatSseState,
   normalizeCodexResponsesInput,
@@ -173,6 +174,124 @@ test('anthropic convert stays off by default', () => {
     { anthropic_to_codex: true },
   )
   assert.equal(allowed.ok, true)
+})
+
+test('anthropic system text blocks become a developer message', () => {
+  const body = anthropicToCodexResponses({
+    model: 'gpt-5.4',
+    system: [
+      { type: 'text', text: 'Follow the project instructions.', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'Use tools when needed.' },
+    ],
+    messages: [{ role: 'user', content: 'hello' }],
+  })
+  assert.deepEqual(body.input, [
+    {
+      type: 'message',
+      role: 'developer',
+      content: [{ type: 'input_text', text: 'Follow the project instructions.\nUse tools when needed.' }],
+    },
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+  ])
+})
+
+test('anthropic string system and message content remain supported', () => {
+  const body = anthropicToCodexResponses({
+    model: 'gpt-5.4',
+    system: 'Be brief.',
+    messages: [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' },
+    ],
+    stream: false,
+    max_tokens: 128,
+  })
+  assert.deepEqual(
+    body.input.map((item) => item.role),
+    ['developer', 'user', 'assistant'],
+  )
+  assert.deepEqual(
+    body.input.map((item) => item.content[0].text),
+    ['Be brief.', 'hello', 'hi'],
+  )
+  assert.equal(body.stream, false)
+  assert.equal(body.max_output_tokens, 128)
+})
+
+for (const content of ['SECRET_CODE', [{ type: 'text', text: 'SECRET_CODE' }]]) {
+  test(`anthropic tool history preserves ${typeof content === 'string' ? 'string' : 'text-block'} results`, () => {
+    const request = {
+      model: 'gpt-5.4',
+      tools: [{ name: 'lookup', description: 'Look up a code.', input_schema: { type: 'object' } }],
+      tool_choice: { type: 'auto' },
+      messages: [
+        { role: 'user', content: 'Look up the code and return it.' },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'call_lookup', name: 'lookup', input: { item: 'a "quoted" item' } }],
+        },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_lookup', content }] },
+      ],
+    }
+    const original = structuredClone(request)
+    const result = toCodexResponses('anthropic.messages', request, { anthropic_to_codex: true })
+    assert.equal(result.ok, true)
+    assert.equal(result.converted, true)
+    assert.deepEqual(result.body.input, [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Look up the code and return it.' }] },
+      {
+        type: 'function_call',
+        call_id: 'call_lookup',
+        name: 'lookup',
+        arguments: JSON.stringify({ item: 'a "quoted" item' }),
+      },
+      { type: 'function_call_output', call_id: 'call_lookup', output: 'SECRET_CODE' },
+    ])
+    assert.deepEqual(result.body.tools, [
+      { type: 'function', name: 'lookup', description: 'Look up a code.', parameters: { type: 'object' } },
+    ])
+    assert.equal(result.body.tool_choice, 'auto')
+    assert.deepEqual(request, original)
+  })
+}
+
+test('anthropic mixed text and multiple tool calls/results keep their block order', () => {
+  const body = anthropicToCodexResponses({
+    model: 'gpt-5.4',
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Before the first call.' },
+          { type: 'tool_use', id: 'call_1', name: 'lookup', input: { item: 'one' } },
+          { type: 'text', text: 'Before the second call.' },
+          { type: 'tool_use', id: 'call_2', name: 'lookup', input: { item: 'two' } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'call_1', content: 'one' },
+          {
+            type: 'tool_result',
+            tool_use_id: 'call_2',
+            is_error: true,
+            content: [{ type: 'text', text: 'not found' }],
+          },
+          { type: 'text', text: 'Continue with these results.' },
+        ],
+      },
+    ],
+  })
+  assert.deepEqual(body.input, [
+    { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Before the first call.' }] },
+    { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{"item":"one"}' },
+    { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Before the second call.' }] },
+    { type: 'function_call', call_id: 'call_2', name: 'lookup', arguments: '{"item":"two"}' },
+    { type: 'function_call_output', call_id: 'call_1', output: 'one' },
+    { type: 'function_call_output', call_id: 'call_2', output: 'not found' },
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue with these results.' }] },
+  ])
 })
 
 test('responses SSE maps to chat chunks', () => {

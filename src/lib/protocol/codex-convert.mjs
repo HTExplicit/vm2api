@@ -295,11 +295,48 @@ export function normalizeCodexResponsesInput(body = {}) {
 }
 
 export function anthropicToCodexResponses(body = {}) {
-  const messages = Array.isArray(body.messages) ? body.messages : []
-  const system = typeof body.system === 'string' ? [{ role: 'system', content: body.system }] : []
+  const messages = []
+  const system = textParts(body.system)
+  if (system) messages.push({ role: 'system', content: system })
+  for (const message of Array.isArray(body.messages) ? body.messages : []) {
+    if (!Array.isArray(message?.content)) {
+      messages.push(message)
+      continue
+    }
+    // Keep block order and the call/result IDs used across Anthropic turns.
+    let content = []
+    const flush = () => {
+      if (content.length) messages.push({ role: message.role, content })
+      content = []
+    }
+    for (const block of message.content) {
+      if (message.role === 'assistant' && block?.type === 'tool_use') {
+        flush()
+        messages.push({
+          role: 'assistant',
+          tool_calls: [
+            {
+              id: block.id,
+              type: 'function',
+              function: {
+                name: block.name,
+                arguments: JSON.stringify(block.input ?? {}),
+              },
+            },
+          ],
+        })
+      } else if (message.role === 'user' && block?.type === 'tool_result') {
+        flush()
+        messages.push({ role: 'tool', tool_call_id: block.tool_use_id, content: block.content ?? '' })
+      } else {
+        content.push(block)
+      }
+    }
+    flush()
+  }
   return chatToCodexResponses({
     model: body.model,
-    messages: [...system, ...messages],
+    messages,
     tools: body.tools,
     tool_choice: body.tool_choice,
     stream: body.stream,
