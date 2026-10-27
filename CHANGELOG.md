@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- #773：重复合法自定义工具名出站前唯一化（保留首个，后续 `kin_tool_<hash>`；`tool_choice`/历史指首个）；唯一性不再受 `tool_name_rewrite` 影响；相同服务端工具去重，冲突/非法本地 400 `invalid_tool_name`。
+
+#773 已部署机升级：仅需更新 Node 控制面后重启；cli-node 哈希未变，不必 `fetch:payload` / `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
 ## 1.4.013 — 2026-10-27
 
 - #769：API 内核 SSE 响应逐块 flush，修复小响应缓冲到结束才返回的问题，保留实际流式交付和首 Token 时序。
