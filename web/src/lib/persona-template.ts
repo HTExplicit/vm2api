@@ -505,7 +505,8 @@ export function personaHideEnabled(
   }
   const legacy = parsePersonaHides(compat?.persona_hides)
   if (legacy != null) return legacy
-  return blocks.some((block) => block.hide === true)
+  // Mirrors gateway personaHidesUsageFromRoutingFile: zero masks by preset, not by block hide flags.
+  return preset === 'zero' || blocks.some((block) => block.hide === true)
 }
 
 /** 写 `persona_hide_presets[preset]`；回到模板默认且服务端没存过时去掉，避免无意义的 dirty。 */
