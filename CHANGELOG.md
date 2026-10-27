@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.016 — 2026-10-27
 
 - #778：zero 档已带 billing `prompt_version`、调用方未提供 cache 标记时，恢复消息 `cache_control` 断点兜底（单轮 1 个、多轮最多 2 个，复用 `officialMessageMarker` 与解析后 TTL；不追加 system 模板；已有 system/tools/消息断点则保留不补点；lean/shaped/preserveSystem/requestContext 路径不启用）。
 
