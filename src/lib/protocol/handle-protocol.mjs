@@ -334,6 +334,7 @@ export function createHandleProtocol(deps) {
     logBag.error_code = decision.error?.body?.error?.code || null
     logBag.error_message = decision.errorMessage || decision.error?.body?.error?.message || null
     logBag.intercept = decision.intercept || null
+    logBag.jev_state = decision.jevState || null
     json(res, decision.error.status, decision.error.body)
     return true
   }

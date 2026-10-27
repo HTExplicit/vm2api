@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 风险审计的硬正则和决策模型只读用户正文。`system`、`instructions`、消息里的 `role=system`、`# Environment` 和已闭合的 `<system-reminder>` 不再送审；未闭合的提醒标签不再把后面的用户句子一起删掉。多轮请求把最后一条用户正文再标成 `[current ask]`，避免 16000 字尾窗只剩历史。拒答缓存的指纹不变，仍含工具回传。决策模型拦住时，`usage_logs.jev_state`（迁移 044）记下当时 POST 的 `state`，请求详情显示为送审正文；这是送审上下文，不是模型指出的命中句。`intercept.keyword` 仍只是题库类别。
+
 ## 1.4.014 — 2026-10-27
 
 - #773：重复合法自定义工具名出站前唯一化（保留首个，后续 `kin_tool_<hash>`；`tool_choice`/历史指首个）；唯一性不再受 `tool_name_rewrite` 影响；相同服务端工具去重，冲突/非法本地 400 `invalid_tool_name`。

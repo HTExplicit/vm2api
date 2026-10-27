@@ -584,6 +584,8 @@ export class RequestLogStore {
       inbound_device_id: sessionIdForLog(extra.inbound_device_id),
       // Gate verdict JSON from intercept-gate; the risk audit groups on it.
       intercept: extra.intercept ? String(extra.intercept).slice(0, 400) : null,
+      // Exact classifyJev payload.state. Context, not a span the model named.
+      jev_state: extra.jev_state ? String(extra.jev_state).slice(0, 64000) : null,
       image_model: extra.image_model || null,
       image_usage: extra.image_usage ? JSON.stringify(extra.image_usage) : null,
       image_input_tokens: imageTokenCount(extra.image_usage?.input_tokens),

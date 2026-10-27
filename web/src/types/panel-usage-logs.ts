@@ -169,6 +169,9 @@ export type UsageLogRow = {
   errorOwner: 'client' | 'provider' | 'platform' | null
   errorCode: string | null
   errorMessage: string | null
+  /** classifyJev 实际 POST 的 state。送审上下文，不是模型指出的命中句。 */
+  jevState: string | null
+
   /** 平台侧拦截（distill / refusal / guard …），由 errorClass/finalState 映射。 */
   blockedBy: string | null
   blockedReason: string | null

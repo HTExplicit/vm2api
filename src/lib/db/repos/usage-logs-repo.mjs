@@ -124,6 +124,7 @@ const SUMMARY_COLUMNS = [
   'reasoning_effort',
   'inbound_device_id',
   'intercept',
+  'jev_state',
   'vm_owner_user_id',
   'image_model',
   'image_usage',

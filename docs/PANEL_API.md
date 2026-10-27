@@ -346,7 +346,7 @@ Claude `routing.quota` 的 5h/7d 闸分三段（`critical_band` 默认 0.05，`g
 
 三个后端走同一套 `/v1/systemone`。题库存在 `questions`：可增删改，缺省是内置六题（综合、色情、破限、逆向、渗透、网络攻击）。每题都是「是否安全」，高分表示安全，启用的题目一起问，任一题低于阈值就拦。`safety_instruction` 非空时再多问一题自定义要求。`POST /jev-intercept/models` 用地址和 Key（留空则用已存的第一把）请求 `{base}/v1/models`，失败回 502，不会把上游 401 当成面板登出。
 
-内置正则覆盖 NSFW、蒸馏、破解、破限，面板删不掉。比较的是用户自己写下的正文，不含 user 轮里的 `tool_result` / `*_tool_result` / `function_call_output`；决策模型仍看 system。命中硬正则或模型返回 HTTP 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device id。模型不可用且 `fail_open` 为 false 时同样 403，不封设备。上游 `content_policy` / `content_filter` / `cyber_policy` / `moderation_blocked` / `safety_violation` / `usage_policy` 同样入库。仅 admin。
+内置正则覆盖 NSFW、蒸馏、破解、破限，面板删不掉。比较的是用户自己写下的正文，不含 user 轮里的 `tool_result` / `*_tool_result` / `function_call_output`，也不含 `system`、`instructions`、`# Environment` 和已闭合的 `<system-reminder>`。决策模型只看这些用户正文；多轮时当前用户句再附在末尾。命中硬正则或模型返回 HTTP 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device id。模型不可用且 `fail_open` 为 false 时同样 403，不封设备。上游 `content_policy` / `content_filter` / `cyber_policy` / `moderation_blocked` / `safety_violation` / `usage_policy` 同样入库。仅 admin。
 
 账号范围（`account_platform_plans[]`、`account_ids[]`，都可为空）把关卡收窄到部分槽位。每一项是 `平台:套餐`，例如 `claude:max`、`gpt:plus`、`gpt:business`；`none` 是没标注套餐。Claude 的 Max/Pro 与虚拟机列表相同（usage 里有 Fable 就是 Max，盖过落盘的 Pro）。指定账号收槽位 id、邮箱或名称，和勾选取并集，全空 = 所有账号都进关卡。只选了 GPT 套餐时 Claude 仍全部进关卡；选了 Claude 套餐或指定账号后，Claude 在选中槽位后再判，没命中的放行。GPT 一旦有范围就只由范围决定，没有范围时仍看 `openai_platform_enabled`。`GET` / `PUT` 都回 `account_scope.account_platform_plan_options`（带当前槽位数）和槽位清单（每条有 `scope_key`）。旧的 `account_types` 不再参与判断；只写过 `account_plan_types`、还没有 `account_platform_plans` 的配置会收成对应的 GPT 套餐（`none` 同时包含两边的未标注）。
 

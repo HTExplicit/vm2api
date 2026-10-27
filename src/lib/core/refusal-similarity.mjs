@@ -83,20 +83,26 @@ function userTexts(body, includeToolResults = true) {
  * User turns from inbound, then body, with exact repeats dropped.
  * Hard regex passes includeToolResults: false. Tool payloads quote the rules
  * (issue text, command output) and are not the user's ask. Refusal similarity
- * still sees them.
+ * still sees them, including system reminders, so a refused prompt stays the
+ * same fingerprint.
+ * `clean` drops closed reminders and `# Environment` before the regex.
+ * The current ask is repeated at the end so a long history cannot hide it.
  */
 export function refusalUserDocument(inbound, body = inbound, options = {}) {
   const includeToolResults = options.includeToolResults !== false
+  const clean = typeof options.clean === 'function' ? options.clean : null
   const seen = new Set()
   const parts = []
   for (const src of [inbound, body]) {
-    for (const text of userTexts(src, includeToolResults)) {
+    for (const raw of userTexts(src, includeToolResults)) {
+      const text = clean ? clean(raw) : raw
       const norm = normalizeText(text)
       if (!norm || seen.has(norm)) continue
       seen.add(norm)
       parts.push(norm)
     }
   }
+  if (clean && parts.length > 1) parts.push(parts[parts.length - 1])
   return parts.join('\n')
 }
 

@@ -727,6 +727,22 @@ test('summaries persist in sqlite across store re-open', () => {
   assert.equal(listed[0].api_key_id, 'key_p')
   assert.equal(s2.snapshot().total_rows, 1)
 })
+test('a jev block keeps the posted state beside the category', () => {
+  const store = tmpStore()
+  const state = '[current ask]\n[user message 4]\n请只改测试。'
+  const row = logOne(store, {
+    status: 403,
+    via: 'jev',
+    final_state: 'policy_blocked',
+    error_code: 'policy_blocked',
+    intercept: gateVerdict({ kind: 'block', by: 'jev', keyword: 'jailbreak' }),
+    jev_state: state,
+  })
+  assert.equal(JSON.parse(row.intercept).keyword, 'jailbreak')
+  assert.equal(row.jev_state, state)
+  const again = new RequestLogStore({ dataDir: store.dataDir, mode: 'normal' })
+  assert.equal(again.listNormal({ limit: 1 })[0].jev_state, state)
+})
 
 test('gate stats count every inbound request and keep the stored verdict', () => {
   const store = tmpStore()

@@ -287,7 +287,13 @@ export async function evaluateProtocolIntercept({
         final_state: 'policy_blocked',
         error,
         errorMessage: unavailable ? error.body.error.message : `${error.body?.error?.message}: ${category}`,
-        intercept: gateVerdict({ kind: 'block', by: 'jev', keyword: unavailable ? 'unavailable' : category }),
+        intercept: gateVerdict({
+          kind: 'block',
+          by: 'jev',
+          keyword: unavailable ? 'unavailable' : category,
+        }),
+        // Exact payload.state. Context the model scored, not a span it named.
+        jevState: unavailable ? '' : verdict.state || '',
         category: unavailable ? 'unavailable' : category,
         deviceId: inboundRefusalDeviceId({ inbound, body, headers }),
         fingerprint: refusalFingerprint(body, inbound),
