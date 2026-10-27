@@ -156,7 +156,8 @@ test('official empty beta uses sub2api DefaultBetaHeader; unofficial uses full m
   assert.match(String(official['anthropic-beta'] || ''), /claude-code-20250219/)
   assert.match(String(official['anthropic-beta'] || ''), /oauth-2025-04-20/)
   assert.match(String(official['anthropic-beta'] || ''), /thinking-token-count-2026-05-13/)
-  assert.match(String(official['anthropic-beta'] || ''), /mid-conversation-system-2026-04-07/)
+  // 833021e2: the 2.1.303 prefix no longer carries the GA mid-conversation-system beta.
+  assert.doesNotMatch(String(official['anthropic-beta'] || ''), /mid-conversation-system-2026-04-07/)
   assert.match(String(official['anthropic-beta'] || ''), /context-management-2025-06-27/)
   assert.doesNotMatch(String(official['anthropic-beta'] || ''), /fine-grained-tool-streaming/)
   assert.doesNotMatch(String(official['anthropic-beta'] || ''), /context-1m/)
@@ -173,7 +174,7 @@ test('official empty beta uses sub2api DefaultBetaHeader; unofficial uses full m
   const unofficial = resolveCrsHeaders({ 'user-agent': 'RikkaHub/1.0' }, dir, null, 'claude-opus-5')
   assert.match(String(unofficial['anthropic-beta'] || ''), /claude-code-20250219/)
   assert.match(String(unofficial['anthropic-beta'] || ''), /thinking-token-count-2026-05-13/)
-  assert.match(String(unofficial['anthropic-beta'] || ''), /mid-conversation-system-2026-04-07/)
+  assert.doesNotMatch(String(unofficial['anthropic-beta'] || ''), /mid-conversation-system-2026-04-07/)
   assert.match(String(unofficial['anthropic-beta'] || ''), /context-management-2025-06-27/)
   assert.doesNotMatch(String(unofficial['anthropic-beta'] || ''), /context-1m-2025-08-07/)
   assert.equal(unofficial['anthropic-dangerous-direct-browser-access'], 'true')

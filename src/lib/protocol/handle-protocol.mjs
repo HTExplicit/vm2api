@@ -1383,6 +1383,8 @@ export function createHandleProtocol(deps) {
                 identity,
                 entrypoint: entrypointNow,
               })
+              // The re-render starts from the raw caller body; re-apply this account's thinking ownership to it.
+              hopBody = filterThinkingForAccount(hopBody, selected.accountId, thinkingOwnerStore).body
             }
             hopBody = prepareCliHopBody(repaired ? body : hopBody, {
               stream: upstreamStream,

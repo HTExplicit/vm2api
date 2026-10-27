@@ -158,7 +158,8 @@ test('cli-hop envelope keeps role=system turns that the VM betas do not declare'
     identity: null,
     cliHop: true,
   })
-  assert.ok(out.body.betas.includes('mid-conversation-system-2026-04-07'))
+  // 9ecee337: mid-conversation-system is GA in 2.1.303; role=system stays without the beta.
+  assert.ok(!out.body.betas.includes('mid-conversation-system-2026-04-07'))
   assert.deepEqual(
     out.body.messages.map((message) => message.role),
     ['user', 'system', 'assistant', 'user'],
