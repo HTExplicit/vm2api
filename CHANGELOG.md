@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.4.013 — 2026-10-27
+
 - #769：API 内核 SSE 响应逐块 flush，修复小响应缓冲到结束才返回的问题，保留实际流式交付和首 Token 时序。
 - #769：协议 token 口径：Claude 转 Chat / Responses 的输入总数包含缓存；OpenAI 规范化区分 inclusive / disjoint 输入并识别显式缓存写入别名，reasoning 保留为 output 子集，不重复累加。
 - #769：日志真实性：TTFT 按 cli-node / OpenAI 实际生成内容或进度打点；新增 `first_byte_ms`、`generation_ms`（迁移 043），列表、请求概览和性能页统一按实测上游输出窗口计算 tok/s，包含隐藏推理、排除终结后的收尾。旧日志或单包缓冲窗口不可测时不再估算速率。
