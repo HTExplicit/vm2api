@@ -201,6 +201,10 @@ test('fleet refresh replaces an egress process whose binary was deleted', {
     assert.equal(current.ok, true, JSON.stringify(current))
     assert.notEqual(current.pid, orphan.pid)
     assert.equal(fs.readlinkSync(`/proc/${current.pid}/exe`), newBin)
+    // The orphan is this test process's own child: after SIGTERM it lingers as a zombie until Node reaps it.
+    for (let i = 0; i < 100 && fs.existsSync(`/proc/${orphan.pid}`); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
     assert.equal(fs.existsSync(`/proc/${orphan.pid}`), false)
     assert.equal(
       JSON.parse(fs.readFileSync(path.join(root, 'data/run/egress/px-fleet/egress.json'), 'utf8')).listen_tcp,
