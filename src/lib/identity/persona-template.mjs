@@ -144,6 +144,13 @@ export const DEFAULT_PERSONA_TEMPLATES = Object.freeze({
       type: 'text',
       text: '{{env_locale}}',
     }),
+    Object.freeze({
+      id: 'caller_system',
+      note: '第三方 system。不进顶层 system，包成 <system-reminder> 放在第一条 user 最前面',
+      drop_if_empty: true,
+      type: 'text',
+      text: '<system-reminder>\n{{caller_system}}\n</system-reminder>\n',
+    }),
   ]),
   official_full: Object.freeze([
     Object.freeze({

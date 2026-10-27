@@ -1447,6 +1447,7 @@ export function personaTemplateSettingsFromRouting(routing = {}) {
       persona_env_instructions_presets: compat.persona_env_instructions_presets,
       persona_timezone_presets: compat.persona_timezone_presets,
       persona_locale_presets: compat.persona_locale_presets,
+      persona_guidance_presets: compat.persona_guidance_presets,
     },
   }
 }
@@ -1761,6 +1762,8 @@ function rewriteOfficialSystem(
   const indexes = billingIndexesFromMessages(messages)
   const extras = park ? collectParkedStanding(routingFile) : []
   const { env, sourceTexts, facts } = personaEnvForBody(body, { identity, model, overwrite })
+  // Slot locale is opt-in for templates; rewrite keeps only the caller's own Locale line (overwrite writes the slot's).
+  if (!overwrite) env.locale = facts.locale || ''
   // Legacy rewrite keeps mid-conversation role=system in the message list.
   const harness = thirdPartyClientPrompt(body.system)
   const leftover = harness ? '' : parkableSystemTexts(body.system).join('\n\n')

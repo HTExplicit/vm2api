@@ -954,3 +954,62 @@ test('official full can drop env_official while the timezone switch still writes
     [],
   )
 })
+
+test('official preset preserves caller system verbatim in a reminder at the front of the first user turn', () => {
+  const caller = '你是一个高速收费员。\n  Keep THIS exact.'
+  withRoutingFile({ persona_preset: 'official', overlay_preset: 'off' }, (file) => {
+    const out = applyCrsUnofficialPersona(
+      { model: 'claude-opus-5-5', system: caller, messages: [{ role: 'user', content: 'hi' }] },
+      { routingFile: file },
+    )
+    assert.equal(firstUserText(out), `<system-reminder>\n${caller.trim()}\n</system-reminder>\nhi`)
+    assert.equal(
+      out.system.some((block) => String(block.text).includes('高速收费员')),
+      false,
+    )
+  })
+})
+
+test('routing persona_guidance_presets turns the 303 guidance block on; default leaves it off', () => {
+  const guidance = (out) => out.system.filter((block) => String(block.text).startsWith('Write code that reads like'))
+  withRoutingFile({ persona_preset: 'official_full', overlay_preset: 'off' }, (file) => {
+    const out = applyCrsUnofficialPersona({ messages: [{ role: 'user', content: 'hi' }] }, { routingFile: file })
+    assert.equal(guidance(out).length, 0)
+  })
+  withRoutingFile(
+    { persona_preset: 'official_full', overlay_preset: 'off', persona_guidance_presets: { official_full: true } },
+    (file) => {
+      const out = applyCrsUnofficialPersona({ messages: [{ role: 'user', content: 'hi' }] }, { routingFile: file })
+      const [block] = guidance(out)
+      assert.equal(block?.text, renderOfficial303Guidance())
+      assert.deepEqual(block.cache_control, { type: 'ephemeral' })
+      assert.equal(
+        out.system.indexOf(block),
+        out.system.findIndex((b) => b.text === '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__') + 1,
+      )
+    },
+  )
+})
+
+test('legacy rewrite Environment never adds the slot locale but keeps a caller Locale line', () => {
+  const identity = { timezone: 'Asia/Tokyo', locale: 'ja_JP.UTF-8', fingerprint: { locale: 'ja_JP.UTF-8' } }
+  const envTexts = (system) =>
+    applyCrsUnofficialPersona(
+      { model: 'claude-sonnet-5', system, messages: [{ role: 'user', content: 'hi' }] },
+      { mode: 'rewrite', identity },
+    )
+      .system.map((block) => String(block.text))
+      .filter((text) => text.startsWith('# Environment'))
+  const bare = envTexts(undefined)
+  assert.ok(bare.length > 0)
+  assert.equal(
+    bare.some((text) => text.includes('Locale:') || text.includes('ja_JP')),
+    false,
+  )
+  const supplied = envTexts('# Environment\n - Locale: fr_FR.UTF-8\n - Timezone: Europe/Paris')
+  assert.ok(supplied.some((text) => text.includes(' - Locale: fr_FR.UTF-8')))
+  assert.equal(
+    supplied.some((text) => text.includes('ja_JP')),
+    false,
+  )
+})
