@@ -218,6 +218,56 @@ export function createHandleProtocol(deps) {
     } catch {}
   }
 
+  function keyGateErrorBody(gate) {
+    return makeError({
+      type: gate.status === 429 ? ErrorType.RATE_LIMIT : ErrorType.PERMISSION,
+      code: gate.code,
+      message: gate.message,
+      status: gate.status,
+      details: gate.detail || undefined,
+    }).body
+  }
+
+  // Codex handlers write usage onto logBag themselves. The key is charged the
+  // official cost usage_logs prices for the same row (image generation
+  // included) times the group rate; logBag is left as is so the row is too.
+  function billCodexKey(managedKey, logBag) {
+    if (logBag.final_state !== 'verified') return
+    const model = logBag.upstream_model || logBag.model
+    const image = logBag.image_usage
+      ? { usage: logBag.image_usage, model: logBag.image_model || null, only: logBag.protocol === 'openai.images' }
+      : null
+    try {
+      const priced = costColumnsFromUsage(logBag.usage || {}, model, image)
+      apiKeyStore.recordUsage(managedKey, logBag.usage || {}, {
+        model,
+        rateMultiplier: deps.groupsRepo.rateMultiplier(managedKey.group_id ?? 1),
+        officialCost: priced.total_cost,
+      })
+    } catch {}
+  }
+
+  /** Codex handlers take the same managed-key acquire / release / spend as the Claude paths. */
+  async function runWithCodexKey(req, res, logBag, run) {
+    const managedKey = req.apiKeyRecord || null
+    if (!managedKey) return run()
+    const gate = apiKeyStore.acquire(managedKey)
+    if (!gate.ok) {
+      stats.errors++
+      logBag.error_code = gate.code
+      logBag.error_message = gate.message
+      return json(res, gate.status, keyGateErrorBody(gate))
+    }
+    try {
+      return await run()
+    } finally {
+      try {
+        apiKeyStore.release(managedKey)
+      } catch {}
+      billCodexKey(managedKey, logBag)
+    }
+  }
+
   function finishClientCancel(res, result, logBag) {
     // Client cancellation is a lifecycle terminal, not a request error. Keep
     // final_state for audit, but leave error fields empty so the cancelled turn
@@ -769,7 +819,38 @@ export function createHandleProtocol(deps) {
         })
       if (protocol === 'anthropic.messages') {
         const codex = normalizeCodexRouting(routing.codex)
-        return handleCodexProtocol({
+        return runWithCodexKey(req, res, logBag, () =>
+          handleCodexProtocol({
+            req,
+            res,
+            protocol,
+            ctx,
+            inbound,
+            logBag,
+            stats,
+            json,
+            writeSSEHeaders,
+            routing: {
+              ...routing,
+              codex: {
+                ...codex,
+                protocols: {
+                  ...codex.protocols,
+                  'anthropic.messages': { mode: 'convert', enabled: true },
+                },
+                convert: { ...codex.convert, anthropic_to_codex: true },
+              },
+            },
+            projectRoot: cfg.paths.project,
+            captureOutbound: logCtx.capture_outbound === true,
+            accountGate,
+            ops: deps.codexOps || {},
+            ...codexSticky,
+          }),
+        )
+      }
+      return runWithCodexKey(req, res, logBag, () =>
+        handleCodexProtocol({
           req,
           res,
           protocol,
@@ -779,41 +860,14 @@ export function createHandleProtocol(deps) {
           stats,
           json,
           writeSSEHeaders,
-          routing: {
-            ...routing,
-            codex: {
-              ...codex,
-              protocols: {
-                ...codex.protocols,
-                'anthropic.messages': { mode: 'convert', enabled: true },
-              },
-              convert: { ...codex.convert, anthropic_to_codex: true },
-            },
-          },
+          routing,
           projectRoot: cfg.paths.project,
           captureOutbound: logCtx.capture_outbound === true,
           accountGate,
           ops: deps.codexOps || {},
           ...codexSticky,
-        })
-      }
-      return handleCodexProtocol({
-        req,
-        res,
-        protocol,
-        ctx,
-        inbound,
-        logBag,
-        stats,
-        json,
-        writeSSEHeaders,
-        routing,
-        projectRoot: cfg.paths.project,
-        captureOutbound: logCtx.capture_outbound === true,
-        accountGate,
-        ops: deps.codexOps || {},
-        ...codexSticky,
-      })
+        }),
+      )
     }
     if (protocol === 'openai.responses') {
       stats.errors++
@@ -1055,17 +1109,7 @@ export function createHandleProtocol(deps) {
         const gate = apiKeyStore.acquire(managedKey)
         if (!gate.ok) {
           stats.errors++
-          return json(
-            res,
-            gate.status,
-            makeError({
-              type: gate.status === 429 ? ErrorType.RATE_LIMIT : ErrorType.PERMISSION,
-              code: gate.code,
-              message: gate.message,
-              status: gate.status,
-              details: gate.detail || undefined,
-            }).body,
-          )
+          return json(res, gate.status, keyGateErrorBody(gate))
         }
       }
       const clientAbort = bindClientAbort(req, res)
@@ -1176,17 +1220,7 @@ export function createHandleProtocol(deps) {
       const gate = apiKeyStore.acquire(managedKey)
       if (!gate.ok) {
         stats.errors++
-        return json(
-          res,
-          gate.status,
-          makeError({
-            type: gate.status === 429 ? ErrorType.RATE_LIMIT : ErrorType.PERMISSION,
-            code: gate.code,
-            message: gate.message,
-            status: gate.status,
-            details: gate.detail || undefined,
-          }).body,
-        )
+        return json(res, gate.status, keyGateErrorBody(gate))
       }
     }
 
@@ -1844,18 +1878,20 @@ export function createHandleProtocol(deps) {
     }
     logBag.model = typeof body?.model === 'string' ? body.model : null
     logBag.inbound_summary = summarizeBody(body)
-    return handleCodexSearch({
-      req,
-      res,
-      body,
-      logBag,
-      stats,
-      json,
-      routing: getRouting() || {},
-      projectRoot: cfg.paths.project,
-      stickyRouter,
-      ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
-    })
+    return runWithCodexKey(req, res, logBag, () =>
+      handleCodexSearch({
+        req,
+        res,
+        body,
+        logBag,
+        stats,
+        json,
+        routing: getRouting() || {},
+        projectRoot: cfg.paths.project,
+        stickyRouter,
+        ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
+      }),
+    )
   }
 
   /** Field names and image count only: Images bodies carry base64 uploads. */
@@ -1954,19 +1990,21 @@ export function createHandleProtocol(deps) {
     }
     logBag.model = typeof body?.model === 'string' ? body.model : null
     logBag.inbound_summary = summarizeImagesBody(body)
-    return handleCodexImages({
-      req,
-      res,
-      kind,
-      body,
-      logBag,
-      stats,
-      json,
-      routing: getRouting() || {},
-      projectRoot: cfg.paths.project,
-      stickyRouter,
-      ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
-    })
+    return runWithCodexKey(req, res, logBag, () =>
+      handleCodexImages({
+        req,
+        res,
+        kind,
+        body,
+        logBag,
+        stats,
+        json,
+        routing: getRouting() || {},
+        projectRoot: cfg.paths.project,
+        stickyRouter,
+        ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
+      }),
+    )
   }
 
   return {
