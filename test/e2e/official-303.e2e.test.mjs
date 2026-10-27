@@ -112,7 +112,7 @@ test('official_303 lean on the real chain: skeleton, rules, version, CCH', { ski
   const blocking = diffShapes(SKELETON, outboundShape(wire.body)).filter((diff) => !isAllowedSkeletonDiff(diff))
   assert.deepEqual(blocking, [])
   assert.equal(wire.body.kin_outbound_shape, undefined)
-  assert.equal(wire.headers['user-agent'], 'claude-cli/2.1.303 (external, sdk-cli)')
+  assert.equal(wire.headers['user-agent'], 'claude-cli/2.1.303 (external, cli)')
   assert.equal(wire.headers.accept, 'application/json, text/event-stream')
   assert.equal(wire.headers['accept-encoding'], 'gzip, br')
   assert.equal(wire.headers['x-stainless-timeout'], '600')
@@ -129,7 +129,7 @@ test('official_303 lean on the real chain: skeleton, rules, version, CCH', { ski
   }
   assert.match(
     billingOf(wire),
-    /^x-anthropic-billing-header: cc_version=2\.1\.303\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=[0-9a-f]{5}; cc_prompt_id=/,
+    /^x-anthropic-billing-header: cc_version=2\.1\.303\.[0-9a-f]{3}; cc_entrypoint=cli; cch=[0-9a-f]{5}; cc_prompt_id=/,
   )
   assert.equal(wire.raw.includes('/home/caller/'), false)
   assert.equal(wire.body.messages[1].content.endsWith(AFTER_ENV), true)
@@ -261,8 +261,8 @@ test('default official templates send the 2.1.303 CLI identity on the real chain
 }, async (t) => {
   for (const preset of ['official', 'official_full']) {
     for (const [entry, routingBase] of [
-      ['sdk-cli', null],
-      ['cli', { compatibility: { cc_entrypoint: 'cli' } }],
+      ['cli', null],
+      ['sdk-cli', { compatibility: { cc_entrypoint: 'sdk-cli' } }],
     ]) {
       const chain = await startRealChain({
         kernelBin,
@@ -304,8 +304,8 @@ test('default official templates put a third-party prompt in one first-user remi
   ]
   for (const preset of ['official', 'official_full']) {
     for (const [entry, routingBase] of [
-      ['sdk-cli', null],
-      ['cli', { compatibility: { cc_entrypoint: 'cli' } }],
+      ['cli', null],
+      ['sdk-cli', { compatibility: { cc_entrypoint: 'sdk-cli' } }],
     ]) {
       const chain = await startRealChain({
         kernelBin,

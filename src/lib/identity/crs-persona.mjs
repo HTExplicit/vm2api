@@ -423,7 +423,7 @@ export function buildBillingAttributionText(
   cliVersion = DEFAULT_CLI_VERSION,
   sessionId = '',
   indexes = null,
-  entrypoint = 'sdk-cli',
+  entrypoint = 'cli',
 ) {
   const ver = parseCliVersion(cliVersion)
   const fp = computeClaudeCodeFingerprint(firstUserText ?? '', ver)
@@ -433,15 +433,15 @@ export function buildBillingAttributionText(
   return `x-anthropic-billing-header: cc_version=${ver}.${fp}; cc_entrypoint=${entry}; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${promptId};${tail}`
 }
 
-/** Panel switch. Only `cli` leaves the shipped `sdk-cli` default. */
+/** Panel switch. Only explicit `sdk-cli` leaves the shipped `cli` default. */
 export function ccEntrypointFromRouting(routing) {
-  return routing?.compatibility?.cc_entrypoint === 'cli' ? 'cli' : 'sdk-cli'
+  return routing?.compatibility?.cc_entrypoint === 'sdk-cli' ? 'sdk-cli' : 'cli'
 }
 
 /** Add the billing block exactly once before the cli-node hop. */
 export function ensureBillingAttribution(
   body,
-  { firstUserText = '', cliVersion = DEFAULT_CLI_VERSION, sessionId = '', indexes = null, entrypoint = 'sdk-cli' } = {},
+  { firstUserText = '', cliVersion = DEFAULT_CLI_VERSION, sessionId = '', indexes = null, entrypoint = 'cli' } = {},
 ) {
   if (!body || typeof body !== 'object') return body
   const hasBilling = (system) => {
@@ -796,7 +796,7 @@ export function buildZeroBillingText(
   firstUserText,
   cliVersion = DEFAULT_CLI_VERSION,
   sessionId = '',
-  entrypoint = 'sdk-cli',
+  entrypoint = 'cli',
 ) {
   const billing = buildBillingAttributionText(firstUserText, cliVersion, sessionId, null, entrypoint)
   const header = billing.endsWith(';') ? billing : `${billing};`
@@ -830,7 +830,7 @@ export function personaTemplateVars({
   preset = '',
   timezoneOnlyEnv = false,
   messages = null,
-  entrypoint = 'sdk-cli',
+  entrypoint = 'cli',
 } = {}) {
   const billing = buildBillingAttributionText(
     firstUserText,
@@ -1813,7 +1813,7 @@ function applyTemplatePersona(
     identity,
     model,
     callerAgent: rawCallerAgent = '',
-    entrypoint = 'sdk-cli',
+    entrypoint = 'cli',
   } = {},
 ) {
   const messages = Array.isArray(body.messages) ? body.messages : []

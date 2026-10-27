@@ -86,7 +86,7 @@ function officialCaller(model = 'claude-opus-5-5') {
   }
 }
 
-function lean(body, { ttl = '5m', officialCallerFlag = true, compat = {}, oneM = false, entrypoint = 'sdk-cli' } = {}) {
+function lean(body, { ttl = '5m', officialCallerFlag = true, compat = {}, oneM = false, entrypoint = 'cli' } = {}) {
   const routing = {
     compatibility: {
       cache_ttl: ttl,
@@ -122,7 +122,7 @@ test('official caller: system is billing, identity, harness, guidance; caller sy
   assert.equal(out.system.length, 5)
   assert.match(
     out.system[0].text,
-    /^x-anthropic-billing-header: cc_version=2\.1\.303\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=00000;/,
+    /^x-anthropic-billing-header: cc_version=2\.1\.303\.[0-9a-f]{3}; cc_entrypoint=cli; cch=00000;/,
   )
   assert.equal(out.system[0].text.includes('cc_is_subagent'), false)
   assert.equal(out.system[0].cache_control, undefined)
@@ -131,8 +131,8 @@ test('official caller: system is billing, identity, harness, guidance; caller sy
   assert.equal(out.system[2].text, OFFICIAL_303_HARNESS)
   assert.equal(out.system[3].text, '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__')
   assert.equal(out.system[3].cache_control, undefined)
-  assert.equal(out.system[4].text, renderOfficial303Guidance({ cwd: '/srv/app', entrypoint: 'sdk-cli' }))
-  assert.doesNotMatch(out.system[4].text, /! <command>/)
+  assert.equal(out.system[4].text, renderOfficial303Guidance({ cwd: '/srv/app', entrypoint: 'cli' }))
+  assert.match(out.system[4].text, /! <command>/)
   assert.deepEqual(out.thinking, { type: 'adaptive', display: 'summarized' })
   const wire = JSON.stringify(out)
   assert.ok(!wire.includes('You are an interactive agent that helps users'), 'old 2.1.296 full prompt dropped')
@@ -147,6 +147,13 @@ test('cli entrypoint keeps the interactive identity and guidance bullet', () => 
   assert.equal(out.system[1].text, OFFICIAL_303_IDENTITY)
   assert.match(out.system[4].text, /! <command>/)
   assert.equal(out.system[4].text, renderOfficial303Guidance({ cwd: '/srv/app', entrypoint: 'cli' }))
+})
+
+test('sdk-cli entrypoint drops the interactive guidance bullet', () => {
+  const out = lean(officialCaller(), { entrypoint: 'sdk-cli' })
+  assert.match(out.system[0].text, /cc_entrypoint=sdk-cli;/)
+  assert.doesNotMatch(out.system[4].text, /! <command>/)
+  assert.equal(out.system[4].text, renderOfficial303Guidance({ cwd: '/srv/app', entrypoint: 'sdk-cli' }))
 })
 
 test('official caller: only the role=system Environment section changes; other bytes stay', () => {

@@ -9,6 +9,7 @@ import {
   billingIndexesFromMessages,
   billingPromptId,
   buildBillingAttributionText,
+  ccEntrypointFromRouting,
   CCH_PLACEHOLDER,
   computeClaudeCodeFingerprint,
   CRS_STANDING_CONSTRAINT,
@@ -414,6 +415,14 @@ test('standalone official line does not insert System Instructions', () => {
   assert.ok(!JSON.stringify(out.messages).includes('[System Instructions]'))
 })
 
+test('ccEntrypointFromRouting defaults to cli unless routing sets sdk-cli', () => {
+  assert.equal(ccEntrypointFromRouting(undefined), 'cli')
+  assert.equal(ccEntrypointFromRouting({}), 'cli')
+  assert.equal(ccEntrypointFromRouting({ compatibility: {} }), 'cli')
+  assert.equal(ccEntrypointFromRouting({ compatibility: { cc_entrypoint: 'sdk-cli' } }), 'sdk-cli')
+  assert.equal(ccEntrypointFromRouting({ compatibility: { cc_entrypoint: 'cli' } }), 'cli')
+})
+
 test('fingerprint is stable for the same first user text and cli version', () => {
   const user = 'abcdefghijklmnopqrstuvwxyz'
   const a = buildBillingAttributionText(user, '2.1.234')
@@ -424,7 +433,7 @@ test('fingerprint is stable for the same first user text and cli version', () =>
   assert.notEqual(a, other)
   assert.equal(
     a,
-    `x-anthropic-billing-header: cc_version=2.1.234.${expectedFp(user, '2.1.234')}; cc_entrypoint=sdk-cli; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${billingPromptId('', user, '2.1.234')};`,
+    `x-anthropic-billing-header: cc_version=2.1.234.${expectedFp(user, '2.1.234')}; cc_entrypoint=cli; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${billingPromptId('', user, '2.1.234')};`,
   )
 })
 
@@ -446,7 +455,7 @@ test('billing attribution leaves caller-supplied billing unchanged', () => {
   assert.equal(out.system[0].text, caller)
 })
 
-test('missing billing receives sdk-cli and turn indexes; caller billing keeps entrypoint', () => {
+test('missing billing receives cli and turn indexes; caller billing keeps entrypoint', () => {
   const messages = [
     { role: 'user', content: 'ping' },
     { role: 'assistant', content: 'pong' },
@@ -460,7 +469,7 @@ test('missing billing receives sdk-cli and turn indexes; caller billing keeps en
   assert.match(
     added.system[0].text,
     new RegExp(
-      `^x-anthropic-billing-header: cc_version=2\\.1\\.296\\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${sessionId}; cc_turn_origin=sdk; cc_prompt_index=0; cc_turn_index=1;$`,
+      `^x-anthropic-billing-header: cc_version=2\\.1\\.296\\.[0-9a-f]{3}; cc_entrypoint=cli; cch=${CCH_PLACEHOLDER}; cc_prompt_id=${sessionId}; cc_turn_origin=sdk; cc_prompt_index=0; cc_turn_index=1;$`,
     ),
   )
   const caller = 'x-anthropic-billing-header: cc_version=2.1.296.abc; cc_entrypoint=cli; cch=00000;'
@@ -688,7 +697,7 @@ test('oh-my-pi OAuth stealth prefix does not skip rewrite even with official UA 
   assert.equal(out.system.length, 4)
   assert.equal(out.system[0].text, CRS_OFFICIAL_SYSTEM)
   assert.match(out.system[1].text, /Oh My Pi coding harness/)
-  assert.match(out.system[2].text, /cc_entrypoint=sdk-cli;/)
+  assert.match(out.system[2].text, /cc_entrypoint=cli;/)
   assert.match(out.system[1].text, /<workstation>/)
   assert.ok(!JSON.stringify(out.system).includes('local-agent'))
   assert.ok(!JSON.stringify(out.system).includes('cc_entrypoint=local-agent'))
@@ -1046,7 +1055,7 @@ test('desktop billing and Agent SDK leftovers are dropped, not parked', () => {
   assert.equal(out.system.length, 5)
   assert.equal(out.system[1].text, CRS_AGENT_EXPANSION)
   assert.equal(out.system[4].text, 'you are a linter')
-  assert.match(out.system[2].text, /cc_entrypoint=sdk-cli;/)
+  assert.match(out.system[2].text, /cc_entrypoint=cli;/)
   assert.ok(!JSON.stringify(out.system).includes('claude-desktop'))
   assert.ok(!JSON.stringify(out.system).includes('running inside'))
   assert.ok(!firstUserContent(out).includes('claude-desktop'))

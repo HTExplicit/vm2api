@@ -793,7 +793,7 @@ export function writeKernelConfig(
     cli_version: profileForPreset(resolveSlotPersonaPreset(vm, routing || {})).cliVersion,
     default_cache_ttl: defaultCacheTtl,
     cc_entrypoint:
-      routing == null ? (previous.cc_entrypoint === 'cli' ? 'cli' : 'sdk-cli') : ccEntrypointFromRouting(routing),
+      routing == null ? (previous.cc_entrypoint === 'sdk-cli' ? 'sdk-cli' : 'cli') : ccEntrypointFromRouting(routing),
     cch_enabled: cchEnabled,
     auto_compact_window: autoCompactWindow,
     model_effort: modelEffort,
