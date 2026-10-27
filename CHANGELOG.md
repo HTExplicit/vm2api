@@ -5,8 +5,9 @@
 ## 1.4.018 — 2026-10-27
 
 - #720：风控页新增「JEV 使用记录」（全部 / JEV 视图下，默认折叠）：每次真正发给审核模型的调用记一行，含北京时间今日次数、累计调用/成功、上游返回的输入/输出 tokens 和按官方 TypeSafe 公开价的费用估算；去重缓存命中不算调用，上游没报用量的记为未知而不是 0。只存 Key 指纹（sha256 前 12 位），不存密钥、正文、问题和响应；明细保留 30 天，按天汇总保留 90 天，累计汇总一直保留。接口 `GET /api/panel/jev-usage` 仅管理员可读。新增迁移 045。
+- #666：arm64 控制面 `deploy/Dockerfile.arm64-control` 的 `NODE_IMAGE` digest 升到 Node 22.23.4（`sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d`），覆盖 Node 10–21 安全更新；amd64 Dockerfile 用浮动标签，下次构建自然跟上。
 
-已部署机升级：更新 Node 控制面与 `web/dist` 后重启；启动应用迁移 045。cli-node 哈希未变，不必 `fetch:payload` / `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+已部署机升级：更新 Node 控制面与 `web/dist` 后重启；启动应用迁移 045。arm64 部署须拉新控制面镜像重建（含 Node 22.23.4）。cli-node 哈希未变，不必 `fetch:payload` / `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
 
 ## 1.4.017 — 2026-10-27
 
