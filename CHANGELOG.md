@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- #804：准入钩子期间释放后按实时 inflight 递增，避免占位复活。
+
 ## 1.4.023 — 2026-10-28
 
 - #791：识别官方 Claude Code 的 `agent_summary` 进度摘要请求（末尾完整摘要指令，含同消息 tool_result + text 与 token-budget 提醒），每次用临时出站会话和独立 seat，不进父会话串行队列、不绑定父会话 sticky / family；VM 亲和、槽位、并发与额度准入照常，容量耗尽时仍排队。普通同会话请求继续串行。此前摘要被父会话长请求挡住，观测到总 TTFT 185 秒（模型 TTFT 2.2 秒）。
