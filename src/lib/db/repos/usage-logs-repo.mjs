@@ -117,6 +117,7 @@ const SUMMARY_COLUMNS = [
   'actual_cost',
   'rate_multiplier',
   'service_tier',
+  'upstream_service_tier',
   'speed',
   'long_context',
   'session_id',

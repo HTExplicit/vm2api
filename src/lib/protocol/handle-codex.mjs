@@ -338,13 +338,19 @@ export function codexFailureHold(result, now = Date.now()) {
 }
 
 /** Idle SOCKS / first hop 502 is retryable only before any SSE byte is committed. */
+/** Lowercased tier; empty, oversized or control-character values are not a tier. */
+function normalizeServiceTier(raw) {
+  if (typeof raw !== 'string') return null
+  const tier = raw.trim().toLowerCase()
+  return tier && tier.length <= 64 && !/[\x00-\x1f\x7f]/.test(tier) ? tier : null
+}
+
 /** `response.service_tier` from a Responses SSE data line, if present. */
 export function serviceTierFromSseLine(line) {
   if (typeof line !== 'string' || !line.startsWith('data:') || !line.includes('service_tier')) return null
   try {
     const ev = JSON.parse(line.slice(5).trim())
-    const tier = ev?.response?.service_tier ?? ev?.service_tier
-    return typeof tier === 'string' && tier ? tier : null
+    return normalizeServiceTier(ev?.response?.service_tier ?? ev?.service_tier)
   } catch {
     return null
   }
@@ -897,8 +903,11 @@ export async function handleCodexProtocol({
         if (delivered) {
           attemptKind = 'succeeded'
           bindSticky(outboundSessionId)
-          const serviceTier = responseServiceTier || converted.body?.service_tier || usage?.service_tier || null
-          const logged = disjointOpenaiUsage(usage && serviceTier ? { ...usage, service_tier: serviceTier } : usage)
+          // Billing follows the tier actually sent (codex-proxy-rs contract). The upstream
+          // echo is kept apart: `priority` answered with `default` is a Fast downgrade (#777).
+          const serviceTier = normalizeServiceTier(outboundBody.service_tier)
+          logBag.upstream_service_tier = responseServiceTier
+          const logged = disjointOpenaiUsage(usage ? { ...usage, service_tier: serviceTier } : usage)
           logBag.usage = logged
           const imageUsage =
             result.body?.tool_usage?.image_gen || result.body?.response?.tool_usage?.image_gen || streamedImageUsage
