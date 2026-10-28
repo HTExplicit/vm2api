@@ -23,7 +23,7 @@
  *   queueSyncRun(vm, slotDir)   fire-and-forget syncRun
  *   onImport(vm, slotDir)       an imported credential replaces the slot's copy
  *   afterRefresh(vm, slotDir)   the slot rotated its credential; mirror it back
- *   touch(vm, slotDir)          telemetry activity mark
+ *   syncTelemetry(vm, slotDir)  acknowledge run/seed publication for VM-native telemetry
  *
  * A node may be a Mac (`platform: 'darwin'`): its slots are launchd services,
  * not containers. That host is `native: true`, has no Docker (dockerApi /
@@ -32,14 +32,16 @@
  *   observe(vm)                 watchdog state of the kernel job
  *   inspect(vm)                 recovery-panel view (same shape as a container inspect)
  *   restartKernel(vm, root)     bounce or (re)load the kernel job
- *   telemetryRunning(vm)        sidecar job state
- *   restartTelemetry(vm, opts)  sidecar on/off
  *
  * Functions are wrapped, not referenced: this module sits in an import cycle
  * with vm-runtime / the kernel supervisor, so bindings are read at call time.
  */
 
 import { localDocker } from '../cluster/docker-remote.mjs'
+import fs from 'node:fs'
+import path from 'node:path'
+import { nodeSession, remoteSlotDir } from '../cluster/placement.mjs'
+import { readRemoteFileNoFollow } from '../cluster/remote-fs.mjs'
 import {
   clusterManager,
   isNativeNodeVm,
@@ -52,11 +54,9 @@ import {
   destroyNativeSlot,
   inspectNativeSlot,
   nativeSlotPaths,
-  nativeTelemetryRunning,
   observeNativeSlot,
   reloadNativeSlot,
   restartNativeKernel,
-  restartNativeTelemetry,
   startNativeSlot,
   stopNativeSlot,
 } from '../cluster/native-slot.mjs'
@@ -65,7 +65,6 @@ import {
   pullSlotCredentials,
   pushSlotCredentials,
   pushSlotFiles,
-  pushTelemetryTouch,
   queueSlotPush,
 } from '../cluster/remote-slot-files.mjs'
 import {
@@ -102,7 +101,11 @@ const LOCAL_HOST = Object.freeze({
   nodeId: null,
   bakedKernel: false,
   ownsSocketFiles: true,
-  bins: Object.freeze({ cli: CONTAINER_CLI_NODE_BIN, cc: CONTAINER_CC_NODE_BIN }),
+  bins: Object.freeze({
+    cli: CONTAINER_CLI_NODE_BIN,
+    cc: CONTAINER_CC_NODE_BIN,
+    oauthAuth: '/usr/local/bin/kin-oauth-auth',
+  }),
   supports: () => true,
   dockerEnv: () => undefined,
   dockerApi: () => localDocker(),
@@ -144,10 +147,25 @@ const LOCAL_HOST = Object.freeze({
   localExitProxyUrl: (vm) => (isCodexVm(vm) ? localEgressProxyUrl() : ''),
   // The container bind-mounts vms/<id>/ directly: every local write is already published.
   syncRun: noop,
+  syncTelemetry: async () => ({ published: true }),
+  telemetryLog: async (vm, slotDir) => {
+    const file = path.join(vm.runtime?.worker_run_dir || path.join(slotDir, 'run'), 'telemetry-upload.log')
+    try {
+      const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK)
+      try {
+        const stat = fs.fstatSync(fd)
+        return stat.isFile() && stat.size <= 65536 ? fs.readFileSync(fd, 'utf8') : ''
+      } finally {
+        fs.closeSync(fd)
+      }
+    } catch (error) {
+      if (error.code === 'ENOENT') return ''
+      throw error
+    }
+  },
   queueSyncRun: () => null,
   onImport: noop,
   afterRefresh: noop,
-  touch: () => null,
 })
 
 function nodeHost(nodeId) {
@@ -156,7 +174,7 @@ function nodeHost(nodeId) {
     nodeId,
     bakedKernel: true,
     ownsSocketFiles: false,
-    bins: { cli: REMOTE_CLI_NODE_BIN, cc: REMOTE_CC_NODE_BIN },
+    bins: { cli: REMOTE_CLI_NODE_BIN, cc: REMOTE_CC_NODE_BIN, oauthAuth: '/usr/local/bin/kin-oauth-auth' },
     supports: (cap) => SLOT_CAPS_NODE.has(cap),
     dockerEnv: () => ({ ...process.env, DOCKER_HOST: `unix://${clusterManager().bridgeSocketPath(nodeId)}` }),
     dockerApi: () => clusterManager().docker(nodeId),
@@ -169,10 +187,25 @@ function nodeHost(nodeId) {
     setProxyEgressEnabled: (vm, projectRoot, enabled) => setRemoteProxyEgressEnabled(vm, projectRoot, enabled),
     localExitProxyUrl: () => nodeEgressProxyUrl(nodeId),
     syncRun: (vm, slotDir) => pushSlotFiles(vm, slotDir, ['run']),
+    syncTelemetry: async (vm, slotDir) => {
+      const result = await pushSlotFiles(vm, slotDir, ['run', 'seed'])
+      if (!result.pushed.includes('run/kernel.json') || !result.pushed.includes('cli-home/.claude/kin-seed.json')) {
+        throw new ClusterError(502, 'telemetry_publish_failed', 'VM telemetry configuration was not published')
+      }
+      return { ...result, published: true }
+    },
+    telemetryLog: async (vm) => {
+      const session = await nodeSession(nodeId)
+      const bytes = await readRemoteFileNoFollow(
+        session.client,
+        `${remoteSlotDir(session.host, vm.id)}/run/telemetry-upload.log`,
+        { maxBytes: 65536 },
+      )
+      return bytes?.toString('utf8') || ''
+    },
     queueSyncRun: (vm, slotDir) => queueSlotPush(vm, slotDir, ['run']),
     onImport: (vm, slotDir) => pushSlotCredentials(vm, slotDir),
     afterRefresh: (vm, slotDir) => pullSlotCredentials(vm, slotDir),
-    touch: (vm, slotDir) => pushTelemetryTouch(vm, slotDir),
   }
 }
 
@@ -212,6 +245,7 @@ function nativeHost(nodeId, record) {
     dockerEnv: unsupported('容器命令'),
     dockerApi: unsupported('容器命令'),
     execUser: unsupported('容器命令'),
+    syncTelemetry: unsupported('VM 原生遥测'),
     start: (vm, projectRoot, opts) => startNativeSlot(vm, projectRoot, opts),
     reload: (vm, projectRoot, opts) => reloadNativeSlot(vm, projectRoot, opts),
     stop: (vm) => stopNativeSlot(vm),
@@ -224,8 +258,6 @@ function nativeHost(nodeId, record) {
     observe: (vm) => observeNativeSlot(vm),
     inspect: (vm) => inspectNativeSlot(vm),
     restartKernel: (vm, projectRoot, opts) => restartNativeKernel(vm, projectRoot, opts),
-    telemetryRunning: (vm) => nativeTelemetryRunning(vm),
-    restartTelemetry: (vm, opts) => restartNativeTelemetry(vm, opts),
   }
 }
 
@@ -235,7 +267,11 @@ export function slotHost(vm) {
   const base = nodeId ? nodeHost(nodeId) : LOCAL_HOST
   if (!isKvmRuntime(vm)) return base
   // Runner socat owns run/kernel.sock; deleting it severs the guest relay.
-  return { ...base, ownsSocketFiles: false }
+  return {
+    ...base,
+    bins: { ...base.bins, oauthAuth: '/opt/kin-payload/usr/local/bin/kin-oauth-auth' },
+    ownsSocketFiles: false,
+  }
 }
 
 /**

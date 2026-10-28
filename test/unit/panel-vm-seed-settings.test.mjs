@@ -132,7 +132,15 @@ test('GET seed-settings returns the upload log only when debug is on', async () 
     fs.mkdirSync(run, { recursive: true })
     fs.writeFileSync(
       path.join(run, 'telemetry-upload.log'),
-      'old\n2026-10-19T00:00:00Z batch tengu_init ok {"event_type":"x"}\n',
+      'old\n' +
+        JSON.stringify({
+          at: '2026-10-19T00:00:00Z',
+          ok: true,
+          events: 2,
+          device_id: 'must-not-escape',
+          payload: 'private-content',
+        }) +
+        '\n',
     )
     const hidden = handler(root)
     await hidden.handlePanel(
@@ -147,10 +155,13 @@ test('GET seed-settings returns the upload log only when debug is on', async () 
       {},
       new URL('http://localhost/api/panel/vms/vm-01/seed-settings?debug=1'),
     )
-    assert.deepEqual(shown.response.body.data.telemetry_log, [
-      'old',
-      '2026-10-19T00:00:00Z batch tengu_init ok {"event_type":"x"}',
-    ])
+    const lines = shown.response.body.data.telemetry_log
+    assert.deepEqual(
+      lines.map((line) => JSON.parse(line)),
+      [{ at: '2026-10-19T00:00:00Z', ok: true, events: 2, error: null }],
+    )
+    assert.ok(!JSON.stringify(lines).includes('must-not-escape'))
+    assert.ok(!JSON.stringify(lines).includes('private-content'))
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

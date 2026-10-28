@@ -396,7 +396,7 @@ function fakeElf(file, fill) {
   buf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1], 0)
   buf.writeUInt16LE(62, 18)
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, buf)
+  fs.writeFileSync(file, buf, { mode: 0o755 })
 }
 
 test('slot image tag follows payload bytes only; a VERSION bump keeps the image', (t) => {
@@ -408,6 +408,7 @@ test('slot image tag follows payload bytes only; a VERSION bump keeps the image'
     'bin/kin-kernel',
     'bin/kin-worker',
     'bin/kin-egress',
+    'bin/kin-oauth-auth',
   ]) {
     fakeElf(path.join(root, f), 1)
   }
@@ -417,6 +418,7 @@ test('slot image tag follows payload bytes only; a VERSION bump keeps the image'
     'KIN_WORKER_BIN',
     'KIN_EGRESS_BIN',
     'KIN_CODEX_KERNEL_BIN',
+    'KIN_OAUTH_AUTH_BIN',
     'KIN_WRAP_CLI_ROOT',
     'KIN_CLUSTER_WORKER_BIN',
     'KIN_CLUSTER_EGRESS_BIN',
@@ -464,8 +466,24 @@ test('slot image tag follows payload bytes only; a VERSION bump keeps the image'
   assert.throws(() => slotImageSpec(root, 'nope-os'), { code: 'invalid_kernel' })
 })
 
-test('cluster payload check skips a container already on the content-hashed image', async () => {
+test('cluster payload check skips a container already on the content-hashed image', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cluster-payload-'))
+  const envKeys = [
+    'KIN_KERNEL_BIN',
+    'KIN_WRAP_CLI_ROOT',
+    'KIN_CODEX_KERNEL_BIN',
+    'KIN_OAUTH_AUTH_BIN',
+    'KIN_CLUSTER_WORKER_BIN',
+    'KIN_CLUSTER_EGRESS_BIN',
+  ]
+  const saved = envKeys.map((key) => [key, process.env[key]])
+  t.after(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+  for (const key of envKeys) delete process.env[key]
   try {
     for (const file of [
       'share/wrap-cli/cli-node',
@@ -473,9 +491,11 @@ test('cluster payload check skips a container already on the content-hashed imag
       'bin/kin-kernel',
       'bin/kin-worker',
       'bin/kin-egress',
+      'bin/kin-oauth-auth',
+      'bin/kin-codex-kernel',
     ])
       fakeElf(path.join(root, file), 1)
-    const saved = ['KIN_CLUSTER_WORKER_BIN', 'KIN_CLUSTER_EGRESS_BIN'].map((key) => [key, process.env[key]])
+    process.env.KIN_CODEX_KERNEL_BIN = path.join(root, 'bin/kin-codex-kernel')
     process.env.KIN_CLUSTER_WORKER_BIN = path.join(root, 'bin/kin-worker')
     process.env.KIN_CLUSTER_EGRESS_BIN = path.join(root, 'bin/kin-egress')
     const vm = { id: 'vm-03', node_id: 'node-a', kernel: 'ubuntu-24.04' }
@@ -484,6 +504,8 @@ test('cluster payload check skips a container already on the content-hashed imag
     const same = await inspectClusterPayloadChanges(root, [vm], { sessionFor: async () => ({ docker: {} }), inspect })
     assert.equal(same.changed_count, 0)
     fakeElf(path.join(root, 'share/wrap-cli/cli-node'), 2)
+    const replacementTime = new Date(Date.now() + 1000)
+    fs.utimesSync(path.join(root, 'share/wrap-cli/cli-node'), replacementTime, replacementTime)
     const next = await inspectClusterPayloadChanges(root, [vm], { sessionFor: async () => ({ docker: {} }), inspect })
     assert.equal(next.changed_count, 1)
     const native = { id: 'vm-mac', node_id: 'node-mac', runtime: { payload_digest: 'old' } }
@@ -505,10 +527,14 @@ test('cluster payload check skips a container already on the content-hashed imag
 
 test('node payload refresh leaves a running slot already on the current image up', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cluster-refresh-'))
-  const saved = ['KIN_CLUSTER_WORKER_BIN', 'KIN_CLUSTER_EGRESS_BIN', 'KIN_CODEX_KERNEL_BIN'].map((key) => [
-    key,
-    process.env[key],
-  ])
+  const saved = [
+    'KIN_KERNEL_BIN',
+    'KIN_WRAP_CLI_ROOT',
+    'KIN_CLUSTER_WORKER_BIN',
+    'KIN_CLUSTER_EGRESS_BIN',
+    'KIN_CODEX_KERNEL_BIN',
+    'KIN_OAUTH_AUTH_BIN',
+  ].map((key) => [key, process.env[key]])
   t.after(() => {
     for (const [key, value] of saved) {
       if (value === undefined) delete process.env[key]
@@ -516,6 +542,7 @@ test('node payload refresh leaves a running slot already on the current image up
     }
     fs.rmSync(root, { recursive: true, force: true })
   })
+  for (const [key] of saved) delete process.env[key]
   for (const file of [
     'share/wrap-cli/cli-node',
     'share/wrap-cli/cc-node',
@@ -523,6 +550,7 @@ test('node payload refresh leaves a running slot already on the current image up
     'bin/kin-worker',
     'bin/kin-egress',
     'bin/kin-codex-kernel',
+    'bin/kin-oauth-auth',
   ])
     fakeElf(path.join(root, file), 1)
   process.env.KIN_CLUSTER_WORKER_BIN = path.join(root, 'bin/kin-worker')
@@ -556,6 +584,7 @@ test('amd64 node payload stays separate from native ARM control helpers', (t) =>
     'bin/kin-codex-kernel',
     'bin/kin-worker',
     'bin/kin-egress',
+    'bin/kin-oauth-auth',
     'amd64/kin-worker',
     'amd64/kin-egress',
   ]) {
@@ -572,6 +601,7 @@ test('amd64 node payload stays separate from native ARM control helpers', (t) =>
     'KIN_WORKER_BIN',
     'KIN_EGRESS_BIN',
     'KIN_CODEX_KERNEL_BIN',
+    'KIN_OAUTH_AUTH_BIN',
     'KIN_WRAP_CLI_ROOT',
     'KIN_CLUSTER_WORKER_BIN',
     'KIN_CLUSTER_EGRESS_BIN',
@@ -716,10 +746,18 @@ test('startSlotImageBuild returns a job awaitSlotImageBuild can finish', async (
     'bin/kin-worker',
     'bin/kin-egress',
     'bin/kin-codex-kernel',
+    'bin/kin-oauth-auth',
   ]) {
     fakeElf(path.join(root, file), 1)
   }
-  const envKeys = ['KIN_CODEX_KERNEL_BIN', 'KIN_CLUSTER_WORKER_BIN', 'KIN_CLUSTER_EGRESS_BIN']
+  const envKeys = [
+    'KIN_KERNEL_BIN',
+    'KIN_WRAP_CLI_ROOT',
+    'KIN_CODEX_KERNEL_BIN',
+    'KIN_OAUTH_AUTH_BIN',
+    'KIN_CLUSTER_WORKER_BIN',
+    'KIN_CLUSTER_EGRESS_BIN',
+  ]
   const saved = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
   const hits = []
   const server = http.createServer((req, res) => {
@@ -738,6 +776,7 @@ test('startSlotImageBuild returns a job awaitSlotImageBuild can finish', async (
     }
     fs.rmSync(root, { recursive: true, force: true })
   })
+  for (const key of envKeys) delete process.env[key]
   process.env.KIN_CODEX_KERNEL_BIN = path.join(root, 'bin/kin-codex-kernel')
   process.env.KIN_CLUSTER_WORKER_BIN = path.join(root, 'bin/kin-worker')
   process.env.KIN_CLUSTER_EGRESS_BIN = path.join(root, 'bin/kin-egress')

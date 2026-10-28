@@ -29,7 +29,6 @@ import {
 import { createKernelWatchdog, normalizeKernelWatchdogConfig } from './lib/transport/kernel-watchdog.mjs'
 import { ensureSlotSubscriptionType } from './lib/oauth/oauth-credentials.mjs'
 import { createCliNodeGuard } from './lib/vm/cli-node-guard.mjs'
-import { ensureTelemetrySidecar } from './lib/vm/slot-process-status.mjs'
 
 import { createSlotBridgeHealer, powerOnSlot, reviveDownSlots } from './lib/vm/slot-recovery.mjs'
 import { createUsageProbeMonitor, normalizeUsageProbeConfig } from './lib/oauth/usage-probe-monitor.mjs'
@@ -507,7 +506,6 @@ kernelWatchdog = createKernelWatchdog({
   listTargets: () => listVms(cfg.paths.project),
   getRouting: () => routingConfig,
   homeDirFor: (vm) => path.join(cfg.paths.project, 'vms', vm.id, 'cli-home'),
-  ensureTelemetry: (vm) => ensureTelemetrySidecar({ projectRoot: cfg.paths.project, vm }),
   revive: (vm) => bootSlot(vm.id),
   healBridges: createSlotBridgeHealer({ projectRoot: cfg.paths.project }),
 })

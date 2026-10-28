@@ -8,7 +8,7 @@ import path from 'node:path'
 import { defaultSeedPolicy, buildSlotSettingsEnv } from '../protocol/seed-policy.mjs'
 import { buildKinSeedJson } from '../identity/workstation-profile.mjs'
 import { OFFICIAL_CLI_VERSION } from '../identity/vm-identity.mjs'
-import { syncWorkerTelemetry } from './vm-runtime.mjs'
+import { syncNativeTelemetry } from './vm-runtime.mjs'
 
 export function inferProjectRootFromCliHome(homeDir) {
   if (!homeDir) return null
@@ -50,7 +50,7 @@ export function writeSlotSeedFiles(projectRoot, vm, seedPolicy = null) {
   fs.writeFileSync(path.join(claudeDir, 'kin-seed.json'), JSON.stringify(seedDoc, null, 2))
   let telemetry = { wrote: false }
   try {
-    telemetry = syncWorkerTelemetry({ ...vm, seed_policy: pol }, projectRoot)
+    telemetry = syncNativeTelemetry({ ...vm, seed_policy: pol }, projectRoot)
   } catch {}
   return {
     wrote: true,

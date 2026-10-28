@@ -22,7 +22,7 @@ import { importWorkerCredential } from '../transport/go-worker-client.mjs'
 import { credentialModeFromOauth, canOfficialCc } from './credential-mode.mjs'
 import { resolveAuthScheme } from './auth-scheme.mjs'
 import { flattenOauthIdentity, normalizeSubscriptionType } from './oauth-identity.mjs'
-import { persistOauthToVm, writeWorkerCredentialFile } from './oauth-credentials.mjs'
+import { persistOauthToVm } from './oauth-credentials.mjs'
 import {
   officialCcUidGid,
   scheduleOfficialCcBootstrap,
@@ -30,6 +30,7 @@ import {
 } from './official-cc-bootstrap.mjs'
 import { normalizeTiers } from '../pool/quota-tiers.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
+import { finishOAuthImport } from './guest-oauth-helper.mjs'
 
 export function createImportCommit(ctx) {
   function routing() {
@@ -143,7 +144,7 @@ export function createImportCommit(ctx) {
     }
   }
 
-  async function commitImportedOauth({ vmId, vmPath, existing, oauth, source, name, skipOfficialCc = false }) {
+  async function commitImportedOauthGrant({ vmId, vmPath, existing, oauth, source, name, skipOfficialCc = false }) {
     const importedCredential = importedCredentialFromOauth(oauth, existing)
     const workerExec = {
       vmId,
@@ -161,7 +162,10 @@ export function createImportCommit(ctx) {
       const socket = existing.runtime?.worker_socket
       const needReload = !socket || !fs.existsSync(socket) || isSlotProxyDesynced(existing, ctx.cfg.paths.project)
       if (needReload) {
-        const boot = await reloadSlotReady(existing, ctx.cfg.paths.project, { routing: routing() })
+        const boot = await reloadSlotReady(existing, ctx.cfg.paths.project, {
+          routing: routing(),
+          allowMissingCredential: true,
+        })
         if (!boot.ok) {
           return { ok: false, status: 502, error: { code: 'worker_start_failed', message: boot.error } }
         }
@@ -227,9 +231,6 @@ export function createImportCommit(ctx) {
       }
     })
     try {
-      writeWorkerCredentialFile(workerExec.homeDir, importedCredential)
-    } catch {}
-    try {
       const ids = officialCcUidGid(vmId)
       materializeOfficialClaudeCredentials(workerExec.homeDir, ids)
     } catch {}
@@ -263,6 +264,16 @@ export function createImportCommit(ctx) {
           },
         })
     return { ok: true, existing, official_cc_bootstrap: officialCc }
+  }
+  async function commitImportedOauth(options) {
+    let result
+    try {
+      result = await commitImportedOauthGrant(options)
+      return result
+    } finally {
+      const observerError = await finishOAuthImport(options.oauth, result?.ok === true)
+      if (observerError && result) result.telemetry_error = observerError
+    }
   }
 
   return {

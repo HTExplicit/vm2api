@@ -181,7 +181,7 @@ import {
   SESSION_SLOT_MIN,
   validateInferenceRoutingPatch,
 } from '../vm/slot-engine.mjs'
-import { validateTelemetryRoutingPatch } from '../vm/worker-telemetry.mjs'
+import { validateTelemetryRoutingPatch } from '../vm/native-telemetry.mjs'
 import { makeError, ErrorType, ErrorCode } from '../core/errors.mjs'
 import * as panel from './panel-api.mjs'
 import { GATEWAY_CAPABILITIES } from '../vm/execution-context.mjs'
@@ -207,7 +207,6 @@ import {
   nextNumericIndex,
   padVm,
   STANDARD_LOCALE,
-  syncWorkerTelemetry,
 } from '../vm/vm-runtime.mjs'
 import {
   startSlotReady,
@@ -276,6 +275,7 @@ import { restartRustKernel, syncClaudeKernelConfigs, writeKernelConfig } from '.
 import { countTokensViaWorker } from '../transport/go-worker-client.mjs'
 import { apiKeyBetaHeader, setupTokenBetaHeader } from '../protocol/claude-code-betas.mjs'
 import { rustKernelHealth, toPublicKernelHealth } from '../transport/rust-kernel-client.mjs'
+import { applyNativeTelemetry } from '../vm/fleet-update.mjs'
 import { codexKernelHealth } from '../transport/codex-kernel-client.mjs'
 import { normalizeHealthProbeConfig } from './health-probe.mjs'
 import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
@@ -514,7 +514,7 @@ async function runKernelSync({ project, routingConfig, body = {}, refreshCluster
   const wanted = Array.isArray(body.ids) ? new Set(body.ids.map(String)) : null
   const selected = wanted ? all.filter((vm) => wanted.has(vm.id)) : all
   // Local slots bind the new binaries. Cluster slots bake the same kernel, CLIs
-  // and kin-worker telemetry into a content-hashed image, then recreate onto it.
+  // and OAuth helpers into a content-hashed image, then recreate onto it.
   const localVms = selected.filter((vm) => !slotHost(vm).bakedKernel)
   const clusterVms = selected.filter((vm) => slotHost(vm).bakedKernel)
   const checkOnly = body.restart === false
@@ -1155,9 +1155,9 @@ export function createPanelHandler(ctx) {
       projectRoot: cfg.paths.project,
       previousEngine: previous,
       targetEngine: target,
-      commit: () => {
+      commit: async () => {
         try {
-          return persistRoutingPatch(body)
+          return await persistRoutingPatch(body)
         } catch (error) {
           restoreRoutingRuntime(previousRoutingConfig)
           if (body.pool || body.failover) initPoolRuntime()
@@ -1218,7 +1218,7 @@ export function createPanelHandler(ctx) {
       const body = await readBody(req, cfg.limits.max_body_bytes)
       let applied
       try {
-        applied = persistRoutingPatch(body)
+        applied = await persistRoutingPatch(body)
       } catch (error) {
         if (error instanceof TypeError || error instanceof RangeError) {
           return json(res, 400, {
@@ -1410,7 +1410,7 @@ export function createPanelHandler(ctx) {
             const state = loadOnboardingState(settings)
             let next
             if (body?.action === 'profile') {
-              applyUsageProfile({
+              await applyUsageProfile({
                 mode: body?.mode,
                 persistRouting: (patch) => persistRoutingPatch(patch),
                 settings,
@@ -2337,7 +2337,7 @@ export function createPanelHandler(ctx) {
         const previous = structuredClone(ctx.routingConfig)
         try {
           if (targets.all) {
-            persistRoutingPatch({
+            await persistRoutingPatch({
               inference: {
                 ...(ctx.routingConfig.inference || {}),
                 dataplane: parsed.value,
@@ -3571,7 +3571,7 @@ export function createPanelHandler(ctx) {
           kin_seed,
           cli_home: homeDir,
         }
-        if (debug) payload.telemetry_log = readTelemetryUploadLog(cfg.paths.project, id)
+        if (debug) payload.telemetry_log = await readTelemetryUploadLog(cfg.paths.project, vm)
         return json(res, 200, panel.ok(payload))
       }
       // PUT /api/panel/vms/:id/seed-settings
@@ -3581,7 +3581,6 @@ export function createPanelHandler(ctx) {
         if (!fs.existsSync(vmPath)) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
         const body = await readBody(req, 256 * 1024)
         const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-        const telemetryWasOff = !isTelemetryEnabled(vm.seed_policy || {})
         const merged = { ...(vm.seed_policy || {}), ...(body.seed_policy || {}) }
         for (const k of ['telemetry_disabled', 'reject_client_settings', 'reject_client_metadata_identity']) {
           if (body[k] !== undefined) merged[k] = !!body[k]
@@ -3592,6 +3591,12 @@ export function createPanelHandler(ctx) {
         if (body.claude_setting !== undefined) merged.claude_setting = body.claude_setting
         if (body['claude.setting'] !== undefined) merged.claude_setting = body['claude.setting']
         const next = defaultSeedPolicy(merged)
+        if (slotHost(vm).native && isTelemetryEnabled(next)) {
+          return json(res, 409, {
+            ok: false,
+            error: { code: 'telemetry_unsupported', message: 'macOS 原生槽不支持 VM 原生遥测' },
+          })
+        }
         if (body.settings_json_override !== undefined) next.settings_json_override = body.settings_json_override
         if (body.extra_env !== undefined) next.extra_env = body.extra_env || {}
         const followProxyTz = body?.timezone_follow_proxy === true || body?.timezoneFollowProxy === true
@@ -3648,20 +3653,18 @@ export function createPanelHandler(ctx) {
         vm.seed_policy = next
         vm.updated_at = new Date().toISOString()
         atomicWriteJson(vmPath, vm, { mode: 0o600 })
-        const written = writeSlotSeedFiles(cfg.paths.project, vm, next)
-        let service = null
-        if (
-          vm.status === 'running' &&
-          (next.telemetry_disabled !== telemetryWasOff || body.telemetry_service_restart === true)
-        ) {
-          const report = await runFleetUpdate(cfg.paths.project, {
-            action: 'telemetry',
-            ids: [id],
-            concurrency: 1,
-            routing: ctx.routingConfig,
+        const service = slotHost(vm).native
+          ? { ok: true, supported: false, state: 'unsupported', seed: writeSlotSeedFiles(cfg.paths.project, vm, next) }
+          : await applyNativeTelemetry({ projectRoot: cfg.paths.project, vm, routing: ctx.routingConfig })
+        if (!service.ok) {
+          return json(res, 502, {
+            ok: false,
+            error: { code: service.code || 'telemetry_not_applied', message: service.error || 'VM 原生配置尚未生效' },
+            data: { vm_id: id, saved: true, applied: false, service },
           })
-          service = report.items?.[0] || report
         }
+        const written = service.seed || {}
+        const { seed: _seed, ...publicService } = service
         return json(
           res,
           200,
@@ -3672,7 +3675,7 @@ export function createPanelHandler(ctx) {
             settings_json: written.settings || null,
             claude_setting: written.claude_setting || '',
             kin_seed: written.kin_seed || null,
-            service,
+            service: publicService,
           }),
         )
       }
@@ -4311,7 +4314,7 @@ export function createPanelHandler(ctx) {
       }
 
       // POST /api/panel/vms/import
-      // workflow: create VM → allocate proxy → import sessionKey (via SOCKS) → start
+      // workflow: create VM → allocate proxy → start guest/CLI → exchange in guest → import
       if (req.method === 'POST' && p === '/api/panel/vms/import') {
         const body = await readBody(req, 1024 * 1024)
         const sessionKey = body.sessionKey || body.session_key || body.sid || ''
@@ -4409,6 +4412,9 @@ export function createPanelHandler(ctx) {
             oauth = await sessionKeyToOAuth(String(sessionKey).trim(), {
               proxyUrl,
               scope: inference ? 'inference' : 'full',
+              exec: slotExec(cfg.paths.project, existing),
+              projectRoot: cfg.paths.project,
+              routing: ctx.routingConfig,
             })
             if (inference) {
               oauth.type = 'setup-token'
@@ -4470,6 +4476,7 @@ export function createPanelHandler(ctx) {
               oauth_email: existing.claude.email,
               has_refresh: existing.claude.has_refresh,
               official_cc_bootstrap: committed.official_cc_bootstrap || null,
+              ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
             }),
           )
         } catch (e) {
@@ -4516,6 +4523,7 @@ export function createPanelHandler(ctx) {
             const generated = await startClaudeAuthLoginSession({
               vm: existing,
               projectRoot: cfg.paths.project,
+              routing: ctx.routingConfig,
               force: body.force === true || body.force === 'true' || body.force === 1,
             })
             const px = existing.proxy || {}
@@ -4642,6 +4650,9 @@ export function createPanelHandler(ctx) {
                   code,
                   proxyUrl: slotProxy.proxyUrl,
                   vmId: id,
+                  exec: slotExec(cfg.paths.project, existing),
+                  projectRoot: cfg.paths.project,
+                  routing: ctx.routingConfig,
                 })
           if (looksLikeOfficialSetupToken(code) || oauth.flavor === SETUP_TOKEN_FLAVOR) {
             oauth.type = 'official-setup-token'
@@ -4681,6 +4692,7 @@ export function createPanelHandler(ctx) {
               oauth_email: existing.claude?.email,
               has_refresh: existing.claude?.has_refresh,
               official_cc_bootstrap: committed.official_cc_bootstrap || null,
+              ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
               source: oauth.source || 'oauth-auth-url',
               flavor: oauth.flavor || null,
             }),
@@ -4759,6 +4771,7 @@ export function createPanelHandler(ctx) {
             oauth_email: existing.claude?.email || null,
             has_refresh: existing.claude?.has_refresh,
             official_cc_bootstrap: committed.official_cc_bootstrap || null,
+            ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
           }),
         )
       }
@@ -4839,6 +4852,7 @@ export function createPanelHandler(ctx) {
             oauth_email: existing.claude?.email || null,
             has_refresh: existing.claude?.has_refresh,
             official_cc_bootstrap: committed.official_cc_bootstrap || null,
+            ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
           }),
         )
       }
@@ -5248,7 +5262,7 @@ export function createPanelHandler(ctx) {
         const { applied: appliedDuringSwitch, ...publicEngineRuntime } = engineRuntime
         let applied
         try {
-          applied = appliedDuringSwitch ?? persistRoutingPatch(body)
+          applied = appliedDuringSwitch ?? (await persistRoutingPatch(body))
         } catch (error) {
           restoreRoutingRuntime(previousRoutingConfig)
           return json(res, 503, {
@@ -5948,12 +5962,29 @@ export function createPanelHandler(ctx) {
   }
 }
 
-function readTelemetryUploadLog(projectRoot, id) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/.test(String(id || ''))) return []
-  try {
-    const text = fs.readFileSync(path.join(projectRoot, 'vms', id, 'run', 'telemetry-upload.log'), 'utf8')
-    return text.split(/\r?\n/).filter(Boolean).slice(-40)
-  } catch {
-    return []
-  }
+async function readTelemetryUploadLog(projectRoot, vm) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,80}$/.test(String(vm?.id || ''))) return []
+  const text = await slotHost(vm).telemetryLog(vm, path.join(projectRoot, 'vms', vm.id))
+  return String(text)
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .slice(-40)
+    .flatMap((line) => {
+      try {
+        const record = JSON.parse(line)
+        if (typeof record?.at !== 'string' || typeof record?.ok !== 'boolean' || !Number.isInteger(record?.events))
+          return []
+        return [
+          JSON.stringify({
+            at: record.at,
+            ok: record.ok,
+            events: record.events,
+            error:
+              typeof record.error === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(record.error) ? record.error : null,
+          }),
+        ]
+      } catch {
+        return []
+      }
+    })
 }

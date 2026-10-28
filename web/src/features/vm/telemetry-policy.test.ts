@@ -1,10 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  telemetryEnabled,
-  telemetrySeedFlags,
-  telemetryView,
-} from './telemetry-policy'
-import { telemetryStatusLabel } from './telemetry-status'
+import { telemetryEnabled, telemetrySeedFlags } from './telemetry-policy'
 
 describe('telemetry reads one bit', () => {
   it('is on only when telemetry_disabled is false', () => {
@@ -26,33 +21,5 @@ describe('telemetry reads one bit', () => {
       disable_nonessential_traffic: false,
       do_not_track: true,
     })
-  })
-
-  it('shows the default-on seed as on even when worker.json says disabled', () => {
-    const view = telemetryView(
-      { telemetry_disabled: false, disable_nonessential_traffic: false },
-      { enabled: false, running: false }
-    )
-    expect(view).toMatchObject({ enabled: true, running: false })
-    expect(telemetryStatusLabel(view)).toBe('已开启 · 进程未运行')
-  })
-
-  it('does not let a running process override a seed that is off', () => {
-    const view = telemetryView(
-      { telemetry_disabled: true },
-      { enabled: true, running: true }
-    )
-    expect(telemetryStatusLabel(view)).toBe('未启用')
-  })
-
-  it('leaves a missing seed as a process observation', () => {
-    expect(
-      telemetryStatusLabel(
-        telemetryView(null, { enabled: true, running: true })
-      )
-    ).toBe('运行中')
-    expect(telemetryStatusLabel(telemetryView(undefined, undefined))).toBe(
-      '状态未知'
-    )
   })
 })

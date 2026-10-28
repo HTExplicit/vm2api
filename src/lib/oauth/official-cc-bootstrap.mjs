@@ -25,7 +25,7 @@ import {
   parseVmIndex,
   containerName,
   officialCcUidGid,
-  syncWorkerTelemetry,
+  syncNativeTelemetry,
   isSlotProxyDesynced,
 } from '../vm/vm-runtime.mjs'
 import { slotMemory } from '../vm/machine-spec.mjs'
@@ -46,7 +46,7 @@ import { defaultSeedPolicy } from '../protocol/seed-policy.mjs'
 import { OFFICIAL_CLI_VERSION, loadVmIdentity, persistVmSettings } from '../identity/vm-identity.mjs'
 import { applyOfficialFingerprintToVm, readOfficialCcIdentity } from '../identity/official-fingerprint.mjs'
 import { writeSlotSeedFiles, inferProjectRootFromCliHome } from '../vm/slot-seed.mjs'
-import { touchTelemetrySession } from '../vm/worker-telemetry.mjs'
+import { applyNativeTelemetry } from '../vm/fleet-update.mjs'
 import { atomicWriteJson, listVmRecordFiles } from '../vm/vm-file.mjs'
 import { CONTAINER_CLI_NODE_BIN, normalizeOfficialCcInference, resolveOfficialCcInference } from '../vm/slot-engine.mjs'
 import { getVm } from '../vm/vm-registry.mjs'
@@ -927,17 +927,11 @@ function persistOfficialCcFingerprint(vmPath, homeDir) {
   return applyOfficialFingerprintToVm(vmPath, homeDir)
 }
 
-/**
- * Post-init telemetry close-out used by vm-05 / vm-13 / vm-30:
- * normalize seed (telemetry on, NONESSENTIAL=1, grove_enabled false), write official
- * ~/.claude.json IDs into worker.json.telemetry, reload the slot so
- * `kin-worker telemetry` starts, then touch a 10-minute session.
- * Never docker rm.
- */
+/** Align explicit post-init opt-in and publish it to the resident native sender. */
 export async function finalizeOfficialCcTelemetry(
   projectRoot,
   vmId,
-  { reload = true, enable = true, routing = {}, reloadSlot = reloadSlotReady } = {},
+  { reload = true, enable = true, routing = {} } = {},
 ) {
   if (!projectRoot || !vmId) {
     return { wrote: false, enabled: false, official: false, reloaded: false, seed_aligned: false, touched: false }
@@ -962,19 +956,8 @@ export async function finalizeOfficialCcTelemetry(
   const homeDir = officialCcHome(projectRoot, vmId)
   applySeedAfterOfficialInit(homeDir, vm, seed, projectRoot)
   const tel = writeOfficialCcTelemetry(projectRoot, vmId)
-  let reloaded = false
-  if (reload && tel.enabled) {
-    try {
-      const r = await reloadSlot(vm, projectRoot, { routing })
-      reloaded = r?.ok === true && r?.rust_ok !== false
-    } catch {}
-  }
-  let touched = false
-  if (tel.enabled) {
-    try {
-      touched = !!touchTelemetrySession(projectRoot, vmId).wrote
-    } catch {}
-  }
+  let applied = null
+  if (reload) applied = await applyNativeTelemetry({ projectRoot, vm, routing })
   return {
     wrote: !!tel.wrote,
     enabled: tel.enabled === true,
@@ -982,12 +965,11 @@ export async function finalizeOfficialCcTelemetry(
     identity_wrote: !!tel.identity_wrote,
     fingerprint_wrote: !!tel.fingerprint_wrote,
     seed_aligned: true,
-    reloaded,
-    touched,
+    applied,
   }
 }
 
-/** Fingerprint + kin-identity + worker.json.telemetry from official ~/.claude.json. */
+/** Keep official identity and native routing synchronized; CLI owns the telemetry payload. */
 export function writeOfficialCcTelemetry(projectRoot, vmId) {
   if (!projectRoot || !vmId) return { wrote: false, enabled: false, official: false }
   const vmPath = path.join(projectRoot, 'vms', `${vmId}.json`)
@@ -1005,7 +987,7 @@ export function writeOfficialCcTelemetry(projectRoot, vmId) {
       identity_wrote: !!fingerprint?.identity_wrote,
     }
   }
-  const tel = syncWorkerTelemetry(vm, projectRoot)
+  const tel = syncNativeTelemetry(vm, projectRoot)
   return {
     wrote: !!tel.wrote,
     enabled: tel.enabled === true,

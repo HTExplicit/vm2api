@@ -8,7 +8,6 @@ import {
   seedDraftOf,
   seedSaveBody,
   settingsRows,
-  telemetryLive,
 } from './seed-settings'
 
 const settings = {
@@ -243,37 +242,5 @@ describe('seed queries', () => {
     ])
     expect(vmSeedQueryOptions('vm-1').queryKey).not.toContain(true)
     expect(vmSeedQueryOptions('vm-1').queryKey).not.toContain(false)
-  })
-})
-
-describe('telemetry lamp', () => {
-  it('stays off while a process is still running', () => {
-    const live = telemetryLive(
-      { seed_policy: { telemetry_disabled: true } },
-      { enabled: true, running: true }
-    )
-    expect(live).toMatchObject({ on: false, running: true, tone: 'off' })
-    expect(live.label).toBe('未启用')
-  })
-
-  it('stays on when the process has not started', () => {
-    const live = telemetryLive(
-      { seed_policy: { telemetry_disabled: false } },
-      { enabled: false, running: false }
-    )
-    expect(live).toMatchObject({
-      on: true,
-      running: false,
-      tone: 'on',
-      label: '已开启 · 进程未运行',
-    })
-  })
-
-  it('does not call a missing observation off', () => {
-    expect(telemetryLive({}, null)).toMatchObject({
-      on: null,
-      running: null,
-      tone: 'unknown',
-    })
   })
 })

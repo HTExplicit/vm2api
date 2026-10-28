@@ -247,7 +247,9 @@ export function telemetryLive(
   const policy = asRecord(seed?.seed_policy)
   const view = telemetryView(policy, observed)
   const enabled = view?.enabled
-  const running = observed?.running
+  const running = observed
+    ? observed.state !== 'unsupported' && observed.state !== 'disabled'
+    : null
   const on = enabled === true ? true : enabled === false ? false : null
   return {
     on,

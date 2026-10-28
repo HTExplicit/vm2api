@@ -89,7 +89,6 @@ import { prepareOutboundEnvelope, prepareCliHopBody, prepareCliPersonaInput } fr
 import { repairAnthropicRequest } from '../pool/upstream-error-policy.mjs'
 import { profileForPreset } from '../identity/official-profiles.mjs'
 import { loadVmIdentity, OFFICIAL_CLI_VERSION } from '../identity/vm-identity.mjs'
-import { touchTelemetrySession } from '../vm/worker-telemetry.mjs'
 import {
   applyCrsIdentityReplace,
   extractCallerSession,
@@ -1385,9 +1384,6 @@ export function createHandleProtocol(deps) {
               throw error
             }
           }
-          try {
-            touchTelemetrySession(cfg.paths.project, selected.vmId, selected.exec?.vm, body?.model)
-          } catch {}
           const identity = loadVmIdentity(selected.exec)
           const attemptStartedAt = extra.attemptStartedAt ?? Date.now()
           // The runner snapshots after this session's queue turn, before VM prebinding.

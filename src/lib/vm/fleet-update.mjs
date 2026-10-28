@@ -8,72 +8,38 @@ import { runtimeKind } from './runtime-kind.mjs'
 import { reloadSlotReady, slotExec } from './slot-runtime.mjs'
 import { collectSlotIdentity } from './guest-identity.mjs'
 import { rustKernelHealth } from '../transport/rust-kernel-client.mjs'
-import { restartTelemetrySidecar } from './slot-process-status.mjs'
-import { isNativeNodeVm, vmNodeId } from '../cluster/placement.mjs'
+import path from 'node:path'
+import { syncNativeTelemetry } from './vm-runtime.mjs'
+import { writeSlotSeedFiles } from './slot-seed.mjs'
 import { slotHost } from './slot-host.mjs'
-import { restartRemoteServices } from '../cluster/remote-slot.mjs'
-import { isMissingContainerMessage, logTelemetryContainerSkip, telemetryContainerSkip } from './docker-container.mjs'
-import {
-  drainEgressForProxyConfig,
-  egressPidsForProxyConfig,
-  inspectEgressProcess,
-  isLocalEgressProxy,
-  readEgressListenTcp,
-  runExclusiveProxyEgress,
-  startProxyEgress,
-  stopEgressProcess,
-  waitEgressExit,
-  waitPortReleased,
-} from './egress.mjs'
+import { readSlotProcessStatus, retireLegacyTelemetry } from './slot-process-status.mjs'
 
 const ACTIONS = new Set(['collect', 'reload', 'roll', 'telemetry'])
 
-export async function restartLocalEgress(projectRoot, vm, opts = {}) {
-  if (isLocalEgressProxy(vm.proxy)) return { ok: true, egress: 'local' }
-  const proxyId = vm.proxy?.id
-  return runExclusiveProxyEgress(projectRoot, proxyId, async () => {
-    const running = inspectEgressProcess(projectRoot, proxyId)
-    const stopped = stopEgressProcess(projectRoot, proxyId)
-    if (!stopped.ok) return { ok: false, action: 'egress_stop_failed', error: stopped.error }
-    const pending = new Set(stopped.pending || [])
-    for (const pid of egressPidsForProxyConfig(projectRoot, proxyId)) pending.add(pid)
-    if (running.ok && running.pid) pending.add(running.pid)
-    for (const pid of pending) {
-      const exited = await waitEgressExit(pid)
-      if (!exited.ok) return { ok: false, action: 'egress_stop_failed', error: exited.error, pid }
+/** Acknowledged publication followed by native state, never a sidecar/egress restart. */
+export async function applyNativeTelemetry({ projectRoot, vm, routing = {}, timeoutMs = 6000 } = {}) {
+  if (!vm?.id || !projectRoot) return { ok: false, code: 'invalid_vm' }
+  const host = slotHost(vm)
+  if (host.native) return { ok: false, code: 'telemetry_unsupported', error: 'macOS 原生槽不支持遥测' }
+  const retired = await retireLegacyTelemetry({ projectRoot, vm })
+  if (!retired.ok) return retired
+  const seed = writeSlotSeedFiles(projectRoot, vm)
+  const written = syncNativeTelemetry(vm, projectRoot, routing)
+  if (!written.supported || !written.wrote) return { ok: false, code: written.error || 'telemetry_config_failed' }
+  await host.syncTelemetry(vm, path.join(projectRoot, 'vms', vm.id))
+  if (!retired.running) return { ok: true, action: 'published', applied: false, state: 'stopped', seed }
+  const deadline = Date.now() + timeoutMs
+  do {
+    const { telemetry } = await readSlotProcessStatus({ projectRoot, vm })
+    if (
+      telemetry?.enabled === written.enabled &&
+      (written.enabled || (telemetry.state === 'disabled' && telemetry.pending_events === 0))
+    ) {
+      return { ok: true, action: 'applied', applied: true, ...telemetry, seed }
     }
-    const drained = await drainEgressForProxyConfig(projectRoot, proxyId)
-    if (!drained.ok) return { ok: false, action: 'egress_stop_failed', error: drained.error, pid: drained.pid }
-    const spec = running.ok ? String(running.listen_tcp || '') : readEgressListenTcp(projectRoot, proxyId)
-    const colon = spec.lastIndexOf(':')
-    const host = colon > 0 ? spec.slice(0, colon) : ''
-    const port = colon > 0 ? Number(spec.slice(colon + 1)) : 0
-    if (host && Number.isFinite(port) && port > 0) {
-      const portFree = await waitPortReleased(host, port)
-      if (!portFree.ok) return { ok: false, action: 'egress_stop_failed', error: portFree.error }
-    }
-    const started = await startProxyEgress(projectRoot, vm.proxy, opts)
-    if (!started?.ok) return { ok: false, action: 'egress_start_failed', error: started?.error || 'kin-egress failed' }
-    return { ok: true, egress: 'restarted', pid: started.pid }
-  })
-}
-
-async function restartLocalServices({ projectRoot, vm, enabled, egressOpts = {} }) {
-  const telemetry = await restartTelemetrySidecar({ projectRoot, vm, enabled })
-  if (!telemetry.ok) return telemetry
-  const egress = await restartLocalEgress(projectRoot, vm, egressOpts)
-  if (!egress.ok) return egress
-  return { ...telemetry, egress: egress.egress ?? (telemetry.skipped ? 'unchanged' : undefined) }
-}
-
-function normalizeTelemetryRefresh(changed, vm) {
-  if (changed?.ok || changed?.skipped) return changed
-  const message = String(changed?.error || changed?.code || '')
-  if (!isMissingContainerMessage(message)) return changed
-  const container =
-    String(vm?.runtime?.container || '').trim() || (vm?.id ? `kin-${String(vm.id).replace(/^vm-/, '')}` : '')
-  logTelemetryContainerSkip('fleet', vm.id, container, message)
-  return telemetryContainerSkip(container, message)
+    await sleep(100)
+  } while (Date.now() < deadline)
+  return { ok: false, code: 'telemetry_not_ready', error: 'native telemetry did not acknowledge policy' }
 }
 
 function sleep(ms) {
@@ -160,16 +126,9 @@ export async function updateOneSlot(
       const enabled =
         telemetryEnabled === undefined ? vm.seed_policy?.telemetry_disabled === false : telemetryEnabled === true
       const vmRef = getVm(projectRoot, id) || vm
-      const changed = normalizeTelemetryRefresh(
-        telemetryFn
-          ? await telemetryFn({ projectRoot, vm: vmRef, telemetryEnabled: enabled, enabled })
-          : isNativeNodeVm(vmRef)
-            ? await slotHost(vmRef).restartTelemetry(vmRef, { enabled })
-            : vmNodeId(vm)
-              ? await restartRemoteServices(vmRef, projectRoot, { telemetryEnabled: enabled })
-              : await restartLocalServices({ projectRoot, vm: vmRef, enabled }),
-        vmRef,
-      )
+      const changed = telemetryFn
+        ? await telemetryFn({ projectRoot, vm: vmRef, telemetryEnabled: enabled, enabled })
+        : await applyNativeTelemetry({ projectRoot, vm: vmRef, routing })
       result.telemetry = changed
       if (changed?.skipped) {
         result.skipped = true

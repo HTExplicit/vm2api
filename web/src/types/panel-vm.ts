@@ -70,6 +70,21 @@ export type VmProxySnap = {
 
 export type InferenceEngine = 'auto' | 'go' | 'rust'
 
+export type VmTelemetryState = {
+  enabled: boolean
+  state:
+    | 'disabled'
+    | 'idle'
+    | 'waiting_credentials'
+    | 'waiting_egress'
+    | 'uploading'
+    | 'error'
+    | 'unsupported'
+  pending_events: number
+  last_upload_at: string | null
+  last_error: string | null
+}
+
 export type VmKernelHealth = {
   reachable?: boolean
   process_up?: boolean
@@ -84,17 +99,15 @@ export type VmKernelHealth = {
   proxy_ok?: boolean | null
   accounts?: number | null
   vm_id?: string | null
+  vm_telemetry?: boolean
+  telemetry_ready?: boolean
+  telemetry?: VmTelemetryState | null
 }
 export type VmKernelSnapshot = {
   credential_owner?: string | null
   credential_state?: string | null
   proxy_state?: string | null
-  telemetry?: {
-    enabled?: boolean | null
-    running?: boolean | null
-    process?: string | null
-    read_only?: boolean
-  } | null
+  telemetry?: VmTelemetryState | null
   process_topology?: {
     rust_pid1?: boolean
     go_worker_pid1?: boolean

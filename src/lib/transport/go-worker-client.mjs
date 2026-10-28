@@ -1158,6 +1158,36 @@ export async function importWorkerCredential(exec, credential, { timeoutMs = 600
   }
 }
 
+export async function callWorkerPost(exec, requestPath, body, { timeoutMs = 20000, signal } = {}) {
+  try {
+    const response = await workerRequest(exec, {
+      method: 'POST',
+      requestPath,
+      body,
+      timeoutMs,
+      signal,
+      maxRequestBytes: 8192,
+    })
+    const parsed = parseJson(await readAll(response, 16384), response.statusCode)
+    return {
+      ok: response.statusCode >= 200 && response.statusCode < 300 && parsed?.ok !== false,
+      status: response.statusCode || 0,
+      body: parsed,
+      headers: publicHeaders(response.headers),
+      via: 'go-worker',
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      status: error.status === 413 ? 413 : 0,
+      body: { error: { code: error.code || 'worker_transport_error', message: 'Slot control request failed' } },
+      headers: {},
+      via: 'go-worker',
+      transportError: error.status !== 413,
+    }
+  }
+}
+
 export async function callWorkerGet(exec, requestPath, { timeoutMs = 30000, signal } = {}) {
   if (isCrsMock()) {
     if (requestPath === '/internal/v1/models') {
