@@ -21,7 +21,7 @@
 
 | Issue | 结论 |
 |---|---|
-| #777 | `service_tier: fast` 返回 `default`。已复核：网关（`codex-convert.mjs:255`）与 codex 内核都把 fast 改写为 `priority` 并带 `x-codex-routing-hint`，返回档位来自上游，应为账号无 Fast 权益。可选：日志里标记「请求 priority、实际 default」的降级。 |
+| #777 | `service_tier: fast` 返回 `default`。网关（`codex-convert.mjs:255`）与 codex 内核都把 fast 改写为 `priority` 并带 `x-codex-routing-hint`，返回档位来自上游，应为账号无 Fast 权益。已处理：计费按发出档位，上游回显存 `upstream_service_tier`，日志标记「Fast 未生效」。 |
 
 ## 建议关闭
 
