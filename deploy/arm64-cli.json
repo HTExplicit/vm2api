@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "cli_sha256": "4975763790088a0eba226f20152b3c45261a0654b8bbc038701757b7699ab4e1",
+  "source_sha256": "d7cfab5556abac18d4f589b16c49f75074526be533ae12cd4d4b670d031533cc",
+  "bun_version": "1.3.14",
+  "bun": {
+    "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64.zip",
+    "member": "bun-linux-aarch64/bun",
+    "sha256": "a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b",
+    "binary_sha256": "37141662ebed915a2ab89313156e455e2a1374395f5f6760d06407f49406f086"
+  },
+  "upx": {
+    "url": "https://github.com/upx/upx/releases/download/v5.2.1/upx-5.2.1-arm64_linux.tar.xz",
+    "member": "upx-5.2.1-arm64_linux/upx",
+    "sha256": "a72d112c5970a904a31da0b9c84f919bc16b9a311787c12245508544a78c7d36"
+  }
+}
