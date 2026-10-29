@@ -330,6 +330,7 @@ test('a guest-planted symlink at the credential path is refused, not followed', 
 
 test('node paths keep ~/.claude in the host-owned mount, everything else in place', () => {
   assert.equal(remoteSlotPath('cli-home/.claude/settings.json'), 'claude/settings.json')
+  assert.equal(remoteSlotPath('cli-home/.claude/telemetry/egress.json'), 'claude/telemetry/egress.json')
   assert.equal(remoteSlotPath('run/kernel.json'), 'run/kernel.json')
   assert.equal(remoteSlotPath('machine-id'), 'machine-id')
 })
