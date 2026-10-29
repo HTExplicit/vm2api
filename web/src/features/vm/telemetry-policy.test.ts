@@ -1,5 +1,8 @@
+import type { VmTelemetryState } from '@/types/panel-vm'
 import { describe, expect, it } from 'vitest'
+import { telemetryLive } from './seed-settings'
 import { telemetryEnabled, telemetrySeedFlags } from './telemetry-policy'
+import { telemetryPolicyConfirmed } from './telemetry-status'
 
 describe('telemetry reads one bit', () => {
   it('is on only when telemetry_disabled is false', () => {
@@ -21,5 +24,53 @@ describe('telemetry reads one bit', () => {
       disable_nonessential_traffic: false,
       do_not_track: true,
     })
+  })
+})
+
+describe('native policy acknowledgment', () => {
+  const observed = (partial: Partial<VmTelemetryState>): VmTelemetryState => ({
+    enabled: false,
+    state: 'disabled',
+    pending_events: 0,
+    last_upload_at: null,
+    last_error: null,
+    ...partial,
+  })
+
+  it('does not overwrite an observed disabled state with desired opt-in', () => {
+    const view = telemetryLive(
+      { seed_policy: { telemetry_disabled: false } },
+      observed({})
+    )
+    expect(view.desired).toBe(true)
+    expect(view.on).toBe(false)
+    expect(view.confirmed).toBe(false)
+    expect(view.tone).toBe('unknown')
+  })
+
+  it('requires native disabled state and an empty queue to confirm opt-out', () => {
+    expect(telemetryPolicyConfirmed(undefined, false)).toBe(false)
+    expect(
+      telemetryPolicyConfirmed(observed({ pending_events: 3 }), false)
+    ).toBe(false)
+    expect(
+      telemetryPolicyConfirmed(
+        observed({ enabled: true, state: 'uploading' }),
+        false
+      )
+    ).toBe(false)
+    expect(telemetryPolicyConfirmed(observed({}), false)).toBe(true)
+  })
+
+  it('does not confuse an applied but credential-gated policy with actual upload', () => {
+    const view = telemetryLive(
+      { seed_policy: { telemetry_disabled: false } },
+      observed({ enabled: true, state: 'waiting_credentials' })
+    )
+    expect(view.confirmed).toBe(true)
+    expect(view.on).toBe(true)
+    expect(
+      telemetryPolicyConfirmed(observed({ state: 'unsupported' }), false)
+    ).toBe(false)
   })
 })

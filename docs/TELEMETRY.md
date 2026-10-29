@@ -91,16 +91,63 @@ backlog and schedule; it is not an opt-out and does not force upload.
 ## Control plane, publication and rollout
 
 Single-VM, bulk and interval controls publish native policy/configuration.
-Remote success requires actual publication of **both** `run/kernel.json` and
-`claude/kin-seed.json`; controller-only writes are not success. Failed or
-unconfirmed activation is reported, including saved-but-not-applied state.
-Stopped VMs can retain published policy without claiming a live sender.
+Remote success requires actual publication of `run/kernel.json` and all three
+seed files: `claude/settings.json`, `claude/claude.setting`, and
+`claude/kin-seed.json`. Controller-only writes are not success. Responses expose
+`saved`, `published`, and `applied` independently; stopped VMs can retain
+published policy without claiming a live sender or a runtime acknowledgment.
+Policy-only publication deliberately excludes `machine-id`, OAuth `worker.json`,
+`internal.token`, and credentials. Seed-only publication also excludes the
+kernel config; full provisioning retains its separate, existing file sets.
 The legacy retirement step inspects physical runtime state, including logically
 paused VMs, and terminates only verified `kin-worker telemetry --config ...`
 PIDs. It never broadly kills OAuth workers or restarts egress for telemetry.
 
 Every actual Linux native launch is also fenced by verified legacy retirement;
 a failed retirement blocks that launch, while healthy checks do not repeat it.
+
+### Existing seed controls and lifecycle
+
+`GET /api/panel/vms/:id/seed-settings` keeps saved `seed_policy` separate from
+observed `settings_json`, `claude_setting`, and `kin_seed`. `seed_files` identifies
+the storage placement (`local` or `node`), observation success, and each file's
+`present` / `missing` / `error` state. Unavailable nodes never fall back to a
+controller mirror. These paths are the configured Docker bind or KVM shared
+backing store; a successful file read does not certify that a KVM guest mounted
+the share or applied the policy.
+
+PUT changes only supplied fields on the latest VM record. The seed form sends
+edits relative to its unlock baseline, so changing a theme cannot resubmit a
+stale telemetry opt-in or overwrite a newer opt-out. Polling does not replace an
+unlocked draft, and failed publication leaves that draft editable. Non-seed
+settings and VM-owned custom environment values survive policy-only writes;
+explicit `extra_env` replacement still removes deleted values. Governed privacy,
+timezone, locale, and forbidden credential/transport keys remain sanitized by
+the single seed-policy builder.
+
+Publication is serialized per VM and rereads the record after asynchronous
+preparation. The acknowledged publication path suppresses an independent
+fire-and-forget config push. Atomic private seed writes do not implicitly
+publish runtime configuration. A failed publication can report `saved: true`,
+`published: false`, `applied: false`; a completed publication awaiting a native
+response reports `published: true`, `applied: false`. Neither is UI success for
+runtime application. An off policy is confirmed only by native disabled state
+and an empty queue; absence or an active old state remains unconfirmed. Both
+single-VM and bulk controls can republish an unconfirmed, already-saved policy.
+
+Official initialization's `sync_telemetry` remains default-off. When enabled, it
+publishes the existing policy; it does not opt the account in. The finalizer's
+`publish: false` option stages files only and claims neither publication nor
+activation. Reauthorization preserves native IDs, settings, credentials, and
+backlog. A healthy native import does not require the retired `worker.sock`, and
+telemetry publication does not restart the VM, CLI, or egress. Keep-mode rebuilds
+retain the native identity/settings/queue/egress files and their ownership;
+explicit factory-reset/traits behavior remains a separate action.
+
+Bootstrap status uses `telemetry_published`, `telemetry_applied`, and
+`telemetry_error` instead of old sidecar-reload/activity-touch indicators. The
+obsolete Go-only inventory command is removed; alignment uses the native
+publication action rather than broad process kills or automatic enablement.
 
 A rollout requires matching Node, Go OAuth worker, Rust and cli-node payloads.
 The worker must emit actual OAuth-attempt notifications. Old native
@@ -123,6 +170,11 @@ not evidence of upload; unreachable state is unknown, not disabled.
 `telemetry_log`; without debug the field is omitted. Local reads reject links
 and non-regular files; remote reads use the placement adapter and the panel
 reprojects allowed fields rather than trusting remote JSON.
+An unavailable audit source additionally returns
+`telemetry_log_error: "telemetry_log_unavailable"`; the UI shows a read error,
+not an empty successful history. Seed and global telemetry views share the
+validated counts-only decoder and keep desired consent separate from observed
+native state; neither invents a running-process observation from the policy.
 
 ## Verification limits
 
@@ -143,3 +195,17 @@ authorized. The official live gate passed over operator-side IPv4, including a
 real `200 pong` conversation. No public payload Release was published, no
 production telemetry was enabled, and neither KVM nor enabled upstream telemetry
 was certified by that rollout.
+
+The later seed/control alignment is an additional source change, not a claim
+that the earlier private deployment contains it. Its isolated real Docker plus
+HTTP smoke verified native acknowledgment without a container restart, custom
+environment preservation and explicit deletion, opt-out through initialization,
+stable identity, stopped publication without application, and unavailable-node
+failure without controller-mirror fallback. Browser runs reproduced the old
+polling-reset/failed-draft defects and verified repaired seed and bulk telemetry
+flows at desktop and 390px widths. A real pinned loopback SSH/SFTP smoke verified
+node-owned reads, four-file publication with atomic per-file writes, seed-only
+isolation, refusal to claim success with a missing required file, and preservation
+of node machine ID, OAuth config, internal token, and credentials. No production
+account or telemetry switch was touched; real KVM and successful production-node
+publication remain separate verification boundaries.

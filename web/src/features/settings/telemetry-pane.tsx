@@ -6,10 +6,10 @@ import {
   type QueryClient,
 } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import type { Vm } from '@/types/panel-vm'
+import type { Vm, VmSeedSettings } from '@/types/panel-vm'
 import { ArrowRight, ChevronRight, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
-import { api } from '@/lib/api'
+import { api, isApiError } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { isCodexVm, slotNameLabel } from '@/lib/vm-kind'
 import { Button } from '@/components/ui/button'
@@ -45,10 +45,8 @@ import {
   vmQueryOptions,
   vmSeedUploadLogQueryOptions,
 } from '@/features/vm/queries'
-import {
-  telemetryEnabled,
-  telemetrySeedFlags,
-} from '@/features/vm/telemetry-policy'
+import { seedSaveState } from '@/features/vm/seed-settings'
+import { telemetrySeedFlags } from '@/features/vm/telemetry-policy'
 
 const LIVE: Record<LiveKey, { legend: string; swatch: string; text: string }> =
   {
@@ -63,17 +61,17 @@ const LIVE: Record<LiveKey, { legend: string; swatch: string; text: string }> =
       text: 'text-[var(--status-caution)]',
     },
     blocked: {
-      legend: '开 · 等待或失败',
+      legend: '等待或失败',
       swatch: 'bg-[var(--status-warn-solid)]',
       text: 'text-[var(--status-warn)]',
     },
     parked: {
-      legend: '开 · 槽已停',
+      legend: '槽已停 · 待确认',
       swatch: 'bg-[var(--ok-2)]',
       text: 'text-muted-foreground',
     },
     unknown: {
-      legend: '开 · 状态未知',
+      legend: '原生状态待确认',
       swatch: 'bg-[var(--status-none)]',
       text: 'text-muted-foreground',
     },
@@ -84,22 +82,12 @@ const LIVE: Record<LiveKey, { legend: string; swatch: string; text: string }> =
     },
   }
 
-type SeedPutResult = {
-  service?: {
-    failed_count?: number
-    items?: { error?: string }[]
-  } | null
-}
-
-/** Configuration saves wait for native VM policy acknowledgment. */
+/** Desired policy is saved separately from publication and native acknowledgment. */
 async function writeTelemetry(id: string, enabled: boolean) {
-  const res = await api<SeedPutResult>(
+  return api<VmSeedSettings>(
     `/api/panel/vms/${encodeURIComponent(id)}/seed-settings`,
     { method: 'PUT', body: JSON.stringify(telemetrySeedFlags(enabled)) }
   )
-  const svc = res?.service
-  if (!svc?.failed_count) return null
-  return svc.items?.find((item) => item.error)?.error || 'VM 原生遥测配置未生效'
 }
 
 async function refreshAfterWrite(qc: QueryClient, ids: string[]) {
@@ -245,7 +233,7 @@ export function TelemetryPane({
   const claude = vms.filter((vm) => !isCodexVm(vm))
   const codexCount = vms.length - claude.length
   // A saved opt-out is not proof that the VM stopped its sender.
-  const probed = claude.filter((vm) => vm.status === 'running')
+  const probed = claude
   const details = useQueries({
     queries: probed.map((vm) => ({
       ...vmQueryOptions(vm.id),
@@ -255,6 +243,13 @@ export function TelemetryPane({
   })
   const detailById = new Map(probed.map((vm, i) => [vm.id, details[i]]))
   const slots = claude.map((vm) => slotState(vm, detailById.get(vm.id)))
+  const targetsFor = (enabled: boolean) =>
+    slots
+      .filter(
+        (slot) =>
+          slot.on !== enabled || (!slot.confirmed && slot.live !== 'parked')
+      )
+      .map((slot) => slot.vm)
 
   const [busy, setBusy] = useState<Set<string>>(() => new Set())
   const [bulk, setBulk] = useState<{
@@ -269,16 +264,21 @@ export function TelemetryPane({
   const setOne = async (vm: Vm, enabled: boolean) => {
     setBusy((cur) => new Set(cur).add(vm.id))
     try {
-      const svcError = await writeTelemetry(vm.id, enabled)
-      if (svcError) {
-        toast.warning(`${vm.id} 已保存，原生配置确认失败：${svcError}`)
-      } else {
-        toast.success(`${vm.id} 遥测已${enabled ? '开启' : '关闭'}`)
-      }
+      const result = await writeTelemetry(vm.id, enabled)
+      const state = seedSaveState(result)
+      if (state === 'applied')
+        toast.success(`${vm.id} 原生已确认${enabled ? '开启' : '关闭'}`)
+      else if (state === 'published')
+        toast.info(`${vm.id} 文件已发布，等待 VM 确认`)
+      else if (state === 'unsupported')
+        toast.warning(`${vm.id} 此运行环境不支持 VM 原生遥测`)
+      else toast.warning(`${vm.id} 已保存，生效状态尚未确认`)
     } catch (error) {
-      toast.error(
-        `${vm.id} 写入失败：${error instanceof Error ? error.message : String(error)}`
-      )
+      const state = seedSaveState(isApiError(error) ? error.data : null)
+      const message = error instanceof Error ? error.message : String(error)
+      if (state !== 'unknown')
+        toast.warning(`${vm.id} 已保存，发布或原生确认失败：${message}`)
+      else toast.error(`${vm.id} 写入失败：${message}`)
     } finally {
       await refreshAfterWrite(qc, [vm.id])
       setBusy((cur) => {
@@ -290,19 +290,20 @@ export function TelemetryPane({
   }
 
   const runBulk = async (enabled: boolean) => {
-    const targets = claude.filter(
-      (vm) => telemetryEnabled(vm.seed_policy) !== enabled
-    )
+    const targets = targetsFor(enabled)
     setConfirm(null)
     if (!targets.length) return
     const failed: string[] = []
-    const restartFailed: string[] = []
+    const pending: string[] = []
     for (const [index, vm] of targets.entries()) {
       setBulk({ enabled, done: index, total: targets.length, current: vm.id })
       try {
-        if (await writeTelemetry(vm.id, enabled)) restartFailed.push(vm.id)
-      } catch {
-        failed.push(vm.id)
+        if (seedSaveState(await writeTelemetry(vm.id, enabled)) !== 'applied')
+          pending.push(vm.id)
+      } catch (error) {
+        if (seedSaveState(isApiError(error) ? error.data : null) !== 'unknown')
+          pending.push(vm.id)
+        else failed.push(vm.id)
       }
     }
     setBulk(null)
@@ -310,18 +311,18 @@ export function TelemetryPane({
       qc,
       targets.map((vm) => vm.id)
     )
-    const ok = targets.length - failed.length
+    const confirmed = targets.length - failed.length - pending.length
     const verb = enabled ? '开启' : '关闭'
     if (failed.length) {
       toast.error(
-        `已${verb} ${ok} 槽，失败 ${failed.length}：${failed.join('、')}`
+        `原生确认${verb} ${confirmed} 槽，待确认 ${pending.length}，写入失败 ${failed.length}：${failed.join('、')}`
       )
-    } else if (restartFailed.length) {
+    } else if (pending.length) {
       toast.warning(
-        `已${verb} ${ok} 槽；原生配置确认失败：${restartFailed.join('、')}`
+        `原生确认${verb} ${confirmed} 槽；已保存但未确认：${pending.join('、')}`
       )
     } else {
-      toast.success(`已${verb} ${ok} 槽`)
+      toast.success(`原生确认${verb} ${confirmed} 槽`)
     }
   }
 
@@ -329,11 +330,9 @@ export function TelemetryPane({
     (key) => [key, slots.filter((s) => s.live === key).length] as const
   )
   const onCount = slots.filter((s) => s.on).length
-  const toEnable = claude.length - onCount
-  const pendingTargets =
-    confirm === null
-      ? []
-      : claude.filter((vm) => telemetryEnabled(vm.seed_policy) !== confirm)
+  const toEnable = targetsFor(true).length
+  const toDisable = targetsFor(false).length
+  const pendingTargets = confirm === null ? [] : targetsFor(confirm)
   const pendingRunning = pendingTargets.filter(
     (vm) => vm.status === 'running'
   ).length
@@ -378,13 +377,13 @@ export function TelemetryPane({
             <Button
               size='sm'
               variant='outline'
-              disabled={!!bulk || onCount === 0}
+              disabled={!!bulk || toDisable === 0}
               onClick={() => setConfirm(false)}
             >
               全部关闭
-              {onCount ? (
+              {toDisable ? (
                 <span className='font-mono text-xs tabular-nums opacity-80'>
-                  {onCount}
+                  {toDisable}
                 </span>
               ) : null}
             </Button>
@@ -425,7 +424,7 @@ export function TelemetryPane({
               ) : null
             )}
             <span className='ms-auto font-mono text-muted-foreground tabular-nums'>
-              {onCount} / {slots.length} 开
+              {onCount} / {slots.length} 策略开启
             </span>
           </div>
           {bulk ? (
@@ -547,8 +546,8 @@ export function TelemetryPane({
       <Card className='gap-0 py-0'>
         <ul className='divide-y divide-[var(--hairline)]'>
           <RelatedRow
-            label='换票后同步遥测'
-            detail='官方初装成功后，按官方身份把该槽遥测打开。'
+            label='初装后发布遥测策略'
+            detail='按当前已保存开关发布原生配置，不自动开启遥测或改写身份。'
             on={routing.isLoading ? null : official?.sync_telemetry === true}
             tab='init'
             tabLabel='初装'
@@ -580,9 +579,10 @@ export function TelemetryPane({
             </p>
             {confirm ? (
               <p>
-                没有官方初装身份的槽会写成开，但要等身份写入后才会上传。
+                只有本 VM 的有效 profile 凭据、真实身份和新鲜出口信息齐备后，
+                才按周期发送必要原生 1P 事件。不会制造初装活动或从控制面代发。
                 {pendingRemote
-                  ? `其中 ${pendingRemote} 个是集群槽：集群节点不支持官方初装，开了也不会上传。`
+                  ? ` ${pendingRemote} 个集群槽必须完成所在节点的文件发布与原生确认。`
                   : ''}
               </p>
             ) : null}
@@ -664,7 +664,7 @@ function SlotRow({
   onToggleOpen: () => void
   onSet: (enabled: boolean) => void
 }) {
-  const { vm, on, live, label, probing } = slot
+  const { vm, on, live, label, probing, confirmed } = slot
   const name = slotNameLabel(vm)
   const panelId = `telemetry-log-${vm.id}`
   return (
@@ -731,7 +731,12 @@ function SlotRow({
                 type='button'
                 aria-pressed={active}
                 aria-label={`${value ? '开启' : '关闭'} ${vm.id} 遥测`}
-                disabled={busy || locked || active}
+                disabled={busy || locked || (active && confirmed)}
+                title={
+                  active && !confirmed
+                    ? '重新发布当前策略并等待 VM 确认'
+                    : undefined
+                }
                 onClick={() => onSet(value)}
                 className={cn(
                   'min-w-9 rounded-[5px] px-2.5 py-1 text-xs font-medium transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-default',

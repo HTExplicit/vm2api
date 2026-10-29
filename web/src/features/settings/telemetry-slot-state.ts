@@ -1,6 +1,9 @@
 import type { Vm, VmDetailPayload } from '@/types/panel-vm'
 import { telemetryEnabled } from '@/features/vm/telemetry-policy'
-import { telemetryStatusLabel } from '@/features/vm/telemetry-status'
+import {
+  telemetryPolicyConfirmed,
+  telemetryStatusLabel,
+} from '@/features/vm/telemetry-status'
 
 export type LiveKey = 'live' | 'idle' | 'blocked' | 'parked' | 'unknown' | 'off'
 export const LIVE_ORDER: LiveKey[] = [
@@ -17,6 +20,7 @@ export type SlotState = {
   live: LiveKey
   label: string
   probing: boolean
+  confirmed: boolean
 }
 
 export function slotState(
@@ -25,33 +29,34 @@ export function slotState(
 ): SlotState {
   const on = telemetryEnabled(vm.seed_policy)
   const observed = detail?.data?.kernel?.telemetry
-  if (observed?.state === 'unsupported')
+  const confirmed = telemetryPolicyConfirmed(observed, on)
+  const base = { vm, on, confirmed, probing: false }
+  if (observed?.state === 'unsupported') {
+    return { ...base, live: 'blocked', label: '此运行环境不支持' }
+  }
+  if (!detail || detail.isPending) {
+    return { ...base, live: 'unknown', label: '探测原生状态', probing: true }
+  }
+  if (!observed) {
     return {
-      vm,
-      on,
-      live: on ? 'blocked' : 'off',
-      label: '此运行环境不支持',
-      probing: false,
+      ...base,
+      live: vm.status === 'stopped' ? 'parked' : 'unknown',
+      label: telemetryStatusLabel(observed, on),
+    }
+  }
+  if (!confirmed)
+    return {
+      ...base,
+      live: 'unknown',
+      label: telemetryStatusLabel(observed, on),
     }
   if (!on)
-    return {
-      vm,
-      on,
-      live: 'off',
-      label: observed?.enabled ? '关 · 等待 VM 确认' : '关',
-      probing: false,
-    }
-  if (vm.status !== 'running')
-    return { vm, on, live: 'parked', label: '槽已停', probing: false }
-  if (!detail || detail.isPending)
-    return { vm, on, live: 'unknown', label: '探测中', probing: true }
-  if (!observed)
-    return { vm, on, live: 'unknown', label: '状态未知', probing: false }
+    return { ...base, live: 'off', label: telemetryStatusLabel(observed, on) }
   const live =
     observed.state === 'uploading'
       ? 'live'
       : observed.state === 'idle'
         ? 'idle'
         : 'blocked'
-  return { vm, on, live, label: telemetryStatusLabel(observed), probing: false }
+  return { ...base, live, label: telemetryStatusLabel(observed, on) }
 }
