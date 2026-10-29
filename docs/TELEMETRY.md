@@ -131,3 +131,15 @@ paths only. They are not real-account/provider or production-node acceptance.
 Real KVM requires an accessible `/dev/kvm`; Docker/TCG, cross-compilation and
 static guest paths cannot certify KVM execution. Keep environment blockers and
 unexecuted criteria explicit in the task verification record.
+
+The separately authorized private `1.4.026` deployment verified five local and
+four remote existing Claude Docker slots in place, including mapped native
+bytes, container identity and disabled/ready/pending-zero state. All ten Claude
+opt-out policies and twelve VM scheduling policies retained their semantics;
+eleven legacy Anthropic Go senders were retired. OpenAI container/native guest
+files and Analytics configuration were unchanged; replacement of host OpenAI
+kernel processes through their normal Node service lifecycle was explicitly
+authorized. The official live gate passed over operator-side IPv4, including a
+real `200 pong` conversation. No public payload Release was published, no
+production telemetry was enabled, and neither KVM nor enabled upstream telemetry
+was certified by that rollout.
