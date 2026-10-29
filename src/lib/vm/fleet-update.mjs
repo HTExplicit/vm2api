@@ -10,7 +10,7 @@ import { collectSlotIdentity } from './guest-identity.mjs'
 import { rustKernelHealth } from '../transport/rust-kernel-client.mjs'
 import path from 'node:path'
 import { syncNativeTelemetry } from './vm-runtime.mjs'
-import { writeSlotSeedFiles } from './slot-seed.mjs'
+import { readVmProxyGeo, writeVmProxyTelemetryEgress } from './native-telemetry.mjs'
 import { slotHost } from './slot-host.mjs'
 import { readSlotProcessStatus, retireLegacyTelemetry } from './slot-process-status.mjs'
 import fs from 'node:fs'
@@ -97,6 +97,12 @@ export async function applyNativeTelemetry({
       result.wrote = result.seed.wrote === true
       const written = syncNativeTelemetry(record, projectRoot, routing, { publish: false })
       if (!written.supported || !written.wrote) return { ...result, code: written.error || 'telemetry_config_failed' }
+      const geo = readVmProxyGeo(record)
+      const egress = writeVmProxyTelemetryEgress(projectRoot, record, geo)
+      if (geo && !egress.wrote && egress.reason !== 'proxy_geo_unavailable') {
+        return { ...result, code: egress.reason || 'telemetry_egress_write_failed', published: false, applied: false }
+      }
+      result.egress = { wrote: egress.wrote, overwritten: egress.overwritten, reason: egress.reason || null }
       const publication = await host.syncTelemetry(record, slotDir)
       if (publication?.published !== true)
         return { ...result, code: 'telemetry_publish_failed', error: 'VM configuration publication was not confirmed' }

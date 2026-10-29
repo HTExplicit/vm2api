@@ -44,7 +44,7 @@ export const SLOT_FILE_SETS = Object.freeze({
   seed: [...SEED_SETTINGS_FILES, 'machine-id'],
   // Policy publication must not overwrite node-owned identity or OAuth files.
   seed_settings: SEED_SETTINGS_FILES,
-  telemetry: ['run/kernel.json', ...SEED_SETTINGS_FILES],
+  telemetry: ['run/kernel.json', ...SEED_SETTINGS_FILES, 'cli-home/.claude/telemetry/egress.json'],
 })
 const CREDENTIALS = 'cli-home/.claude/credentials.json'
 const SLOT_BINARIES = Object.freeze(['kin-worker', 'kin-egress'])
@@ -72,7 +72,7 @@ async function prepareRemoteDir(session, vm) {
   const dir = remoteSlotDir(session.host, vm.id)
   const owner = remoteSlotOwner(session.host, vm)
   // Mount roots only: nothing here resolves through a path the guest can rewrite.
-  const roots = [`${dir}/run`, `${dir}/claude`, `${dir}/cli-home`].map(shellQuote).join(' ')
+  const roots = [`${dir}/run`, `${dir}/claude`, `${dir}/claude/telemetry`, `${dir}/cli-home`].map(shellQuote).join(' ')
   const binDir = shellQuote(`${dir}/slot-bin`)
   // Docker creates a missing bind source as root:root, which the slot uid cannot write.
   const chown =
