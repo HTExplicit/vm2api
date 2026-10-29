@@ -459,10 +459,14 @@ test('native interval publication reports an unreachable remote VM as failed, no
     ['vm-codex', { platform: 'openai', family: 'codex' }],
   ]) {
     fs.mkdirSync(path.join(vms, id, 'run'), { recursive: true })
-    fs.mkdirSync(path.join(vms, id, 'cli-home', '.claude'), { recursive: true })
+    const claudeDir = path.join(vms, id, 'cli-home', '.claude')
+    fs.mkdirSync(claudeDir, { recursive: true })
     fs.writeFileSync(path.join(vms, `${id}.json`), JSON.stringify({ id, seed_policy: seed, ...extra }))
     fs.writeFileSync(path.join(vms, id, 'run', 'worker.json'), JSON.stringify({ vm_id: id }))
-    fs.writeFileSync(path.join(vms, id, 'cli-home', '.claude', '.claude.json'), JSON.stringify({ userID: user }))
+    fs.writeFileSync(path.join(claudeDir, '.claude.json'), JSON.stringify({ userID: user }))
+    fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify({ env: { TZ: 'UTC' } }))
+    fs.writeFileSync(path.join(claudeDir, 'claude.setting'), 'TZ=UTC\n')
+    fs.writeFileSync(path.join(claudeDir, 'kin-seed.json'), JSON.stringify({ version: 1 }))
   }
   const routingConfig = { concurrency: {}, tiers: {} }
   fs.writeFileSync(routingFile, JSON.stringify(routingConfig))
