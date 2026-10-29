@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- #832：对齐 #814/#807：官方 cache 断点单测保留 CLI `eager_input_streaming`；调度 admission 单测不再依赖 `accounts.schedulable`。
 - #815：取消 Opus/Sonnet 5.5 将强制 `tool_choice` 静默改写为 `auto` 并强加 `strict:true` 的行为；入口 `validateToolChoice`，不兼容请求明确 400（`tool_choice_incompatible` / `invalid_tool_choice`），兼容模型保留调用方 `tool_choice` 与 `strict`。**行为破坏**：原先静默降级为 auto 的强制工具请求，现返回 400。
 
 ## 1.4.028 — 2026-10-30

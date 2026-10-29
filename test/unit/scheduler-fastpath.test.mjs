@@ -149,9 +149,9 @@ test('health singleflight survives caller cancellation and persists without touc
 test('admission rejects a new disable, cooldown or scope restriction after selection', async (t) => {
   const { pool, runtime, db } = fixture(t)
   const candidate = (await pool.eligibleCandidates(options))[0]
-  db.prepare('UPDATE accounts SET schedulable=0 WHERE id=?').run(candidate.accountId)
+  db.prepare("UPDATE accounts SET status='disabled' WHERE id=?").run(candidate.accountId)
   assert.equal(pool.reserve(candidate), null)
-  db.prepare('UPDATE accounts SET schedulable=1 WHERE id=?').run(candidate.accountId)
+  db.prepare("UPDATE accounts SET status='active' WHERE id=?").run(candidate.accountId)
   runtime.updateWindow(candidate.accountId, { vmId: candidate.vmId, overloadUntil: Date.now() + 60000 })
   assert.equal(pool.reserve(candidate), null)
   runtime.updateWindow(candidate.accountId, { vmId: candidate.vmId, overloadUntil: Date.now() - 1 })
