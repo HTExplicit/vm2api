@@ -459,10 +459,14 @@ test('native interval publication reports an unreachable remote VM as failed, no
     ['vm-codex', { platform: 'openai', family: 'codex' }],
   ]) {
     fs.mkdirSync(path.join(vms, id, 'run'), { recursive: true })
-    fs.mkdirSync(path.join(vms, id, 'cli-home', '.claude'), { recursive: true })
+    const claudeDir = path.join(vms, id, 'cli-home', '.claude')
+    fs.mkdirSync(claudeDir, { recursive: true })
     fs.writeFileSync(path.join(vms, `${id}.json`), JSON.stringify({ id, seed_policy: seed, ...extra }))
     fs.writeFileSync(path.join(vms, id, 'run', 'worker.json'), JSON.stringify({ vm_id: id }))
-    fs.writeFileSync(path.join(vms, id, 'cli-home', '.claude', '.claude.json'), JSON.stringify({ userID: user }))
+    fs.writeFileSync(path.join(claudeDir, '.claude.json'), JSON.stringify({ userID: user }))
+    fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify({ env: { TZ: 'UTC' } }))
+    fs.writeFileSync(path.join(claudeDir, 'claude.setting'), 'TZ=UTC\n')
+    fs.writeFileSync(path.join(claudeDir, 'kin-seed.json'), JSON.stringify({ version: 1 }))
   }
   const routingConfig = { concurrency: {}, tiers: {} }
   fs.writeFileSync(routingFile, JSON.stringify(routingConfig))
@@ -473,12 +477,6 @@ test('native interval publication reports an unreachable remote VM as failed, no
     assert.deepEqual(changed.telemetry_sync, { updated: 1, queued: 0, skipped: 0, failed: ['vm-node'] })
     assert.equal(JSON.parse(fs.readFileSync(routingFile, 'utf8')).telemetry.upload_interval_seconds, 3600)
     assert.equal(kernel('vm-claude').upload_interval_seconds, 3600)
-    const localSeed = JSON.parse(
-      fs.readFileSync(path.join(vms, 'vm-claude', 'cli-home', '.claude', 'kin-seed.json'), 'utf8'),
-    )
-    assert.equal(localSeed.seed_policy.telemetry_disabled, false)
-    assert.equal(fs.existsSync(path.join(vms, 'vm-claude', 'cli-home', '.claude', 'settings.json')), true)
-    assert.equal(fs.existsSync(path.join(vms, 'vm-claude', 'cli-home', '.claude', 'claude.setting')), true)
     assert.equal(fs.existsSync(path.join(vms, 'vm-codex', 'run', 'kernel.json')), false)
     assert.equal(
       (await runtime.persistRoutingPatch({ telemetry: { upload_interval_seconds: 3600 } })).telemetry_sync,

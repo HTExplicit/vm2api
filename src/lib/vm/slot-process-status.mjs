@@ -33,6 +33,9 @@ export async function retireLegacyTelemetry({ vm, run = runSlotProcess, inspect 
   try {
     runtime = await inspect(host.dockerApi(), slotExecContainer(vm))
   } catch {
+    // Remote slots must confirm publication on the node; local stopped slots only publish disk state.
+    if (vm.node_id) return { ok: false, code: 'telemetry_runtime_unavailable' }
+    if (vm.status !== 'running') return { ok: true, running: false, state: 'stopped' }
     return { ok: false, code: 'telemetry_runtime_unavailable' }
   }
   if (!runtime?.State?.Running) return { ok: true, running: false, state: 'stopped' }

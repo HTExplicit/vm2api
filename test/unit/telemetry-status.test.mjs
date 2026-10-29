@@ -34,10 +34,28 @@ test('unreachable native VM remains unknown rather than claiming upload or disab
   })
   assert.equal(result.telemetry, null)
 })
+test('local stopped VM skips legacy retirement when the runtime is unavailable', async () => {
+  let ran = false
+  const result = await retireLegacyTelemetry({
+    vm: { id: 'vm-05', status: 'stopped' },
+    inspect: async () => {
+      throw new Error('docker offline')
+    },
+    run: async () => {
+      ran = true
+      throw new Error('must not run')
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.running, false)
+  assert.equal(ran, false)
+})
+
 test('stopped VM publication does not spawn a process to retire telemetry', async () => {
   let ran = false
   const result = await retireLegacyTelemetry({
     vm: { id: 'vm-03', status: 'stopped' },
+    inspect: async () => ({ State: { Running: false } }),
     run: async () => {
       ran = true
       throw new Error('must not run')
