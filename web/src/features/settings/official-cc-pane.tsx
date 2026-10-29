@@ -27,6 +27,7 @@ const TIMEOUTS: [number, string][] = [
 ]
 
 const MEMORY: [string, string][] = [
+  ['250m', '250 MB'],
   ['500m', '500 MB（推荐）'],
   ['512m', '512 MB'],
   ['1g', '1 GB'],
@@ -40,7 +41,7 @@ const BASIC: [string, string, string, boolean][] = [
   [
     'sync_telemetry',
     '发布原生遥测策略',
-    '初装成功后按已保存的开关同步，不自动开启',
+    '只同步已保存的 telemetry_disabled，不把环境变量 0 当成开启',
     false,
   ],
 ]
@@ -104,8 +105,9 @@ export function OfficialCcSettingsPane({
           这是槽位的初装流程配置。启用后换票会执行官方 hello，保留已有 VM
           身份、settings 与原生队列，不把重新授权当作新设备。运输固定 Rust
           cli-hop，这里不能改成 HTTP；真正运行 CLI 的数据面仍按当前配置选择。
-          「发布原生遥测策略」只同步已保存的开关与 kernel/seed，不改写凭据、
-          不开启已关闭的遥测，也不为遥测重启 VM。
+          「发布原生遥测策略」只同步已保存的 telemetry_disabled，不读取
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC，不开启已关闭的遥测，不改写凭据，
+          也不为遥测重启 VM。hello、/usage、指纹和内存设置与这个开关无关。
         </p>
 
         <div className='divide-y'>

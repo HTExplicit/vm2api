@@ -350,12 +350,19 @@ export function TelemetryPane({
         <CardHeader className='flex flex-wrap items-start justify-between gap-x-6 gap-y-3'>
           <div className='min-w-0 space-y-1.5'>
             <CardTitle className='text-base'>遥测</CardTitle>
-            <p className='max-w-[60ch] text-sm text-muted-foreground'>
-              每个 Claude 槽只有一个开关，存在种子策略{' '}
+            <p className='max-w-[68ch] text-sm text-muted-foreground'>
+              每个 Claude 槽只有一个开关。写入{' '}
               <code className='font-mono text-xs text-foreground'>
-                telemetry_disabled
-              </code>
-              。其余键都跟着它写。
+                telemetry_disabled === false
+              </code>{' '}
+              才算开，缺这个值也是关。把{' '}
+              <code className='font-mono text-xs text-foreground'>
+                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+              </code>{' '}
+              改成 0 不会打开：关的时候播种才写成 0，开的时候写成 1。官方 CLI
+              把这个变量的任何已设置值都当成只走必要流量。旧 Go
+              遥测服务已下线，发送者是常驻 cli-node，默认关。展开槽位可提取最近
+              40 条计数日志，不含正文或身份。
               {codexCount
                 ? ` GPT 使用独立统计链路，${codexCount} 个不在此列。`
                 : ''}
@@ -481,8 +488,9 @@ export function TelemetryPane({
         <CardHeader>
           <CardTitle className='text-base'>播种写什么</CardTitle>
           <p className='text-sm text-muted-foreground'>
-            开关决定下面每个键的值。槽内这些键是锁定项，种子页的 extra_env
-            改不动。
+            开关只认
+            telemetry_disabled。下面是播种时跟着写的镜像，手改环境变量不会保持，也不能单独当开关。槽内这些键是锁定项，种子页的
+            extra_env 改不动。
           </p>
         </CardHeader>
         <CardContent>
@@ -547,7 +555,7 @@ export function TelemetryPane({
         <ul className='divide-y divide-[var(--hairline)]'>
           <RelatedRow
             label='初装后发布遥测策略'
-            detail='按当前已保存开关发布原生配置，不自动开启遥测或改写身份。'
+            detail='初装成功后只发布已保存的开关，不读取环境变量，不自动开启，也不改写身份。'
             on={routing.isLoading ? null : official?.sync_telemetry === true}
             tab='init'
             tabLabel='初装'
