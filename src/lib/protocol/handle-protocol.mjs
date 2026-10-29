@@ -606,7 +606,7 @@ export function createHandleProtocol(deps) {
         }).body,
       )
     }
-    logBag.inbound_body = inbound
+    logBag.inbound_body = logCtx.mode === 'debug' ? inbound : null
     logBag.inbound_summary = summarizeBody(inbound)
     logBag.model = inbound?.model || null
     logBag.requested_model = inbound?.model || null

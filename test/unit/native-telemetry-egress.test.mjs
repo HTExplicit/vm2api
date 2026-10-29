@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
+  buildNativeTelemetry,
   telemetryEgressSnapshot,
   telemetryFactHash,
   writeVmProxyTelemetryEgress,
@@ -32,12 +33,10 @@ test('proxy geo overwrites a failed telemetry egress stub', () => {
     assert.equal(written.wrote, true)
     assert.equal(written.overwritten, true)
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
-    const projection = {
-      proxy_id: 'px-1',
-      proxy_url: 'socks5h://127.0.0.1:1080',
-      proxy_required: true,
-    }
-    const binding = telemetryFactHash([projection.proxy_id, projection.proxy_url, projection.proxy_required])
+    const projection = buildNativeTelemetry(vm, root, { telemetry: {} })
+    assert.equal(projection.proxy_url, '')
+    assert.equal(projection.proxy_required, false)
+    const binding = telemetryFactHash([projection.proxy_id, '', false])
     assert.equal(saved.binding, binding)
     assert.equal(saved.epoch, telemetryFactHash([binding, geo.ip]))
     assert.equal(saved.ip, geo.ip)
