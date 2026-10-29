@@ -133,9 +133,18 @@ def main():
                 status, data = request('/internal/v1/cancel', {'request_id': 'cancel-probe'})
                 assert status == 200 and json.loads(data).get('cancelled'), data
                 pending.result(timeout=20)
-            time.sleep(1)
-            _, raw = request('/internal/health')
-            health = json.loads(raw)
+            deadline = time.time() + 15
+            health = {}
+            while time.time() < deadline:
+                _, raw = request('/internal/health')
+                health = json.loads(raw)
+                if (
+                    health.get('healthy')
+                    and health.get('cli_restarts') == 0
+                    and health.get('ready_slots') == 20
+                ):
+                    break
+                time.sleep(0.5)
             assert health.get('healthy') and health.get('cli_restarts') == 0 and health.get('ready_slots') == 20, health
             print(json.dumps({'passed': True, 'requests': results, 'cancelled': True,
                               'ready_slots': health['ready_slots'], 'cli_restarts': health['cli_restarts']}), flush=True)
