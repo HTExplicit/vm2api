@@ -1,16 +1,17 @@
 # Changelog
 
 ## Unreleased
-- 上游 Usage Policy 的 400（内核常记成 `upstream_invalid_request`）归入拒答，风险审计能看到。拒答指纹显示用户原文，不显示 `<system-reminder>`。近似只比较去掉提醒、环境和工具回传后的用户正文；短于 512 字只做精确指纹，不靠共享提醒误伤。
-- 决策模型题库收成三题：使用政策、色情、破限与攻击。使用政策按近期上游拒答改过，轴承和编码器这类机械句不拦。色情低于阈值就拦，并写入 device 封禁。破限、逆向、破解、渗透和网络攻击合成一题，三题各自打分，任一题低于阈值就拦。未改过的旧六题在读取时换成这三题；面板改过的句子保留。
-- 请求日志的思考强度改读出站 envelope：调用方 effort 优先，没有则记模型缺省（面板 `default_effort`，未设置用目录缺省，Sonnet 5 为 high）。`off` 仍为空。失败在发出之前的请求仍只显示入站值。
 
-- Linux VM 遥测在每个 slot 开始时伴生发送一条，不合并、不堆积作业结果。缺有效 profile scope 或已发布出口地理时暂停，401 不降级匿名发送。关闭立即清队列。
-- Linux 初登、重新授权工具进入目标 Docker/KVM guest，保留原 helper 和唯一 Go refresh 写者；实际换票阶段经受鉴权的 native 私有入口确认，缓存命中不制造事件。单 VM / 批量开关、间隔、状态和计数日志统一原生通路，远端必须确认 kernel 与 seed 均已发布；macOS 遥测明确不支持。升级须配套 Node / Go OAuth worker / kernel / cli-node 新产物，真实 KVM 验收仍需可访问的测试环境。
-- 已在另行授权的私有 `1.4.026` Docker 部署中完成五个本机、四个远端 Claude 槽原地升级，容器身份及原调度语义保持；10 条 Claude 遥测关闭策略保持，九槽 native ready / disabled / pending=0，11 个旧 Go 发送者退役。版本、认证、公网页面、容器身份及真实 `200 pong` 验收通过。未公开发布 payload/Release，未开启生产遥测；这不构成 KVM 或生产 1P 上传认证。
-- 决策模型收窄今天的误伤。综合、破限、逆向、渗透、网络攻击五题明确放过：修本机故障时的「所有权限都给你」和 tool loaded、抄进来的审查说明、阅读自己的或客户的源码、路径里的「反编译」、在自己的机器上搭中转并设置登录密码，以及排查已交付系统的 ssh、redis、kafka 和配置密码。色情、暴力伤害、破解授权、明确越狱、对未授权目标的渗透和窃取别人的凭据仍然拦。
-- 设置 → 遥测写明唯一开关是 `telemetry_disabled === false`：`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0` 不会打开，该变量只是播种镜像；展开槽位提取最近 40 条计数日志。设置 → 初装的「发布原生遥测策略」仍只同步已保存开关，不改官方 hello、用量、指纹或内存。
-- 遥测发布从 VM 配置里的代理读取已保存的 IP 和地理信息，覆盖写入槽位 `telemetry/egress.json`。发送者加载这份快照，不在槽内拨代理，也不把多次 slot 开始合成一批。`payload-2026.10.29-telemetry-slot-start` 的 cli-node 含该发送端；升级后须 `fetch:payload` 且 `wrap-cli/sync`。
+- #820：决策模型收窄误伤。综合、破限、逆向、渗透、网络攻击五题明确放过：修本机故障时的「所有权限都给你」和 tool loaded、抄进来的审查说明、阅读自己的或客户的源码、路径里的「反编译」、在自己的机器上搭中转并设置登录密码，以及排查已交付系统的 ssh、redis、kafka 和配置密码。色情、暴力伤害、破解授权、明确越狱、对未授权目标的渗透和窃取别人的凭据仍然拦。已保存的旧出厂题会在读配置时自动升级为新句（LEGACY 集合；拦截静默放宽，面板改过的不动）。
+- #822：Linux VM 遥测迁入同一 Rust 内核管理的常驻 cli-node，移除 Go 遥测服务及自愈/回退；仅使用目标 VM 身份、凭据、settings 与动态出口。在每个 slot 开始时伴生发送一条必要原生 1P 事件，不合并、不堆积作业结果；缺有效 profile scope 或已发布出口地理时暂停，401 不降级匿名发送。关闭立即清队列。
+- #822：Linux 初登、重新授权工具进入目标 Docker/KVM guest，保留原 helper 和唯一 Go refresh 写者；实际换票阶段经受鉴权的 native 私有入口确认，缓存命中不制造事件。单 VM / 批量开关、间隔、状态和计数日志统一原生通路，远端必须确认 kernel 与 seed 均已发布；macOS 遥测明确不支持。升级须配套 Node / Go OAuth worker / kernel / cli-node 新产物，真实 KVM 验收仍需可访问的测试环境。
+- #823：设置 → 遥测写明唯一开关是 `telemetry_disabled === false`：`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0` 不会打开，该变量只是播种镜像；展开槽位提取最近 40 条计数日志。设置 → 初装的「发布原生遥测策略」仍只同步已保存开关，不改官方 hello、用量、指纹或内存。
+- #823：遥测发布从 VM 配置里的代理读取已保存的 IP 和地理信息，覆盖写入槽位 `telemetry/egress.json`；失败占位会被改写。发送者加载这份快照，不再自己探测，也不在槽内拨代理，也不把多次 slot 开始合成一批。出口只走槽网络外层转发。没有可用地理信息时不发明快照，也不阻断其余发布。`payload-2026.10.29-telemetry-slot-start` 的 cli-node 含该发送端。
+- #824：请求日志的思考强度改读出站 envelope：调用方 effort 优先，没有则记模型缺省（面板 `default_effort`，未设置用目录缺省，Sonnet 5 为 high）。`off` 仍为空。失败在发出之前的请求仍只显示入站值。
+- #825：上游 Usage Policy 的 400（内核常记成 `upstream_invalid_request`）归入拒答，风险审计能看到。拒答指纹显示用户原文，不显示 `<system-reminder>`。近似只比较去掉提醒、环境和工具回传后的用户正文；短于 512 字只做精确指纹，不靠共享提醒误伤。
+- #825：**行为变化**：决策模型默认由六题收成三题（`usage_policy` / `nsfw` / `abuse`），破限、逆向、渗透与网络攻击合并进 `abuse`。读配置时 `normalizeJevConfig` 迁移：若保存的仍是未改过的旧内置 `safety`/`jailbreak`/`reverse`/`pentest`/`cyber` 出厂句（LEGACY 集合命中），整表替换为三题新文案并保留原 `nsfw` 的 enabled；任一条目被面板改过、或存在自定义 id，则只刷新仍匹配 LEGACY 的内置句，不删自定义题。使用政策按近期上游拒答改过，轴承和编码器这类机械句不拦。色情低于阈值就拦，并写入 device 封禁。三题各自打分，任一题低于阈值就拦。
+
+已部署机升级：更新 Node 控制面与 `web/dist` 后重启；须 `npm run fetch:payload` 后 `wrap-cli/sync`（`restart:true`）。重部署 Go OAuth worker（`kin-oauth-auth`）。ARM64 控制面镜像须重建以随 `deploy/arm64-cli.json` 钉住 `payload-2026.10.29-telemetry-slot-start` 的 cli-node（`8484c4c58f4b7782a190f7cab7c8aa5d1f706ae26b2d2a5cafe81af070f0611b` / 27933052 字节）。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
 
 ## 1.4.025 — 2026-10-28
 
