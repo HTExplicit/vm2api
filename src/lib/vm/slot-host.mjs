@@ -24,6 +24,8 @@
  *   onImport(vm, slotDir)       an imported credential replaces the slot's copy
  *   afterRefresh(vm, slotDir)   the slot rotated its credential; mirror it back
  *   syncTelemetry(vm, slotDir)  acknowledge run/seed publication for VM-native telemetry
+ *   seedFiles(vm, slotDir)      read owner seed bytes plus actual HOME; null means missing, errors never fall back
+ *   syncSeed(vm, slotDir)       acknowledge all three seed files without claiming native telemetry support
  *
  * A node may be a Mac (`platform: 'darwin'`): its slots are launchd services,
  * not containers. That host is `native: true`, has no Docker (dockerApi /
@@ -93,6 +95,7 @@ import { isCodexVm } from './vm-kind.mjs'
 import { nodeEgressProxyUrl } from '../cluster/node-egress-socks.mjs'
 import { isKvmRuntime } from './runtime-kind.mjs'
 import { stopCodexKernel } from '../transport/codex-kernel-supervisor.mjs'
+import { readLocalSlotSeedFiles } from './slot-seed.mjs'
 
 const noop = async () => ({ skipped: true })
 
@@ -147,7 +150,32 @@ const LOCAL_HOST = Object.freeze({
   localExitProxyUrl: (vm) => (isCodexVm(vm) ? localEgressProxyUrl() : ''),
   // The container bind-mounts vms/<id>/ directly: every local write is already published.
   syncRun: noop,
-  syncTelemetry: async () => ({ published: true }),
+  seedFiles: async (_vm, slotDir) => ({
+    cli_home: path.join(slotDir, 'cli-home'),
+    files: readLocalSlotSeedFiles(slotDir),
+  }),
+  syncSeed: async (_vm, slotDir) => {
+    const files = readLocalSlotSeedFiles(slotDir)
+    if (Object.values(files).some((value) => value === null)) {
+      throw new ClusterError(502, 'seed_publish_failed', 'VM seed files are missing')
+    }
+    return { published: true }
+  },
+  syncTelemetry: async (vm, slotDir) => {
+    const files = readLocalSlotSeedFiles(slotDir)
+    if (Object.values(files).some((value) => value === null)) {
+      throw new ClusterError(502, 'telemetry_publish_failed', 'VM seed files are missing')
+    }
+    const config = path.join(vm.runtime?.worker_run_dir || path.join(slotDir, 'run'), 'kernel.json')
+    const fd = fs.openSync(config, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK)
+    try {
+      if (!fs.fstatSync(fd).isFile())
+        throw new ClusterError(502, 'telemetry_publish_failed', 'VM kernel config is unavailable')
+    } finally {
+      fs.closeSync(fd)
+    }
+    return { published: true }
+  },
   telemetryLog: async (vm, slotDir) => {
     const file = path.join(vm.runtime?.worker_run_dir || path.join(slotDir, 'run'), 'telemetry-upload.log')
     try {
@@ -187,9 +215,41 @@ function nodeHost(nodeId) {
     setProxyEgressEnabled: (vm, projectRoot, enabled) => setRemoteProxyEgressEnabled(vm, projectRoot, enabled),
     localExitProxyUrl: () => nodeEgressProxyUrl(nodeId),
     syncRun: (vm, slotDir) => pushSlotFiles(vm, slotDir, ['run']),
+    seedFiles: async (vm) => {
+      const session = await nodeSession(nodeId)
+      const root = remoteSlotDir(session.host, vm.id)
+      const files = {}
+      for (const name of ['settings.json', 'claude.setting', 'kin-seed.json']) {
+        const bytes = await readRemoteFileNoFollow(session.client, `${root}/claude/${name}`, {
+          maxBytes: (1 << 20) + 1,
+        })
+        if (bytes && bytes.length > 1 << 20)
+          throw new ClusterError(502, 'seed_file_too_large', 'VM seed file is too large')
+        files[name] = bytes === null ? null : bytes.toString('utf8')
+      }
+      return { cli_home: `${root}/cli-home`, files }
+    },
+    syncSeed: async (vm, slotDir) => {
+      const result = await pushSlotFiles(vm, slotDir, ['seed_settings'])
+      if (
+        !['settings.json', 'claude.setting', 'kin-seed.json'].every((name) =>
+          result.pushed.includes(`cli-home/.claude/${name}`),
+        )
+      ) {
+        throw new ClusterError(502, 'seed_publish_failed', 'VM seed configuration was not published')
+      }
+      return { ...result, published: true }
+    },
     syncTelemetry: async (vm, slotDir) => {
-      const result = await pushSlotFiles(vm, slotDir, ['run', 'seed'])
-      if (!result.pushed.includes('run/kernel.json') || !result.pushed.includes('cli-home/.claude/kin-seed.json')) {
+      const result = await pushSlotFiles(vm, slotDir, ['telemetry'])
+      if (
+        ![
+          'run/kernel.json',
+          'cli-home/.claude/settings.json',
+          'cli-home/.claude/claude.setting',
+          'cli-home/.claude/kin-seed.json',
+        ].every((file) => result.pushed.includes(file))
+      ) {
         throw new ClusterError(502, 'telemetry_publish_failed', 'VM telemetry configuration was not published')
       }
       return { ...result, published: true }

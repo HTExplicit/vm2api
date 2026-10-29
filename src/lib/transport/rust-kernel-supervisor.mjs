@@ -743,7 +743,7 @@ function writeKernelJsonAtomically(configPath, config, vm) {
 export function writeKernelConfig(
   projectRoot,
   vm,
-  { token, proxyUrl, proxyRequired, officialCcInference, timezone, routing } = {},
+  { token, proxyUrl, proxyRequired, officialCcInference, timezone, routing, publish = true } = {},
 ) {
   const root = String(process.env.KIN_SLOT_RUN_ROOT || '').trim()
   const runDir = root ? path.join(root, vm.id) : path.join(projectRoot, 'vms', vm.id, 'run')
@@ -862,7 +862,7 @@ export function writeKernelConfig(
     fs.chmodSync(configPath, privileged ? 0o600 : 0o640)
   } catch {}
   // kin-kernel hot-reloads kernel.json: the change must reach wherever the slot reads it.
-  if (changed) host.queueSyncRun(record, path.join(projectRoot, 'vms', vm.id))
+  if (changed && publish) host.queueSyncRun(record, path.join(projectRoot, 'vms', vm.id))
   return {
     runDir,
     socketPath,

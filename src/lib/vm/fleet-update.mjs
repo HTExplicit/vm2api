@@ -13,33 +13,133 @@ import { syncNativeTelemetry } from './vm-runtime.mjs'
 import { writeSlotSeedFiles } from './slot-seed.mjs'
 import { slotHost } from './slot-host.mjs'
 import { readSlotProcessStatus, retireLegacyTelemetry } from './slot-process-status.mjs'
+import fs from 'node:fs'
+import { withVmLock } from './vm-file.mjs'
+import { normalizeVmKind } from './vm-kind.mjs'
+
+function publicationRevision(vm) {
+  return JSON.stringify({
+    node_id: vm.node_id,
+    runtime: vm.runtime,
+    runtime_type: vm.runtime_type,
+    seed_policy: vm.seed_policy,
+    proxy: vm.proxy,
+    timezone: vm.timezone,
+    locale: vm.locale,
+    fingerprint: vm.fingerprint,
+    kind: normalizeVmKind(vm).kind,
+  })
+}
+
+function publicationPlacement(vm) {
+  return JSON.stringify([
+    vm.node_id,
+    vm.runtime,
+    runtimeKind(vm),
+    normalizeVmKind(vm).kind,
+    slotHost(vm).native === true,
+  ])
+}
 
 const ACTIONS = new Set(['collect', 'reload', 'roll', 'telemetry'])
 
 /** Acknowledged publication followed by native state, never a sidecar/egress restart. */
-export async function applyNativeTelemetry({ projectRoot, vm, routing = {}, timeoutMs = 6000 } = {}) {
-  if (!vm?.id || !projectRoot) return { ok: false, code: 'invalid_vm' }
-  const host = slotHost(vm)
-  if (host.native) return { ok: false, code: 'telemetry_unsupported', error: 'macOS 原生槽不支持遥测' }
-  const retired = await retireLegacyTelemetry({ projectRoot, vm })
-  if (!retired.ok) return retired
-  const seed = writeSlotSeedFiles(projectRoot, vm)
-  const written = syncNativeTelemetry(vm, projectRoot, routing)
-  if (!written.supported || !written.wrote) return { ok: false, code: written.error || 'telemetry_config_failed' }
-  await host.syncTelemetry(vm, path.join(projectRoot, 'vms', vm.id))
-  if (!retired.running) return { ok: true, action: 'published', applied: false, state: 'stopped', seed }
-  const deadline = Date.now() + timeoutMs
-  do {
-    const { telemetry } = await readSlotProcessStatus({ projectRoot, vm })
-    if (
-      telemetry?.enabled === written.enabled &&
-      (written.enabled || (telemetry.state === 'disabled' && telemetry.pending_events === 0))
-    ) {
-      return { ok: true, action: 'applied', applied: true, ...telemetry, seed }
+export async function applyNativeTelemetry({
+  projectRoot,
+  vm,
+  routing = {},
+  timeoutMs = 6000,
+  replaceEnv = false,
+} = {}) {
+  const initial = { ok: false, wrote: false, published: false, applied: false, state: 'unknown' }
+  if (!vm?.id || !projectRoot) return { ...initial, code: 'invalid_vm' }
+  const vmPath = path.join(projectRoot, 'vms', `${vm.id}.json`)
+  return withVmLock(`seed-publication:${vmPath}`, async () => {
+    const result = { ...initial, supported: true }
+    const current = () => {
+      const record = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+      if (record.id !== vm.id) throw new Error('vm_record_changed')
+      return record
     }
-    await sleep(100)
-  } while (Date.now() < deadline)
-  return { ok: false, code: 'telemetry_not_ready', error: 'native telemetry did not acknowledge policy' }
+    try {
+      let record = current()
+      let host = slotHost(record)
+      if (host.native || normalizeVmKind(record).kind !== 'claude') {
+        return {
+          ...result,
+          supported: false,
+          state: 'unsupported',
+          code: 'telemetry_unsupported',
+          error: '此槽不支持 VM 原生遥测',
+        }
+      }
+      const placement = publicationPlacement(record)
+      const retired = await retireLegacyTelemetry({ projectRoot, vm: record })
+      if (!retired.ok) return { ...result, ...retired, published: false, applied: false }
+      record = current()
+      if (placement !== publicationPlacement(record)) {
+        return { ...result, code: 'telemetry_publication_superseded', error: 'VM placement changed during publication' }
+      }
+      host = slotHost(record)
+      const slotDir = path.join(projectRoot, 'vms', record.id)
+      // A node's effective settings are authoritative; never preserve an old controller mirror.
+      const existing = await host.seedFiles(record, slotDir)
+      const observedPlacement = publicationPlacement(record)
+      record = current()
+      if (observedPlacement !== publicationPlacement(record)) {
+        return { ...result, code: 'telemetry_publication_superseded', error: 'VM placement changed during publication' }
+      }
+      const revision = publicationRevision(record)
+      result.seed = writeSlotSeedFiles(projectRoot, record, null, {
+        existingSettings: existing.files['settings.json'] === null ? {} : JSON.parse(existing.files['settings.json']),
+        replaceEnv,
+      })
+      result.wrote = result.seed.wrote === true
+      const written = syncNativeTelemetry(record, projectRoot, routing, { publish: false })
+      if (!written.supported || !written.wrote) return { ...result, code: written.error || 'telemetry_config_failed' }
+      const publication = await host.syncTelemetry(record, slotDir)
+      if (publication?.published !== true)
+        return { ...result, code: 'telemetry_publish_failed', error: 'VM configuration publication was not confirmed' }
+      result.published = true
+      if (publicationRevision(current()) !== revision) {
+        return {
+          ...result,
+          code: 'telemetry_publication_superseded',
+          error: 'VM configuration changed during publication',
+        }
+      }
+      if (!retired.running) return { ...result, ok: true, action: 'published', state: 'stopped' }
+      const deadline = Date.now() + timeoutMs
+      do {
+        const { telemetry } = await readSlotProcessStatus({ projectRoot, vm: record })
+        if (publicationRevision(current()) !== revision) {
+          return {
+            ...result,
+            code: 'telemetry_publication_superseded',
+            error: 'VM configuration changed during observation',
+          }
+        }
+        if (
+          telemetry?.enabled === written.enabled &&
+          (written.enabled || (telemetry.state === 'disabled' && telemetry.pending_events === 0))
+        ) {
+          return { ...result, ...telemetry, ok: true, action: 'applied', applied: true }
+        }
+        await sleep(100)
+      } while (Date.now() < deadline)
+      return { ...result, code: 'telemetry_not_ready', error: 'native telemetry did not acknowledge policy' }
+    } catch {
+      return {
+        ...result,
+        code: result.published
+          ? 'telemetry_observation_unavailable'
+          : result.wrote
+            ? 'telemetry_publish_failed'
+            : 'telemetry_config_failed',
+        error: 'VM telemetry configuration is unavailable',
+      }
+    }
+  })
 }
 
 function sleep(ms) {

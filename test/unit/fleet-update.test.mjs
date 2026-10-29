@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { runFleetUpdate, fleetStatus, isWorkerProcessUp } from '../../src/lib/vm/fleet-update.mjs'
+import { runFleetUpdate, fleetStatus, isWorkerProcessUp, applyNativeTelemetry } from '../../src/lib/vm/fleet-update.mjs'
 
 function writeSlot(root, id, extra = {}) {
   const dir = path.join(root, 'vms')
@@ -142,4 +142,28 @@ test('fleet collection bounds concurrency and visits every slot', { timeout: 200
   assert.equal(report.total, 4)
   assert.equal(report.ok_count, 4)
   assert.equal(report.failed_count, 0)
+})
+
+test('native telemetry publication uses the current stored VM kind and reports unsupported without writes', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-fleet-current-kind-'))
+  try {
+    writeSlot(root, 'vm-01', { family: 'codex', seed_policy: { telemetry_disabled: true } })
+    const file = path.join(root, 'vms', 'vm-01.json')
+    const before = fs.readFileSync(file, 'utf8')
+    const result = await applyNativeTelemetry({
+      projectRoot: root,
+      vm: { id: 'vm-01', family: 'claude', seed_policy: { telemetry_disabled: false } },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.supported, false)
+    assert.equal(result.state, 'unsupported')
+    assert.equal(result.code, 'telemetry_unsupported')
+    assert.equal(result.wrote, false)
+    assert.equal(result.published, false)
+    assert.equal(result.applied, false)
+    assert.equal(fs.readFileSync(file, 'utf8'), before)
+    assert.equal(fs.existsSync(path.join(root, 'vms', 'vm-01', 'cli-home')), false)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

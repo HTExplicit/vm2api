@@ -33,14 +33,18 @@ import {
   writeRemoteFile,
 } from './remote-fs.mjs'
 
+const SEED_SETTINGS_FILES = Object.freeze([
+  'cli-home/.claude/settings.json',
+  'cli-home/.claude/claude.setting',
+  'cli-home/.claude/kin-seed.json',
+])
+
 export const SLOT_FILE_SETS = Object.freeze({
   run: ['run/kernel.json', 'run/worker.json', 'run/internal.token'],
-  seed: [
-    'cli-home/.claude/settings.json',
-    'cli-home/.claude/claude.setting',
-    'cli-home/.claude/kin-seed.json',
-    'machine-id',
-  ],
+  seed: [...SEED_SETTINGS_FILES, 'machine-id'],
+  // Policy publication must not overwrite node-owned identity or OAuth files.
+  seed_settings: SEED_SETTINGS_FILES,
+  telemetry: ['run/kernel.json', ...SEED_SETTINGS_FILES],
 })
 const CREDENTIALS = 'cli-home/.claude/credentials.json'
 const SLOT_BINARIES = Object.freeze(['kin-worker', 'kin-egress'])

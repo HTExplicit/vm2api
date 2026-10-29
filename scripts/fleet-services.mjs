@@ -8,7 +8,7 @@
  *   1. wait until every node that hosts a slot has a ready link
  *   2. wrap-cli sync: local slots take the new kernel / cli-node files, node
  *      slots move onto a content-hashed image with the same payload
- *   3. telemetry: restart kin-worker / kin-egress on every slot
+ *   3. telemetry: publish the saved VM-native policy and await its acknowledgment
  */
 import fs from 'node:fs/promises'
 import http from 'node:http'

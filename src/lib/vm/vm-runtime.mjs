@@ -406,12 +406,12 @@ export function isSlotProxyDesynced(vm, projectRoot) {
 }
 
 /** Publish native kernel telemetry routing. kin-seed remains the sole policy authority. */
-export function syncNativeTelemetry(vm, projectRoot, routing = null) {
+export function syncNativeTelemetry(vm, projectRoot, routing = null, { publish = true } = {}) {
   if (!vm?.id || !projectRoot) return { wrote: false, supported: false, enabled: false }
   const supported = !isCodexVm(vm) && !slotHost(vm).native
   const enabled = supported && isTelemetryEnabled(defaultSeedPolicy(vm.seed_policy || {}))
   if (!supported) return { wrote: false, supported, enabled, error: 'telemetry_unsupported' }
-  const written = writeKernelConfig(projectRoot, vm, { routing })
+  const written = writeKernelConfig(projectRoot, vm, { routing, publish })
   return { wrote: !!written, supported, enabled, changed: written?.changed === true }
 }
 
