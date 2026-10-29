@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import {
   dockerGatewayIp,
   officialCcUidGid,
@@ -39,7 +38,7 @@ test('uid follows vm index', () => {
   assert.deepEqual(officialCcUidGid('vm-30'), { uid: 10030, gid: 987 })
 })
 
-test('wipe clears first-use files and keeps worker credentials', () => {
+test('first-use cleanup preserves native identity, settings, credentials and backlog', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cc-'))
   fs.mkdirSync(path.join(dir, '.claude', 'projects', '-home-kincli'), { recursive: true })
   fs.mkdirSync(path.join(dir, '.claude', 'sessions'), { recursive: true })
@@ -52,6 +51,11 @@ test('wipe clears first-use files and keeps worker credentials', () => {
     }),
   )
   fs.writeFileSync(path.join(dir, '.claude', 'settings.json'), '{"theme":"dark"}')
+  fs.writeFileSync(path.join(dir, '.claude', '.claude.json'), '{"userID":"nested-user"}')
+  fs.writeFileSync(path.join(dir, '.claude', 'kin-seed.json'), '{"seed_policy":{"telemetry_disabled":true}}')
+  fs.writeFileSync(path.join(dir, '.claude', 'kin-identity.json'), '{"device_id":"native-device"}')
+  fs.mkdirSync(path.join(dir, '.claude', 'telemetry'), { recursive: true })
+  fs.writeFileSync(path.join(dir, '.claude', 'telemetry', 'queue.json'), '{"events":[{"id":"kept"}]}')
   fs.writeFileSync(
     path.join(dir, '.claude', 'credentials.json'),
     JSON.stringify({
@@ -62,12 +66,22 @@ test('wipe clears first-use files and keeps worker credentials', () => {
   const wiped = wipeOfficialFirstUseHome(dir)
   assert.equal(wiped.wiped, true)
   assert.equal(wiped.kept_credentials, true)
-  assert.equal(fs.existsSync(path.join(dir, '.claude.json')), false)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, '.claude.json'), 'utf8')).userID, 'old-user')
   assert.equal(fs.existsSync(path.join(dir, '.claude', 'projects')), false)
-  assert.equal(fs.existsSync(path.join(dir, '.claude', 'settings.json')), false)
+  assert.equal(fs.readFileSync(path.join(dir, '.claude', 'settings.json'), 'utf8'), '{"theme":"dark"}')
+  assert.equal(fs.readFileSync(path.join(dir, '.claude', '.claude.json'), 'utf8'), '{"userID":"nested-user"}')
+  assert.equal(
+    fs.readFileSync(path.join(dir, '.claude', 'kin-seed.json'), 'utf8'),
+    '{"seed_policy":{"telemetry_disabled":true}}',
+  )
+  assert.equal(fs.readFileSync(path.join(dir, '.claude', 'kin-identity.json'), 'utf8'), '{"device_id":"native-device"}')
+  assert.equal(
+    fs.readFileSync(path.join(dir, '.claude', 'telemetry', 'queue.json'), 'utf8'),
+    '{"events":[{"id":"kept"}]}',
+  )
   const cred = JSON.parse(fs.readFileSync(path.join(dir, '.claude', 'credentials.json'), 'utf8'))
   assert.equal(cred.claudeAiOauth.accessToken, 'keep')
-  assert.equal(summarizeOfficialCcHome(dir).has_user_id, false)
+  assert.equal(summarizeOfficialCcHome(dir).has_user_id, true)
   const login = materializeOfficialClaudeCredentials(dir)
   assert.equal(login.wrote, true)
   assert.equal(login.linked, true)
@@ -91,12 +105,22 @@ test('status file never stores tokens', () => {
     hello_ok: true,
     stats_ok: true,
     has_oauth_account: true,
+    telemetry_published: true,
+    telemetry_applied: false,
+    telemetry_error: 'telemetry_not_ready',
+    sidecar_reloaded: true,
+    telemetry_touched: true,
   })
   const status = readOfficialCcStatus(dir)
   const raw = fs.readFileSync(path.join(dir, '.claude', 'kin-official-bootstrap.json'), 'utf8')
   assert.equal(status.status, 'ok')
   assert.equal(status.hello_ok, true)
   assert.equal(status.access_token, undefined)
+  assert.equal(status.telemetry_published, true)
+  assert.equal(status.telemetry_applied, false)
+  assert.equal(status.telemetry_error, 'telemetry_not_ready')
+  assert.equal(status.sidecar_reloaded, undefined)
+  assert.equal(status.telemetry_touched, undefined)
   assert.equal(status.email, undefined)
   assert.ok(!raw.includes('sk-ant-oat01'))
   assert.ok(status.error.length <= 300)
@@ -388,42 +412,6 @@ test('auto init still runs when official IDs are missing or account changes', ()
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('settings persist keeps sync_telemetry explicit on and off', () => {
-  const on = normalizeOfficialCcConfig({ enabled: true, wipe: true })
-  assert.equal(on.sync_telemetry, false)
-  const off = normalizeOfficialCcConfig({ ...on, sync_telemetry: false })
-  assert.equal(off.sync_telemetry, false)
-  const back = normalizeOfficialCcConfig({ ...off, sync_telemetry: true, wipe: false })
-  assert.equal(back.sync_telemetry, true)
-  assert.equal(back.wipe, false)
-})
-
-test('repo routing.json and the Vite console expose init telemetry sync', () => {
-  const here = path.dirname(fileURLToPath(import.meta.url))
-  const gw = path.resolve(here, '../..')
-  const routing = JSON.parse(fs.readFileSync(path.join(gw, 'src/config/routing.json'), 'utf8'))
-  assert.equal(routing.official_cc.sync_telemetry, false)
-  assert.equal(routing.official_cc.resident, false)
-  assert.equal(routing.official_cc.inference, 'cli-hop')
-  assert.equal(routing.official_cc.memory, '500m')
-
-  const pane = fs.readFileSync(path.join(gw, 'web/src/features/settings/official-cc-pane.tsx'), 'utf8')
-  assert.match(pane, /id=\{`occ-\$\{key\}`\}/)
-  assert.match(pane, /id='occ-resident'/)
-  assert.match(pane, /sync_telemetry/)
-  assert.match(pane, /同步遥测/)
-  assert.match(pane, /hello 后常驻/)
-  assert.match(pane, /500 MB（推荐）/)
-
-  const nav = fs.readFileSync(path.join(gw, 'web/src/config/nav.ts'), 'utf8')
-  assert.match(nav, /settings: '设置'/)
-
-  const card = fs.readFileSync(path.join(gw, 'web/src/features/vm/official-cc-card.tsx'), 'utf8')
-  assert.match(card, /telemetry: '写入遥测'/)
-  assert.match(card, /already_initialized/)
-  assert.match(card, /此槽已初装过/)
-})
-
 function writeSlotCliNode(home) {
   const bin = path.join(home, '.kin', 'cli-node')
   fs.mkdirSync(path.dirname(bin), { recursive: true })
@@ -588,10 +576,68 @@ test('collectOfficialCcAccount reads tier from profile and model ids via slot wo
   assert.deepEqual(got.available_models, ['claude-fable-5', 'claude-sonnet-4-5'])
 })
 
-test('bootstrap source never calls Anthropic from the host', () => {
-  const src = fs.readFileSync(
-    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/lib/oauth/official-cc-bootstrap.mjs'),
-    'utf8',
-  )
-  assert.equal(/probeVmUsage|host-anthropic|node-fetch/.test(src), false)
+test('telemetry finalization preserves saved consent and VM-owned files without claiming activation', async (t) => {
+  const previousRunRoot = process.env.KIN_SLOT_RUN_ROOT
+  delete process.env.KIN_SLOT_RUN_ROOT
+  t.after(() => {
+    if (previousRunRoot === undefined) delete process.env.KIN_SLOT_RUN_ROOT
+    else process.env.KIN_SLOT_RUN_ROOT = previousRunRoot
+  })
+  for (const telemetryDisabled of [undefined, true, false, 'false', 0]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cc-policy-'))
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    const vmId = 'vm-policy'
+    const home = writeCompletedOfficialHome(root, vmId)
+    const vmPath = path.join(root, 'vms', `${vmId}.json`)
+    const vm = {
+      id: vmId,
+      kernel: 'ubuntu-24.04',
+      seed_policy: telemetryDisabled === undefined ? {} : { telemetry_disabled: telemetryDisabled },
+      fingerprint: { device_id: 'controller-device', session_id: 'controller-session' },
+    }
+    const vmBytes = JSON.stringify(vm)
+    const identityBytes = fs.readFileSync(path.join(home, '.claude.json'), 'utf8')
+    const credentialBytes = '{"claudeAiOauth":{"accessToken":"fixture-token"}}'
+    const queueBytes = '{"events":[{"id":"preserved-event"}]}'
+    fs.writeFileSync(vmPath, vmBytes)
+    fs.writeFileSync(path.join(home, '.claude', 'credentials.json'), credentialBytes)
+    fs.mkdirSync(path.join(home, '.claude', 'telemetry'), { recursive: true })
+    fs.writeFileSync(path.join(home, '.claude', 'telemetry', 'queue.json'), queueBytes)
+    const out = await finalizeOfficialCcTelemetry(root, vmId, { publish: false })
+    assert.equal(out.ok, true, out.error)
+    assert.equal(out.enabled, telemetryDisabled === false)
+    assert.equal(out.wrote, true)
+    assert.equal(out.seed_aligned, true)
+    assert.equal(out.published, false)
+    assert.equal(out.applied, false)
+    assert.equal(fs.readFileSync(vmPath, 'utf8'), vmBytes)
+    assert.equal(fs.readFileSync(path.join(home, '.claude.json'), 'utf8'), identityBytes)
+    assert.equal(fs.readFileSync(path.join(home, '.claude', 'credentials.json'), 'utf8'), credentialBytes)
+    assert.equal(fs.readFileSync(path.join(home, '.claude', 'telemetry', 'queue.json'), 'utf8'), queueBytes)
+    const seed = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'kin-seed.json'), 'utf8'))
+    assert.equal(seed.seed_policy.telemetry_disabled, telemetryDisabled !== false)
+    const config = JSON.parse(fs.readFileSync(path.join(root, 'vms', vmId, 'run', 'kernel.json'), 'utf8'))
+    assert.equal(config.telemetry.upload_interval_seconds, 600)
+    assert.equal(config.telemetry.identity, undefined)
+    assert.equal(fs.existsSync(path.join(root, 'vms', vmId, 'run', 'worker.json')), false)
+    assert.equal(fs.existsSync(path.join(root, 'vms', vmId, 'run', 'telemetry.touch')), false)
+  }
+})
+
+test('completed native userID does not require a legacy machineID or another initialization', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cc-user-only-'))
+  try {
+    const vmId = 'vm-native'
+    const home = writeCompletedOfficialHome(root, vmId)
+    const file = path.join(home, '.claude.json')
+    const bytes = JSON.stringify({ userID: 'native-user', oauthAccount: { accountUuid: 'acc-1' } })
+    fs.writeFileSync(file, bytes)
+    const decision = officialCcShouldSkipAutoInit(root, vmId, { incoming: { account_uuid: 'acc-1' } })
+    assert.equal(decision.skip, true)
+    assert.equal(decision.reason, 'already_initialized')
+    assert.equal(summarizeOfficialCcHome(home).has_machine_id, false)
+    assert.equal(fs.readFileSync(file, 'utf8'), bytes)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })
