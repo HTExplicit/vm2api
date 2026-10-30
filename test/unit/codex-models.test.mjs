@@ -181,6 +181,24 @@ test('refreshCodexAccessToken posts form grant and keeps fallback refresh token'
   assert.match(calls[0].body, /refresh_token=rt-old/)
 })
 
+test('OAuth refresh preserves an explicit invalid_grant and does not classify a generic 403 as revoked', async () => {
+  const rejected = await refreshCodexAccessToken({
+    refreshToken: 'test-refresh',
+    fetchImpl: async () => ({ status: 400, json: async () => ({ error: 'invalid_grant' }) }),
+  })
+  assert.equal(rejected.error, 'invalid_grant')
+  const forbidden = await refreshCodexAccessToken({
+    refreshToken: 'test-refresh',
+    fetchImpl: async () => ({
+      status: 403,
+      json: async () => {
+        throw new Error('HTML')
+      },
+    }),
+  })
+  assert.equal(forbidden.error, 'refresh_rejected')
+})
+
 test('parseCodexModelCatalog keeps whitelisted catalog metadata', () => {
   const [row] = parseCodexModelCatalog({
     models: [

@@ -12,6 +12,7 @@ import {
   hasSpendableCodexCredits,
 } from '../protocol/codex-usage.mjs'
 import { decodeJwtPayload, openaiClaimsFromIdToken, openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
+import { openaiAuthBlock, resetOpenaiAuth } from '../oauth/openai-auth-state.mjs'
 
 export { isCodexVm }
 
@@ -340,6 +341,7 @@ export function upsertCodexAccount(projectRoot, vmId, patch = {}, { replaceCrede
   if (!accounts.length) accounts.push(cur)
   else accounts[0] = cur
   writeCodexAccounts(projectRoot, vmId, accounts)
+  resetOpenaiAuth(projectRoot, vmId)
   return cur
 }
 
@@ -414,6 +416,7 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
     chatgpt_subscription_active_until: subscription.active_until,
     chatgpt_plan_type: first.chatgpt_plan_type || null,
     subscription,
+    auth_block: openaiAuthBlock(vm, first),
     account_count: accounts.length,
     usage,
     reset_credits: vm.codex?.reset_credits || null,

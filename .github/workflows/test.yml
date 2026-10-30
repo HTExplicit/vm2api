@@ -55,7 +55,12 @@ jobs:
             test/unit/fleet-services.test.mjs \
             test/unit/billing-aggregation.test.mjs \
             test/unit/usage-logs-repo.test.mjs \
-            test/unit/panel-billing-lookup.test.mjs; do
+            test/unit/panel-billing-lookup.test.mjs \
+            test/unit/openai-auth-state.test.mjs \
+            test/unit/openai-subscription.test.mjs \
+            test/unit/panel-subscription.test.mjs \
+            test/unit/handle-codex.test.mjs \
+            test/unit/vm-package.test.mjs; do
             node --test "$file"
           done
       - name: synthetic billing benchmark

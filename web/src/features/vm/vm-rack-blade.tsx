@@ -14,6 +14,7 @@ import { tierVisual } from '@/lib/tier-visual'
 import { cn } from '@/lib/utils'
 import { slotCredentialLabel } from '@/lib/vm-kind'
 import {
+  authenticationBlockCopy,
   claudeTier,
   credentialStatus,
   poolStatus,
@@ -301,9 +302,9 @@ export function BladeCallout({
       vm.schedule_state === 'unschedulable' &&
       !CREDENTIAL_DEATH.test(String(vm.unschedulable_reason || ''))
     const detail = vm.unschedulable_detail || {}
-    const note = String(
-      vm.refresh_error || detail.message || detail.raw || ''
-    ).trim()
+    const note =
+      authenticationBlockCopy(vm) ||
+      String(vm.refresh_error || detail.message || detail.raw || '').trim()
     return (
       <Callout
         tone='bad'
@@ -329,7 +330,10 @@ export function BladeCallout({
         }
       >
         {note ? (
-          <span className='truncate font-mono text-[11.5px] opacity-90'>
+          <span
+            className='truncate font-mono text-[11.5px] opacity-90'
+            title={note}
+          >
             {note}
           </span>
         ) : null}

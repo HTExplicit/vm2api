@@ -31,6 +31,7 @@ import {
 } from '../vm/slot-engine.mjs'
 import { probeAccount } from '../oauth/usage-probe.mjs'
 import { queryOpenaiQuota, resetOpenaiQuota } from '../oauth/openai-quota.mjs'
+import { openaiAuthBlock } from '../oauth/openai-auth-state.mjs'
 import { queryClaudeResetCredits, redeemClaudeResetCredit } from '../oauth/claude-reset-credits.mjs'
 import { canOfficialUsage, credentialModeOfVm, isSetupTokenMode } from '../oauth/credential-mode.mjs'
 import { getUsageCache } from '../oauth/usage-cache.mjs'
@@ -1891,6 +1892,17 @@ function enrichVm(v, accountQuota, active, extras = {}) {
       v.cooldown_reason ||
       null,
   })
+  const authBlock = isCodex ? openaiAuthBlock(v) : null
+  if (authBlock) {
+    Object.assign(availability, {
+      key: 'bad',
+      text: '认证失败，已停止分配',
+      accept: false,
+      usable: false,
+      reason: 'credential_blocked',
+      until: null,
+    })
+  }
   const activeHours = v.active_hours || null
   const activeHoursZone = activeHoursZoneOf(activeHours, v)
   const activeHoursState = evaluateActiveHours(activeHours, undefined, v.timezone)
@@ -1945,6 +1957,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     seats: isCodex ? null : { used: Number(seatRow?.seats_used) || 0, max: seatsMax },
     sessions: isCodex ? { active: codexSessions?.active, max: codexSessions?.max } : null,
   })
+  if (authBlock) triad.unschedulable_detail = authBlock
   return {
     id: v.id,
     name: v.name,

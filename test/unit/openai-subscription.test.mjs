@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { refreshOpenaiSubscription } from '../../src/lib/oauth/openai-subscription.mjs'
 import { queryOpenaiQuota } from '../../src/lib/oauth/openai-quota.mjs'
+import { captureOpenaiAuth, recordOpenaiAuthResult } from '../../src/lib/oauth/openai-auth-state.mjs'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { readCodexAccounts, summarizeCodexSlot, writeCodexAccounts } from '../../src/lib/vm/codex-slot.mjs'
 import { atomicWriteJson } from '../../src/lib/vm/vm-file.mjs'
@@ -181,11 +182,12 @@ test('403 preserves the previous snapshot and delays automatic retry without exc
   assert.equal(result.subscription.active_until, previousUntil)
   assert.equal(result.subscription.next_retry_at, new Date(NOW + 30 * 60_000).toISOString())
   assert.match(result.subscription.last_error, /403/)
+  assert.equal(slot.read().codex.auth_block, undefined)
   await refreshOpenaiSubscription({ ...slot.options, now: NOW + 60_000, fetchImpl })
   assert.equal(calls, 1)
 })
 
-test('upstream 401 is a credential hint rather than a panel-login 401', async (t) => {
+test('upstream 401 persists an authentication block without returning a panel-login 401', async (t) => {
   const slot = fixture(t)
   const result = await refreshOpenaiSubscription({
     ...slot.options,
@@ -195,6 +197,48 @@ test('upstream 401 is a credential hint rather than a panel-login 401', async (t
   assert.equal(result.ok, false)
   assert.notEqual(result.status, 401)
   assert.match(result.message, /刷新凭据/)
+  const block = slot.read().codex.auth_block
+  assert.equal(block.account_id, ACCOUNT_ID)
+  assert.equal(block.status, 401)
+  assert.equal(block.source, 'subscription')
+  assert.equal(block.reason, 'upstream_401')
+})
+
+test('a valid Free account clears the authentication block even without a subscription date', async (t) => {
+  const slot = fixture(t)
+  recordOpenaiAuthResult(captureOpenaiAuth(slot.projectRoot, slot.vmId), { status: 401, source: 'inference' })
+  const checked = accountCheck(null)
+  checked.accounts[ACCOUNT_ID].entitlement.subscription_plan = 'free'
+  const result = await refreshOpenaiSubscription({
+    ...slot.options,
+    force: true,
+    fetchImpl: async (rawUrl) => response(200, new URL(rawUrl).pathname.includes('/accounts/check/') ? checked : {}),
+  })
+  assert.equal(result.error, 'subscription_date_missing')
+  assert.equal(result.subscription.active_until, CLAIM_UNTIL)
+  assert.equal(slot.read().codex.auth_block, undefined)
+})
+
+test('expired access saves subscription retry metadata without blocking a refreshable account', async (t) => {
+  const slot = fixture(t)
+  const account = readCodexAccounts(slot.projectRoot, slot.vmId)[0]
+  writeCodexAccounts(slot.projectRoot, slot.vmId, [
+    {
+      ...account,
+      access_token: jwt({ exp: NOW / 1000 - 1, 'https://api.openai.com/auth': { chatgpt_account_id: ACCOUNT_ID } }),
+    },
+  ])
+  const result = await refreshOpenaiSubscription({
+    ...slot.options,
+    force: true,
+    fetchImpl: async () => assert.fail('expired access must not query or exchange tokens'),
+  })
+  assert.equal(result.error, 'subscription_access_expired')
+  assert.equal(result.subscription.last_attempt_at, new Date(NOW).toISOString())
+  assert.equal(result.subscription.next_retry_at, new Date(NOW + 30 * 60_000).toISOString())
+  assert.match(result.subscription.last_error, /Access Token 已过期/)
+  assert.equal(slot.read().codex.auth_block, undefined)
+  assert.equal(readCodexAccounts(slot.projectRoot, slot.vmId)[0].refresh_token, account.refresh_token)
 })
 
 test('concurrent refreshes share a request and discard its result after the slot changes account', async (t) => {
@@ -260,23 +304,35 @@ test('replacing an imported account clears the old subscription snapshot', async
 })
 
 test('a failed subscription supplement does not fail successful quota refresh', async (t) => {
-  const slot = fixture(t)
-  writeCodexAccounts(slot.projectRoot, slot.vmId, [
-    { access_token: readCodexAccounts(slot.projectRoot, slot.vmId)[0].access_token, chatgpt_account_id: ACCOUNT_ID },
-  ])
-  const calls = []
-  const result = await queryOpenaiQuota({
-    projectRoot: slot.projectRoot,
-    vmId: slot.vmId,
-    fetchImpl: async (rawUrl) => {
-      const pathname = new URL(rawUrl).pathname
-      calls.push(pathname)
-      if (pathname.endsWith('/usage')) return response(200, { plan_type: 'pro', rate_limit: {} })
-      if (pathname.endsWith('/rate-limit-reset-credits')) return response(200, { available_count: 0, credits: [] })
-      return response(403, {})
-    },
-  })
-  assert.equal(result.ok, true)
-  assert.ok(calls.includes('/backend-api/accounts/check/v4-2023-04-27'))
-  assert.match(slot.read().codex.subscription.last_error, /403/)
+  for (const status of [403, 401]) {
+    const slot = fixture(t)
+    writeCodexAccounts(slot.projectRoot, slot.vmId, [
+      {
+        access_token: jwt({
+          exp: Date.now() / 1000 + 3600,
+          'https://api.openai.com/auth': { chatgpt_account_id: ACCOUNT_ID },
+        }),
+        chatgpt_account_id: ACCOUNT_ID,
+      },
+    ])
+    recordOpenaiAuthResult(captureOpenaiAuth(slot.projectRoot, slot.vmId), { status: 401, source: 'inference' })
+    const calls = []
+    const result = await queryOpenaiQuota({
+      projectRoot: slot.projectRoot,
+      vmId: slot.vmId,
+      fetchImpl: async (rawUrl) => {
+        const pathname = new URL(rawUrl).pathname
+        calls.push(pathname)
+        if (pathname.endsWith('/usage')) return response(200, { plan_type: 'pro', rate_limit: {} })
+        if (pathname.endsWith('/rate-limit-reset-credits')) return response(200, { available_count: 0, credits: [] })
+        assert.equal(slot.read().codex.auth_block, undefined, 'quota success has recovered the previous block')
+        return response(status, {})
+      },
+    })
+    assert.equal(result.ok, true)
+    assert.ok(calls.includes('/backend-api/accounts/check/v4-2023-04-27'))
+    assert.match(slot.read().codex.subscription.last_error, new RegExp(String(status)))
+    assert.equal(slot.read().codex.auth_block?.status, status === 401 ? 401 : undefined)
+    if (status === 401) assert.equal(slot.read().codex.auth_block.source, 'subscription')
+  }
 })

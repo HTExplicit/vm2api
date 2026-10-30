@@ -25,6 +25,12 @@ import { atomicWriteJson } from '../vm/vm-file.mjs'
 import { applyCrsUnofficialPersona } from '../identity/crs-persona.mjs'
 import { claudeCodeInboundBody, claudeCodeInboundHeaders } from '../protocol/claude-code-inbound.mjs'
 import { credentialModeFromOauth, credentialModeOfVm } from '../oauth/credential-mode.mjs'
+import {
+  captureOpenaiAuth,
+  isOpenaiCredentialCurrent,
+  recordOpenaiAuthResult,
+  resetOpenaiAuth,
+} from '../oauth/openai-auth-state.mjs'
 import { isModelEnabled, getModelParams, getCapabilities, listPolicyModels } from '../protocol/model-policy.mjs'
 import { listGptPolicyModels, isGptModelEnabled, syncGptIdsIntoPolicy } from '../protocol/gpt-model-policy.mjs'
 import { modelsDevMeta } from './price-catalog.mjs'
@@ -139,12 +145,14 @@ function persistRefreshedCodexAccount(projectRoot, vmId, patch = {}, previous = 
       (previous.refresh_token && row.refresh_token === previous.refresh_token) ||
       (previous.access_token && row.access_token === previous.access_token),
   )
+  if (idx < 0 && (previous.refresh_token || previous.access_token)) return null
   if (idx < 0) idx = 0
   const cur = { ...(accounts[idx] || {}), ...patch }
   if (!cur.id) cur.id = cur.email || cur.chatgpt_account_id || 'codex'
   if (!accounts.length) accounts.push(cur)
   else accounts[idx] = cur
   writeCodexAccounts(projectRoot, vmId, accounts)
+  if (idx === 0) resetOpenaiAuth(projectRoot, vmId)
   return cur
 }
 
@@ -204,11 +212,13 @@ export async function syncCodexCatalog({
     const accounts = readCodexAccounts(projectRoot, target.id)
     const rows = accounts.length ? accounts : [target.codex || {}]
     for (const account of rows) {
+      const primary = !accounts.length || account === accounts[0]
+      let auth = captureOpenaiAuth(projectRoot, target.id, account)
       let access = account.access_token || target.codex?.access_token
       const accountId = account.chatgpt_account_id || target.codex?.chatgpt_account_id
       const refreshToken = account.refresh_token || target.codex?.refresh_token
-      const fetchOnce = () =>
-        fetchChatgptModelCatalog({
+      const fetchOnce = async () => {
+        const live = await fetchChatgptModelCatalog({
           accessToken: access,
           accountId,
           proxyUrl,
@@ -216,10 +226,23 @@ export async function syncCodexCatalog({
           direct,
           catalogVersion: catalogVersion.version,
         })
+        recordOpenaiAuthResult(auth, {
+          status: live.status,
+          source: 'catalog',
+          authenticated: live.authenticated === true || live.ok === true,
+        })
+        return live
+      }
       let live = await fetchOnce()
       if (live.error === 'upstream_auth' && rotate && refreshToken) {
         const tok = await refreshCodexAccessToken({ refreshToken, proxyUrl, fetchImpl })
         if (!tok.ok) {
+          recordOpenaiAuthResult(auth, {
+            status: tok.status,
+            error: tok.error,
+            source: 'oauth_refresh',
+            message: 'GPT OAuth 刷新失败，请重新登录',
+          })
           lastError = {
             ok: false,
             error: tok.error || 'refresh_failed',
@@ -228,7 +251,11 @@ export async function syncCodexCatalog({
           }
           continue
         }
-        persistRefreshedCodexAccount(
+        if (primary && !isOpenaiCredentialCurrent(auth)) {
+          lastError = { ok: false, error: 'credential_changed', message: '凭据已更新，未写入旧刷新结果' }
+          continue
+        }
+        const saved = persistRefreshedCodexAccount(
           projectRoot,
           target.id,
           {
@@ -239,6 +266,11 @@ export async function syncCodexCatalog({
           },
           account,
         )
+        if (!saved) {
+          lastError = { ok: false, error: 'credential_changed', message: '凭据已更新，未写入旧刷新结果' }
+          continue
+        }
+        auth = captureOpenaiAuth(projectRoot, target.id, saved)
         access = tok.access_token
         live = await fetchOnce()
       }
@@ -1113,6 +1145,7 @@ export async function runVmTestChat(opts = {}) {
     })
     if (codex && !result?.ok && looksLikeCodexUnauthorized(result)) {
       const first = readCodexAccounts(projectRoot, vmId)[0] || {}
+      const auth = captureOpenaiAuth(projectRoot, vmId, first)
       const refreshToken = String(first.refresh_token || '').trim()
       if (refreshToken) {
         push('info', 'Codex hop 401，尝试刷新 OAuth')
@@ -1121,23 +1154,40 @@ export async function runVmTestChat(opts = {}) {
           proxyUrl: hostProxyUrlForVm(vm),
           fetchImpl: opts.fetchImpl,
         })
-        if (tok.ok) {
-          persistRefreshedCodexAccount(projectRoot, vmId, {
-            access_token: tok.access_token,
-            refresh_token: tok.refresh_token,
-            id_token: tok.id_token || first.id_token,
-            expires_at: tok.expires_at || first.expires_at,
-          })
-          result = await postV1Responses({
-            baseUrl,
-            apiKey,
-            inbound,
-            headers,
+        if (tok.ok && isOpenaiCredentialCurrent(auth)) {
+          const saved = persistRefreshedCodexAccount(
+            projectRoot,
             vmId,
-            timeoutMs,
-            extraHeaders: opts.extraHeaders || {},
-          })
+            {
+              access_token: tok.access_token,
+              refresh_token: tok.refresh_token,
+              id_token: tok.id_token || first.id_token,
+              expires_at: tok.expires_at || first.expires_at,
+            },
+            first,
+          )
+          if (saved) {
+            result = await postV1Responses({
+              baseUrl,
+              apiKey,
+              inbound,
+              headers,
+              vmId,
+              timeoutMs,
+              extraHeaders: opts.extraHeaders || {},
+            })
+          } else {
+            push('error', '凭据已更新，未写入旧刷新结果')
+          }
+        } else if (tok.ok) {
+          push('error', '凭据已更新，未写入旧刷新结果')
         } else {
+          recordOpenaiAuthResult(auth, {
+            status: tok.status,
+            error: tok.error,
+            source: 'oauth_refresh',
+            message: 'GPT OAuth 刷新失败',
+          })
           push('error', `Codex OAuth 刷新失败: ${tok.error || 'refresh_failed'}`)
         }
       }

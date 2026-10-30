@@ -1,6 +1,6 @@
 import type { Vm } from '@/types/panel-vm'
 import type { StatusTone } from '@/types/status'
-import { pct } from '@/lib/format'
+import { fmtExpiresAt, pct } from '@/lib/format'
 import { isCodexVm } from '@/lib/vm-kind'
 
 function credTextOf(vm: Vm): { text: string; key: string; tone: string } {
@@ -480,13 +480,38 @@ export function restrictionUntilOf(vm: Vm | undefined): number | null {
   return cool > 0 ? cool : null
 }
 
+const AUTH_SOURCE_LABELS: Record<string, string> = {
+  subscription: '订阅查询',
+  inference: '模型请求',
+  quota: '额度查询',
+  search: '联网搜索',
+  images: '图片请求',
+  catalog: '模型目录',
+  oauth_refresh: '凭据刷新',
+}
+
+export function authenticationBlockCopy(vm: Vm | undefined): string {
+  if (vm?.unschedulable_reason !== 'credential_blocked') return ''
+  const detail = vm.unschedulable_detail || {}
+  const source = String(detail.source || '')
+  return [
+    AUTH_SOURCE_LABELS[source] || source,
+    detail.at ? fmtExpiresAt(detail.at) : '',
+    String(detail.message || '').trim(),
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}
+
 /** 详情冷却格与限制态共用同一套文案，不另起一套冷却系统。 */
 export function restrictionCopy(vm: Vm | undefined): string {
   if (!vm) return '无限制'
   const unschedulable = unschedulableTone(vm)
   if (unschedulable) {
     const detail = vm.unschedulable_detail || {}
-    const message = String(detail.message || detail.raw || '').trim()
+    const message =
+      authenticationBlockCopy(vm) ||
+      String(detail.message || detail.raw || '').trim()
     return message ? `${unschedulable.text}：${message}` : unschedulable.text
   }
   const restricted = restrictionTone(vm)

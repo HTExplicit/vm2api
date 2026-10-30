@@ -276,6 +276,14 @@ export async function refreshCodexAccessToken(opts = {}) {
     })
     const status = Number(res?.status) || 0
     const payload = await readFetchBody(res)
+    const oauthError = typeof payload?.error === 'string' ? payload.error : payload?.error?.code
+    if (
+      /^(invalid_grant|oauth_invalid_grant|oauth_revoked|token_revoked|refresh_token_reused|refresh_token_invalid)$/.test(
+        oauthError || '',
+      )
+    ) {
+      return { ok: false, error: oauthError, status }
+    }
     if (status === 401 || status === 403) {
       return { ok: false, error: 'refresh_rejected', status }
     }
@@ -394,10 +402,11 @@ export async function fetchChatgptModelCatalog(opts = {}) {
     }
     if (status >= 400) return { ok: false, error: 'upstream_error', status, ids: [], models: [] }
     const body = await readFetchBody(res)
+    const authenticated = !!body && typeof body === 'object'
     const models = parseCodexModelCatalog(body)
     const ids = models.map((row) => row.id)
-    if (!ids.length) return { ok: false, error: 'empty_catalog', status, ids: [], models: [] }
-    return { ok: true, status: status || 200, ids, models, source: 'codex' }
+    if (!ids.length) return { ok: false, error: 'empty_catalog', status, authenticated, ids: [], models: [] }
+    return { ok: true, status: status || 200, authenticated, ids, models, source: 'codex' }
   } catch (e) {
     const aborted = e?.name === 'AbortError' || /aborted/i.test(String(e?.message || e))
     return { ok: false, error: aborted ? 'timeout' : 'fetch_failed', ids: [], models: [] }

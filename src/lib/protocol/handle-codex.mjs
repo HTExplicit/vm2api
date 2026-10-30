@@ -38,6 +38,13 @@ import { isLocalEgressProxy } from '../vm/egress.mjs'
 import { vmNodeId } from '../cluster/placement.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
 import { readCodexAccounts, upsertCodexAccount } from '../vm/codex-slot.mjs'
+import {
+  captureOpenaiAuth,
+  isOpenaiAuthCurrent,
+  isOpenaiCredentialCurrent,
+  readOpenaiAuthBlock,
+  recordOpenaiAuthResult,
+} from '../oauth/openai-auth-state.mjs'
 import { scopeAccountFromVm } from './jev-intercept.mjs'
 import {
   CODEX_APP_VERSION,
@@ -320,8 +327,8 @@ export function isRetryableCodexTransport(result) {
 /**
  * Short process-local hold for an account that just failed upstream. This is
  * not the operator scheduling switch: it expires by itself and keeps the next
- * request from spending another turn on the same dead 401 / rate-limited
- * account. Committed streams and request-shaped errors are never parked.
+ * request from spending another turn on a rate-limited account. Authentication
+ * failures use persistent credential state. Committed streams are never parked.
  */
 export function codexFailureHold(result, now = Date.now()) {
   if (!result || result.ok === true || result.committed === true) return null
@@ -335,12 +342,23 @@ export function codexFailureHold(result, now = Date.now()) {
     )
   )
     return null
-  if (status === 401) return { until: now + 5 * 60_000, reason: 'oauth_401' }
+  if (status === 401 || code === 'credential_blocked') return null
   if (status === 403) return { until: now + 5 * 60_000, reason: 'permission_denied' }
   if (status === 429) return { until: now + 60_000, reason: 'rate_limited' }
   if (status === 408 || status >= 500) return { until: now + 30_000, reason: 'upstream_5xx' }
   if (result.transportError === true || status === 0) return { until: now + 30_000, reason: 'transport_error' }
   return null
+}
+
+function blockedCodexResult() {
+  return {
+    ok: false,
+    status: 503,
+    committed: false,
+    body: {
+      error: { type: 'api_error', code: 'credential_blocked', message: '账号认证失败，已停止分配，请刷新凭据' },
+    },
+  }
 }
 
 /** Idle SOCKS / first hop 502 is retryable only before any SSE byte is committed. */
@@ -808,9 +826,22 @@ export async function handleCodexProtocol({
         if (captureOutbound) logBag.outbound_body = outboundBody
         logBag.outbound_headers = redactHeaders(outboundHeaders)
         let hopEmitted = false
+        const guardedHop = async (args) => {
+          if (readOpenaiAuthBlock(projectRoot, vm.id)) return blockedCodexResult()
+          const auth = captureOpenaiAuth(projectRoot, vm.id)
+          const result = await hop(args)
+          recordOpenaiAuthResult(auth, {
+            status: result?.status,
+            source: 'inference',
+            error: result?.body?.error?.code || result?.error_code,
+            message: '模型请求认证失败，已停止分配',
+            authenticated: Number(result?.status) >= 200 && Number(result?.status) < 300 && (result?.ok || hopEmitted),
+          })
+          return result
+        }
         const runHop = () =>
           runCodexKernelHop({
-            hop,
+            hop: guardedHop,
             args: {
               exec: execFor(projectRoot, vm),
               signal: gone.signal,
@@ -965,7 +996,7 @@ export async function handleCodexProtocol({
           return res.end()
         }
         reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
-        const failureHold = codexFailureHold(result)
+        const failureHold = readOpenaiAuthBlock(projectRoot, vm.id) ? null : codexFailureHold(result)
         if (failureHold) holdOpenAIAccount(vm.id, failureHold)
         if (res.headersSent || hopEmitted) {
           stats.errors++
@@ -973,7 +1004,7 @@ export async function handleCodexProtocol({
           logBag.upstream_status = result?.status || 0
           return res.end()
         }
-        if (isCodexFailoverError(result)) {
+        if (result?.body?.error?.code === 'credential_blocked' || isCodexFailoverError(result)) {
           pickOpts.excluded.add(vm.id)
           leaveSticky()
           switches += 1
@@ -1003,6 +1034,7 @@ export async function handleCodexProtocol({
 function rejectCodexAdmission({ res, json, stats, logBag, picked, model }) {
   stats.errors++
   logBag.error_code = picked.error || 'no_codex_vm'
+  if (picked.error === 'credential_blocked') return json(res, 503, blockedCodexResult().body)
   if (picked.error === 'platform_mismatch') {
     return json(res, 400, {
       error: {
@@ -1113,22 +1145,32 @@ function searchCredentials(projectRoot, vm) {
  * refresh token on its own, so first adopt a token it wrote meanwhile; otherwise refresh
  * once per slot, shared by concurrent callers.
  */
-function refreshSearchAccess(projectRoot, vm, usedAccess, { proxyUrl, fetchImpl, refresh }) {
+function refreshSearchAccess(projectRoot, vm, usedAccess, { proxyUrl, fetchImpl, refresh, auth }) {
+  if (!isOpenaiCredentialCurrent(auth)) return null
   const now = searchCredentials(projectRoot, vm)
-  if (now.access && now.access !== usedAccess) return now.access
-  if (!now.refresh) return ''
+  if (now.access && now.access !== usedAccess) return { access: now.access, auth }
+  if (!now.refresh) return null
   let pending = searchRefreshes.get(vm.id)
   if (!pending) {
     pending = (async () => {
       const tok = await refresh({ refreshToken: now.refresh, proxyUrl, fetchImpl })
-      if (!tok?.ok || !tok.access_token) return ''
+      if (!tok?.ok || !tok.access_token) {
+        recordOpenaiAuthResult(auth, {
+          status: tok?.status,
+          source: 'oauth_refresh',
+          error: tok?.error,
+          message: 'GPT OAuth 刷新失败，请重新导入凭据',
+        })
+        return null
+      }
+      if (!isOpenaiCredentialCurrent(auth)) return null
       upsertCodexAccount(projectRoot, vm.id, {
         access_token: tok.access_token,
         refresh_token: tok.refresh_token || now.refresh,
         id_token: tok.id_token || now.first.id_token,
         expires_at: tok.expires_at || now.first.expires_at,
       })
-      return tok.access_token
+      return { access: tok.access_token, auth: captureOpenaiAuth(projectRoot, vm.id) }
     })().finally(() => searchRefreshes.delete(vm.id))
     searchRefreshes.set(vm.id, pending)
   }
@@ -1155,10 +1197,16 @@ async function postCodexJson({
   fetchImpl,
   refresh = refreshCodexAccessToken,
 }) {
+  if (readOpenaiAuthBlock(projectRoot, vm.id)) {
+    const blocked = blockedCodexResult()
+    return { status: blocked.status, text: JSON.stringify(blocked.body), headers: {} }
+  }
   const proxyUrl = hostProxyUrlForVm(vm)
   if (!fetchImpl && !proxyUrl && !isLocalEgressProxy(vm.proxy)) return { status: 0, error: 'proxy_required' }
   const doFetch = fetchImpl || makeProxyFetch(proxyUrl, timeoutMs, { maxMs: timeoutMs })
   const creds = searchCredentials(projectRoot, vm)
+  let auth = captureOpenaiAuth(projectRoot, vm.id, creds.first)
+  const source = url === CODEX_SEARCH_URL ? 'search' : 'images'
   const send = async (access) => {
     // Same identity as the slot's kernel; the backend wants originator, User-Agent and version to agree.
     const headers = {
@@ -1174,7 +1222,16 @@ async function postCodexJson({
     Object.assign(headers, extraHeaders)
     try {
       const res = await doFetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
-      return { status: Number(res?.status) || 0, text: await res.text(), headers: plainHeaders(res?.headers) }
+      const status = Number(res?.status) || 0
+      if (status === 401) {
+        recordOpenaiAuthResult(auth, { status, source, message: '模型请求认证失败（401），已停止分配' })
+      }
+      const text = await res.text()
+      const payload = parseJson(text)
+      if (status >= 200 && status < 300 && payload && typeof payload === 'object') {
+        recordOpenaiAuthResult(auth, { status, source, authenticated: true })
+      }
+      return { status, text, headers: plainHeaders(res?.headers) }
     } catch (e) {
       return { status: 0, error: /abort/i.test(`${e?.name} ${e?.message}`) ? 'upstream_timeout' : 'upstream_transport' }
     }
@@ -1182,8 +1239,11 @@ async function postCodexJson({
   if (!creds.access && !creds.refresh) return { status: 0, error: 'no_oauth_token' }
   let out = creds.access ? await send(creds.access) : { status: 401 }
   if (out.status === 401 || out.status === 403) {
-    const access = await refreshSearchAccess(projectRoot, vm, creds.access, { proxyUrl, fetchImpl, refresh })
-    if (access) out = await send(access)
+    const recovered = await refreshSearchAccess(projectRoot, vm, creds.access, { proxyUrl, fetchImpl, refresh, auth })
+    if (recovered && isOpenaiAuthCurrent(recovered.auth)) {
+      auth = { ...recovered.auth }
+      out = await send(recovered.access)
+    }
   }
   return out
 }

@@ -187,6 +187,7 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     chatgpt_subscription_active_until: kind.kind === 'codex' ? codex?.chatgpt_subscription_active_until || null : null,
     chatgpt_plan_type: kind.kind === 'codex' ? codex?.chatgpt_plan_type || null : null,
     subscription: kind.kind === 'codex' ? codex?.subscription || null : null,
+    auth_block: kind.kind === 'codex' ? codex?.auth_block || null : null,
     claude_reset_credits: kind.kind === 'codex' ? null : vm.claude_reset_credits || null,
   }
 }
