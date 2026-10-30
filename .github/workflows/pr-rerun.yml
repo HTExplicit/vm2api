@@ -17,7 +17,8 @@ permissions:
 
 jobs:
   rerun:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success')
+    # Automatic PR reruns are disabled for this fork's first release.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:

@@ -5,9 +5,9 @@
 #   查 GitHub Release → 停服务 → 换版本 → 保留配置 → 拉起。
 #
 # 安装:
-#   curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash
+#   curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/install.sh | sudo bash
 # 更新:
-#   curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+#   curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/install.sh | sudo bash -s -- upgrade
 # 检查:
 #   sudo bash /opt/vm2api/deploy/install.sh check
 #
@@ -25,7 +25,7 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-GITHUB_REPO="${VM2API_GITHUB_REPO:-dofastted/vm2api}"
+GITHUB_REPO="${VM2API_GITHUB_REPO:-HTExplicit/vm2api}"
 INSTALL_DIR="${VM2API_DIR:-/opt/vm2api}"
 SERVICE_NAME="vm2api"
 DEFAULT_PORT="${PORT:-8787}"
@@ -134,7 +134,7 @@ resolve_host_arch() {
   fi
 }
 
-# amd64 用多架构 tag（与旧安装一致）；arm64 固定单架构镜像，
+# amd64 用裸版本 tag（与旧安装一致）；arm64 固定单架构镜像，
 # 平台不匹配时报错，不会悄悄换成 amd64 控制面。
 image_tag_for() {
   if [ "$HOST_ARCH" = arm64 ]; then
@@ -202,13 +202,9 @@ latest_release_tag() {
     normalize_tag "$tag"
     return
   fi
-  tag="$(git ls-remote --tags --refs "https://github.com/${GITHUB_REPO}.git" 2>/dev/null \
-    | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1,1 -k2,2n -k3,3n | tail -n1 || true)"
-  if [ -z "$tag" ]; then
-    err "拿不到 GitHub 最新 Release。可设 GITHUB_TOKEN，或指定 --version vX.Y.Z"
-    exit 1
-  fi
-  echo "$tag"
+  # A tag can still belong to a draft whose image is not public yet.
+  err "拿不到 GitHub 最新公开 Release。可设 GITHUB_TOKEN，或指定已发布的 --version vX.Y.Z"
+  exit 1
 }
 
 release_notes() {
@@ -314,7 +310,7 @@ guide_changelog_error() {
   echo "    grep -q '!CHANGELOG.md' .dockerignore || echo '!CHANGELOG.md' >> .dockerignore"
   echo "    docker compose up -d --build"
   echo "  或一键升到已修复版本:"
-  echo "    curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/install.sh | sudo bash -s -- upgrade"
+  echo "    curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/maint/deploy/install.sh | sudo bash -s -- upgrade"
   echo ""
 }
 
@@ -770,7 +766,7 @@ cmd_install() {
   fi
 
   print_login_banner
-  info "以后更新: curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/install.sh | sudo bash -s -- upgrade"
+  info "以后更新: curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/maint/deploy/install.sh | sudo bash -s -- upgrade"
 }
 
 cmd_upgrade() {
@@ -779,7 +775,7 @@ cmd_upgrade() {
   resolve_host_arch
   print_banner
   if [ ! -f "${INSTALL_DIR}/docker-compose.yml" ]; then
-    err "未安装。先: curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/install.sh | sudo bash"
+    err "未安装。先: curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/maint/deploy/install.sh | sudo bash"
     exit 1
   fi
   local current tag mode
@@ -836,7 +832,7 @@ cmd_check() {
     warn "有新版本 ${tag}"
     echo ""
     echo "一键更新:"
-    echo "  curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/install.sh | sudo bash -s -- upgrade"
+    echo "  curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/maint/deploy/install.sh | sudo bash -s -- upgrade"
     echo ""
     if [ -f "${INSTALL_DIR}/CHANGELOG.md" ]; then
       print_changelog_slice "${INSTALL_DIR}/CHANGELOG.md" "$current" "$(version_of_tag "$tag")" || true

@@ -27,7 +27,7 @@ function renderStatus(overrides: Partial<ReleaseStatus>) {
     needs_wrap_cli_sync: false,
     upgrade_command: '',
     check_command: '',
-    repo: 'dofastted/vm2api',
+    repo: 'HTExplicit/vm2api',
     source_error: null,
     changelog: [],
     ...overrides,
@@ -47,6 +47,14 @@ function renderStatus(overrides: Partial<ReleaseStatus>) {
 }
 
 describe('release check display', () => {
+  it('shows the fork installer when the API has no upgrade command', () => {
+    const html = renderStatus({ upgrade_command: '', source_error: 'offline' })
+    expect(html).toContain(
+      'https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/install.sh'
+    )
+    expect(html).not.toContain('dofastted/vm2api')
+  })
+
   it('never labels a failed check as up to date (including older API responses)', () => {
     const html = renderStatus({ source_error: 'github_http_503' })
     expect(html).not.toContain('已是最新')

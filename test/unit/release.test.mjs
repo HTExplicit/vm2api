@@ -167,7 +167,7 @@ test('buildUpdateStatus reports an available GitHub release and the one-click co
         json: async () => ({
           tag_name: 'v1.2.7',
           name: 'vm2api v1.2.7',
-          html_url: 'https://github.com/dofastted/vm2api/releases/tag/v1.2.7',
+          html_url: 'https://github.com/HTExplicit/vm2api/releases/tag/v1.2.7',
           published_at: '2026-09-21T00:00:00Z',
           body: '一键更新',
         }),

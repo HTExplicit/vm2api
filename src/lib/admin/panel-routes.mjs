@@ -994,8 +994,7 @@ export function createPanelHandler(ctx) {
     }
   }
 
-  function workerExecForVm(id) {
-    const vm = getVm(cfg.paths.project, id)
+  function workerExecForVm(id, vm = getVm(cfg.paths.project, id)) {
     if (!vm) return null
     return {
       vmId: id,
@@ -1006,9 +1005,8 @@ export function createPanelHandler(ctx) {
     }
   }
 
-  async function panelKernelHealth({ id }) {
-    const exec = workerExecForVm(id)
-    const vm = exec?.vm || getVm(cfg.paths.project, id)
+  async function panelKernelHealth({ id, vm = getVm(cfg.paths.project, id) }) {
+    const exec = workerExecForVm(id, vm)
     if (!exec || !vm) {
       const missing = { reachable: false, status: null, error_code: 'vm_not_found' }
       return { go: missing, rust: missing }
@@ -2685,6 +2683,25 @@ export function createPanelHandler(ctx) {
         return json(res, 200, panel.ok({ vm: summarizeVm(saved, cfg.paths.project, ctx.routingConfig) }))
       }
 
+      // GET /api/panel/vms/:id/health — kernel-only check for upgrade verification.
+      if (req.method === 'GET' && /^\/api\/panel\/vms\/[^/]+\/health$/.test(p)) {
+        const id = p.split('/')[4]
+        const vm = getVm(cfg.paths.project, id)
+        if (!vm) return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'vm not found' } })
+        const health = await panelKernelHealth({ id, vm })
+        return json(
+          res,
+          200,
+          panel.ok({
+            id,
+            kernel: {
+              go_health: health.go || null,
+              rust_health: health.rust || null,
+              codex_health: health.codex || null,
+            },
+          }),
+        )
+      }
       // GET /api/panel/vms/:id
       if (req.method === 'GET' && /^\/api\/panel\/vms\/[^/]+$/.test(p)) {
         const id = p.split('/').pop()

@@ -5,7 +5,7 @@
 ### 完全隔离的虚拟机级 AI 订阅转 API 生产网关
 **Next-Generation Fully Isolated VM-Level AI Subscription-to-API Gateway**
 
-[![Release](https://img.shields.io/badge/Release-v1.3.133-blue.svg?style=for-the-badge&logo=github)](https://github.com/dofastted/vm2api/releases)
+[![Release](https://img.shields.io/badge/Release-v1.4.2801-blue.svg?style=for-the-badge&logo=github)](https://github.com/HTExplicit/vm2api/releases)
 [![License](https://img.shields.io/badge/License-Noncommercial-amber.svg?style=for-the-badge)](LICENSE)
 [![Benchmarks](https://img.shields.io/badge/Benchmarks-Clean%20Verified-00C853?style=for-the-badge&logo=shield)](docs/benchmarks/README.md)
 [![Cluster](https://img.shields.io/badge/Cluster-Multi--VPS%20Ready-7928CA?style=for-the-badge&logo=docker)](docs/DEPLOY.md)
@@ -40,6 +40,14 @@
 ---
 
 # 🇨🇳 简体中文
+
+## 本 fork 的发布来源
+
+本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，维护分支为 `maint`。首版 `v1.4.2801` 基于 [dofastted/vm2api](https://github.com/dofastted/vm2api) 的 `1.4.028`（`77b72613c90f2eda0f90165d524d7a247b9d1974`），包含健康检查、账单统计与面板升级改进，见 [CHANGELOG.md](CHANGELOG.md)。上游归属、[LICENSE](LICENSE)、鸣谢与历史文档保留；下方旧版说明和评测为上游历史内容。
+
+控制面镜像默认使用 `ghcr.io/htexplicit/vm2api`，面板更新默认检查本 fork 的公开 Release；`VM2API_GITHUB_REPO` 可指定发布仓库，Compose 会传入控制面。槽位二进制仍由 `deploy/payload.json` 固定上游来源、版本和 SHA256，客体系统镜像来源保持原配置。
+
+首轮仅发布 **linux/amd64** 控制面镜像与 10 个附件。发布流程先保留草稿，推送版本镜像并核验 GHCR 匿名访问后，才移动镜像 `latest` 并公开 Release。首次 GHCR 包须由维护者设为 Public；检查失败时保持草稿，可在确认匿名拉取成功后重跑失败的 `publish` job。此 fork 首版不提供 ARM64 控制面镜像。
 
 ## 目录
 - [💡 项目概览](#-项目概览)
@@ -187,26 +195,26 @@ vm2api 严格遵循行业最严苛的**纯净度基准**。入站请求不泄露
 
 ## 🚀 快速开始（生产部署）
 
-推荐在 **Ubuntu 24.04 LTS** 环境使用官方 Docker Compose 一键启动。
+本 fork 首版支持在 **Ubuntu 24.04 LTS / amd64** 环境使用 Docker Compose 一键启动。
 
 ### 1. 一键脚本安装（推荐）
 
 ```bash
 # 生产环境一键拉取并安装
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/install.sh | sudo bash
 
 # 以后更新
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
+curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/install.sh | sudo bash -s -- upgrade
 ```
 
-ARM64（aarch64）主机用同一条命令，脚本自动选择 `-arm64` 控制面镜像并准备 QEMU；实验性支持，见 [docs/ARM64.md](docs/ARM64.md)。
+首轮未发布 ARM64（aarch64）镜像；[docs/ARM64.md](docs/ARM64.md) 保留上游实验性方案的说明。
 
 ### 2. 手动 Docker Compose 启动
 
 ```bash
 mkdir -p /opt/vm2api && cd /opt/vm2api
-curl -sSLO https://raw.githubusercontent.com/dofastted/vm2api/main/docker-compose.yml
-curl -sSL -o .env https://raw.githubusercontent.com/dofastted/vm2api/main/.env.example
+curl -sSLO https://raw.githubusercontent.com/HTExplicit/vm2api/maint/docker-compose.yml
+curl -sSL -o .env https://raw.githubusercontent.com/HTExplicit/vm2api/maint/.env.example
 chmod 600 .env
 
 # 按需修改 .env 中的关键变量（VM2API_API_KEY, VM2API_ADMIN_PASSWORD, VM2API_DB_SECRET）
@@ -252,6 +260,8 @@ vm2api 内置全栈自适应网关，原生支持以下所有主流生态：
 <br/>
 
 # 🇬🇧 English
+
+This is the [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api) maintenance fork on `maint`. The first release, `v1.4.2801`, is based on upstream `1.4.028` and publishes an **amd64-only** control-plane image at `ghcr.io/htexplicit/vm2api`. Release checks, installer commands, and console repository links use this fork. The pinned upstream slot payload, guest images, attribution, and [LICENSE](LICENSE) are retained. See [CHANGELOG.md](CHANGELOG.md) for fork changes; the historical descriptions and benchmark results below came from upstream.
 
 > **Sponsor**: [ProxyLane](https://proxylane.dev/zh-cn/isp-proxies?utm_source=vm2api&utm_medium=affiliate&utm_campaign=vm2api_sponsor_202610&utm_content=github_readme_en) native static residential ISP IPs built for AI accounts: low Scamalytics fraud scores, a dedicated IP with unlimited traffic, from $3.90. Bind one IP per slot: paste the SOCKS5 line `host:port:user:pass` into 代理池 → 添加代理 (Proxy pool → Add proxy). Code `VM2API30` gives 30% off your first purchase.
 
@@ -381,7 +391,7 @@ Open a hit and read the body. A false positive means tighten that gate, not dele
 
 ```bash
 # Recommended one-line installation on Ubuntu 24.04 LTS
-curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/install.sh | sudo bash
 ```
 
 After deployment, access:
@@ -393,7 +403,7 @@ After deployment, access:
 
 ## 🐞 问题反馈 / Issue Reporting
 
-提交 Issue 前请阅读 [ISSUE_GUIDE.md](ISSUE_GUIDE.md)，按“版本 → 复现路线 → 环境（VPS / 代理）→ VM 与请求日志 → 源码定位（可选）→ 脱敏”收集信息，再用 [Bug 报告表单](https://github.com/dofastted/vm2api/issues/new/choose) 提交。
+提交 Issue 前请阅读 [ISSUE_GUIDE.md](ISSUE_GUIDE.md)，按“版本 → 复现路线 → 环境（VPS / 代理）→ VM 与请求日志 → 源码定位（可选）→ 脱敏”收集信息，再用 [Bug 报告表单](https://github.com/HTExplicit/vm2api/issues/new/choose) 提交。
 
 Before opening an issue, follow [ISSUE_GUIDE.md](ISSUE_GUIDE.md): version, reproduction steps, host/proxy environment, VM and request logs, optional source pointers — and redact all secrets.
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { UPGRADE_COMMAND } from '@/config/repo'
 import { ArrowUpCircle, Copy, ExternalLink, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
 import { ApiError, api, isApiError } from '@/lib/api'
@@ -203,16 +204,14 @@ export function AboutPane() {
             遥测重建镜像并换容器，不改凭证和指纹。
           </p>
           <pre className='overflow-x-auto rounded-md bg-muted px-3 py-2 font-mono text-xs'>
-            {data?.upgrade_command ||
-              'curl -sSL https://raw.githubusercontent.com/dofastted/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade'}
+            {data?.upgrade_command || UPGRADE_COMMAND}
           </pre>
           <div className='flex flex-wrap gap-2'>
             <Button
               size='sm'
               variant='outline'
               onClick={() => {
-                const command = data?.upgrade_command
-                if (!command) return
+                const command = data?.upgrade_command || UPGRADE_COMMAND
                 copyText(command)
                   .then(() => toast.success('已复制'))
                   .catch(() => toast.error('复制失败'))

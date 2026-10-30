@@ -28,7 +28,9 @@ if (args[0] === 'compose') {
   console.log(process.env.SAME_CONTAINER === '1' ? 'old-id' : 'new-id')
 } else if (args[0] === 'exec') {
   const cmd = args.slice(3)
-  if (cmd.some((part) => String(part).includes('fleet-services.mjs'))) process.exit(0)
+  if (cmd.some((part) => String(part).includes('fleet-services.mjs'))) {
+    process.exit(cmd[0] !== 'test' && process.env.FAIL_FLEET === '1' ? 1 : 0)
+  }
   const result = spawnSync(process.execPath, cmd, { stdio: 'inherit' })
   process.exit(result.status ?? 1)
 } else { process.exit(2) }
@@ -39,7 +41,9 @@ async function runUpgrade({ source = true, arch = 'amd64', override, env = {} } 
   const bin = path.join(root, 'fake-bin')
   const log = path.join(root, 'calls.jsonl')
   const bootVersion = path.join(root, 'boot-version')
+  const requests = []
   const server = http.createServer((req, res) => {
+    requests.push(req.url)
     res.setHeader('Content-Type', 'application/json')
     if (req.url === '/health') {
       res.end('{"status":"ok"}')
@@ -55,7 +59,7 @@ async function runUpgrade({ source = true, arch = 'amd64', override, env = {} } 
               : { items: env.NO_SLOTS === '1' ? [] : [{ id: 'vm-01', status: 'running' }] },
         }),
       )
-    } else if (req.url === '/api/panel/vms/vm-01' && req.headers.authorization === 'Bearer test-key') {
+    } else if (req.url === '/api/panel/vms/vm-01/health' && req.headers.authorization === 'Bearer test-key') {
       const upgraded = fs.readFileSync(bootVersion, 'utf8') === 'v1.2.7'
       const broken = env.PREEXISTING_SLOT_FAILURE === '1' || (upgraded && env.BROKEN_SLOT === '1')
       res.end(
@@ -130,6 +134,7 @@ async function runUpgrade({ source = true, arch = 'amd64', override, env = {} } 
     return {
       ...result,
       root,
+      requests,
       calls: fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : [],
       env: fs.readFileSync(path.join(root, '.env'), 'utf8'),
       version: fs.readFileSync(path.join(root, 'VERSION'), 'utf8'),
@@ -159,6 +164,12 @@ test('source upgrade builds the backend, preserves overrides, recreates it, and 
   assert.match(result.stdout, /restarted and verified at v1\.2\.7/)
   assert.match(result.env, /VM2API_ADMIN_PASSWORD=keep-me/)
   assert.equal(result.routing, 'operator config\n', 'release checkout must preserve live routing config')
+  assert.equal(result.requests.filter((url) => url === '/api/panel/vms/vm-01/health').length, 2)
+  assert.ok(!result.requests.includes('/api/panel/vms/vm-01'), 'upgrade must not load slot details')
+  const fleet = result.calls.find(
+    (args) => args[0] === 'exec' && args[2] === 'node' && args[3].endsWith('/fleet-services.mjs'),
+  )
+  assert.deepEqual(fleet.slice(4, 6), [result.root, '1'])
 })
 
 test('failed backend build never replaces the running control plane', async () => {
@@ -217,6 +228,14 @@ test('image upgrade pulls the pinned ARM64 release and records VERSION only afte
   assert.ok(result.calls.some((args) => args.includes('pull')))
   assert.ok(!result.calls.some((args) => args.includes('build')))
   assert.equal(result.version, '1.2.7\n')
+})
+
+test('failed slot refresh does not advance the host VERSION or report success', async () => {
+  const result = await runUpgrade({ source: false, env: { FAIL_FLEET: '1' } })
+  assert.equal(result.code, 1)
+  assert.match(result.stderr, /Slot payload\/service refresh failed/)
+  assert.doesNotMatch(result.stdout, /restarted and verified/)
+  assert.equal(result.version, '1.2.6\n')
 })
 
 test('compose upgrades ignore host DOCKER_DEFAULT_PLATFORM so ARM64 control images still pull', async () => {

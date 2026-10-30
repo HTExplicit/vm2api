@@ -134,14 +134,16 @@ export function toPublicTelemetryState(value) {
  * `provider`, `ready_slots`, `cli_pid`; Go hop omits them.
  */
 export function toPublicKernelHealth(health, engine) {
+  const invalidJson = health?.error?.code === 'worker_invalid_json'
   const processUp =
-    engine === 'rust'
+    !invalidJson &&
+    (engine === 'rust'
       ? rustKernelProcessUp(health)
       : health?.ok === true ||
         Number(health?.status) === 200 ||
         health?.worker_version != null ||
-        health?.version != null
-  const reachable = engine === 'rust' ? rustKernelReachable(health) : processUp
+        health?.version != null)
+  const reachable = processUp && (engine !== 'rust' || rustKernelReachable(health))
   return {
     reachable,
     process_up: processUp,
@@ -159,7 +161,7 @@ export function toPublicKernelHealth(health, engine) {
     vm_telemetry: health?.vm_telemetry === true,
     telemetry_ready: health?.telemetry_ready === true,
     telemetry: toPublicTelemetryState(health?.telemetry),
-    error_code: reachable ? null : health?.code || `${engine}_worker_unavailable`,
+    error_code: reachable ? null : health?.code || health?.error?.code || `${engine}_worker_unavailable`,
   }
 }
 

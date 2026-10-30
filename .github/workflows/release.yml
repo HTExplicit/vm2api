@@ -1,8 +1,4 @@
-# Publish linux binaries and the control-plane images.
-# Assets: unsuffixed names are linux amd64 (deployed panels download them by
-# exact name); native ARM64 helpers carry a `-linux-arm64` suffix.
-# Images: `<ref>-amd64` and `<ref>-arm64` are single-arch; `<ref>` (and
-# `latest` on tags) is a manifest list over both.
+# First fork release: amd64 assets and image stay private until the image is public.
 name: release
 
 on:
@@ -28,54 +24,51 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - name: verify tag matches VERSION
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: verify release tag and VERSION
         shell: bash
         run: |
           set -euo pipefail
           version=$(tr -d '[:space:]' < VERSION)
-          test "${GITHUB_REF_NAME}" = "v${version}" || {
-            echo "tag ${GITHUB_REF_NAME} does not match VERSION ${version}" >&2
-            exit 1
-          }
-      - name: stage pinned payload
+          test "$GITHUB_REF_TYPE" = tag
+          test "$GITHUB_REF_NAME" = "v${version}"
+      - name: stage pinned amd64 payload
         run: |
-          # Every amd64 asset, Go helpers included, is the pinned production build.
           node scripts/fetch-payload.mjs
           node scripts/fetch-payload.mjs --stage dist
-      - uses: actions/upload-artifact@v7
-        with:
-          name: linux-amd64
-          path: dist/*
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
-      - uses: softprops/action-gh-release@v3
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          generate_release_notes: false
-          fail_on_unmatched_files: true
-          name: vm2api ${{ github.ref_name }}
-          body: |
-            无后缀附件为 linux amd64；`-linux-arm64` 后缀为 ARM64 控制面原生 helper。槽位 kernel / CLI 只有 amd64，ARM64 主机经 QEMU 运行。
-            控制面镜像：`ghcr.io/dofastted/vm2api:${{ github.ref_name }}`（多架构），`${{ github.ref_name }}-amd64` / `${{ github.ref_name }}-arm64`（单架构）。一键脚本按宿主架构自动选择。
+      - name: create draft and upload the 10 amd64 assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'NOTES'
+          首个 HTExplicit/vm2api 维护版，基于上游 1.4.028。健康检查改为独立工作线程，账单统计合并读取，面板升级核对实际运行后端版本。
 
-            升级见 [CHANGELOG.md](https://github.com/dofastted/vm2api/blob/main/CHANGELOG.md)、[docs/DEPLOY.md](https://github.com/dofastted/vm2api/blob/main/docs/DEPLOY.md) 与 [docs/ARM64.md](https://github.com/dofastted/vm2api/blob/main/docs/ARM64.md)。
-          files: |
-            dist/kin-kernel
-            dist/kin-kernel-crag
-            dist/kin-codex-kernel
-            dist/kin-worker
-            dist/kin-egress
-            dist/kin-slot-gate
-            dist/kin-oauth-auth
-            dist/kin-computer
-            dist/cli-node
-            dist/cc-node
+          本轮仅支持 linux/amd64。10 个无后缀附件沿用 deploy/payload.json 钉住的上游版本与校验值。
+          控制面镜像：`ghcr.io/htexplicit/vm2api:TAG` 和 `ghcr.io/htexplicit/vm2api:TAG-amd64`。
+
+          变更与升级说明：[CHANGELOG.md](https://github.com/HTExplicit/vm2api/blob/TAG/CHANGELOG.md)。许可证与上游归属保留。
+          NOTES
+          sed -i "s/TAG/${GITHUB_REF_NAME}/g" release-notes.md
+          if gh release view "$GITHUB_REF_NAME" --json isDraft >/dev/null 2>&1; then
+            test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true || {
+              echo 'Release is already public; refusing to replace published assets.' >&2
+              exit 1
+            }
+            gh release edit "$GITHUB_REF_NAME" --title "vm2api ${GITHUB_REF_NAME}" --notes-file release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft \
+              --title "vm2api ${GITHUB_REF_NAME}" --notes-file release-notes.md
+          fi
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            dist/kin-kernel dist/kin-kernel-crag dist/kin-codex-kernel \
+            dist/kin-worker dist/kin-egress dist/kin-slot-gate \
+            dist/kin-oauth-auth dist/kin-computer dist/cli-node dist/cc-node
+          test "$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets | length')" = 10
 
   image-amd64:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     needs: linux-amd64
     permissions:
       contents: read
@@ -92,117 +85,53 @@ jobs:
         id: meta
         shell: bash
         run: |
-          set -euo pipefail
-          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          ref=edge
-          if [ "${{ github.ref_type }}" = "tag" ]; then ref="${GITHUB_REF_NAME}"; fi
-          echo "image=ghcr.io/${owner}/vm2api:${ref}-amd64" >> "$GITHUB_OUTPUT"
-      - name: control plane image
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+      - name: build and push amd64 control plane
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
           provenance: false
           push: true
-          tags: ${{ steps.meta.outputs.image }}
-          cache-from: type=gha,scope=vm2api
-          cache-to: type=gha,scope=vm2api,mode=max
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ github.ref_name }}
+            ${{ steps.meta.outputs.image }}:${{ github.ref_name }}-amd64
+          cache-from: type=gha,scope=vm2api-amd64
+          cache-to: type=gha,scope=vm2api-amd64,mode=max
 
-  image-arm64:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 40
-    needs: linux-amd64
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: image-amd64
     permissions:
       contents: write
       packages: write
     steps:
-      - uses: actions/checkout@v7
-      - name: prepare pinned x86 QEMU handler for the smoke test
-        run: |
-          python3 deploy/prepare-arm64.py
-          python3 deploy/prepare-arm64.py --check
-      - name: resolve image reference
-        id: meta
+      - uses: docker/setup-buildx-action@v4
+      - name: verify image is anonymously readable
         shell: bash
         run: |
           set -euo pipefail
-          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          ref=edge
-          if [ "${{ github.ref_type }}" = "tag" ]; then ref="${GITHUB_REF_NAME}"; fi
-          echo "image=ghcr.io/${owner}/vm2api:${ref}-arm64" >> "$GITHUB_OUTPUT"
-      - name: build native control plane
-        run: docker build --progress=plain --platform linux/arm64 -f deploy/Dockerfile.arm64-control -t "${{ steps.meta.outputs.image }}" .
-      - name: verify native runtime and emulated payloads
-        run: python3 test/deploy/smoke_arm64_image.py "${{ steps.meta.outputs.image }}"
-      - name: extract native helpers as release assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist-arm64
-          cid=$(docker create --platform linux/arm64 "${{ steps.meta.outputs.image }}")
-          trap 'docker rm "$cid" >/dev/null' EXIT
-          for name in kin-worker kin-egress; do
-            docker cp "$cid:/opt/vm2api/image-bin/$name" "dist-arm64/$name-linux-arm64"
-          done
-          python3 - dist-arm64/*-linux-arm64 <<'PY'
-          import struct, sys
-          for path in sys.argv[1:]:
-              data = open(path, 'rb').read(64)
-              assert data[:6] == b'\x7fELF\x02\x01', path
-              assert struct.unpack_from('<H', data, 18)[0] == 183, f'{path} is not AArch64'
-          PY
-      - uses: actions/upload-artifact@v7
-        with:
-          name: linux-arm64
-          path: dist-arm64/*
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          anonymous_config=$(mktemp -d)
+          if ! DOCKER_CONFIG="$anonymous_config" docker manifest inspect "${image}:${GITHUB_REF_NAME}" >/dev/null; then
+            echo '::error::GHCR is not anonymously readable. Release remains draft and latest has not moved. Set the package visibility to Public, verify an anonymous docker pull, then rerun only the failed publish job.'
+            exit 1
+          fi
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: push image
-        run: docker push "${{ steps.meta.outputs.image }}"
-      - name: attach ARM64 assets to the release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: publish latest image and release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF_NAME}" dist-arm64/kin-worker-linux-arm64 dist-arm64/kin-egress-linux-arm64 --clobber
-
-  manifest:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: [image-amd64, image-arm64]
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: publish multi-arch tags
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          image="ghcr.io/${owner}/vm2api"
-          ref=edge
-          targets=()
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            ref="${GITHUB_REF_NAME}"
-            targets+=(-t "${image}:latest")
-          fi
-          targets+=(-t "${image}:${ref}")
-          docker buildx imagetools create "${targets[@]}" "${image}:${ref}-amd64" "${image}:${ref}-arm64"
-          docker buildx imagetools inspect --raw "${image}:${ref}" | python3 -c '
-          import json, sys
-          found = {(m.get("platform") or {}).get("architecture") for m in json.load(sys.stdin).get("manifests", [])}
-          missing = {"amd64", "arm64"} - found
-          assert not missing, f"manifest list lacks {sorted(missing)}"
-          print("manifest platforms:", sorted(p for p in found if p))
-          '
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker buildx imagetools create --prefer-index=false \
+            --tag "${image}:latest" "${image}:${GITHUB_REF_NAME}"
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest

@@ -16,8 +16,8 @@ const MODULE_PROJECT = path.resolve(__dirname, '..', '..', '..')
 const execFileAsync = promisify(execFile)
 const UPGRADE_SCRIPT = fs.readFileSync(path.join(MODULE_PROJECT, 'scripts', 'panel-upgrade.sh'), 'utf8')
 
-export const GITHUB_REPO = 'dofastted/vm2api'
-export const INSTALL_SCRIPT_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/install.sh`
+export const GITHUB_REPO = process.env.VM2API_GITHUB_REPO?.trim() || 'HTExplicit/vm2api'
+export const INSTALL_SCRIPT_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/maint/deploy/install.sh`
 export const DOCKER_SOCK = '/var/run/docker.sock'
 
 const DEFAULT_CACHE_MS = 5 * 60 * 1000
@@ -90,7 +90,7 @@ export function isReleaseTag(value) {
 
 /**
  * Control-plane image tag for a release on this architecture. amd64 keeps the
- * bare tag (a manifest list, so existing installs keep working); arm64 pins
+ * bare tag (so existing installs keep working); arm64 pins
  * its single-arch image so a host-wide DOCKER_DEFAULT_PLATFORM cannot swap it.
  */
 export function imageTagFor(tag, arch = process.arch) {

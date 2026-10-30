@@ -19,6 +19,7 @@ export const MAX_CRAG_DOWNLOAD_BYTES = MAX_KERNEL_DOWNLOAD_BYTES
 const META_TIMEOUT_MS = 8000
 const DOWNLOAD_TIMEOUT_MS = 60_000
 const MAX_REDIRECTS = 3
+const GITHUB_REPO_PATTERN = GITHUB_REPO.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 function coded(code, message) {
   const error = new Error(message)
   error.code = code
@@ -60,13 +61,13 @@ export function isAllowedKernelUrl(raw, { redirect = false } = {}) {
   }
   if (url.protocol !== 'https:' || url.username || url.password) return false
   if (url.hostname === 'api.github.com') {
-    return new RegExp(`^/repos/${GITHUB_REPO}/releases/(?:latest|tags/v\\d+\\.\\d+\\.\\d+|assets/\\d+)$`).test(
+    return new RegExp(`^/repos/${GITHUB_REPO_PATTERN}/releases/(?:latest|tags/v\\d+\\.\\d+\\.\\d+|assets/\\d+)$`).test(
       url.pathname,
     )
   }
   if (url.hostname === 'github.com') {
     return new RegExp(
-      `^/${GITHUB_REPO}/releases/download/v\\d+\\.\\d+\\.\\d+/(?:${KERNEL_RELEASE_ASSET}|${CLI_NODE_RELEASE_ASSET}|${CC_NODE_RELEASE_ASSET}|${KERNEL_CRAG_RELEASE_ASSET})$`,
+      `^/${GITHUB_REPO_PATTERN}/releases/download/v\\d+\\.\\d+\\.\\d+/(?:${KERNEL_RELEASE_ASSET}|${CLI_NODE_RELEASE_ASSET}|${CC_NODE_RELEASE_ASSET}|${KERNEL_CRAG_RELEASE_ASSET})$`,
     ).test(url.pathname)
   }
   return (

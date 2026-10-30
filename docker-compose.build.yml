@@ -2,7 +2,7 @@
 # 用法: docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 services:
   vm2api:
-    image: ${VM2API_IMAGE:-ghcr.io/dofastted/vm2api}:${VM2API_IMAGE_TAG:-dev}
+    image: ${VM2API_IMAGE:-ghcr.io/htexplicit/vm2api}:${VM2API_IMAGE_TAG:-dev}
     build:
       context: .
       dockerfile: Dockerfile
