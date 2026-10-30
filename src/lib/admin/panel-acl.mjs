@@ -195,6 +195,7 @@ function userVmPathAllowed(method, path) {
       rest === 'stop' ||
       rest === 'recover' ||
       rest === 'openai-quota/refresh' ||
+      rest === 'openai-subscription/refresh' ||
       rest === 'openai-quota/reset' ||
       rest === 'claude-reset/query' ||
       rest === 'claude-reset/redeem' ||

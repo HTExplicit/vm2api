@@ -17,6 +17,7 @@ import {
 } from '../protocol/codex-usage.mjs'
 import { CODEX_OAUTH_ORIGINATOR, makeProxyFetch, refreshCodexAccessToken } from '../protocol/codex-models.mjs'
 import { openaiIdentityFromJwt } from './openai-jwt.mjs'
+import { refreshOpenaiSubscription } from './openai-subscription.mjs'
 
 export const CHATGPT_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 export const CHATGPT_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits'
@@ -402,7 +403,12 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
 export async function queryOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = true, policy = null } = {}) {
   const slot = await loadSlot(projectRoot, vmId)
   if (!slot.ok) return slot
-  return queryUpstream(slot, { fetchImpl, rotate, projectRoot, vmId, policy })
+  const result = await queryUpstream(slot, { fetchImpl, rotate, projectRoot, vmId, policy })
+  if (result.ok) {
+    const refreshed = await refreshOpenaiSubscription({ projectRoot, vmId, fetchImpl })
+    result.subscription = refreshed.subscription
+  }
+  return result
 }
 
 export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = true, policy = null } = {}) {

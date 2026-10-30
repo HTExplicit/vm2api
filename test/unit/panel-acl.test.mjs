@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { authorizePanelRoute, viewsForRole, hasCapability, canViewPage } from '../../src/lib/admin/panel-acl.mjs'
@@ -64,18 +65,56 @@ test('user can manage owned vm/proxy/key surfaces and nothing else', () => {
 test('user can query quota and redeem reset credits on owned vms and keys', () => {
   const allowed = [
     '/api/panel/vms/vm-01/openai-quota/refresh',
+    '/api/panel/vms/vm-01/openai-subscription/refresh',
     '/api/panel/vms/vm-01/openai-quota/reset',
     '/api/panel/vms/vm-01/claude-reset/query',
     '/api/panel/vms/vm-01/claude-reset/redeem',
     '/api/panel/api-keys/key_a/reset-quota',
   ]
   for (const p of allowed) {
+    assert.equal(authorizePanelRoute('POST', p, 'admin').ok, true, `admin POST ${p}`)
     assert.equal(authorizePanelRoute('POST', p, 'user').ok, true, `user POST ${p}`)
     assert.equal(authorizePanelRoute('GET', p, 'user').ok, false, `user GET ${p}`)
     assert.equal(authorizePanelRoute('POST', p, 'super').ok, false, `super POST ${p}`)
   }
   assert.equal(authorizePanelRoute('POST', '/api/panel/api-keys/key_a/reset', 'user').ok, false)
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/claude-reset/other', 'user').ok, false)
+})
+
+test('subscription refresh uses the existing tenant ownership boundary', async (t) => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-subscription-owner-'))
+  t.after(() => fs.rmSync(project, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(project, 'vms'))
+  fs.writeFileSync(
+    path.join(project, 'vms', 'vm-owned.json'),
+    JSON.stringify({ id: 'vm-owned', platform: 'openai', owner_user_id: 'owner', codex: {} }),
+  )
+  for (const [userId, expectedStatus] of [
+    ['other-user', 404],
+    ['owner', 400],
+  ]) {
+    let response
+    const handler = createPanelHandler({
+      cfg: { paths: { project } },
+      requireAuth(req) {
+        req.panelUser = userId
+        req.panelRole = 'user'
+        req.panelUserId = userId
+        return true
+      },
+      json(_res, status, body) {
+        response = { status, body }
+        return true
+      },
+    })
+    await handler(
+      { method: 'POST' },
+      {},
+      new URL('http://localhost/api/panel/vms/vm-owned/openai-subscription/refresh'),
+    )
+    assert.equal(response.status, expectedStatus, userId)
+    if (userId === 'owner') assert.equal(response.body.error.code, 'no_access_token')
+  }
 })
 
 test('user can rotate owned api keys; super cannot', () => {

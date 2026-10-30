@@ -1,21 +1,39 @@
 import type { Vm } from '@/types/panel-vm'
 import { expiresAtToMs } from '@/lib/fable-status'
+import { fmtExpiresAt } from '@/lib/format'
 import { isCodexVm } from '@/lib/vm-kind'
 
 export type SubscriptionTone = 'muted' | 'warn' | 'bad'
 
 const NEAR_DAYS = 7
 
-/** List/rack label. GPT uses the credential end date only. Claude has no upstream field. */
+export function subscriptionInfoTitle(vm: Vm): string {
+  if (!isCodexVm(vm)) return 'Claude 没有上游订阅到期字段'
+  const info = vm.subscription
+  const source =
+    info?.source === 'accounts_check' || info?.source === 'subscriptions'
+      ? '来源：查询结果'
+      : vm.chatgpt_subscription_active_until
+        ? '来源：凭证'
+        : '订阅日期尚未获取'
+  return [
+    source,
+    info?.last_success_at &&
+      `最近成功查询：${fmtExpiresAt(info.last_success_at)}`,
+    info?.last_error && `最近查询失败：${info.last_error}`,
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+/** List/rack label uses the subscription date resolved by the panel. */
 export function subscriptionListLabel(
   vm: Vm,
   now: number
 ): { text: string; title: string; tone: SubscriptionTone } {
   const unknown = {
     text: '订阅 未知',
-    title: isCodexVm(vm)
-      ? '凭证没有 chatgpt_subscription_active_until，不用 access token 或额度重置推算'
-      : 'Claude 没有上游订阅到期字段',
+    title: subscriptionInfoTitle(vm),
     tone: 'muted' as const,
   }
   if (!isCodexVm(vm)) return unknown
@@ -27,14 +45,14 @@ export function subscriptionListLabel(
   if (ms <= now) {
     return {
       text: `订阅 ${stamp} 已过期`,
-      title: '以凭证为准，不是额度窗口重置',
+      title: subscriptionInfoTitle(vm),
       tone: 'bad',
     }
   }
   const days = Math.ceil((ms - now) / 86_400_000)
   return {
     text: `订阅 ${stamp} · ${days}d`,
-    title: '以凭证为准，不是 access token 到期或额度窗口重置',
+    title: subscriptionInfoTitle(vm),
     tone: days <= NEAR_DAYS ? 'warn' : 'muted',
   }
 }

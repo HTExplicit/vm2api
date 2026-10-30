@@ -1,5 +1,15 @@
 import type { WindowEstimate } from './panel-pricing'
 
+export type OpenaiSubscription = {
+  active_until: string | null
+  plan_type: string | null
+  source: 'accounts_check' | 'subscriptions' | 'credential' | null
+  last_attempt_at: string | null
+  last_success_at: string | null
+  next_retry_at: string | null
+  last_error: string | null
+}
+
 /**
  * 出站认证头方案。gateway 规范化后只有这两个值。
  *
@@ -301,12 +311,13 @@ export type Vm = {
       utilization_7d?: number | null
     }
   } | null
-  /** Raw OpenAI `plan_type` from wham/usage (GPT slots only). */
+  /** OpenAI plan from WHAM, then the same-account subscription query (GPT only). */
   plan_type?: string | null
-  /** ChatGPT subscription end from OAuth `id_token` (`chatgpt_subscription_active_until`). */
+  /** Same-account subscription query result, falling back to the OAuth credential. */
   chatgpt_subscription_active_until?: string | null
   /** Plan label fallback from OAuth `id_token` when `plan_type` from usage is absent. */
   chatgpt_plan_type?: string | null
+  subscription?: OpenaiSubscription | null
   reset_credits?: {
     available_count?: number
     credits?: Array<{ expires_at?: string }>
