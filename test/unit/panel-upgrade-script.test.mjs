@@ -29,7 +29,7 @@ if (args[0] === 'compose') {
 } else if (args[0] === 'exec') {
   const cmd = args.slice(3)
   if (cmd.some((part) => String(part).includes('fleet-services.mjs'))) {
-    process.exit(cmd[0] !== 'test' && process.env.FAIL_FLEET === '1' ? 1 : 0)
+    process.exit(args[2] === 'node' && process.env.FAIL_FLEET === '1' ? 1 : 0)
   }
   const result = spawnSync(process.execPath, cmd, { stdio: 'inherit' })
   process.exit(result.status ?? 1)
