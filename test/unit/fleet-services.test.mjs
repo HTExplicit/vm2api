@@ -52,8 +52,8 @@ const slots = {
   ok: true,
   data: {
     items: [
-      { id: 'local-a', node_id: null },
-      { id: 'node-b', node_id: 'node-1' },
+      { id: 'local-a', family: 'claude', node_id: null },
+      { id: 'node-b', family: 'claude', node_id: 'node-1' },
     ],
   },
 }
@@ -119,9 +119,14 @@ test('fleet refresh runs through the server after node links come up', async () 
       )
       for (const request of requests.slice(1)) assert.equal(request.authorization, 'Bearer test-key')
       assert.deepEqual(JSON.parse(requests[4].body), { restart: true })
-      assert.deepEqual(JSON.parse(requests[5].body), { action: 'telemetry', concurrency: 4 })
+      assert.deepEqual(JSON.parse(requests[5].body), {
+        action: 'telemetry',
+        concurrency: 4,
+        ids: ['local-a', 'node-b'],
+      })
       const report = JSON.parse(result.stdout)
       assert.equal(report.ok_count, 2)
+      assert.equal(report.skipped_not_applicable, 0)
       assert.equal(report.kernel_sync.ok, true)
       assert.equal(report.kernel_sync.items[1].kernel_changed, true)
     },
@@ -155,9 +160,11 @@ test('fleet refresh goes on past an offline node and fails on its slot', async (
       })
       assert.equal(result.code, 1)
       assert.match(result.stderr, /node link not ready: node-1/)
-      assert.ok(requests.some((request) => request.url === '/api/panel/vms/fleet-update'))
+      const request = requests.find((request) => request.url === '/api/panel/vms/fleet-update')
+      assert.deepEqual(JSON.parse(request.body).ids, ['local-a', 'node-b'])
       const report = JSON.parse(result.stdout)
       assert.equal(report.failed_count, 1)
+      assert.equal(report.skipped_not_applicable, 0)
       assert.deepEqual(report.kernel_sync.items[1], {
         id: 'node-b',
         node_id: 'node-1',
@@ -174,7 +181,7 @@ test('fleet refresh with only local slots skips the node link wait', async () =>
   await withServer(
     {
       '/health': () => ({ status: 'ok' }),
-      '/api/panel/vms': () => ({ ok: true, data: [{ id: 'local-a', node_id: null }] }),
+      '/api/panel/vms': () => ({ ok: true, data: [{ id: 'local-a', family: 'claude', node_id: null }] }),
       '/api/panel/wrap-cli/sync': () => kernelSync([{ id: 'local-a', ok: true }]),
       '/api/panel/vms/fleet-update': () => telemetry([{ id: 'local-a', ok: true }]),
     },
@@ -182,6 +189,104 @@ test('fleet refresh with only local slots skips the node link wait', async () =>
       const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, VM2API_API_KEY: 'test-key' })
       assert.equal(result.code, 0, result.stderr)
       assert.ok(!requests.some((request) => request.url === '/api/panel/cluster/nodes'))
+    },
+  )
+})
+
+test('all-GPT fleets still sync payloads without submitting a telemetry job', async () => {
+  const vms = [
+    { id: 'gpt-a', family: 'codex', node_id: null },
+    { id: 'gpt-b', family: 'codex', node_id: null },
+  ]
+  await withServer(
+    {
+      '/health': () => ({ status: 'ok' }),
+      '/api/panel/vms': () => ({ ok: true, data: { items: vms } }),
+      '/api/panel/wrap-cli/sync': () => kernelSync(vms.map((vm) => ({ id: vm.id, ok: true }))),
+    },
+    async (base, requests) => {
+      const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, VM2API_API_KEY: 'test-key' })
+      assert.equal(result.code, 0, result.stderr)
+      assert.deepEqual(
+        requests.map((request) => [request.method, request.url]),
+        [
+          ['GET', '/health'],
+          ['GET', '/api/panel/vms'],
+          ['POST', '/api/panel/wrap-cli/sync'],
+        ],
+      )
+      assert.deepEqual(JSON.parse(requests[2].body), { restart: true })
+      const report = JSON.parse(result.stdout)
+      assert.equal(report.total, 0)
+      assert.equal(report.failed_count, 0)
+      assert.equal(report.skipped_not_applicable, 2)
+      assert.equal(report.kernel_sync.ok, true)
+      assert.equal(report.kernel_sync.total, 2)
+    },
+  )
+})
+
+test('mixed fleets submit telemetry only for Claude slots outside native nodes', async () => {
+  const vms = [
+    { id: 'local-a', family: 'claude', runtime_type: 'docker', node_id: null },
+    { id: 'node-b', family: 'claude', runtime_type: 'docker', node_id: 'linux-node' },
+    { id: 'kvm-c', family: 'claude', runtime_type: 'kvm', node_id: null },
+    { id: 'native-d', family: 'claude', runtime_type: 'docker', node_id: 'mac-node' },
+    { id: 'gpt-e', family: 'codex', runtime_type: 'docker', node_id: null },
+  ]
+  const supportedIds = ['local-a', 'node-b', 'kvm-c']
+  await withServer(
+    {
+      '/health': () => ({ status: 'ok' }),
+      '/api/panel/vms': () => ({ ok: true, data: { items: vms } }),
+      '/api/panel/cluster/nodes': () => ({
+        ok: true,
+        data: {
+          items: [
+            { id: 'linux-node', platform: 'linux', link: { state: 'ready' } },
+            { id: 'mac-node', platform: 'darwin', link: { state: 'ready' } },
+          ],
+        },
+      }),
+      '/api/panel/wrap-cli/sync': () => kernelSync(vms.map((vm) => ({ id: vm.id, ok: true }))),
+      '/api/panel/vms/fleet-update': () => telemetry(supportedIds.map((id) => ({ id, ok: true }))),
+    },
+    async (base, requests) => {
+      const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, VM2API_API_KEY: 'test-key' })
+      assert.equal(result.code, 0, result.stderr)
+      assert.equal(requests.filter((request) => request.url === '/api/panel/cluster/nodes').length, 1)
+      const request = requests.find((request) => request.url === '/api/panel/vms/fleet-update')
+      assert.deepEqual(JSON.parse(request.body), { action: 'telemetry', concurrency: 4, ids: supportedIds })
+      const report = JSON.parse(result.stdout)
+      assert.equal(report.total, 3)
+      assert.equal(report.skipped_not_applicable, 2)
+      assert.equal(report.kernel_sync.total, 5)
+    },
+  )
+})
+
+test('a supported slot telemetry failure still makes fleet finalization fail', async () => {
+  await withServer(
+    {
+      '/health': () => ({ status: 'ok' }),
+      '/api/panel/vms': () => ({
+        ok: true,
+        data: { items: [{ id: 'local-a', family: 'claude', node_id: null }] },
+      }),
+      '/api/panel/wrap-cli/sync': () => kernelSync([{ id: 'local-a', ok: true }]),
+      '/api/panel/vms/fleet-update': () =>
+        telemetry([{ id: 'local-a', ok: false, code: 'telemetry_not_ready', error: 'Policy was not acknowledged' }]),
+    },
+    async (base, requests) => {
+      const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, VM2API_API_KEY: 'test-key' })
+      assert.equal(result.code, 1)
+      const request = requests.find((request) => request.url === '/api/panel/vms/fleet-update')
+      assert.deepEqual(JSON.parse(request.body).ids, ['local-a'])
+      const report = JSON.parse(result.stdout)
+      assert.equal(report.failed_count, 1)
+      assert.equal(report.skipped_not_applicable, 0)
+      assert.equal(report.items[0].code, 'telemetry_not_ready')
+      assert.equal(report.kernel_sync.ok, true)
     },
   )
 })

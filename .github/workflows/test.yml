@@ -1,4 +1,4 @@
-# Focused offline checks for the first amd64 fork release.
+# Focused offline checks for amd64 fork releases.
 name: ci
 
 on:
@@ -52,6 +52,7 @@ jobs:
             test/unit/panel-vm-health.test.mjs \
             test/unit/rust-kernel-health.test.mjs \
             test/unit/panel-upgrade-script.test.mjs \
+            test/unit/fleet-services.test.mjs \
             test/unit/billing-aggregation.test.mjs \
             test/unit/usage-logs-repo.test.mjs \
             test/unit/panel-billing-lookup.test.mjs; do
