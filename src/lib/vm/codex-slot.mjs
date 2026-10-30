@@ -11,7 +11,7 @@ import {
   extraToCodexSnapshot,
   hasSpendableCodexCredits,
 } from '../protocol/codex-usage.mjs'
-import { openaiClaimsFromIdToken, openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
+import { decodeJwtPayload, openaiClaimsFromIdToken, openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
 
 export { isCodexVm }
 
@@ -276,6 +276,44 @@ export function enrichCodexAccountIdentity(account = {}) {
   return next
 }
 
+/** Subscription requests must use the ChatGPT account, never an OAuth user id. */
+export function codexSubscriptionAccountId(account = {}) {
+  const payload = decodeJwtPayload(account.access_token || account.accessToken)
+  return firstString(payload?.['https://api.openai.com/auth']?.chatgpt_account_id, account.chatgpt_account_id)
+}
+
+export function normalizeCodexSubscriptionPlan(value) {
+  const plan = firstString(value)
+  return (
+    {
+      chatgptpro: 'pro',
+      chatgptteamplan: 'team',
+      chatgptplus: 'plus',
+      chatgptplusplan: 'plus',
+    }[plan.toLowerCase()] ||
+    plan ||
+    null
+  )
+}
+
+/** API metadata lives on the slot, outside the credential file shared with the kernel. */
+export function codexSubscriptionView(account = {}, vm = {}) {
+  const accountId = codexSubscriptionAccountId(account)
+  const saved = vm.codex?.subscription
+  const snapshot = accountId && saved?.account_id === accountId ? saved : null
+  const apiDate = snapshot?.active_until && Number.isFinite(Date.parse(snapshot.active_until))
+  const credentialDate = account.chatgpt_subscription_active_until || null
+  return {
+    active_until: apiDate ? snapshot.active_until : credentialDate,
+    plan_type: normalizeCodexSubscriptionPlan(snapshot?.plan_type || account.chatgpt_plan_type),
+    source: apiDate ? snapshot.source : credentialDate ? 'credential' : null,
+    last_attempt_at: snapshot?.last_attempt_at || null,
+    last_success_at: snapshot?.last_success_at || null,
+    next_retry_at: snapshot?.next_retry_at || null,
+    last_error: snapshot?.last_error || null,
+  }
+}
+
 export function upsertCodexAccount(projectRoot, vmId, patch = {}, { replaceCredentials = false } = {}) {
   const accounts = readCodexAccounts(projectRoot, vmId)
   const previous = { ...(accounts[0] || {}) }
@@ -363,6 +401,7 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
   const usage = buildCodexUsageView(Object.keys(extra).length ? extraToCodexSnapshot(extra) : vm.codex?.usage || {})
   const hasAccess = !!(first.access_token || vm.codex?.has_access)
   const hasRefresh = !!(first.refresh_token || vm.codex?.has_refresh)
+  const subscription = codexSubscriptionView(first, vm)
   return {
     platform: 'openai',
     family: 'codex',
@@ -371,12 +410,17 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
     email: first.email || vm.codex?.email || vm.email || null,
     expires_at: first.expires_at || vm.codex?.expires_at || null,
     chatgpt_account_id: first.chatgpt_account_id || vm.codex?.chatgpt_account_id || null,
-    chatgpt_subscription_active_until: first.chatgpt_subscription_active_until || null,
+    chatgpt_subscription_active_until: subscription.active_until,
     chatgpt_plan_type: first.chatgpt_plan_type || null,
+    subscription,
     account_count: accounts.length,
     usage,
     reset_credits: vm.codex?.reset_credits || null,
     credits: vm.codex?.credits || null,
-    plan_type: vm.codex?.plan_type || null,
+    plan_type:
+      vm.codex?.plan_type ||
+      (subscription.source === 'accounts_check' || subscription.source === 'subscriptions'
+        ? subscription.plan_type
+        : null),
   }
 }

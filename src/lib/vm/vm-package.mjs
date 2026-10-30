@@ -501,6 +501,7 @@ function mirrorCodex(vm, account) {
     email: account.email || null,
     expires_at: account.expires_at || null,
   }
+  delete vm.codex.subscription
 }
 
 /**

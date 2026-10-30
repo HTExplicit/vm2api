@@ -16,6 +16,25 @@ test('panel dashboard, list and detail retain GPT subscription claims without in
   const tokenExpiry = 1_900_000_000
   const slots = [
     {
+      id: 'vm-api-subscription',
+      platform: 'openai',
+      codex: {
+        plan_type: 'team',
+        subscription: {
+          account_id: 'vm-api-subscription',
+          active_until: '2028-06-01T12:00:00.000Z',
+          plan_type: 'pro',
+          source: 'accounts_check',
+          last_success_at: '2026-10-31T00:00:00.000Z',
+        },
+      },
+      claims: { chatgpt_subscription_active_until: until, chatgpt_plan_type: 'plus' },
+      expectedUntil: '2028-06-01T12:00:00.000Z',
+      expectedPlan: 'plus',
+      expectedUsagePlan: 'team',
+      expectedSource: 'accounts_check',
+    },
+    {
       id: 'vm-subscription',
       platform: 'openai',
       codex: { plan_type: 'team' },
@@ -55,7 +74,10 @@ test('panel dashboard, list and detail retain GPT subscription claims without in
       JSON.stringify({
         accounts: [
           {
-            access_token: jwt({ exp: tokenExpiry }),
+            access_token: jwt({
+              exp: tokenExpiry,
+              'https://api.openai.com/auth': { chatgpt_account_id: slot.id },
+            }),
             refresh_token: 'fixture-refresh-secret',
             id_token: jwt({ 'https://api.openai.com/auth': slot.claims }),
             expires_at: tokenExpiry,
@@ -88,6 +110,12 @@ test('panel dashboard, list and detail retain GPT subscription claims without in
       assert.equal(view.chatgpt_subscription_active_until, slot.expectedUntil, `${slot.id} subscription date`)
       assert.equal(view.chatgpt_plan_type, slot.expectedPlan, `${slot.id} credential plan`)
       assert.equal(view.plan_type, slot.expectedUsagePlan, `${slot.id} usage plan`)
+      if (slot.expectedSource) {
+        assert.equal(view.subscription.source, slot.expectedSource)
+        assert.equal(view.subscription.active_until, slot.expectedUntil)
+        assert.equal(view.subscription.last_success_at, '2026-10-31T00:00:00.000Z')
+        assert.equal(view.subscription.account_id, undefined)
+      }
       assert.equal(view.access_token, undefined)
       assert.equal(view.id_token, undefined)
       assert.equal(view.refresh_token, undefined)

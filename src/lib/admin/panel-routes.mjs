@@ -77,6 +77,7 @@ import {
   resetGptModelPolicy,
 } from '../protocol/gpt-model-policy.mjs'
 import { refreshCodexAccessToken } from '../protocol/codex-models.mjs'
+import { refreshOpenaiSubscription } from '../oauth/openai-subscription.mjs'
 import {
   defaultSeedPolicy,
   isTelemetryEnabled,
@@ -429,6 +430,7 @@ async function commitImportedCodexVm({
     email: saved.email || null,
     expires_at: saved.expires_at || null,
   }
+  delete existing.codex.subscription
   const global = normalizeOpenAIQuotaPolicy(routingConfig.codex?.quota || {})
   const preservePin = (value, override) =>
     previousPolicy[override] === true &&
@@ -3087,6 +3089,18 @@ export function createPanelHandler(ctx) {
         const result = await panel.buildOpenaiQuotaRefresh({ cfg, id, routingConfig: ctx.routingConfig })
         if (result.status) return json(res, result.status, result.body)
         return json(res, 200, result)
+      }
+      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/openai-subscription\/refresh$/.test(p)) {
+        const id = p.split('/')[4]
+        const result = await refreshOpenaiSubscription({ projectRoot: cfg.paths.project, vmId: id, force: true })
+        if (!result.ok) {
+          return json(res, result.status || 502, {
+            ok: false,
+            error: { code: result.error, message: result.message },
+            data: { vm_id: id, subscription: result.subscription },
+          })
+        }
+        return json(res, 200, panel.ok({ vm_id: id, subscription: result.subscription }))
       }
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/openai-quota\/reset$/.test(p)) {
         const id = p.split('/')[4]

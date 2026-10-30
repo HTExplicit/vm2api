@@ -9,6 +9,7 @@ import {
 } from '@/lib/cred-type'
 import { extraUsageText } from '@/lib/fable-status'
 import { fmtExpiresAt, fmtNum, pct } from '@/lib/format'
+import { subscriptionInfoTitle } from '@/lib/subscription-expiry'
 import { cn } from '@/lib/utils'
 import { isCodexVm } from '@/lib/vm-kind'
 import { claudeTier, credExpiry } from '@/lib/vm-status'
@@ -38,6 +39,7 @@ import {
   probeSourceLabel,
   type ProbeCheck,
 } from '@/features/vm/probe-status'
+import { SubscriptionRefreshButton } from '@/features/vm/subscription-refresh-button'
 import { VmPackageButton } from '@/features/vm/vm-package-dialog'
 import { useVmPerms } from '@/features/vm/vm-perms'
 
@@ -158,8 +160,20 @@ export function VmAccountTab(props: VmAccountTabProps) {
                 </Field>
               ) : null}
               {gpt ? (
-                <Field label='订阅到期（以凭证为准）' compact>
-                  {fmtExpiresAt(vm.chatgpt_subscription_active_until)}
+                <Field label='订阅到期' compact>
+                  <div className='flex flex-wrap items-center gap-2'>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span tabIndex={0} className='cursor-help'>
+                          {fmtExpiresAt(vm.chatgpt_subscription_active_until)}
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent className='max-w-xs whitespace-pre-line'>
+                        {subscriptionInfoTitle(vm)}
+                      </TooltipContent>
+                    </Tooltip>
+                    <SubscriptionRefreshButton vm={vm} />
+                  </div>
                 </Field>
               ) : null}
               {credType === 'apikey' ? (
