@@ -5,7 +5,7 @@
 ### 完全隔离的虚拟机级 AI 订阅转 API 生产网关
 **Next-Generation Fully Isolated VM-Level AI Subscription-to-API Gateway**
 
-[![Release](https://img.shields.io/badge/Release-v1.4.2801-blue.svg?style=for-the-badge&logo=github)](https://github.com/HTExplicit/vm2api/releases)
+[![Release](https://img.shields.io/github/v/release/HTExplicit/vm2api?style=for-the-badge&logo=github&label=Release)](https://github.com/HTExplicit/vm2api/releases/latest)
 [![License](https://img.shields.io/badge/License-Noncommercial-amber.svg?style=for-the-badge)](LICENSE)
 [![Benchmarks](https://img.shields.io/badge/Benchmarks-Clean%20Verified-00C853?style=for-the-badge&logo=shield)](docs/benchmarks/README.md)
 [![Cluster](https://img.shields.io/badge/Cluster-Multi--VPS%20Ready-7928CA?style=for-the-badge&logo=docker)](docs/DEPLOY.md)
@@ -43,11 +43,13 @@
 
 ## 本 fork 的发布来源
 
-本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，维护分支为 `maint`。首版 `v1.4.2801` 基于 [dofastted/vm2api](https://github.com/dofastted/vm2api) 的 `1.4.028`（`77b72613c90f2eda0f90165d524d7a247b9d1974`），包含健康检查、账单统计与面板升级改进，见 [CHANGELOG.md](CHANGELOG.md)。上游归属、[LICENSE](LICENSE)、鸣谢与历史文档保留；下方旧版说明和评测为上游历史内容。
+本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，维护分支为 `maint`，当前版本见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随 main 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始。
 
-控制面镜像默认使用 `ghcr.io/htexplicit/vm2api`，面板更新默认检查本 fork 的公开 Release；`VM2API_GITHUB_REPO` 可指定发布仓库，Compose 会传入控制面。槽位二进制仍由 `deploy/payload.json` 固定上游来源、版本和 SHA256，客体系统镜像来源保持原配置。
+上游归属、[LICENSE](LICENSE)、鸣谢与历史文档保留；下方旧版说明和评测为上游历史内容，具体版本以对应记录为准。
 
-首轮仅发布 **linux/amd64** 控制面镜像与 10 个附件。发布流程先保留草稿，推送版本镜像并核验 GHCR 匿名访问后，才移动镜像 `latest` 并公开 Release。首次 GHCR 包须由维护者设为 Public；检查失败时保持草稿，可在确认匿名拉取成功后重跑失败的 `publish` job。此 fork 首版不提供 ARM64 控制面镜像。
+控制面镜像默认使用 `ghcr.io/htexplicit/vm2api`，通过 `VM2API_IMAGE` 配置；`VM2API_GITHUB_REPO` 指定发布仓库，Compose 会传入控制面，面板更新默认检查本 fork 的公开 Release。槽位二进制仍由 `deploy/payload.json` 固定上游来源、版本、大小和 SHA256，客体系统镜像来源保持原配置。
+
+当前发布 **linux/amd64** 控制面镜像与 10 个固定附件。发布流程先准备草稿和附件，再构建推送版本镜像，核验 GHCR 匿名访问后才移动镜像 `latest` 并公开 Release。若新建包为私有，维护者需设为 Public；匿名访问检查失败时保留草稿，修正包权限后可重跑失败的 `publish` job。当前不提供 ARM64 控制面镜像。
 
 ## 目录
 - [💡 项目概览](#-项目概览)
@@ -55,7 +57,7 @@
 - [🛡️ 九大核心特性（特色防封与拟真矩阵）](#️-九大核心特性特色防封与拟真矩阵)
   - [0️⃣ 独家 0 提示词注入机制 & 改写引擎](#0️⃣-独家-0-提示词注入机制--改写引擎)
   - [1️⃣ 真实拟真物理机环境](#1️⃣-真实拟真物理机环境)
-  - [2️⃣ 官方 Claude Code 真实进程转发](#2️⃣-官方-claude-code-真实进程转发)
+  - [2️⃣ 官方 Claude Code 真实进程转发](#2️⃣-官方-claude-code-真实进程转发--槽位管理)
   - [3️⃣ 封控拦截与风险审计](#3️⃣-封控拦截与风险审计)
   - [4️⃣ 完整的隔离网络环境（1 VM = 1 独立网络出口）](#4️⃣-完整的隔离网络环境1-vm--1-独立网络出口)
   - [5️⃣ 前置协议清洗与多协议统一结构化](#5️⃣-前置协议清洗与多协议统一结构化)
@@ -261,17 +263,21 @@ vm2api 内置全栈自适应网关，原生支持以下所有主流生态：
 
 # 🇬🇧 English
 
-This is the [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api) maintenance fork on `maint`. The first release, `v1.4.2801`, is based on upstream `1.4.028` and publishes an **amd64-only** control-plane image at `ghcr.io/htexplicit/vm2api`. Release checks, installer commands, and console repository links use this fork. The pinned upstream slot payload, guest images, attribution, and [LICENSE](LICENSE) are retained. See [CHANGELOG.md](CHANGELOG.md) for fork changes; the historical descriptions and benchmark results below came from upstream.
+This is the [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api) maintenance fork on `maint`. See the [latest release](https://github.com/HTExplicit/vm2api/releases/latest) and [CHANGELOG.md](CHANGELOG.md) for the current version. The first release, `v1.4.2801`, is based on [upstream 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974) and improves health checks, billing statistics, and panel upgrades; `v1.4.2802` fixes which upgrade finalization tasks apply to GPT slots. Upstream releases are reviewed before integration; upstream main is not deployed automatically. Revisions on the 028 baseline use 2801, 2802, and so on; integrating 029 starts at 2901.
+
+The **linux/amd64** control-plane image defaults to `ghcr.io/htexplicit/vm2api`, configured through `VM2API_IMAGE`. Release checks, installer commands, and console links use this fork, with `VM2API_GITHUB_REPO` selecting the release repository. The pinned upstream slot payload, size and SHA256 checks, guest image sources, attribution, and [LICENSE](LICENSE) are retained. Historical descriptions and benchmark results below came from upstream and apply to their recorded versions.
+
+Releases prepare a draft with 10 fixed assets, build and push the versioned image, then verify anonymous GHCR access before updating `latest` and publishing the release. If a new package is private, a maintainer must make it Public; a failed access check leaves the draft unpublished, and the failed `publish` job can be rerun after correcting package visibility. ARM64 control-plane images are not currently published.
 
 > **Sponsor**: [ProxyLane](https://proxylane.dev/zh-cn/isp-proxies?utm_source=vm2api&utm_medium=affiliate&utm_campaign=vm2api_sponsor_202610&utm_content=github_readme_en) native static residential ISP IPs built for AI accounts: low Scamalytics fraud scores, a dedicated IP with unlimited traffic, from $3.90. Bind one IP per slot: paste the SOCKS5 line `host:port:user:pass` into 代理池 → 添加代理 (Proxy pool → Add proxy). Code `VM2API30` gives 30% off your first purchase.
 
 ## Table of Contents
 - [💡 Overview](#-overview)
-- [🆕 Recent changes](#recent-changes)
+- [🆕 Recent changes](#recent-changes-13133)
 - [🛡️ 9 Core Pillars (Anti-Ban & Emulation Matrix)](#️-9-core-pillars-anti-ban--emulation-matrix)
   - [0️⃣ Zero Prompt Injection Engine](#0️⃣-zero-prompt-injection-engine)
   - [1️⃣ Physical Hardware Fingerprint Emulation](#1️⃣-physical-hardware-fingerprint-emulation)
-  - [2️⃣ Official Claude Code Native Process Forwarding](#2️⃣-official-claude-code-native-process-forwarding)
+  - [2️⃣ Official Claude Code Native Process Forwarding](#2️⃣-official-claude-code-native-process-forwarding--slot-management)
   - [3️⃣ Pre-hop risk gates](#3️⃣-pre-hop-risk-gates)
   - [4️⃣ Completely Isolated Network (1 VM = 1 Egress)](#4️⃣-completely-isolated-network-1-vm--1-egress)
   - [5️⃣ Deep Protocol Cleansing & Multi-Inbound Structuring](#5️⃣-deep-protocol-cleansing--multi-inbound-structuring)
