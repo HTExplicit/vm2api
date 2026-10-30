@@ -2038,6 +2038,8 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     codex_credits: isCodex ? v.codex_credits || v.codex?.credits || null : null,
     claude_reset_credits: isCodex ? null : v.claude_reset_credits || null,
     plan_type: isCodex ? v.plan_type || null : null,
+    chatgpt_subscription_active_until: isCodex ? v.chatgpt_subscription_active_until || null : null,
+    chatgpt_plan_type: isCodex ? v.chatgpt_plan_type || null : null,
     ...(q.weekly_split ? { weekly_split: q.weekly_split } : {}),
     fable_inflight: fablePool.fable_inflight,
     fable_max: fablePool.fable_max,
