@@ -279,7 +279,8 @@ export function enrichCodexAccountIdentity(account = {}) {
 /** Subscription requests must use the ChatGPT account, never an OAuth user id. */
 export function codexSubscriptionAccountId(account = {}) {
   const payload = decodeJwtPayload(account.access_token || account.accessToken)
-  return firstString(payload?.['https://api.openai.com/auth']?.chatgpt_account_id, account.chatgpt_account_id)
+  const id = firstString(payload?.['https://api.openai.com/auth']?.chatgpt_account_id, account.chatgpt_account_id)
+  return id.startsWith('user-') ? '' : id
 }
 
 export function normalizeCodexSubscriptionPlan(value) {

@@ -147,6 +147,20 @@ test('another workspace cannot supply the subscription date', async (t) => {
   assert.equal(result.error, 'subscription_account_mismatch')
   assert.equal(calls, 1)
   assert.equal(result.subscription.active_until, CLAIM_UNTIL)
+
+  writeCodexAccounts(slot.projectRoot, slot.vmId, [
+    {
+      access_token: jwt({ exp: NOW / 1000 + 3600, 'https://api.openai.com/auth': { user_id: 'user-oauth-only' } }),
+    },
+  ])
+  const userOnly = await refreshOpenaiSubscription({
+    ...slot.options,
+    force: true,
+    fetchImpl: async () => {
+      throw new Error('OAuth user id must not reach the subscription endpoint')
+    },
+  })
+  assert.equal(userOnly.error, 'subscription_account_required')
 })
 
 test('403 preserves the previous snapshot and delays automatic retry without exchanging credentials', async (t) => {
