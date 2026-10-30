@@ -37,6 +37,7 @@ export function vmSchedulableProps(vm: Vm) {
     restrictionUntil: restrictionUntilOf(vm),
     restrictionReason: vm.restriction_reason,
     unschedulableText: vm.unschedulable_text || vm.unschedulable_reason || null,
+    unschedulableReason: vm.unschedulable_reason || null,
   }
 }
 
@@ -46,6 +47,7 @@ export function SchedulableSwitch({
   scheduleState,
   restrictionUntil,
   unschedulableText,
+  unschedulableReason,
   className,
 }: {
   vmId: string
@@ -54,6 +56,7 @@ export function SchedulableSwitch({
   restrictionUntil?: number | null
   restrictionReason?: string | null
   unschedulableText?: string | null
+  unschedulableReason?: string | null
   className?: string
 }) {
   const qc = useQueryClient()
@@ -85,7 +88,9 @@ export function SchedulableSwitch({
   const untilText = formatRestrictionUntil(restrictionUntil)
   const tooltip =
     scheduleState === 'unschedulable' && !checked
-      ? `不可调度：${unschedulableText || '错误'}。处理后点击重新开启调度`
+      ? unschedulableReason === 'credential_blocked'
+        ? '认证失败，已停止分配。刷新或重新导入凭据，认证成功后自动恢复'
+        : `不可调度：${unschedulableText || '错误'}。处理后点击重新开启调度`
       : restricted && checked
         ? untilText
           ? `调度开，当前受限至 ${untilText}`

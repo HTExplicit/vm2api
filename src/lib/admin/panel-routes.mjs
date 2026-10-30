@@ -79,6 +79,13 @@ import {
 import { refreshCodexAccessToken } from '../protocol/codex-models.mjs'
 import { refreshOpenaiSubscription } from '../oauth/openai-subscription.mjs'
 import {
+  captureOpenaiAuth,
+  isOpenaiCredentialCurrent,
+  readOpenaiAuthBlock,
+  recordOpenaiAuthResult,
+  resetOpenaiAuth,
+} from '../oauth/openai-auth-state.mjs'
+import {
   defaultSeedPolicy,
   isTelemetryEnabled,
   seedTelemetryContract,
@@ -419,17 +426,20 @@ async function commitImportedCodexVm({
   const wasCodex = isCodexVm(existing)
   const previousPolicy = existing.policy && typeof existing.policy === 'object' ? existing.policy : {}
   const saved = upsertCodexAccount(cfg.paths.project, existing.id, account, { replaceCredentials: true })
+  const currentCodex = getVm(cfg.paths.project, existing.id)?.codex
   existing.platform = 'openai'
   existing.family = 'codex'
   existing.codex_kernel = true
   existing.codex = {
     ...(existing.codex && typeof existing.codex === 'object' ? existing.codex : {}),
+    ...(currentCodex || {}),
     has_access: !!saved.access_token,
     has_refresh: !!saved.refresh_token,
     chatgpt_account_id: saved.chatgpt_account_id || null,
     email: saved.email || null,
     expires_at: saved.expires_at || null,
   }
+  delete existing.codex.auth_block
   delete existing.codex.subscription
   const global = normalizeOpenAIQuotaPolicy(routingConfig.codex?.quota || {})
   const preservePin = (value, override) =>
@@ -477,7 +487,7 @@ async function commitImportedCodexVm({
     catalog = null
   }
   return {
-    vm: summarizeVm(existing, cfg.paths.project, routingConfig),
+    vm: summarizeVm(getVm(cfg.paths.project, existing.id) || existing, cfg.paths.project, routingConfig),
     platform: 'openai',
     catalog: catalog && catalog.ok ? { synced: catalog.synced, ids: catalog.ids } : catalog,
   }
@@ -3227,13 +3237,17 @@ export function createPanelHandler(ctx) {
         }
         const currentVm = getVm(cfg.paths.project, id)
         const credentialFailure =
+          (isCodexVm(currentVm) && readOpenaiAuthBlock(cfg.paths.project, id)) ||
           /oauth_revoked|oauth_invalid_grant|invalid_grant|refresh_token_missing|token has been revoked/i.test(
             `${currentVm?.claude?.refresh_error || ''} ${currentVm?.schedule_disabled_reason || ''}`,
           )
         if (body.schedulable && credentialFailure) {
           return json(res, 409, {
             ok: false,
-            error: { code: 'credential_unavailable', message: '凭证已失效或吊销，请重新导入凭证后再开启调度' },
+            error: {
+              code: 'credential_unavailable',
+              message: '凭证不可用，请先刷新或重新导入凭据，认证恢复后再开启调度',
+            },
           })
         }
         const reason = body.schedulable ? null : body.reason || 'disabled'
@@ -3457,6 +3471,7 @@ export function createPanelHandler(ctx) {
           }
           const prev = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
           prev.id = prev.id || id
+          if (isCodexVm(prev)) resetOpenaiAuth(cfg.paths.project, id)
           const slotDir = path.join(cfg.paths.project, 'vms', id)
           const removed = []
           for (const file of [
@@ -3478,7 +3493,12 @@ export function createPanelHandler(ctx) {
               record.account_uuid = null
               record.org_uuid = null
               record.expires_at = null
-              record.codex = {}
+              record.codex = isCodexVm(record)
+                ? {
+                    auth_revision: record.codex?.auth_revision || 0,
+                    credential_revision: record.codex?.credential_revision || 0,
+                  }
+                : {}
               record.claude = {}
               record.worker_credential = null
               record.refresh_status = null
@@ -4947,6 +4967,7 @@ export function createPanelHandler(ctx) {
         const vm = getVm(cfg.paths.project, id)
         if (isCodexVm(vm)) {
           const first = readCodexAccounts(cfg.paths.project, id)[0] || {}
+          const auth = captureOpenaiAuth(cfg.paths.project, id, first)
           const refreshToken = String(first.refresh_token || '').trim()
           if (!refreshToken) {
             return json(res, 400, {
@@ -4959,9 +4980,21 @@ export function createPanelHandler(ctx) {
             proxyUrl: hostProxyUrlForVm(vm),
           })
           if (!tok.ok) {
+            recordOpenaiAuthResult(auth, {
+              status: tok.status,
+              error: tok.error,
+              source: 'oauth_refresh',
+              message: 'GPT OAuth 刷新失败，请重新导入',
+            })
             return json(res, 502, {
               ok: false,
               error: { code: tok.error || 'refresh_failed', message: 'GPT OAuth 刷新失败，请重新导入' },
+            })
+          }
+          if (!isOpenaiCredentialCurrent(auth)) {
+            return json(res, 409, {
+              ok: false,
+              error: { code: 'credential_changed', message: '凭据已更新，未写入旧刷新结果' },
             })
           }
           upsertCodexAccount(cfg.paths.project, id, {

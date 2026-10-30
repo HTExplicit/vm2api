@@ -4,12 +4,13 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { buildDashboard, buildVmDetail, buildVmList } from '../../src/lib/admin/panel-api.mjs'
+import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 
 function jwt(payload) {
   return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`
 }
 
-test('panel dashboard, list and detail retain GPT subscription claims without inferring missing dates', async (t) => {
+test('panel dashboard, list and detail retain GPT subscription claims and authentication blocks', async (t) => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-panel-subscription-'))
   t.after(() => fs.rmSync(project, { recursive: true, force: true }))
   const until = '2027-06-01T12:00:00Z'
@@ -20,6 +21,15 @@ test('panel dashboard, list and detail retain GPT subscription claims without in
       platform: 'openai',
       codex: {
         plan_type: 'team',
+        auth_revision: 1,
+        auth_block: {
+          account_id: 'vm-api-subscription',
+          reason: 'upstream_401',
+          source: 'subscription',
+          status: 401,
+          at: '2026-10-31T00:00:00.000Z',
+          message: 'OpenAI 认证失败，已停止分配，请刷新凭据',
+        },
         subscription: {
           account_id: 'vm-api-subscription',
           active_until: '2028-06-01T12:00:00.000Z',
@@ -119,6 +129,79 @@ test('panel dashboard, list and detail retain GPT subscription claims without in
       assert.equal(view.access_token, undefined)
       assert.equal(view.id_token, undefined)
       assert.equal(view.refresh_token, undefined)
+      if (slot.id === 'vm-api-subscription') {
+        assert.equal(view.availability.key, 'bad')
+        assert.equal(view.availability.accept, false)
+        assert.equal(view.cred_status.key, 'bad')
+        assert.equal(view.schedule_state, 'unschedulable')
+        assert.equal(view.unschedulable_reason, 'credential_blocked')
+        assert.deepEqual(view.unschedulable_detail, {
+          reason: 'upstream_401',
+          source: 'subscription',
+          status: 401,
+          at: '2026-10-31T00:00:00.000Z',
+          message: 'OpenAI 认证失败，已停止分配，请刷新凭据',
+        })
+        assert.equal(view.unschedulable_detail.account_id, undefined)
+        assert.equal(view.schedulable, true, 'operator scheduling intent is preserved')
+      }
     }
   }
+})
+
+test('panel schedule enable and cooldown clear cannot release an OpenAI authentication block', async (t) => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-panel-auth-block-'))
+  t.after(() => fs.rmSync(project, { recursive: true, force: true }))
+  const id = 'vm-auth-block'
+  const vmPath = path.join(project, 'vms', `${id}.json`)
+  const block = {
+    account_id: id,
+    reason: 'upstream_401',
+    source: 'inference',
+    status: 401,
+    at: '2026-10-31T00:00:00.000Z',
+    message: '认证失败，已停止分配',
+  }
+  fs.mkdirSync(path.join(project, 'vms', id), { recursive: true })
+  fs.writeFileSync(
+    vmPath,
+    JSON.stringify({
+      id,
+      platform: 'openai',
+      status: 'running',
+      schedulable: true,
+      codex: { auth_revision: 1, auth_block: block },
+    }),
+  )
+  fs.writeFileSync(
+    path.join(project, 'vms', id, 'codex-credentials.json'),
+    JSON.stringify({
+      accounts: [{ access_token: jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: id } }) }],
+    }),
+  )
+  const response = {}
+  const handle = createPanelHandler({
+    cfg: { paths: { project }, vm: { id: null } },
+    routingConfig: {},
+    accountQuota: { config: {}, snapshot: () => ({ accounts: [] }) },
+    requireAuth(req) {
+      req.apiKeyKind = 'master'
+      req.panelRole = 'admin'
+      return true
+    },
+    readBody: async () => ({ schedulable: true }),
+    json(_res, status, payload) {
+      response.status = status
+      response.body = payload
+      return true
+    },
+  })
+  await handle({ method: 'POST' }, {}, new URL(`http://localhost/api/panel/vms/${id}/schedulable`))
+  assert.equal(response.status, 409)
+  assert.equal(response.body.error.code, 'credential_unavailable')
+  await handle({ method: 'POST' }, {}, new URL(`http://localhost/api/panel/vms/${id}/cooldown/clear`))
+  assert.equal(response.status, 200)
+  const saved = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+  assert.deepEqual(saved.codex.auth_block, block)
+  assert.equal(saved.schedulable, true)
 })

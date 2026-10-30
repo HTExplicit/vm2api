@@ -2,6 +2,7 @@ import path from 'node:path'
 import { normalizeTimezone, zonedParts } from '../core/timezone.mjs'
 import { makeProxyFetch } from '../protocol/codex-models.mjs'
 import { decodeJwtPayload } from './openai-jwt.mjs'
+import { captureOpenaiAuth, isOpenaiAuthCurrent, recordOpenaiAuthResult } from './openai-auth-state.mjs'
 import {
   codexSubscriptionAccountId,
   codexSubscriptionView,
@@ -41,7 +42,7 @@ function accountFromCheck(payload, accountId) {
   )
 }
 
-async function request(fetch, url, accessToken) {
+async function request(fetch, url, accessToken, auth) {
   const response = await fetch(url.href, {
     method: 'GET',
     headers: {
@@ -54,6 +55,13 @@ async function request(fetch, url, accessToken) {
       'x-openai-target-route': url.pathname,
     },
   })
+  if (response.status === 401) {
+    recordOpenaiAuthResult(auth, {
+      status: 401,
+      source: 'subscription',
+      message: '订阅查询认证失败（401），请先刷新凭据',
+    })
+  }
   if (response.status < 200 || response.status >= 300) {
     const status = Number(response.status) || 0
     throw failure(
@@ -81,21 +89,21 @@ async function refresh({ projectRoot, vmId, force, fetchImpl, now }) {
   const account = enrichCodexAccountIdentity(readCodexAccounts(projectRoot, vmId)[0] || {})
   const current = codexSubscriptionView(account, vm)
   const accountId = codexSubscriptionAccountId(account)
+  const auth = captureOpenaiAuth(projectRoot, vmId, account)
   const result = (data) => ({ ...data, vm_id: vmId, subscription: current })
   if (!account.access_token) return result(failure('no_access_token', 'GPT 槽没有 access_token', 400))
   if (!accountId) return result(failure('subscription_account_required', '凭证缺少 ChatGPT account_id', 400))
   if (!force && (Date.parse(current.active_until || '') > now || Date.parse(current.next_retry_at || '') > now)) {
     return result({ ok: true })
   }
-  const expiresAt = Number(decodeJwtPayload(account.access_token)?.exp) * 1000
-  if (expiresAt > 0 && expiresAt <= now) {
-    return result(failure('subscription_access_expired', 'Access Token 已过期，请先刷新凭据', 400))
-  }
-
   const stamp = new Date(now).toISOString()
   let snapshot
   let error = null
   try {
+    const expiresAt = Number(decodeJwtPayload(account.access_token)?.exp) * 1000
+    if (expiresAt > 0 && expiresAt <= now) {
+      throw failure('subscription_access_expired', 'Access Token 已过期，请先刷新凭据', 400)
+    }
     const proxyUrl = hostProxyUrlForVm(vm)
     if (!fetchImpl && !proxyUrl && !isLocalEgressProxy(vm.proxy)) {
       throw failure('proxy_required', 'GPT 槽未绑定出口代理', 400)
@@ -108,9 +116,10 @@ async function refresh({ projectRoot, vmId, force, fetchImpl, now }) {
       'timezone_offset_min',
       String(Math.round((Math.floor(now / 60_000) * 60_000 - local) / 60_000)),
     )
-    const checked = await request(fetch, checkUrl, account.access_token)
+    const checked = await request(fetch, checkUrl, account.access_token, auth)
     const record = accountFromCheck(checked, accountId)
     if (!record) throw failure('subscription_account_mismatch', '订阅查询未返回当前账号，保留原日期')
+    recordOpenaiAuthResult(auth, { authenticated: true, source: 'subscription' })
     snapshot = {
       active_until: until(record.entitlement?.expires_at ?? record.account?.expires_at ?? record.expires_at),
       plan_type: normalizeCodexSubscriptionPlan(
@@ -121,7 +130,10 @@ async function refresh({ projectRoot, vmId, force, fetchImpl, now }) {
     if (!snapshot.active_until || Date.parse(snapshot.active_until) <= now) {
       const url = new URL(SUBSCRIPTIONS_URL)
       url.searchParams.set('account_id', accountId)
-      const body = await request(fetch, url, account.access_token)
+      const body = await request(fetch, url, account.access_token, auth)
+      if (body && typeof body === 'object') {
+        recordOpenaiAuthResult(auth, { authenticated: true, source: 'subscription' })
+      }
       snapshot = {
         active_until: until(body.active_until ?? body.expires_at),
         plan_type: normalizeCodexSubscriptionPlan(body.subscription_plan ?? body.plan_type) || snapshot.plan_type,
@@ -141,8 +153,8 @@ async function refresh({ projectRoot, vmId, force, fetchImpl, now }) {
   // Re-read after I/O: the same slot may have received a different account while querying.
   const latest = getVm(projectRoot, vmId)
   const latestAccount = enrichCodexAccountIdentity(readCodexAccounts(projectRoot, vmId)[0] || {})
-  if (!latest || codexSubscriptionAccountId(latestAccount) !== accountId) {
-    return result(failure('subscription_account_changed', '账号已更换，未写入旧查询结果', 409))
+  if (!latest || codexSubscriptionAccountId(latestAccount) !== accountId || !isOpenaiAuthCurrent(auth)) {
+    return result(failure('subscription_account_changed', '账号或凭据已更新，未写入旧查询结果', 409))
   }
   const previous = latest.codex?.subscription?.account_id === accountId ? latest.codex.subscription : {}
   latest.codex = { ...(latest.codex || {}) }

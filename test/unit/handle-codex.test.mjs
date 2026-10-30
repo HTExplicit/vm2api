@@ -14,6 +14,11 @@ import {
 import { persistCodexUsage, getVm } from '../../src/lib/vm/vm-registry.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
+import {
+  captureOpenaiAuth,
+  readOpenaiAuthBlock,
+  recordOpenaiAuthResult,
+} from '../../src/lib/oauth/openai-auth-state.mjs'
 
 beforeEach(() => resetOpenAIAccountRuntime())
 
@@ -1023,7 +1028,7 @@ test('Codex failover stops at the configured attempt budget', async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('a 401 parks the GPT slot so the next request skips it', async () => {
+test('a 401 persistently blocks the GPT slot so the next request skips it', async () => {
   const rt = await import('../../src/lib/pool/openai-account-runtime.mjs')
   rt.resetOpenAIAccountRuntime()
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-401-'))
@@ -1048,7 +1053,9 @@ test('a 401 parks the GPT slot so the next request skips it', async () => {
   const first = await handleCodexProtocol(codexArgs(root, ops))
   assert.equal(first.status, 200)
   assert.deepEqual(seen, ['vm-gpt-a', 'vm-gpt-b'])
-  assert.ok(rt.openAIAccountHold('vm-gpt-a'))
+  assert.equal(readOpenaiAuthBlock(root, 'vm-gpt-a').source, 'inference')
+  assert.equal(rt.openAIAccountHold('vm-gpt-a'), null)
+  rt.resetOpenAIAccountRuntime()
   seen.length = 0
   const second = await handleCodexProtocol(codexArgs(root, ops))
   assert.equal(second.status, 200)
@@ -1057,23 +1064,20 @@ test('a 401 parks the GPT slot so the next request skips it', async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('failure holds ignore committed streams and request-shaped 400s', () => {
+test('failure holds leave 401 to persistent auth state and ignore request-shaped errors', () => {
   const now = 1_700_000_000_000
   assert.equal(codexFailureHold({ ok: false, status: 401, committed: true }, now), null)
   assert.equal(
     codexFailureHold({ ok: false, status: 400, body: { error: { code: 'invalid_request_error' } } }, now),
     null,
   )
-  assert.deepEqual(codexFailureHold({ ok: false, status: 401, committed: false }, now), {
-    until: now + 5 * 60_000,
-    reason: 'oauth_401',
-  })
+  assert.equal(codexFailureHold({ ok: false, status: 401, committed: false }, now), null)
   assert.equal(
     codexFailureHold(
       { ok: false, status: 401, body: { error: { code: 'invalid_request', message: 'token expired' } } },
       now,
-    ).reason,
-    'oauth_401',
+    ),
+    null,
   )
   assert.equal(
     codexFailureHold(
@@ -1082,6 +1086,31 @@ test('failure holds ignore committed streams and request-shaped 400s', () => {
     ),
     null,
   )
+})
+
+test('authentication blocked during kernel preparation never reaches that upstream slot', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-auth-before-send-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  for (const id of ['vm-gpt-a', 'vm-gpt-b']) writeGptVm(root, id)
+  const seen = []
+  const out = await handleCodexProtocol(
+    codexArgs(root, {
+      ensureCodexKernel: async (exec) => {
+        if (exec.vm.id === 'vm-gpt-a') {
+          recordOpenaiAuthResult(captureOpenaiAuth(root, exec.vm.id), { status: 401, source: 'subscription' })
+        }
+        return { ok: true }
+      },
+      streamCodexKernel: async ({ exec, onEvent }) => {
+        seen.push(exec.vm.id)
+        await onEvent('data: {"type":"response.completed"}')
+        return { ok: true, status: 200, terminalState: 'verified' }
+      },
+    }),
+  )
+  assert.equal(out.status, 200)
+  assert.deepEqual(seen, ['vm-gpt-b'])
+  assert.equal(readOpenaiAuthBlock(root, 'vm-gpt-a').source, 'subscription')
 })
 
 test('#A11: an OpenAI pool that stays full answers 429 pool_overloaded', async () => {

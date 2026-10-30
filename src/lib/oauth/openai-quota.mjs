@@ -18,6 +18,12 @@ import {
 import { CODEX_OAUTH_ORIGINATOR, makeProxyFetch, refreshCodexAccessToken } from '../protocol/codex-models.mjs'
 import { openaiIdentityFromJwt } from './openai-jwt.mjs'
 import { refreshOpenaiSubscription } from './openai-subscription.mjs'
+import {
+  captureOpenaiAuth,
+  isOpenaiAuthCurrent,
+  isOpenaiCredentialCurrent,
+  recordOpenaiAuthResult,
+} from './openai-auth-state.mjs'
 
 export const CHATGPT_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 export const CHATGPT_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits'
@@ -262,10 +268,14 @@ async function loadSlot(projectRoot, vmId) {
     accountId: firstString(first.chatgpt_account_id, vm.codex?.chatgpt_account_id),
     proxyUrl,
     direct: isLocalEgressProxy(vm.proxy),
+    auth: captureOpenaiAuth(projectRoot, vmId, first),
   }
 }
 
-async function quotaFetch(url, { method = 'GET', headers, body, proxyUrl, fetchImpl, timeoutMs, direct = false } = {}) {
+async function quotaFetch(
+  url,
+  { method = 'GET', headers, body, proxyUrl, fetchImpl, timeoutMs, direct = false, auth } = {},
+) {
   const fetchFn = fetchImpl || makeProxyFetch(proxyUrl, timeoutMs || OPENAI_QUOTA_TIMEOUT_MS)
   if (!fetchImpl && !proxyUrl && !direct)
     return { ok: false, error: 'proxy_required', message: 'GPT 槽未绑定 SOCKS5', status: 400 }
@@ -276,7 +286,13 @@ async function quotaFetch(url, { method = 'GET', headers, body, proxyUrl, fetchI
       ...(body === undefined ? {} : { body }),
     })
     const status = Number(res?.status) || 0
+    if (status === 401) {
+      recordOpenaiAuthResult(auth, { status, source: 'quota', message: '额度查询认证失败（401），请先刷新凭据' })
+    }
     const payload = await readJson(res)
+    if (status >= 200 && status < 300 && payload && typeof payload === 'object') {
+      recordOpenaiAuthResult(auth, { authenticated: true, source: 'quota' })
+    }
     return { ok: status > 0 && status < 400, status, payload }
   } catch (e) {
     const aborted = e?.name === 'AbortError' || /aborted/i.test(String(e?.message || e))
@@ -297,14 +313,28 @@ async function rotateIfNeeded(slot, projectRoot, vmId, fetchImpl) {
     fetchImpl,
     timeoutMs: OPENAI_QUOTA_TIMEOUT_MS,
   })
-  if (!tok.ok) return { ...slot, rotateError: tok.error || 'refresh_failed' }
+  if (!tok.ok) {
+    recordOpenaiAuthResult(slot.auth, {
+      status: tok.status,
+      error: tok.error,
+      source: 'oauth_refresh',
+      message: 'GPT OAuth 刷新失败，请重新导入',
+    })
+    return { ...slot, rotateError: tok.error || 'refresh_failed' }
+  }
+  if (!isOpenaiCredentialCurrent(slot.auth)) return { ...slot, rotateError: 'credential_changed' }
   upsertCodexAccount(projectRoot, vmId, {
     access_token: tok.access_token,
     refresh_token: tok.refresh_token,
     id_token: tok.id_token || slot.first.id_token,
     expires_at: tok.expires_at || slot.first.expires_at,
   })
-  return { ...slot, access: tok.access_token, refresh: tok.refresh_token || slot.refresh }
+  return {
+    ...slot,
+    access: tok.access_token,
+    refresh: tok.refresh_token || slot.refresh,
+    auth: captureOpenaiAuth(projectRoot, vmId),
+  }
 }
 
 function publicUsage(extra, resetCredits, credits, usagePayload = {}) {
@@ -333,6 +363,7 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
       proxyUrl: current.proxyUrl,
       fetchImpl,
       direct: current.direct,
+      auth: current.auth,
     })
     if (!usage.ok && usage.error) return usage
     if (usage.status === 401 || usage.status === 403) {
@@ -348,6 +379,7 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
       proxyUrl: current.proxyUrl,
       fetchImpl,
       direct: current.direct,
+      auth: current.auth,
     })
     return { usage, details }
   }
@@ -356,6 +388,8 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
   if (pack.error === 'upstream_auth' && rotate && current.refresh) {
     current = await rotateIfNeeded(current, projectRoot, vmId, fetchImpl)
     if (!current.access || current.rotateError) {
+      if (current.rotateError === 'credential_changed')
+        return fail('credential_changed', '账号或凭据已更新，请重试', 409)
       return fail(current.rotateError || 'refresh_failed', 'GPT OAuth 刷新失败，请重新导入', 502)
     }
     pack = await run(current.access)
@@ -366,6 +400,7 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
     })
   }
   if (pack.ok === false || pack.error) return pack
+  if (!isOpenaiAuthCurrent(current.auth)) return fail('credential_changed', '账号或凭据已更新，未写入旧额度结果', 409)
 
   const extra = extraFromRateLimit(pack.usage.payload?.rate_limit || pack.usage.payload?.rateLimit || {})
   const usageCredits = pack.usage.payload?.rate_limit_reset_credits || pack.usage.payload?.rateLimitResetCredits
@@ -431,12 +466,15 @@ export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
       proxyUrl: current.proxyUrl,
       fetchImpl,
       direct: current.direct,
+      auth: current.auth,
     })
 
   let res = await consume(current.access)
   if ((res.status === 401 || res.status === 403) && rotate && current.refresh) {
     current = await rotateIfNeeded(current, projectRoot, vmId, fetchImpl)
     if (!current.access || current.rotateError) {
+      if (current.rotateError === 'credential_changed')
+        return fail('credential_changed', '账号或凭据已更新，请重试', 409)
       return fail(current.rotateError || 'refresh_failed', 'GPT OAuth 刷新失败，请重新导入', 502)
     }
     res = await consume(current.access)
