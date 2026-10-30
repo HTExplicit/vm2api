@@ -8,7 +8,7 @@
  *   1. wait until every node that hosts a slot has a ready link
  *   2. wrap-cli sync: local slots take the new kernel / cli-node files, node
  *      slots move onto a content-hashed image with the same payload
- *   3. telemetry: publish the saved VM-native policy and await its acknowledgment
+ *   3. telemetry: publish the saved policy to supported Claude slots and await its acknowledgment
  */
 import fs from 'node:fs/promises'
 import http from 'node:http'
@@ -84,29 +84,31 @@ function dataOf(pathname, response) {
   throw new Error(`${pathname}: ${response.json?.error?.message || `HTTP ${response.status}`}`)
 }
 
-async function slotNodeIds(key) {
+async function fleetSlots(key) {
   const data = dataOf('/api/panel/vms', await call(key, 'GET', '/api/panel/vms', undefined, 15_000))
   const vms = Array.isArray(data) ? data : data.items
   if (!Array.isArray(vms)) throw new Error('/api/panel/vms: invalid slot list')
-  return [...new Set(vms.map((vm) => vm.node_id).filter(Boolean))]
+  return vms
 }
 
-/** Not-ready node ids once the wait ends. The server reconnects them on its own after boot. */
+/** Keep the node inventory used by the link wait so native hosts can be excluded from telemetry. */
 async function waitNodeLinks(key, nodeIds) {
   const deadline = Date.now() + linkWaitMs
   let pending = nodeIds
+  let nodes = []
   for (;;) {
     try {
       const data = dataOf(
         '/api/panel/cluster/nodes',
         await call(key, 'GET', '/api/panel/cluster/nodes', undefined, 15_000),
       )
-      const ready = new Set((data.items || []).filter((node) => node.link?.state === 'ready').map((node) => node.id))
+      nodes = data.items || []
+      const ready = new Set(nodes.filter((node) => node.link?.state === 'ready').map((node) => node.id))
       pending = nodeIds.filter((id) => !ready.has(id))
     } catch (error) {
       console.warn(`[fleet-services] node link check failed: ${error?.message || error}`)
     }
-    if (!pending.length || Date.now() >= deadline) return pending
+    if (!pending.length || Date.now() >= deadline) return { offline: pending, nodes }
     await delay(pollMs)
   }
 }
@@ -140,11 +142,14 @@ if (!key) {
 }
 
 try {
-  const nodeIds = await slotNodeIds(key)
+  const vms = await fleetSlots(key)
+  const nodeIds = [...new Set(vms.map((vm) => vm.node_id).filter(Boolean))]
+  let nodes = []
   if (nodeIds.length) {
-    const offline = await waitNodeLinks(key, nodeIds)
+    const links = await waitNodeLinks(key, nodeIds)
+    nodes = links.nodes
     // Slots on these nodes fail below with node_not_ready; the rest still update.
-    if (offline.length) console.warn(`[fleet-services] node link not ready: ${offline.join(', ')}`)
+    if (links.offline.length) console.warn(`[fleet-services] node link not ready: ${links.offline.join(', ')}`)
   }
   const kernels = summarizeKernelSync(
     dataOf(
@@ -152,11 +157,22 @@ try {
       await call(key, 'POST', '/api/panel/wrap-cli/sync', { restart: true }, SYNC_TIMEOUT_MS),
     ),
   )
-  const report = dataOf(
-    '/api/panel/vms/fleet-update',
-    await call(key, 'POST', '/api/panel/vms/fleet-update', { action: 'telemetry', concurrency }, SYNC_TIMEOUT_MS),
-  )
-  console.log(JSON.stringify({ ...report, kernel_sync: kernels }))
+  const nativeNodes = new Set(nodes.filter((node) => node.platform === 'darwin').map((node) => node.id))
+  const ids = vms.filter((vm) => vm.family === 'claude' && !nativeNodes.has(vm.node_id)).map((vm) => vm.id)
+  // An empty ids list means all slots to the API, so do not submit an empty telemetry job.
+  const report = ids.length
+    ? dataOf(
+        '/api/panel/vms/fleet-update',
+        await call(
+          key,
+          'POST',
+          '/api/panel/vms/fleet-update',
+          { action: 'telemetry', concurrency, ids },
+          SYNC_TIMEOUT_MS,
+        ),
+      )
+    : { action: 'telemetry', concurrency, total: 0, ok_count: 0, skipped_count: 0, failed_count: 0, items: [] }
+  console.log(JSON.stringify({ ...report, skipped_not_applicable: vms.length - ids.length, kernel_sync: kernels }))
   if (report.skipped_count) {
     for (const item of report.items || []) {
       if (!item.skipped) continue

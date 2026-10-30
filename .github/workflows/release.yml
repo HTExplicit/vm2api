@@ -1,4 +1,4 @@
-# First fork release: amd64 assets and image stay private until the image is public.
+# Fork releases stay draft until the amd64 image is publicly readable.
 name: release
 
 on:
@@ -42,7 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           cat > release-notes.md <<'NOTES'
-          首个 HTExplicit/vm2api 维护版，基于上游 1.4.028。健康检查改为独立工作线程，账单统计合并读取，面板升级核对实际运行后端版本。
+          HTExplicit/vm2api 维护版。本次变更与升级说明见下方对应版本的 CHANGELOG.md。
 
           本轮仅支持 linux/amd64。10 个无后缀附件沿用 deploy/payload.json 钉住的上游版本与校验值。
           控制面镜像：`ghcr.io/htexplicit/vm2api:TAG` 和 `ghcr.io/htexplicit/vm2api:TAG-amd64`。
