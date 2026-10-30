@@ -104,3 +104,12 @@ test('toPublicKernelHealth leaves Go hop slot fields null', () => {
   assert.equal(out.cli_pid, null)
   assert.equal(out.worker_version, 'go-1')
 })
+
+test('invalid health JSON is unavailable even with HTTP 200', () => {
+  for (const engine of ['rust', 'codex', 'go']) {
+    const out = toPublicKernelHealth({ ok: false, status: 200, error: { code: 'worker_invalid_json' } }, engine)
+    assert.equal(out.process_up, false)
+    assert.equal(out.reachable, false)
+    assert.equal(out.error_code, 'worker_invalid_json')
+  }
+})

@@ -24,18 +24,18 @@ test('selectKernelAsset accepts only the kin-kernel GitHub asset', () => {
   const picked = selectKernelAsset({
     tag_name: 'v1.3.2',
     assets: [
-      { name: 'kin-worker', url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/1' },
+      { name: 'kin-worker', url: 'https://api.github.com/repos/HTExplicit/vm2api/releases/assets/1' },
       {
         name: 'kin-kernel',
         size: 64,
-        url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/9',
+        url: 'https://api.github.com/repos/HTExplicit/vm2api/releases/assets/9',
         browser_download_url: 'https://evil.example/kin-kernel',
       },
     ],
   })
   assert.equal(picked.ok, true)
   assert.equal(picked.tag, 'v1.3.2')
-  assert.equal(picked.url, 'https://api.github.com/repos/dofastted/vm2api/releases/assets/9')
+  assert.equal(picked.url, 'https://api.github.com/repos/HTExplicit/vm2api/releases/assets/9')
   assert.equal(selectKernelAsset({ tag_name: 'v1.3.2', assets: [] }).code, 'kernel_asset_missing')
   assert.equal(
     selectCliNodeAsset({
@@ -44,7 +44,7 @@ test('selectKernelAsset accepts only the kin-kernel GitHub asset', () => {
         {
           name: 'cli-node',
           size: 64,
-          url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/8',
+          url: 'https://api.github.com/repos/HTExplicit/vm2api/releases/assets/8',
         },
       ],
     }).asset,
@@ -65,7 +65,7 @@ test('selectKernelAsset accepts only the kin-kernel GitHub asset', () => {
         {
           name: 'kin-kernel',
           size: 33 * 1024 * 1024,
-          url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/9',
+          url: 'https://api.github.com/repos/HTExplicit/vm2api/releases/assets/9',
         },
       ],
     }).code,
@@ -74,8 +74,10 @@ test('selectKernelAsset accepts only the kin-kernel GitHub asset', () => {
 })
 
 test('kernel download follows GitHub asset redirects and refuses other hosts', async () => {
-  assert.equal(isAllowedKernelUrl('http://api.github.com/repos/dofastted/vm2api/releases/latest'), false)
-  assert.equal(isAllowedKernelUrl('https://api.github.com/repos/dofastted/vm2api/releases/tags/v1.2.3'), true)
+  assert.equal(isAllowedKernelUrl('https://api.github.com/repos/dofastted/vm2api/releases/latest'), false)
+  assert.equal(isAllowedKernelUrl('https://github.com/dofastted/vm2api/releases/download/v1.2.3/kin-kernel'), false)
+  assert.equal(isAllowedKernelUrl('http://api.github.com/repos/HTExplicit/vm2api/releases/latest'), false)
+  assert.equal(isAllowedKernelUrl('https://api.github.com/repos/HTExplicit/vm2api/releases/tags/v1.2.3'), true)
   assert.equal(isAllowedKernelUrl('https://evil.example/kin-kernel', { redirect: true }), false)
   const elf = fakeElf64Amd64()
   const seen = []
@@ -92,29 +94,29 @@ test('kernel download follows GitHub asset redirects and refuses other hosts', a
               {
                 name: 'kin-kernel',
                 size: elf.length,
-                browser_download_url: 'https://github.com/dofastted/vm2api/releases/download/v1.2.3/kin-kernel',
+                browser_download_url: 'https://github.com/HTExplicit/vm2api/releases/download/v1.2.3/kin-kernel',
               },
               {
                 name: 'cli-node',
                 size: elf.length,
-                browser_download_url: 'https://github.com/dofastted/vm2api/releases/download/v1.2.3/cli-node',
+                browser_download_url: 'https://github.com/HTExplicit/vm2api/releases/download/v1.2.3/cli-node',
               },
               {
                 name: 'cc-node',
                 size: elf.length,
-                browser_download_url: 'https://github.com/dofastted/vm2api/releases/download/v1.2.3/cc-node',
+                browser_download_url: 'https://github.com/HTExplicit/vm2api/releases/download/v1.2.3/cc-node',
               },
               {
                 name: 'kin-kernel-crag',
                 size: elf.length,
-                browser_download_url: 'https://github.com/dofastted/vm2api/releases/download/v1.2.3/kin-kernel-crag',
+                browser_download_url: 'https://github.com/HTExplicit/vm2api/releases/download/v1.2.3/kin-kernel-crag',
               },
             ],
           }),
           { status: 200 },
         )
       }
-      if (String(url) === 'https://github.com/dofastted/vm2api/releases/download/v1.2.3/kin-kernel') {
+      if (String(url) === 'https://github.com/HTExplicit/vm2api/releases/download/v1.2.3/kin-kernel') {
         return new Response(null, {
           status: 302,
           headers: {
@@ -127,9 +129,9 @@ test('kernel download follows GitHub asset redirects and refuses other hosts', a
         return new Response(elf, { status: 200 })
       }
       if (
-        String(url) === 'https://github.com/dofastted/vm2api/releases/download/v1.2.3/cli-node' ||
-        String(url) === 'https://github.com/dofastted/vm2api/releases/download/v1.2.3/cc-node' ||
-        String(url) === 'https://github.com/dofastted/vm2api/releases/download/v1.2.3/kin-kernel-crag'
+        String(url) === 'https://github.com/HTExplicit/vm2api/releases/download/v1.2.3/cli-node' ||
+        String(url) === 'https://github.com/HTExplicit/vm2api/releases/download/v1.2.3/cc-node' ||
+        String(url) === 'https://github.com/HTExplicit/vm2api/releases/download/v1.2.3/kin-kernel-crag'
       ) {
         return new Response(elf, { status: 200 })
       }
@@ -144,7 +146,7 @@ test('kernel download follows GitHub asset redirects and refuses other hosts', a
   assert.ok(Buffer.from(fetched.crag.bytes).equals(elf))
   assert.equal(fetched.crag.skipped, undefined)
   assert.equal(seen.length, 6)
-  assert.equal(isAllowedKernelUrl('https://github.com/dofastted/vm2api/releases/download/v1.2.3/cc-node'), true)
+  assert.equal(isAllowedKernelUrl('https://github.com/HTExplicit/vm2api/releases/download/v1.2.3/cc-node'), true)
 
   const blocked = await downloadReleaseKernel({
     fetchImpl: async (url) => {
@@ -156,22 +158,22 @@ test('kernel download follows GitHub asset redirects and refuses other hosts', a
               {
                 name: 'kin-kernel',
                 size: 64,
-                url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/4',
+                url: 'https://api.github.com/repos/HTExplicit/vm2api/releases/assets/4',
               },
               {
                 name: 'cli-node',
                 size: 64,
-                url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/5',
+                url: 'https://api.github.com/repos/HTExplicit/vm2api/releases/assets/5',
               },
               {
                 name: 'cc-node',
                 size: 64,
-                url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/6',
+                url: 'https://api.github.com/repos/HTExplicit/vm2api/releases/assets/6',
               },
               {
                 name: 'kin-kernel-crag',
                 size: 64,
-                url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/7',
+                url: 'https://api.github.com/repos/HTExplicit/vm2api/releases/assets/7',
               },
             ],
           }),

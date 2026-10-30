@@ -182,10 +182,6 @@ function timeCond(since, until) {
   return { cond: where.length ? `WHERE ${where.join(' AND ')}` : '', params }
 }
 
-function accountEventKey(row) {
-  return `${row?.account_id || ''}\0${row?.vm_id || ''}`
-}
-
 function resolveAccountWindow(windows, row) {
   const list = Array.isArray(windows) ? windows : []
   return (
@@ -194,56 +190,6 @@ function resolveAccountWindow(windows, row) {
     list.find((w) => w.vm_id && w.vm_id === row.vm_id) ||
     null
   )
-}
-
-function groupCostEvents(rows = []) {
-  const map = new Map()
-  for (const row of rows) {
-    const key = accountEventKey(row)
-    const list = map.get(key) || []
-    list.push(row)
-    map.set(key, list)
-  }
-  return map
-}
-
-function isFableRow(row) {
-  const upstream = String(row?.upstream_model ?? '').trim()
-  const model = String(row?.model ?? '').trim()
-  return (upstream || model).toLowerCase().includes('fable')
-}
-
-function unpricedWithTokens(row) {
-  return row?.pricing_model === UNPRICED_MODEL && totalTokens(row) > 0
-}
-
-function bucketEventsSince(rows = [], sinceMs) {
-  const since = Number(sinceMs)
-  const picked = rows.filter((row) => {
-    const at = Date.parse(row.created_at)
-    return Number.isFinite(at) && (!Number.isFinite(since) || at >= since)
-  })
-  if (!picked.length) return { ...emptyCostBucket(), unpriced: 0 }
-  return {
-    ...sumCostBuckets(
-      picked.map((row) => ({
-        requests: 1,
-        success: Number(row.success || 0),
-        errors: Number(row.errors || 0),
-        input_tokens: Number(row.input_tokens || 0),
-        output_tokens: Number(row.output_tokens || 0),
-        cache_read_tokens: Number(row.cache_read_tokens || 0),
-        cache_creation_tokens: Number(row.cache_creation_tokens || 0),
-        prompt_tokens: Number(row.prompt_tokens || 0),
-        input_cost: Number(row.input_cost || 0),
-        output_cost: Number(row.output_cost || 0),
-        cache_read_cost: Number(row.cache_read_cost || 0),
-        cache_creation_cost: Number(row.cache_creation_cost || 0),
-        total_cost: Number(row.total_cost || 0),
-      })),
-    ),
-    unpriced: picked.filter(unpricedWithTokens).length,
-  }
 }
 
 function filterCond({ since = null, until = null, vmId = null, accountId = null, apiKeyId = null } = {}) {
@@ -297,6 +243,7 @@ export class UsageLogsRepo {
     // during one refresh. Keep this cache repository-local so it never affects
     // request accounting or persists across processes.
     this._billingStatsCache = new Map()
+    this._billingBaseCache = null
     this._billingBackfillAt = 0
     this._insert = db.prepare(`
       INSERT INTO usage_logs (${SUMMARY_COLUMNS.join(', ')})
@@ -1074,7 +1021,8 @@ export class UsageLogsRepo {
     const cacheNow = Date.now()
     const key = billingStatsCacheKey(accountWindows)
     const cached = cacheable ? this._billingStatsCache.get(key) : null
-    if (cached && cached.expires_at > cacheNow) return cached.value
+    if (cached && cached.expires_at > cacheNow && cached.value.today_start === shanghaiDayStartIso())
+      return cached.value
 
     // Historical cost repair is maintenance, not part of rendering a panel.
     // Limit it independently so several panel endpoints cannot repeat the same
@@ -1086,26 +1034,36 @@ export class UsageLogsRepo {
       } catch {}
     }
 
-    const value = this._computeBillingStats({ accountWindows, now })
+    const value = this._computeBillingStats({ accountWindows, now, cacheable })
     if (this._billingStatsCache.size > 32) {
       for (const [cacheKey, entry] of this._billingStatsCache) {
         if (entry.expires_at <= cacheNow) this._billingStatsCache.delete(cacheKey)
       }
     }
-    // Start the TTL after the expensive synchronous aggregation completes. On
-    // large databases the computation itself can exceed the TTL; anchoring the
-    // expiry at cache lookup time would make a freshly computed entry already
-    // stale and every refresh would scan the table again.
-    if (cacheable) this._billingStatsCache.set(key, { value, expires_at: Date.now() + BILLING_STATS_CACHE_TTL_MS })
+    // A later scope may reuse an older base, but cannot extend its lifetime.
+    if (cacheable)
+      this._billingStatsCache.set(key, {
+        value,
+        expires_at: Math.min(Date.now() + BILLING_STATS_CACHE_TTL_MS, this._billingBaseCache.expires_at),
+      })
     return value
   }
 
-  _computeBillingStats({ accountWindows = null, now = Date.now() } = {}) {
+  _computeBillingStats({ accountWindows = null, now = Date.now(), cacheable = false } = {}) {
     const todayStart = shanghaiDayStartIso()
     const fiveHStart = new Date(now - WINDOW_5H_MS).toISOString()
     const sevenDStart = new Date(now - WINDOW_7D_MS).toISOString()
-    const accountsTotal = this.costByAccount()
-    const accountsToday = this.costByAccount({ since: todayStart })
+    let base = cacheable ? this._billingBaseCache : null
+    if (!base || base.todayStart !== todayStart || base.expires_at <= Date.now()) {
+      base = {
+        todayStart,
+        accountsTotal: this.costByAccount(),
+        accountsToday: this.costByAccount({ since: todayStart }),
+      }
+      base.expires_at = Date.now() + BILLING_STATS_CACHE_TTL_MS
+      if (cacheable) this._billingBaseCache = base
+    }
+    const { accountsTotal, accountsToday } = base
     // The per-account queries already cover every row. Re-sum them for the
     // global buckets instead of scanning the entire usage table two more times.
     // This matters on multi-GB databases where each synchronous full scan also
@@ -1117,40 +1075,19 @@ export class UsageLogsRepo {
     const keyOf = (a) => a.account_id + '\0' + (a.vm_id || '')
     const todayById = new Map(accountsToday.map((a) => [keyOf(a), a]))
     const aligned = Array.isArray(accountWindows) && accountWindows.length > 0
-    let eventsSince = sevenDStart
-    if (aligned) {
-      let earliest = Date.parse(sevenDStart)
-      for (const win of accountWindows) {
-        for (const [reset, dur] of [
-          [win.reset_5h, WINDOW_5H_MS],
-          [win.reset_7d, WINDOW_7D_MS],
-          [win.reset_7d_oi, WINDOW_7D_MS],
-        ]) {
-          const start = extraWindowSince(reset, dur, now)
-          if (start != null && start < earliest) earliest = start
-        }
-      }
-      eventsSince = new Date(earliest).toISOString()
-    }
-    const events = aligned ? this._costEventsSince(eventsSince) : null
     const fiveById = aligned ? null : new Map(this.costByAccount({ since: fiveHStart }).map((a) => [keyOf(a), a]))
     const sevenById = aligned ? null : new Map(this.costByAccount({ since: sevenDStart }).map((a) => [keyOf(a), a]))
-    const eventsByKey = aligned ? groupCostEvents(events) : null
     const accounts = accountsTotal.map((a) => {
       const t = todayById.get(keyOf(a)) || emptyCostBucket()
       const win = aligned ? resolveAccountWindow(accountWindows, a) : null
       const since5 = aligned ? (extraWindowSince(win?.reset_5h, WINDOW_5H_MS, now) ?? Date.parse(fiveHStart)) : null
       const since7 = aligned ? (extraWindowSince(win?.reset_7d, WINDOW_7D_MS, now) ?? Date.parse(sevenDStart)) : null
-      const w = aligned
-        ? bucketEventsSince(eventsByKey.get(keyOf(a)) || [], since5)
-        : fiveById.get(keyOf(a)) || emptyCostBucket()
-      const w7 = aligned
-        ? bucketEventsSince(eventsByKey.get(keyOf(a)) || [], since7)
-        : sevenById.get(keyOf(a)) || emptyCostBucket()
+      const w = aligned ? this._costBucketSince(a, since5) : fiveById.get(keyOf(a)) || emptyCostBucket()
+      const w7 = aligned ? this._costBucketSince(a, since7) : sevenById.get(keyOf(a)) || emptyCostBucket()
       let window_fable = null
       if (aligned && win?.reset_7d_oi) {
         const sinceFable = extraWindowSince(win.reset_7d_oi, WINDOW_7D_MS, now) ?? Date.parse(sevenDStart)
-        const fable = bucketEventsSince((eventsByKey.get(keyOf(a)) || []).filter(isFableRow), sinceFable)
+        const fable = this._costBucketSince(a, sinceFable, true)
         window_fable = {
           cost: Number(fable.total_cost || 0),
           tokens: totalTokens(fable),
@@ -1251,34 +1188,53 @@ export class UsageLogsRepo {
     }
   }
 
-  _costEventsSince(since) {
-    return this.db
-      .prepare(
-        `
-      SELECT
-        COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, ''), vm_id, '—') AS account_id,
-        vm_id,
-        created_at,
-        model,
-        upstream_model,
-        pricing_model,
-        CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END AS success,
-        CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END AS errors,
-        COALESCE(input_tokens, 0) AS input_tokens,
-        COALESCE(output_tokens, 0) AS output_tokens,
-        COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-        COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens,
-        (${PROMPT_TOKENS_SQL}) AS prompt_tokens,
-        COALESCE(input_cost, 0) AS input_cost,
-        COALESCE(output_cost, 0) AS output_cost,
-        COALESCE(cache_read_cost, 0) AS cache_read_cost,
-        COALESCE(cache_creation_cost, 0) AS cache_creation_cost,
-        COALESCE(total_cost, 0) AS total_cost
-      FROM usage_logs
-      WHERE created_at >= ?
-    `,
-      )
-      .all(since)
+  // Aggregate indexed account windows inside SQLite; do not materialize the
+  // entire fleet's week of events for each individual VM detail request.
+  _costBucketSince(account, sinceMs, fable = false) {
+    const where = [
+      account.vm_id ? 'vm_id = ?' : "(vm_id IS NULL OR vm_id = '')",
+      'created_at >= ?',
+      "COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, ''), vm_id, '—') = ?",
+    ]
+    const params = account.vm_id ? [account.vm_id] : []
+    params.push(new Date(sinceMs).toISOString(), account.account_id)
+    if (fable) {
+      // Match String.trim(), including tabs and Unicode whitespace.
+      const whitespace =
+        '\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
+      where.push("INSTR(LOWER(COALESCE(NULLIF(TRIM(upstream_model, ?), ''), TRIM(model, ?))), 'fable') > 0")
+      params.push(whitespace, whitespace)
+    }
+    const statements = (this._costBucketStatements ??= new Map())
+    const key = `${account.vm_id ? 'vm' : 'empty'}:${fable}`
+    let statement = statements.get(key)
+    if (!statement) {
+      statement = this.db.prepare(`
+      SELECT COUNT(*) AS requests,
+        SUM(CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END) AS success,
+        SUM(CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
+        COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
+        COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
+        COALESCE(SUM(MAX(COALESCE(cache_read_tokens, 0), 0)), 0) AS cache_read_tokens,
+        COALESCE(SUM(MAX(COALESCE(cache_creation_tokens, 0), 0)), 0) AS cache_creation_tokens,
+        COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
+        COALESCE(SUM(MAX(COALESCE(input_cost, 0), 0)), 0) AS input_cost,
+        COALESCE(SUM(MAX(COALESCE(output_cost, 0), 0)), 0) AS output_cost,
+        COALESCE(SUM(MAX(COALESCE(cache_read_cost, 0), 0)), 0) AS cache_read_cost,
+        COALESCE(SUM(MAX(COALESCE(cache_creation_cost, 0), 0)), 0) AS cache_creation_cost,
+        COALESCE(SUM(MAX(COALESCE(total_cost, 0), 0)), 0) AS total_cost,
+        COALESCE(SUM(CASE WHEN pricing_model = '${UNPRICED_MODEL}' AND (${TOTAL_TOKENS_SQL}) > 0 THEN 1 ELSE 0 END), 0) AS unpriced
+      FROM usage_logs WHERE ${where.join(' AND ')}
+      `)
+      statements.set(key, statement)
+    }
+    const row = statement.get(...params)
+    if (!row.requests) return { ...emptyCostBucket(), unpriced: 0 }
+    const out = { ...row }
+    for (const field of ['input_cost', 'output_cost', 'cache_read_cost', 'cache_creation_cost', 'total_cost']) {
+      out[field] = Math.round(out[field] * 1e8) / 1e8
+    }
+    return out
   }
 
   ownerBilling({ ownerUserId = null, since = null, until = null, groupBy = 'vm' } = {}) {

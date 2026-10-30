@@ -50,7 +50,7 @@ probe() {
         if (!Array.isArray(vms)) throw new Error("Invalid slot list")
         const healthy = []
         for (const vm of vms.filter(vm => vm.status === "running")) {
-          if (kernelHealthy(await json(`/api/panel/vms/${encodeURIComponent(vm.id)}`))) {
+          if (kernelHealthy(await json(`/api/panel/vms/${encodeURIComponent(vm.id)}/health`))) {
             healthy.push(vm.id)
           }
         }
@@ -61,7 +61,7 @@ probe() {
         const version = await json("/api/panel/version")
         if (version.current_tag !== target) throw new Error(`Backend still at ${version.current_tag}`)
         for (const id of JSON.parse(baseline)) {
-          if (!kernelHealthy(await json(`/api/panel/vms/${encodeURIComponent(id)}`))) {
+          if (!kernelHealthy(await json(`/api/panel/vms/${encodeURIComponent(id)}/health`))) {
             throw new Error(`Previously healthy slot ${id} failed kernel verification`)
           }
         }
@@ -137,7 +137,6 @@ fi
 attempt=0
 while [ "$attempt" -lt 45 ]; do
   if probe verify "$TAG" "$BASELINE"; then
-    [ -d .git ] || printf '%s\n' "${TAG#v}" > VERSION
     # Slot payloads through the new server (it alone holds the cluster links):
     # local slots take the new kernel/cli-node files, node slots move onto a
     # rebuilt slot image, then every slot restarts kin-worker/kin-egress.
@@ -145,10 +144,11 @@ while [ "$attempt" -lt 45 ]; do
     # next image update instead of invalidating an otherwise verified upgrade.
     if ! docker exec "$CONTAINER" test -f /opt/vm2api/scripts/fleet-services.mjs >/dev/null 2>&1; then
       echo "Slot refresh helper is not present in the control plane; retry after the next image update" >&2
-    elif ! docker exec "$CONTAINER" node /opt/vm2api/scripts/fleet-services.mjs; then
+    elif ! docker exec "$CONTAINER" node /opt/vm2api/scripts/fleet-services.mjs "$ROOT" 1; then
       echo "Slot payload/service refresh failed; inspect the per-slot report" >&2
       exit 1
     fi
+    [ -d .git ] || printf '%s\n' "${TAG#v}" > VERSION
     echo "Control plane restarted and verified at $TAG"
     echo "Previously healthy slot kernels verified: $BASELINE"
     exit 0

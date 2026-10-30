@@ -2,6 +2,8 @@ import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { isMainThread } from 'node:worker_threads'
+import { kernelHealthInWorker } from './kernel-health-thread.mjs'
 import { prepareOutboundHeaders } from '../protocol/outbound-attempt.mjs'
 import { sanitizeAnthropicBodyForBetaTokens } from '../protocol/anthropic-policy.mjs'
 import { withRequestProtocolBetas } from '../protocol/claude-code-betas.mjs'
@@ -994,6 +996,13 @@ export async function workerHealth(exec, { timeoutMs = 3000, signal } = {}) {
     }
   }
   try {
+    if (isMainThread) {
+      const { socketPath, tokenPath } = workerPaths(exec)
+      return await kernelHealthInWorker(
+        { vm: { runtime: { worker_socket: socketPath, worker_token_file: tokenPath } } },
+        { timeoutMs, signal },
+      )
+    }
     const response = await workerRequest(exec, {
       requestPath: '/internal/health',
       timeoutMs,

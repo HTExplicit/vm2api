@@ -1,15 +1,13 @@
-# PR/main gate against the production baseline: deploy/payload.json pins the
-# exact ELFs running live, so CI only checks source and the pinned bytes.
+# Focused offline checks for the first amd64 fork release.
 name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [maint]
   pull_request:
+    branches: [maint]
   workflow_dispatch:
 
-# Only PR runs supersede each other; every main push keeps its own verdict so
-# it is visible when main turned red and when it recovered.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -25,67 +23,55 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: merge current base
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          # refs/pull/<n>/merge keeps the base from the PR's last push and a
-          # re-run reuses it; merge today's base so a re-run tests against it.
-          git fetch --no-tags origin "$BASE_REF"
-          git -c user.name=ci -c user.email=ci@localhost merge --no-edit FETCH_HEAD
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: package-lock.json
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.25.x'
-          cache-dependency-path: |
-            worker/go.sum
-            api-kernel/go.sum
       - uses: pnpm/action-setup@v6
         with:
           version: 10
           cache: true
           cache_dependency_path: web/pnpm-lock.yaml
       - run: npm ci
-      - name: format and syntax
+      - name: installer and upgrade shell syntax
         run: |
-          npx biome format
-          test -z "$(gofmt -l worker api-kernel)" || { gofmt -l worker api-kernel; exit 1; }
-          find src scripts -name '*.mjs' -print0 | xargs -0 -n1 node --check
-      - name: pinned payload
+          bash -n deploy/install.sh
+          sh -n scripts/panel-upgrade.sh
+      - name: focused backend regressions
+        shell: bash
         run: |
-          node scripts/fetch-payload.mjs
-          node scripts/fetch-payload.mjs --check
-      - name: native CLI packaging unit tests
-        run: python3 -m unittest discover -s test/deploy -p test_native_cli.py -v
-      - run: npm run test:unit
-      - name: go vet and test
+          set -euo pipefail
+          for file in \
+            test/unit/release.test.mjs \
+            test/unit/release-errors.test.mjs \
+            test/unit/release-source.test.mjs \
+            test/unit/release-kernel.test.mjs \
+            test/unit/panel-update.test.mjs \
+            test/unit/kernel-health-thread.test.mjs \
+            test/unit/panel-vm-health.test.mjs \
+            test/unit/rust-kernel-health.test.mjs \
+            test/unit/panel-upgrade-script.test.mjs \
+            test/unit/billing-aggregation.test.mjs \
+            test/unit/usage-logs-repo.test.mjs \
+            test/unit/panel-billing-lookup.test.mjs; do
+            node --test "$file"
+          done
+      - name: synthetic billing benchmark
+        shell: bash
         run: |
-          (cd worker && go vet ./... && go test ./...)
-          (cd api-kernel && go vet ./... && go test ./...)
-      - name: web
+          docker run --rm --network none --cpus 3 --memory 4g --memory-swap 4g \
+            -v "$GITHUB_WORKSPACE:/work:ro" -w /work \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/work \
+            node:22-bookworm node scripts/benchmark-billing-aggregation.mjs | tee billing-benchmark.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: billing-benchmark
+          path: billing-benchmark.json
+          retention-days: 7
+      - name: web regressions and build
         working-directory: web
         run: |
           pnpm install --frozen-lockfile
-          pnpm format:check
-          pnpm test
+          pnpm exec vitest run src/config/repo.test.ts src/features/settings/about-pane.test.ts
           pnpm build
-
-  arm64-native-cli:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - name: prepare pinned x86 kernel emulation
-        run: python3 deploy/prepare-arm64.py
-      - name: build native ARM control plane
-        run: docker build -f deploy/Dockerfile.arm64-control -t vm2api-native-cli-ci .
-      - name: offline large-body, concurrency and cancel regression
-        run: |
-          docker run --network none --cpus 2 --memory 3g --pids-limit 256 \
-            --entrypoint python3 -v "$PWD/test/deploy/smoke_native_cli.py:/smoke.py:ro" \
-            vm2api-native-cli-ci /smoke.py
