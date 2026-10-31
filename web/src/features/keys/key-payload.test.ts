@@ -131,7 +131,7 @@ describe('API key limit payload', () => {
     })
   })
 
-  it('requires configured account keys and does not open the group to tenants', () => {
+  it('requires configured funded account keys and does not open the group to tenants', () => {
     const apiDraft: KeyLimitsDraft = {
       ...draft,
       group_type: 'openai_apikey',
@@ -140,13 +140,13 @@ describe('API key limit payload', () => {
     const configured = {
       id: 'gpt-a',
       family: 'codex',
-      openai_api: { has_key: true, enabled: false },
+      openai_api: { has_key: true, enabled: false, balance: '37.000' },
     } as Vm
     expect(
       keyLimitsPayload(apiDraft, 'create', { vms: [configured] })
     ).toMatchObject({ allowed_vms: ['gpt-a'], category: 'api' })
     expect(() => keyLimitsPayload(apiDraft, 'create', { vms: [] })).toThrow(
-      '尚未配置 API key'
+      '新增账号需已配置 API key'
     )
     expect(() =>
       keyLimitsPayload({ ...apiDraft, allowed_vms: [] }, 'create')
@@ -154,5 +154,51 @@ describe('API key limit payload', () => {
     expect(() =>
       keyLimitsPayload(apiDraft, 'create', { isAdmin: false })
     ).toThrow('仅管理员')
+  })
+  it('retains old depleted selections on edit but validates every added account', () => {
+    const apiDraft: KeyLimitsDraft = {
+      ...draft,
+      group_type: 'openai_apikey',
+      allowed_vms: ['old'],
+    }
+    const old = {
+      id: 'old',
+      family: 'codex',
+      openai_api: { has_key: true, balance: '0.000' },
+    } as Vm
+    const fresh = {
+      id: 'fresh',
+      family: 'codex',
+      plan_type: 'free',
+      openai_api: {
+        has_key: true,
+        balance: '0.0000000000000000001',
+        enabled: false,
+      },
+    } as Vm
+    expect(
+      keyLimitsPayload(apiDraft, 'edit', {
+        vms: [old, fresh],
+        currentAllowedVms: ['old'],
+      })
+    ).toMatchObject({ allowed_vms: ['old'] })
+    expect(
+      keyLimitsPayload({ ...apiDraft, allowed_vms: ['old', 'fresh'] }, 'edit', {
+        vms: [old, fresh],
+        currentAllowedVms: ['old'],
+      })
+    ).toMatchObject({ allowed_vms: ['old', 'fresh'] })
+    expect(() =>
+      keyLimitsPayload(apiDraft, 'create', {
+        vms: [old],
+        currentAllowedVms: ['old'],
+      })
+    ).toThrow('余额大于 0')
+    expect(() =>
+      keyLimitsPayload({ ...apiDraft, allowed_vms: ['old', 'other'] }, 'edit', {
+        vms: [old, { ...old, id: 'other' }],
+        currentAllowedVms: ['old'],
+      })
+    ).toThrow('余额大于 0')
   })
 })

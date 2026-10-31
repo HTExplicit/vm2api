@@ -185,12 +185,57 @@ test('preview persists the offer and destinations without modifying OAuth creden
   assert.deepEqual(view.destinations, [DESTINATION])
   assert.equal(view.enabled, false)
   assert.equal(view.has_key, false)
+  assert.match(view.offer_checked_at, /^\d{4}-\d\d-\d\dT/)
+  assert.equal(view.offer_stale, false)
+  assert.equal(view.link_checked_at, null)
   const record = slot.repo.getAccount(ACCOUNT_ID)
   assert.equal(record.vm_id, slot.vmId)
   assert.deepEqual(record.offer, OFFER)
   assert.deepEqual(readCodexAccounts(slot.projectRoot, slot.vmId), before)
   assert.equal(slot.vm().status, 'stopped')
   assert.equal(slot.vm().schedulable, false)
+})
+
+test('an expired eligibility sample is refreshed before a new claim and an external link stays locked', async (t) => {
+  const slot = fixture(t)
+  let time = Date.parse('2026-11-01T00:00:00Z')
+  const preview = { eligible: true, offer: OFFER }
+  const mock = mcpMock({ preview, link: () => assert.fail('an external link must not be submitted again') })
+  const service = slot.service(mock.fetch, { now: () => time })
+  await service.preview(slot.vmId)
+  time += 5 * 60_000
+  assert.equal(service.view(slot.vm()).offer_stale, true)
+  Object.assign(preview, { eligible: false, offer: null, ineligibility_reason: 'already_linked' })
+  await assert.rejects(service.claim(slot.vmId), { code: 'api_promo_already_linked' })
+  assert.equal(mock.tools().filter((call) => call.params.name === 'preview_api_credit_promo').length, 2)
+  const view = service.view(slot.vm())
+  assert.equal(view.claim_status, 'claimed')
+  assert.equal(view.offer_stale, false)
+  assert.equal(view.link_checked_at, new Date(time).toISOString())
+})
+
+test('balance updates expose organization details without making old promo eligibility fresh', async (t) => {
+  const slot = fixture(t)
+  let time = Date.parse('2026-11-01T00:00:00Z')
+  const service = slot.service(mcpMock().fetch, { now: () => time })
+  const first = await service.preview(slot.vmId)
+  slot.repo.upsertAccount(ACCOUNT_ID, { organization_id: ORG_ID })
+  time += 6 * 60_000
+  slot.repo.upsertOrg(ORG_ID, {
+    balance: '37.1234567890123456789',
+    paid_balance: '2.34',
+    grants: [{ id: 'grant-one', remaining: '34.7834567890123456789', expires_at: EXPIRES }],
+    next_expiring_amount: '34.7834567890123456789',
+    next_expiring_at: EXPIRES,
+    balance_checked_at: new Date(time).toISOString(),
+  })
+  const view = service.view(slot.vm())
+  assert.equal(view.balance, '37.1234567890123456789')
+  assert.equal(view.paid_balance, '2.34')
+  assert.equal(view.grants.length, 1)
+  assert.equal(view.next_expiring_amount, '34.7834567890123456789')
+  assert.equal(view.offer_checked_at, first.offer_checked_at)
+  assert.equal(view.offer_stale, true)
 })
 
 test('claim selects the sole organization and persists its operation before linking, then blocks duplicate claims', async (t) => {
@@ -340,6 +385,7 @@ test('proxy rebind after MCP initialize stops the claim before another RPC is se
     vm_id: slot.vmId,
     claim_status: 'eligible',
     offer: OFFER,
+    offer_checked_at: new Date().toISOString(),
     destinations: [DESTINATION],
   })
   const mock = mcpMock({ link: () => assert.fail('the old proxy must not submit the link') })

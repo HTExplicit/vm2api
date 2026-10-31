@@ -534,15 +534,23 @@ kin-egress 的 UDP DNS 与 TCP 一致：上游全部不可达或解析失败时�
 
 sessionKey / 授权码导入必须走该槽 SOCKS5。
 
+## OpenAI 槽位浏览器（仅 admin）
+
+基址 `/vms/:id`。POST `/browser/open` 接收 `{ purpose: "oauth" | "platform" }`，立即返回公开状态并在后台排队、启动；GET `/browser` 读取当前 `active/status/purpose/message`。POST `/browser-ticket` 返回 `{ ticket, url }`，30 秒单次票据可在排队时连接 WebSocket `/browser?ticket=…`。POST `/browser/close` 取消该槽登录及配置任务，保存会话并释放浏览器。`/openai-api/browser-ticket` 与 WebSocket `/openai-api/browser` 保留兼容。
+
+一个槽位固定一套首次随机生成的 Camoufox 身份，OAuth 与 Platform 共用加密网页会话，所有网页及换票请求使用当前绑定代理；改绑后须重新打开。同账号 OAuth 回调自动换票、保存并推送 `oauth_complete`，窗口保留，可继续进入 Platform；API 配置完成为 `api_ready`，`ready` 仅表示浏览器已就绪。未关联赠额的账号打开 Platform 只导航，不自动领取。
+
+画面先发送 JSON `frame` 元数据 `{ seq, mime, width, height, imageWidth, imageHeight, quality }`，紧接二进制 JPEG；`width/height` 是网页逻辑视口，图片尺寸为 `imageWidth/imageHeight`。客户端发送 `click/move/scroll/key/text/continue/close`，输入可带 `seq`，服务端返回 `input_ack`；`{ type: "quality", mode: "smooth" | "native" }` 切换流畅或原图。默认流畅最长边 1280 像素，网页视口和指纹不变；输入后请求新帧，活动最高 5 FPS、静置 1 FPS，慢连接跳过旧帧。反代须保留通用和旧路径的 WebSocket Upgrade，见[部署反代](DEPLOY.md#反代)。
+
 ## OpenAI 账号 API（仅 admin）
 
-基址 `/vms/:id/openai-api`。GET 返回公开状态；POST `/preview` 查询 Pro 三档赠额资格与接收组织，POST `/claim` 接收 `{ destination_account_id? }`，唯一组织可省略。关联后的 `pending/claimed` 状态锁定领取，复查沿用原操作编号。外部已领取账号也可继续配置。
+基址 `/vms/:id/openai-api`。GET 返回公开状态；POST `/preview` 查询 Pro 三档赠额资格与接收组织，POST `/claim` 接收 `{ destination_account_id? }`，唯一组织可省略。资格样本超过 5 分钟后，首次领取前重新查询；关联后的 `pending/claimed` 状态锁定领取，复查沿用原操作编号。外部已领取账号也可继续配置。
 
 POST `/setup` 继续 Platform 登录、专用项目和账号 key 配置；POST `/refresh` 刷新发放或组织总余额；PATCH `/enabled` 接收 `{ enabled: boolean }`，独立于 OAuth 启停、调度及登录会话。账号行 `openai_api` 返回领取、配置、key 尾号、组织余额及更新时间，不返回 secret、指纹或登录会话。
 
-POST `/browser-ticket` 返回 `{ ticket, url }`，url 含30秒单次票据，连接 WebSocket `/browser?ticket=…`。服务端发送 `frame`（JPEG base64、width、height）及 `status`；客户端发送 `click/move/scroll/key/text/continue/close`。浏览器固定使用该账号独立指纹和当前绑定代理。反代须为该 `/browser` 路径保留 WebSocket Upgrade，配置见[部署反代](DEPLOY.md#反代)。
+组织余额来自官方 Billing `credit_grants` JSON 的 `total_available`，购买余额来自 `total_paid_available`；不由逐笔额度推导总余额。`paid_balance/grants/next_expiring_amount/next_expiring_at` 补充购买余额及最近到期额度，金额以十进制字符串保存并去尾零，未知保持空值，负余额照实返回。`offer_checked_at/link_checked_at/balance_checked_at` 分别记录资格、关联和余额观测时间；`offer_stale` 提示资格待重查，余额刷新不更新领取资格。
 
-生成密钥使用 `group_type: "openai_apikey"`、`category: "api"`、`allowed_vms: [...]`，至少选择一个已配置 key 的 OpenAI 账号；模型列表和推理均限所选账号，普通 API 全局池不隐式使用账号 key。401/余额耗尽/临时限流保留官方错误码，API 请求不计入 OAuth 5H/7D 窗口估算。
+生成密钥使用 `group_type: "openai_apikey"`、`category: "api"`、`allowed_vms: [...]`。新增候选须为已配置 key 且最后成功组织余额大于 0 的 OpenAI 账号，不要求 Pro；正余额待刷新仍可选，零、负数或未知余额隐藏。编辑时已有绑定保留回显、可移除，仅校验新加入的账号。API 独立开关不会因勾选自动开启，候选筛选不额外限制已有绑定的推理。模型列表和推理均限所选账号，普通 API 全局池不隐式使用账号 key；401、余额耗尽和临时限流保留官方错误码，API 请求不计入 OAuth 5H/7D 窗口估算。
 
 ## 集群（SSH 节点，仅 admin；super 只读 `GET /cluster/nodes`）
 

@@ -169,7 +169,7 @@ Node 听 `:8787`。HTTPS 放在 nginx。
 
 ```nginx
 # 集群页 / 槽位运维终端和账号浏览器是 WebSocket：必须透传 Upgrade，并直连 Node（前面若有会丢 Upgrade 的网关，也要绕过）。
-location ~ ^/api/panel/((cluster/nodes|vms)/[^/]+/shell|vms/[^/]+/openai-api/browser)$ {
+location ~ ^/api/panel/((cluster/nodes|vms)/[^/]+/shell|vms/[^/]+/(openai-api/)?browser)$ {
   proxy_pass http://127.0.0.1:8787;
   proxy_http_version 1.1;
   proxy_set_header Host $host;
@@ -202,7 +202,9 @@ location / {
 }
 ```
 
-`Connection ""` 会剥掉 Upgrade，终端、账号浏览器或 Responses WS 握手拿不到 101，所以 shell / openai-api/browser / responses 路径单独放在前面。生产机的 Go 前门在 `:8787`、Node 在 `:8788` 时，这些 location 必须 `proxy_pass` 到 Node。终端症状和核对命令见 [nginx-shell.md](nginx-shell.md)。
+`Connection ""` 会剥掉 Upgrade，终端、账号浏览器或 Responses WS 握手拿不到 101，所以 shell / browser / openai-api/browser / responses 路径单独放在前面。生产机的 Go 前门在 `:8787`、Node 在 `:8788` 时，这些 location 必须 `proxy_pass` 到 Node。终端症状和核对命令见 [nginx-shell.md](nginx-shell.md)。
+
+升级前保存最新数据库、槽凭据和配置，再使用正常面板升级。镜像更新不会修改宿主 Nginx；已有反代须同时补齐通用 `/api/panel/vms/<id>/browser` 与兼容的 `/openai-api/browser` 路径，校验配置后平滑重载。
 
 ## 本机 Node（备选）
 

@@ -1,4 +1,5 @@
 import type { Vm } from '@/types/panel-vm'
+import { isOpenaiApiKeyCandidate } from '@/features/vm/openai-api-state'
 
 export type KeyGroupType =
   'all' | 'anthropic' | 'openai' | 'openai_apikey' | 'pool'
@@ -31,7 +32,7 @@ function groupTypeOf(value: string): KeyGroupType {
 export function keyLimitsPayload(
   draft: KeyLimitsDraft,
   mode: 'create' | 'edit',
-  options: { isAdmin?: boolean; vms?: Vm[] } = {}
+  options: { isAdmin?: boolean; vms?: Vm[]; currentAllowedVms?: string[] } = {}
 ): Record<string, unknown> {
   const isAdmin = options.isAdmin ?? true
   if (!isAdmin && draft.group_type === 'openai_apikey')
@@ -68,11 +69,16 @@ export function keyLimitsPayload(
       )
     }
     if (group_type === 'openai_apikey' && options.vms) {
-      const configured = new Set(
-        options.vms.filter((vm) => vm.openai_api?.has_key).map((vm) => vm.id)
+      const candidates = new Set(
+        options.vms.filter(isOpenaiApiKeyCandidate).map((vm) => vm.id)
       )
-      if (allowed_vms.some((id) => !configured.has(id)))
-        throw new Error('所选账号尚未配置 API key，请先完成账号 API 配置')
+      const existing = new Set(
+        mode === 'edit' ? options.currentAllowedVms || [] : []
+      )
+      if (allowed_vms.some((id) => !existing.has(id) && !candidates.has(id)))
+        throw new Error(
+          '新增账号需已配置 API key 且最后成功查询的 API 余额大于 0'
+        )
     }
     body.group_type = group_type
     body.allowed_vms = allowed_vms

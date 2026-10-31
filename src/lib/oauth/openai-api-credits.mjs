@@ -14,6 +14,7 @@ import { decodeJwtPayload } from './openai-jwt.mjs'
 
 const MCP_URL = 'https://chatgpt.com/backend-api/product-account-links/mcp'
 const PROTOCOL = '2025-03-26'
+const OFFER_FRESHNESS_MS = 5 * 60_000
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'
 
@@ -36,6 +37,9 @@ function defaultView(proEligible = false) {
     ineligibility_reason: null,
     offer: null,
     benefit: null,
+    offer_checked_at: null,
+    link_checked_at: null,
+    offer_stale: false,
     destinations: [],
     organization_id: null,
     organization_name: null,
@@ -44,6 +48,10 @@ function defaultView(proEligible = false) {
     key_suffix: null,
     setup_status: 'idle',
     balance: null,
+    paid_balance: null,
+    grants: [],
+    next_expiring_amount: null,
+    next_expiring_at: null,
     balance_checked_at: null,
     balance_error: null,
     last_error: null,
@@ -74,11 +82,12 @@ async function rpcPayload(response, id) {
 
 /** Promo tools use the slot's ChatGPT credential; Platform key management is separate. */
 export class OpenaiApiCreditsService {
-  constructor({ projectRoot, repo, fetchImpl, onLinked } = {}) {
+  constructor({ projectRoot, repo, fetchImpl, onLinked, now = Date.now } = {}) {
     this.projectRoot = projectRoot
     this.repo = repo
     this.fetchImpl = fetchImpl
     this.onLinked = onLinked
+    this.now = now
     this.inflight = new Map()
   }
 
@@ -113,6 +122,9 @@ export class OpenaiApiCreditsService {
       ineligibility_reason: record.ineligibility_reason,
       offer: record.offer,
       benefit: record.benefit,
+      offer_checked_at: record.offer_checked_at || null,
+      link_checked_at: record.link_checked_at || null,
+      offer_stale: record.claim_status === 'eligible' && !this.freshOffer(record),
       destinations: record.destinations || [],
       organization_id: record.organization_id || null,
       organization_name: org?.display_name || null,
@@ -121,6 +133,10 @@ export class OpenaiApiCreditsService {
       key_suffix: keyOwned ? key.api_key.slice(-4) : null,
       setup_status: record.setup_status,
       balance: org?.balance ?? null,
+      paid_balance: org?.paid_balance ?? null,
+      grants: org?.grants || [],
+      next_expiring_amount: org?.next_expiring_amount ?? null,
+      next_expiring_at: org?.next_expiring_at || null,
       balance_checked_at: org?.balance_checked_at || null,
       balance_error: org?.balance_error || null,
       last_error: record.last_error,
@@ -137,9 +153,15 @@ export class OpenaiApiCreditsService {
       if (['pending', 'claimed'].includes(context.record?.claim_status)) {
         throw problem('api_promo_already_linked', '该账号已领取，后续按期自动发放', 409)
       }
-      if (!context.record || context.record.claim_status === 'unknown') {
+      if (
+        !context.record?.operation_id &&
+        (!context.record || context.record.claim_status === 'unknown' || !this.freshOffer(context.record))
+      ) {
         await this.previewAccount(vmId)
         context = this.promoContext(vmId)
+      }
+      if (['pending', 'claimed'].includes(context.record?.claim_status)) {
+        throw problem('api_promo_already_linked', '该账号已领取，后续按期自动发放', 409)
       }
       if (context.record.claim_status !== 'eligible')
         throw problem('api_promo_ineligible', '当前账号没有可领取的 API 赠额', 409)
@@ -187,6 +209,16 @@ export class OpenaiApiCreditsService {
       .finally(() => this.inflight.delete(vmId))
     this.inflight.set(vmId, { kind, promise: pending })
     return pending
+  }
+
+  freshOffer(record) {
+    const checkedAt = Date.parse(record?.offer_checked_at || '')
+    const expiresAt = Date.parse(record?.offer?.expires_at || '')
+    return (
+      Number.isFinite(checkedAt) &&
+      this.now() - checkedAt < OFFER_FRESHNESS_MS &&
+      (!Number.isFinite(expiresAt) || expiresAt > this.now())
+    )
   }
 
   promoContext(vmId, { requirePro = true } = {}) {
@@ -293,6 +325,8 @@ export class OpenaiApiCreditsService {
         ineligibility_reason: preview.ineligibility_reason || null,
         offer: preview.offer || null,
         benefit: preview.benefit || context.record?.benefit || null,
+        offer_checked_at: new Date(this.now()).toISOString(),
+        ...(alreadyLinked ? { link_checked_at: new Date(this.now()).toISOString() } : {}),
         destinations: (discovered.destinations || []).filter((row) => row.destination_type === 'api_org'),
         last_error: null,
       })
@@ -324,6 +358,7 @@ export class OpenaiApiCreditsService {
         claim_status: delivery.outcome === 'pending' ? 'pending' : 'claimed',
         ineligibility_reason: 'already_linked',
         delivery,
+        link_checked_at: new Date(this.now()).toISOString(),
         benefit:
           context.record?.benefit ||
           (context.record?.offer

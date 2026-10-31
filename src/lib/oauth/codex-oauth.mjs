@@ -171,3 +171,8 @@ export async function exchangeCodexAuthCode({ sessionId, code, proxyUrl, vmId, f
 export function resetCodexAuthUrlSessions() {
   sessions.clear()
 }
+
+/** A closed account browser must not leave a reusable authorization grant. */
+export function cancelCodexAuthSession(sessionId) {
+  return sessions.delete(sessionId)
+}

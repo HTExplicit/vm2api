@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
-import { Copy, ExternalLink, Upload } from 'lucide-react'
+import { Copy, ExternalLink, Globe, Upload } from 'lucide-react'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { proxyNamedLabel } from '@/lib/vm-status'
@@ -10,7 +10,9 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import type { CommitResult } from '@/features/vm/credential-panel'
-import { vmQueryOptions } from '@/features/vm/queries'
+import { SlotBrowserDialog } from '@/features/vm/openai-platform-browser-dialog'
+import { vmQueryOptions, vmsListQueryOptions } from '@/features/vm/queries'
+import { useVmPerms } from '@/features/vm/vm-perms'
 
 type CodexImportMode = 'oauth' | 'access_token' | 'refresh_token' | 'json'
 
@@ -96,6 +98,10 @@ export function CodexCredentialPanel({
   onCommitted?: (data: CommitResult, vmId: string, what: string) => void
 }) {
   const qc = useQueryClient()
+  const perms = useVmPerms()
+  const browserNotified = useRef(false)
+  const browserCommit = useRef<CommitResult | null>(null)
+  const [browserOpen, setBrowserOpen] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
   const [mode, setMode] = useState<CodexImportMode>('oauth')
   const [text, setText] = useState('')
@@ -124,6 +130,7 @@ export function CodexCredentialPanel({
     Promise.all([
       qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey }),
       qc.invalidateQueries({ queryKey: vmQueryOptions(vm.id).queryKey }),
+      qc.invalidateQueries({ queryKey: vmsListQueryOptions().queryKey }),
     ])
 
   const importCred = useMutation({
@@ -222,6 +229,26 @@ export function CodexCredentialPanel({
         sessionKey、Setup Token 或 Console Key。一槽一号。
       </Hint>
       <Seg value={mode} onChange={setMode} disabled={busy} />
+      {perms.admin ? (
+        <div className='flex flex-wrap items-center gap-2'>
+          <Button
+            size='sm'
+            variant='outline'
+            disabled={busy}
+            onClick={() => {
+              browserNotified.current = false
+              browserCommit.current = null
+              setBrowserOpen(true)
+            }}
+          >
+            <Globe className='size-3.5' aria-hidden />
+            浏览器登录
+          </Button>
+          <span className='text-xs text-muted-foreground'>
+            使用本槽固定身份与绑定代理，授权成功后自动保存
+          </span>
+        </div>
+      ) : null}
       {mode === 'oauth' ? (
         linkReady ? (
           <div className='space-y-2'>
@@ -395,6 +422,30 @@ export function CodexCredentialPanel({
           </Button>
         </div>
       )}
+      {browserOpen ? (
+        <SlotBrowserDialog
+          vmId={vm.id}
+          email={vm.email}
+          purpose='oauth'
+          open={browserOpen}
+          onOpenChange={(value) => {
+            setBrowserOpen(value)
+            if (!value && browserCommit.current) {
+              const data = browserCommit.current
+              browserCommit.current = null
+              onCommitted?.(data, vm.id, '已完成 OpenAI 浏览器授权')
+            }
+          }}
+          onComplete={(data) => {
+            void invalidate()
+            if (!browserNotified.current) {
+              browserNotified.current = true
+              toast.success('已完成 OpenAI 浏览器授权')
+            }
+            if (data) browserCommit.current = data
+          }}
+        />
+      ) : null}
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { getDb } from '../database.mjs'
+import { getDb, withTransaction } from '../database.mjs'
 import { maybeDecrypt, maybeEncrypt } from '../secure.mjs'
 
 const ACCOUNT_FIELDS = {
@@ -11,6 +11,8 @@ const ACCOUNT_FIELDS = {
   operation_id: 'operation_id',
   destination_account_id: 'destination_account_id',
   offer: 'offer_json',
+  offer_checked_at: 'offer_checked_at',
+  link_checked_at: 'link_checked_at',
   benefit: 'benefit_json',
   destinations: 'destinations_json',
   delivery: 'delivery_json',
@@ -24,17 +26,28 @@ const ORG_FIELDS = {
   project_id: 'project_id',
   endpoint_id: 'endpoint_id',
   balance: 'balance',
+  paid_balance: 'paid_balance',
+  grants: 'grants_json',
+  next_expiring_amount: 'next_expiring_amount',
+  next_expiring_at: 'next_expiring_at',
   balance_checked_at: 'balance_checked_at',
   balance_error: 'balance_error',
 }
-const JSON_FIELDS = new Set(['offer', 'benefit', 'destinations', 'delivery', 'fingerprint'])
+const JSON_FIELDS = new Set(['offer', 'benefit', 'destinations', 'delivery', 'fingerprint', 'grants'])
+const MONEY_FIELDS = new Set(['balance', 'paid_balance', 'next_expiring_amount'])
 
 function encode(key, value) {
   if (key === 'enabled') return value ? 1 : 0
   if (JSON_FIELDS.has(key)) return value == null ? null : JSON.stringify(value)
   if (key === 'storage_state') return value == null ? null : maybeEncrypt(JSON.stringify(value))
-  if (key === 'balance') return value == null ? null : String(value)
+  if (MONEY_FIELDS.has(key)) return value == null ? null : String(value)
   return value
+}
+
+function orgRow(row) {
+  if (!row) return null
+  const { grants_json, ...value } = row
+  return { ...value, grants: grants_json == null ? [] : JSON.parse(grants_json) }
 }
 
 function accountRow(row) {
@@ -75,8 +88,7 @@ export class OpenaiApiRepo {
   }
 
   getOrg(organizationId) {
-    const row = this._getOrg.get(organizationId)
-    return row ? { ...row } : null
+    return orgRow(this._getOrg.get(organizationId))
   }
 
   upsertOrg(organizationId, patch = {}) {
@@ -89,13 +101,46 @@ export class OpenaiApiRepo {
   }
 
   listOrgs() {
-    return this._listOrgs.all().map((row) => ({ ...row }))
+    return this._listOrgs.all().map(orgRow)
   }
 
   getKey(keyId) {
     if (!keyId) return null
     const row = this._getKey.get(keyId)
     return row ? { ...row, api_key: maybeDecrypt(row.api_key), disabled: !!row.disabled } : null
+  }
+
+  /** Remove only this slot's live API material. Claim receipts and shared
+   * organization balances remain available for future account synchronization. */
+  cleanupForVm(vmId) {
+    if (!vmId) throw new Error('vm_id is required')
+    return withTransaction(this.db, () => {
+      const keys = this.db.prepare('SELECT id, endpoint_id FROM api_endpoint_keys WHERE source_vm_id = ?').all(vmId)
+      const stamp = new Date().toISOString()
+      const detachKey = this.db.prepare(
+        "UPDATE openai_api_accounts SET key_id = '', enabled = 0, setup_status = 'idle', updated_at = ? WHERE key_id = ?",
+      )
+      const deleteKey = this.db.prepare('DELETE FROM api_endpoint_keys WHERE id = ?')
+      for (const key of keys) {
+        detachKey.run(stamp, key.id)
+        deleteKey.run(key.id)
+      }
+      const accounts = this.db
+        .prepare(`UPDATE openai_api_accounts SET vm_id = '', key_id = '', enabled = 0,
+          fingerprint_json = NULL, storage_state_enc = NULL, setup_status = 'idle', last_error = NULL,
+          updated_at = ? WHERE vm_id = ?`)
+        .run(stamp, vmId).changes
+      let endpoints = 0
+      for (const endpointId of new Set(keys.map((key) => key.endpoint_id))) {
+        if (this.db.prepare('SELECT 1 FROM api_endpoint_keys WHERE endpoint_id = ? LIMIT 1').get(endpointId)) continue
+        this.db.prepare('DELETE FROM api_endpoint_models WHERE endpoint_id = ?').run(endpointId)
+        endpoints += this.db.prepare('DELETE FROM api_endpoints WHERE id = ?').run(endpointId).changes
+        this.db
+          .prepare("UPDATE openai_api_orgs SET endpoint_id = '', updated_at = ? WHERE endpoint_id = ?")
+          .run(stamp, endpointId)
+      }
+      return { accounts, keys: keys.length, endpoints }
+    })
   }
 
   upsert(table, idColumn, id, fields, patch) {

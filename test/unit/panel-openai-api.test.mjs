@@ -327,3 +327,172 @@ test('generic endpoint edits cannot detach an account key from its identity or o
   assert.equal(store.getKey(key.id).api_key, 'sk-account-fixture')
   assert.equal(store.getRaw(ep.id).kind, 'openai')
 })
+
+
+test('slot browser routes dispatch administrator login, immediate tickets and ordered close', async (t) => {
+  const root = fixture(t)
+  const steps = []
+  const state = { vm_id: 'vm-api', status: 'queued', purpose: 'oauth' }
+  const slotBrowserManager = {
+    state(id) { steps.push(['state', id]); return state },
+    browserTicket(id) {
+      steps.push(['ticket', id])
+      return { ticket: 'short-lived', url: '/api/panel/vms/vm-api/browser?ticket=short-lived' }
+    },
+    async close(id) { steps.push(['browser-close', id]) },
+    acquire() { return new Promise(() => {}) },
+  }
+  const codexBrowserLogin = {
+    start(id) { steps.push(['oauth-start', id]); return state },
+    async cancel(id) { steps.push(['oauth-cancel', id]) },
+  }
+  const manager = {
+    async cancel(...args) { steps.push(['api-cancel', ...args]) },
+  }
+  const ctx = { manager, slotBrowserManager, codexBrowserLogin }
+  const viewed = await handler(root, ctx)('GET', '/api/panel/vms/vm-api/browser')
+  assert.equal(viewed.status, 200)
+  assert.deepEqual(viewed.body.data, state)
+  steps.length = 0
+  const opened = await handler(root, { ...ctx, body: { purpose: 'oauth' } })(
+    'POST', '/api/panel/vms/vm-api/browser/open',
+  )
+  assert.equal(opened.status, 200)
+  assert.deepEqual(opened.body.data, state)
+  assert.deepEqual(steps, [
+    ['api-cancel', 'vm-api', { closeBrowser: false }],
+    ['oauth-start', 'vm-api'],
+  ])
+  steps.length = 0
+  const ticket = await handler(root, ctx)('POST', '/api/panel/vms/vm-api/browser-ticket')
+  assert.equal(ticket.status, 200)
+  assert.equal(ticket.body.data.ticket, 'short-lived')
+  assert.deepEqual(steps, [['ticket', 'vm-api']], 'ticket must not wait for browser acquisition')
+  steps.length = 0
+  const closed = await handler(root, ctx)('POST', '/api/panel/vms/vm-api/browser/close')
+  assert.equal(closed.status, 200)
+  assert.deepEqual(steps, [
+    ['oauth-cancel', 'vm-api'], ['api-cancel', 'vm-api'],
+    ['browser-close', 'vm-api'], ['state', 'vm-api'],
+  ])
+})
+
+test('slot Platform browser cancels OAuth first and continues claimed account setup', async (t) => {
+  const root = fixture(t)
+  for (const claim_status of ['pending', 'claimed']) {
+    const steps = []
+    const state = { vm_id: 'vm-api', status: 'opening', purpose: 'platform' }
+    const out = await handler(root, {
+      body: { purpose: 'platform' },
+      codexBrowserLogin: { async cancel(id) { steps.push(['oauth-cancel', id]) } },
+      manager: {
+        view(vm) { steps.push(['view', vm.id]); return { ...VIEW, claim_status } },
+        setup(id) { steps.push(['setup', id]) },
+      },
+      slotBrowserManager: {
+        state(id) { steps.push(['state', id]); return state },
+        open() { assert.fail('claimed setup must not open a second browser flow') },
+      },
+    })('POST', '/api/panel/vms/vm-api/browser/open')
+    assert.equal(out.status, 200)
+    assert.deepEqual(out.body.data, state)
+    assert.deepEqual(steps, [
+      ['oauth-cancel', 'vm-api'], ['view', 'vm-api'], ['setup', 'vm-api'], ['state', 'vm-api'],
+    ])
+  }
+})
+
+test('unlinked slot opens Platform in the same retained browser without submitting a claim', async (t) => {
+  const root = fixture(t)
+  const steps = []
+  const live = { page: { async goto(url, options) { steps.push(['goto', url, options.waitUntil]) } } }
+  const out = await handler(root, {
+    body: { purpose: 'platform' },
+    codexBrowserLogin: { async cancel(id) { steps.push(['oauth-cancel', id]) } },
+    manager: {
+      view() { return { ...VIEW, claim_status: 'unknown' } },
+      setup() { assert.fail('opening Platform must not claim or configure automatically') },
+    },
+    credits: { claim() { assert.fail('opening Platform must not claim') } },
+    slotBrowserManager: {
+      open(id, options) { steps.push(['open', id, options]) },
+      async acquire(id, options) { steps.push(['acquire', id, options]); return live },
+      state() { return { status: 'opening' } },
+      setStatus(current, status) { assert.equal(current, live); steps.push(['status', status]) },
+    },
+  })('POST', '/api/panel/vms/vm-api/browser/open')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(out.status, 200)
+  assert.deepEqual(steps, [
+    ['oauth-cancel', 'vm-api'],
+    ['open', 'vm-api', { purpose: 'platform', interactive: true }],
+    ['acquire', 'vm-api', { purpose: 'platform', interactive: true, retain: true }],
+    ['status', 'opening'], ['goto', 'https://platform.openai.com/', 'domcontentloaded'], ['status', 'ready'],
+  ])
+})
+
+test('generic slot browser is admin-only and retains typed request failures', async (t) => {
+  const root = fixture(t)
+  for (const role of ['user', 'super']) {
+    for (const [method, resource] of [
+      ['GET', 'browser'], ['POST', 'browser-ticket'], ['POST', 'browser/open'], ['POST', 'browser/close'],
+    ]) {
+      const out = await handler(root, {
+        who: { panelUser: 'fixture', panelRole: role },
+        slotBrowserManager: new Proxy({}, { get() { assert.fail('unauthorized browser access') } }),
+        codexBrowserLogin: new Proxy({}, { get() { assert.fail('unauthorized login access') } }),
+      })(method, '/api/panel/vms/vm-api/' + resource)
+      assert.equal(out.status, 403, role + ' ' + resource)
+    }
+  }
+  const invalid = await handler(root, { body: { purpose: 'unrelated' } })(
+    'POST', '/api/panel/vms/vm-api/browser/open',
+  )
+  assert.equal(invalid.status, 400)
+  assert.equal(invalid.body.error.code, 'invalid_browser_purpose')
+  const missing = await handler(root)('GET', '/api/panel/vms/missing/browser')
+  assert.equal(missing.status, 404)
+  const failed = await handler(root, {
+    slotBrowserManager: {
+      browserTicket() { throw Object.assign(new Error('浏览器已关闭'), { code: 'browser_closed', status: 409 }) },
+    },
+  })('POST', '/api/panel/vms/vm-api/browser-ticket')
+  assert.equal(failed.status, 409)
+  assert.deepEqual(failed.body.error, { code: 'browser_closed', message: '浏览器已关闭' })
+})
+
+test('new account API bindings require a positive exact balance while old depleted selections remain editable', async (t) => {
+  const root = fixture(t)
+  const db = createDatabase({ dbPath: ':memory:' })
+  t.after(() => db.close())
+  const store = new ApiKeyStore({ db })
+  const body = { name: 'funded', group_type: 'openai_apikey', allowed_vms: ['vm-api'] }
+  for (const balance of ['0', '0.000', '-0.0001', null]) {
+    const out = await handler(root, {
+      body, apiKeyStore: store, manager: { view: () => ({ ...VIEW, balance }) },
+    })('POST', '/api/panel/api-keys')
+    assert.equal(out.status, 400)
+    assert.equal(out.body.error.code, 'key_api_positive_balance_required')
+  }
+  const created = await handler(root, {
+    body, apiKeyStore: store,
+    manager: { view: () => ({ ...VIEW, enabled: false, balance: '0.00000000000000000000000000000000000000000001', balance_error: '需要登录' }) },
+  })('POST', '/api/panel/api-keys')
+  assert.equal(created.status, 201, JSON.stringify(created.body))
+  const keyId = created.body.item.id
+  const existing = await handler(root, {
+    body: { ...body, quota_requests: 123 }, apiKeyStore: store,
+    manager: { view: () => ({ ...VIEW, balance: '0' }) },
+  })('PATCH', '/api/panel/api-keys/' + keyId)
+  assert.equal(existing.status, 200, JSON.stringify(existing.body))
+  assert.deepEqual(existing.body.item.allowed_vms, ['vm-api'])
+  assert.equal(existing.body.item.quota_requests, 123)
+  fs.writeFileSync(path.join(root, 'vms', 'vm-zero.json'), JSON.stringify({ id: 'vm-zero', platform: 'openai', family: 'codex' }))
+  const added = await handler(root, {
+    body: { group_type: 'openai_apikey', allowed_vms: ['vm-api', 'vm-zero'] }, apiKeyStore: store,
+    manager: { view: () => ({ ...VIEW, balance: '0' }) },
+  })('PATCH', '/api/panel/api-keys/' + keyId)
+  assert.equal(added.status, 400)
+  assert.equal(added.body.error.code, 'key_api_positive_balance_required')
+  assert.deepEqual(JSON.parse(store.getById(keyId).allowed_vms), ['vm-api'])
+})

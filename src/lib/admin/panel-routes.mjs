@@ -28,11 +28,18 @@ import { JevUsageRepo } from '../db/repos/jev-usage-repo.mjs'
 import { RefusalGuardsRepo } from '../db/repos/refusal-guards-repo.mjs'
 import { RefusalDeviceBlocksRepo } from '../db/repos/refusal-device-blocks-repo.mjs'
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
-import { parseCodexImportPayload, upsertCodexAccount, readCodexAccounts, clearCodexCredits } from '../vm/codex-slot.mjs'
+import {
+  parseCodexImportPayload,
+  upsertCodexAccount,
+  readCodexAccounts,
+  clearCodexCredits,
+  enrichCodexAccountIdentity,
+} from '../vm/codex-slot.mjs'
 import { generateAuthUrl, exchangeAuthCode, normalizeOauthFlavor } from '../oauth/oauth-auth-url.mjs'
 import { sessionKeyToOAuth, panelImportErrorPayload } from '../oauth/cookie-auth.mjs'
 import { enrichOauthIdentity } from '../oauth/oauth-identity.mjs'
 import { generateCodexAuthUrl, exchangeCodexAuthCode } from '../oauth/codex-oauth.mjs'
+import { cleanupVmFiles } from '../vm/slot-cleanup.mjs'
 import {
   completeClaudeSetupToken,
   readSetupTokenSession,
@@ -98,7 +105,7 @@ import { readCatalogSync, syncClaudeCatalog, syncGptCatalog } from './catalog-mo
 import { setPriceOverride, listPriceOverrides, syncModelsDev } from './price-catalog.mjs'
 import { buildPricing } from './pricing-view.mjs'
 import { publicKeyView } from './api-keys.mjs'
-import { assertVmScope, normalizeKeyScope } from './key-scope.mjs'
+import { assertVmScope, normalizeKeyScope, keyScopeFromRecord } from './key-scope.mjs'
 import { resolvePreset } from '../pool/api-presets.mjs'
 import {
   assertVmPoolExists,
@@ -417,16 +424,21 @@ function statsParams(req, u, dimensionKey) {
   return { range, dimension, tz: u.searchParams.get('tz') || 'UTC', owner_user_id: logsOwner(req, u) }
 }
 
-async function commitImportedCodexVm({
+export async function commitImportedCodexVm({
   cfg,
   vmPath,
   existing,
   account,
   catalogClientVersion = 'auto',
   routingConfig = {},
+  onAccountChanged,
 }) {
   const wasCodex = isCodexVm(existing)
   const previousPolicy = existing.policy && typeof existing.policy === 'object' ? existing.policy : {}
+  const incomingIdentity = enrichCodexAccountIdentity(account)
+  const oldId = existing.codex?.chatgpt_account_id
+  if (oldId && incomingIdentity.chatgpt_account_id && oldId !== incomingIdentity.chatgpt_account_id)
+    await onAccountChanged?.(existing.id, incomingIdentity.chatgpt_account_id)
   const saved = upsertCodexAccount(cfg.paths.project, existing.id, account, { replaceCredentials: true })
   const currentCodex = getVm(cfg.paths.project, existing.id)?.codex
   existing.platform = 'openai'
@@ -565,7 +577,7 @@ async function runKernelSync({ project, routingConfig, body = {}, refreshCluster
   if (traits) {
     for (const vm of localVms) {
       if (isCodexVm(vm)) continue
-      const gone = await destroySlot(vm)
+      const gone = await destroySlot(vm, cfg.paths.project)
       if (!gone.ok) {
         const item = (local.items || []).find((row) => row.id === vm.id)
         if (item) {
@@ -638,6 +650,10 @@ export function createPanelHandler(ctx) {
   const apiScheduler = ctx.apiScheduler
   const openaiApiManager = ctx.openaiApiManager
   const openaiApiCredits = ctx.openaiApiCredits
+  const slotBrowserManager = ctx.slotBrowserManager
+  const codexBrowserLogin = ctx.codexBrowserLogin
+  const slotBrowserRepo = ctx.slotBrowserRepo
+  const openaiApiRepo = ctx.openaiApiRepo
   const panelUsers = ctx.panelUsers
   const requestLog = ctx.requestLog
   const vmTestSchedule = ctx.vmTestSchedule
@@ -921,15 +937,30 @@ export function createPanelHandler(ctx) {
     return filterVmsForPanel(listVms(cfg.paths.project), { role: ident.role, userId: req.panelUserId })
   }
 
-  function assertAccountApiScope(scope) {
+  function assertAccountApiScope(scope, previous = null) {
     if (scope?.group_type !== 'openai_apikey') return
     scope.vm_pool_id = null
+    const retained = new Set(previous?.group_type === 'openai_apikey' ? keyScopeFromRecord(previous).allowed_vms : [])
     for (const id of scope.allowed_vms) {
+      if (retained.has(id)) continue
       const vm = getVm(cfg.paths.project, id)
-      if (!openaiApiManager?.view(vm)?.has_key) {
+      const state = openaiApiManager?.view(vm)
+      if (!state?.has_key) {
         throw Object.assign(new Error('所选账号尚未配置 API key'), { code: 'key_api_account_not_ready' })
       }
+      const balance = String(state.balance ?? '').trim()
+      if (!/^\+?\d+(?:\.\d+)?$/.test(balance) || !/[1-9]/.test(balance)) {
+        throw Object.assign(new Error('新增 API 账号需要已确认的正余额'), { code: 'key_api_positive_balance_required' })
+      }
     }
+  }
+
+  async function cleanupChangedBrowserAccount(vmId, accountId) {
+    await codexBrowserLogin?.cancel(vmId)
+    await openaiApiManager?.cancel(vmId)
+    await slotBrowserManager?.close(vmId)
+    if (slotBrowserRepo?.get(vmId)) slotBrowserRepo.upsert(vmId, { account_id: accountId, storage_state: null })
+    openaiApiRepo?.cleanupForVm(vmId)
   }
 
   function endpointKeyProxy(key) {
@@ -1454,6 +1485,68 @@ export function createPanelHandler(ctx) {
       ) {
         return true
       }
+      const slotBrowserRoute = p.match(/^\/api\/panel\/vms\/([^/]+)\/(browser(?:\/(open|close))?|browser-ticket)$/)
+      if (slotBrowserRoute) {
+        if (panelIdentity(req).role !== 'admin')
+          return json(res, 403, { ok: false, error: { code: 'forbidden', message: '只有管理员可以使用槽位浏览器' } })
+        const [, vmId, resource, action] = slotBrowserRoute
+        try {
+          const vm = getVm(cfg.paths.project, vmId)
+          if (!vm || !isCodexVm(vm))
+            return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'OpenAI 槽位不存在' } })
+          let result
+          if (req.method === 'GET' && resource === 'browser') result = slotBrowserManager.state(vmId)
+          else if (req.method === 'POST' && resource === 'browser-ticket')
+            result = slotBrowserManager.browserTicket(vmId)
+          else if (req.method === 'POST' && action === 'open') {
+            const body = await readBody(req, 4096)
+            const purpose = body?.purpose || 'oauth'
+            if (purpose === 'oauth') {
+              await openaiApiManager.cancel(vmId, { closeBrowser: false })
+              result = codexBrowserLogin.start(vmId)
+            } else if (purpose === 'platform') {
+              await codexBrowserLogin.cancel(vmId)
+              const account = openaiApiManager.view(vm)
+              if (['claimed', 'pending'].includes(account?.claim_status)) {
+                openaiApiManager.setup(vmId)
+                result = slotBrowserManager.state(vmId)
+              } else {
+                slotBrowserManager.open(vmId, { purpose: 'platform', interactive: true })
+                void slotBrowserManager
+                  .acquire(vmId, { purpose: 'platform', interactive: true, retain: true })
+                  .then(async (live) => {
+                    slotBrowserManager.setStatus(live, 'opening', '正在打开 OpenAI Platform')
+                    await live.page.goto('https://platform.openai.com/', {
+                      waitUntil: 'domcontentloaded',
+                      timeout: 45_000,
+                    })
+                    slotBrowserManager.setStatus(live, 'ready', '可在此窗口继续使用 OpenAI Platform')
+                  })
+                  .catch(() => {})
+                result = slotBrowserManager.state(vmId)
+              }
+            } else
+              return json(res, 400, {
+                ok: false,
+                error: { code: 'invalid_browser_purpose', message: '请选择 OAuth 或 Platform' },
+              })
+          } else if (req.method === 'POST' && action === 'close') {
+            await codexBrowserLogin.cancel(vmId)
+            await openaiApiManager.cancel(vmId)
+            await slotBrowserManager.close(vmId)
+            result = slotBrowserManager.state(vmId)
+          } else return json(res, 404, { ok: false, error: { code: 'not_found', message: '接口不存在' } })
+          return json(res, 200, panel.ok(result))
+        } catch (error) {
+          return json(res, error.status || 502, {
+            ok: false,
+            error: {
+              code: error.code || 'browser_failed',
+              message: error.publicMessage || error.message || '浏览器操作失败',
+            },
+          })
+        }
+      }
       const openaiApiRoute = p.match(/^\/api\/panel\/vms\/([^/]+)\/openai-api(?:\/([^/]+))?$/)
       if (openaiApiRoute) {
         if (panelIdentity(req).role !== 'admin') {
@@ -1469,11 +1562,16 @@ export function createPanelHandler(ctx) {
           else if (req.method === 'POST' && action === 'claim') {
             const body = await readBody(req, 8192)
             result = await openaiApiCredits.claim(vmId, { destination_account_id: body?.destination_account_id })
-          } else if (req.method === 'POST' && action === 'setup') result = await openaiApiManager.setup(vmId)
-          else if (req.method === 'POST' && action === 'refresh') result = await openaiApiManager.refresh(vmId)
-          else if (req.method === 'POST' && action === 'browser-ticket')
+          } else if (req.method === 'POST' && action === 'setup') {
+            await codexBrowserLogin?.cancel(vmId)
+            result = await openaiApiManager.setup(vmId)
+          } else if (req.method === 'POST' && action === 'refresh') {
+            await codexBrowserLogin?.cancel(vmId)
+            result = await openaiApiManager.refresh(vmId)
+          } else if (req.method === 'POST' && action === 'browser-ticket') {
+            await codexBrowserLogin?.cancel(vmId)
             result = await openaiApiManager.browserTicket(vmId)
-          else if (req.method === 'PATCH' && action === 'enabled') {
+          } else if (req.method === 'PATCH' && action === 'enabled') {
             const body = await readBody(req, 8192)
             if (typeof body?.enabled !== 'boolean') {
               return json(res, 400, { ok: false, error: { code: 'invalid_enabled', message: 'enabled 必须为布尔值' } })
@@ -1819,7 +1917,7 @@ export function createPanelHandler(ctx) {
             scopeInput.vm_pool_id = null
           const scope = normalizeKeyScope(scopeInput, { partial: true, current: currentRec })
           if (scope) {
-            assertAccountApiScope(scope)
+            assertAccountApiScope(scope, currentRec)
             if (ident.role !== 'admin' && currentRec?.vm_pool_id) {
               scope.vm_pool_id = currentRec.vm_pool_id
             }
@@ -2354,6 +2452,8 @@ export function createPanelHandler(ctx) {
           })
         }
         try {
+          await codexBrowserLogin?.stop()
+          await slotBrowserManager?.stop()
           await openaiApiManager?.stop()
           const out = await backupService.restoreBackup(id)
           return json(res, 200, { ok: true, ...out })
@@ -2370,6 +2470,7 @@ export function createPanelHandler(ctx) {
             error: { message: String(e.message || e), code: e.code || 'restore_failed' },
           })
         } finally {
+          slotBrowserManager?.start()
           if (process.env.KIN_CRS_MOCK !== '1') openaiApiManager?.start()
         }
       }
@@ -3474,56 +3575,61 @@ export function createPanelHandler(ctx) {
         }
         const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
         if (!fs.existsSync(vmPath)) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        const active = getActiveVmId(cfg.paths.project)
-        if (active === id && listVms(cfg.paths.project).some((vm) => vm.id !== id)) {
-          return json(res, 409, { ok: false, error: { message: 'cannot delete active VM, switch active first' } })
-        }
-        const vm = getVm(cfg.paths.project, id)
-        if (denyIfUserCannotDeleteVm(req, res, vm, json)) return true
-        try {
-          if (vm) {
-            const gone = await destroySlot(vm)
-            // A node slot that could not be removed keeps running there with the account's credential.
-            if (!gone.ok && slotHost(vm).kind === 'node') {
-              return json(res, 409, {
-                ok: false,
-                error: { code: gone.code || 'remote_destroy_failed', message: gone.error || 'remote destroy failed' },
-              })
-            }
+        return await withVmLock(vmPath, async () => {
+          if (!fs.existsSync(vmPath)) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
+          const active = getActiveVmId(cfg.paths.project)
+          if (active === id && listVms(cfg.paths.project).some((vm) => vm.id !== id)) {
+            return json(res, 409, { ok: false, error: { message: 'cannot delete active VM, switch active first' } })
           }
-        } catch {}
-        // detach this VM only — do not unbind other slots sharing the SOCKS5
-        try {
-          proxyPool.unbindVm(id)
-        } catch {}
-        // remove cli-home
-        try {
-          fs.rmSync(path.join(cfg.paths.project, 'vms', id), { recursive: true, force: true })
-        } catch {}
-        fs.unlinkSync(vmPath)
-        invalidateVmSlotReadCache(cfg.paths.project, id)
-        try {
-          vmTestSchedule.remove(id)
-        } catch {}
-        if (active === id) {
-          clearActiveVm(cfg.paths.project)
+          const vm = getVm(cfg.paths.project, id)
+          if (denyIfUserCannotDeleteVm(req, res, vm, json)) return true
           try {
-            clearActiveVmFromDb()
-          } catch {}
+            await codexBrowserLogin?.cancel(id)
+            await openaiApiManager?.cancel(id)
+            await slotBrowserManager?.close(id)
+            if (vm) {
+              const gone = await destroySlot(vm, cfg.paths.project)
+              if (!gone.ok)
+                return json(res, 409, {
+                  ok: false,
+                  error: { code: gone.code || 'slot_destroy_failed', message: gone.error || '槽位销毁失败' },
+                })
+            }
+            cleanupVmFiles({ projectRoot: cfg.paths.project, vmId: id, resetInProgress: false })
+            openaiApiRepo?.cleanupForVm(id)
+            slotBrowserRepo?.remove(id)
+            removeVmFromDb(id)
+          } catch (error) {
+            return json(res, 500, {
+              ok: false,
+              error: { code: error.code || 'slot_cleanup_failed', message: error.message || '槽位清理失败' },
+            })
+          }
+          // detach this VM only — do not unbind other slots sharing the SOCKS5
           try {
-            reloadActiveVm(cfg)
+            proxyPool.unbindVm(id)
           } catch {}
-        }
-        // drop the DB credential mirror row too
-        try {
-          removeVmFromDb(id)
-        } catch {}
-        // optional chat side files
-        try {
-          const chat = path.join(cfg.paths.project, 'vms', `${id}-chat.json`)
-          if (fs.existsSync(chat)) fs.unlinkSync(chat)
-        } catch {}
-        return json(res, 200, panel.ok({ deleted: id }))
+          fs.unlinkSync(vmPath)
+          invalidateVmSlotReadCache(cfg.paths.project, id)
+          try {
+            vmTestSchedule.remove(id)
+          } catch {}
+          if (active === id) {
+            clearActiveVm(cfg.paths.project)
+            try {
+              clearActiveVmFromDb()
+            } catch {}
+            try {
+              reloadActiveVm(cfg)
+            } catch {}
+          }
+          // optional chat side files
+          try {
+            const chat = path.join(cfg.paths.project, 'vms', `${id}-chat.json`)
+            if (fs.existsSync(chat)) fs.unlinkSync(chat)
+          } catch {}
+          return json(res, 200, panel.ok({ deleted: id }))
+        })
       }
       // POST /api/panel/vms/:id/reset — destroy container + home, recreate same slot
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/reset$/.test(p)) {
@@ -3535,10 +3641,14 @@ export function createPanelHandler(ctx) {
         return await withVmLock(vmPath, async () => {
           if (!fs.existsSync(vmPath)) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
           const prev = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-          const gone = await destroySlot(prev)
+          await codexBrowserLogin?.cancel(id)
+          await openaiApiManager?.cancel(id)
+          await slotBrowserManager?.close(id)
+          const gone = await destroySlot(prev, cfg.paths.project)
           if (!gone.ok) {
             return json(res, 500, { ok: false, error: { message: gone.error || 'destroy failed', code: gone.code } })
           }
+          if (mode === 'traits') slotBrowserRepo?.remove(id)
           let { vm } = recreateVmFiles(cfg.paths.project, prev, { mode })
           try {
             invalidateLiveCredentialCache()
@@ -3627,6 +3737,11 @@ export function createPanelHandler(ctx) {
           }
           const prev = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
           prev.id = prev.id || id
+          await codexBrowserLogin?.cancel(id)
+          await openaiApiManager?.cancel(id)
+          await slotBrowserManager?.close(id)
+          if (slotBrowserRepo?.get(id)) slotBrowserRepo.upsert(id, { account_id: '', storage_state: null })
+          openaiApiRepo?.cleanupForVm(id)
           if (isCodexVm(prev)) resetOpenaiAuth(cfg.paths.project, id)
           const slotDir = path.join(cfg.paths.project, 'vms', id)
           const removed = []
@@ -3973,9 +4088,13 @@ export function createPanelHandler(ctx) {
           )
         }
         if (mode === 'traits') {
-          const gone = await destroySlot(vm)
+          await codexBrowserLogin?.cancel(id)
+          await openaiApiManager?.cancel(id)
+          await slotBrowserManager?.close(id)
+          const gone = await destroySlot(vm, cfg.paths.project)
           if (!gone.ok)
             return json(res, 500, { ok: false, error: { code: gone.code, message: gone.error || '重建新特征失败' } })
+          slotBrowserRepo?.remove(id)
           const rebuilt = recreateVmFiles(cfg.paths.project, vm, { mode: 'traits' })
           const boot = await startSlotReady(rebuilt.vm, cfg.paths.project, {
             recreate: true,
@@ -4632,6 +4751,7 @@ export function createPanelHandler(ctx) {
               account,
               catalogClientVersion: ctx.routingConfig.codex?.catalog_client_version,
               routingConfig: ctx.routingConfig,
+              onAccountChanged: cleanupChangedBrowserAccount,
             })
             return json(res, 200, panel.ok(committed))
           }
@@ -4869,6 +4989,7 @@ export function createPanelHandler(ctx) {
               existing,
               catalogClientVersion: ctx.routingConfig.codex?.catalog_client_version,
               routingConfig: ctx.routingConfig,
+              onAccountChanged: cleanupChangedBrowserAccount,
               account: {
                 access_token: oauth.access_token,
                 refresh_token: oauth.refresh_token,

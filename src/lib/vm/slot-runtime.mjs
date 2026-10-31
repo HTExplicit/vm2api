@@ -72,9 +72,18 @@ export async function stopSlot(vm) {
   return slotHost(vm).stop(vm)
 }
 
-/** Destroy the slot container. Used only by explicit reset / delete. */
-export async function destroySlot(vm) {
-  return slotHost(vm).destroy(vm)
+/** Explicit reset/delete must stop the host kernel before its files disappear. */
+export async function destroySlot(vm, projectRoot, opts = {}) {
+  const host = slotHost(vm)
+  if (isCodexVm(vm) && host.kind === 'local') {
+    if (!projectRoot) return { ok: false, code: 'project_root_required', error: 'slot project root required' }
+    const stop = opts.ops?.stopCodexKernelAndWait || stopCodexKernelAndWait
+    const stopped = await stop(slotExec(projectRoot, vm))
+    if (!stopped.ok) {
+      return { ok: false, code: 'codex_kernel_stop_failed', error: stopped.reason || 'Codex kernel did not stop' }
+    }
+  }
+  return (opts.ops?.destroy || host.destroy)(vm)
 }
 
 /** Reload guest worker so a new bind-mounted / virtiofs binary is picked up. Recreate only when the bound egress network moved; otherwise never docker rm. */

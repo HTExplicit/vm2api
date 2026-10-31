@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { createDatabase } from '../../src/lib/db/database.mjs'
+import { SlotBrowserRepo } from '../../src/lib/db/repos/slot-browser-repo.mjs'
 import { OpenaiApiRepo } from '../../src/lib/db/repos/openai-api-repo.mjs'
 import { ApiEndpointStore } from '../../src/lib/admin/api-endpoints.mjs'
 import { OpenaiApiManager } from '../../src/lib/openai-api/manager.mjs'
@@ -21,10 +22,18 @@ function fixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-openai-api-manager-'))
   const db = createDatabase({ dataDir: directory })
   const repo = new OpenaiApiRepo(db)
+  const profiles = new SlotBrowserRepo(db)
   const store = new ApiEndpointStore({ db })
   const identities = new Map()
   const calls = { sessions: [], configured: [], models: [], closed: [], refreshed: [], reloaded: 0 }
-  const behavior = { authenticated: true, balance: '37.000', balanceError: null, configure: null, inspect: null }
+  const behavior = {
+    authenticated: true,
+    balance: '37.000',
+    balanceError: null,
+    readBalance: null,
+    configure: null,
+    inspect: null,
+  }
   let time = Date.now()
   const credits = {
     accountForVm(vmId) {
@@ -67,6 +76,7 @@ function fixture(t) {
       return result
     }
     async readBalance() {
+      if (behavior.readBalance) return behavior.readBalance()
       if (behavior.balanceError) throw behavior.balanceError
       return { balance: behavior.balance }
     }
@@ -114,6 +124,7 @@ function fixture(t) {
         status: 'stopped',
         schedulable: false,
         family: 'codex',
+        codex: { chatgpt_account_id: accountId },
         timezone: 'Asia/Singapore',
         proxy: { url: `socks5h://127.0.0.1:${vmId === 'vm-a' ? 1080 : 1081}` },
       },
@@ -153,6 +164,7 @@ function fixture(t) {
   return {
     manager,
     repo,
+    profiles,
     store,
     identities,
     credits,
@@ -191,13 +203,15 @@ test('two accounts get separate saved fingerprints, sessions and keys while shar
   const f = fixture(t)
   const a = f.add()
   const b = f.add('vm-b', 'account-b')
-  f.manager.setup(a.vm.id)
-  f.manager.setup(b.vm.id)
+  f.manager.enqueue(f.credits.accountForVm(a.vm.id), 'setup', false)
+  f.manager.enqueue(f.credits.accountForVm(b.vm.id), 'setup', false)
   await f.settle()
   const first = f.repo.getAccount(a.accountId)
   const second = f.repo.getAccount(b.accountId)
-  assert.notDeepEqual(first.fingerprint, second.fingerprint)
-  assert.notDeepEqual(first.storage_state, second.storage_state)
+  const firstProfile = f.profiles.get(a.vm.id)
+  const secondProfile = f.profiles.get(b.vm.id)
+  assert.notDeepEqual(firstProfile.fingerprint, secondProfile.fingerprint)
+  assert.notDeepEqual(firstProfile.storage_state, secondProfile.storage_state)
   assert.notEqual(first.key_id, second.key_id)
   assert.equal(f.repo.getKey(first.key_id).source_account_id, a.accountId)
   assert.equal(f.repo.getKey(second.key_id).source_account_id, b.accountId)
@@ -205,11 +219,11 @@ test('two accounts get separate saved fingerprints, sessions and keys while shar
   assert.equal(second.setup_status, 'ready')
   assert.equal(f.calls.configured[1].projectId, 'proj-test')
   assert.equal(f.store.listRaw().length, 2, 'account endpoints keep model catalogs and display names separate')
-  f.manager.setup(a.vm.id)
+  f.manager.enqueue(f.credits.accountForVm(a.vm.id), 'setup', false)
   await f.settle()
   assert.equal(f.calls.configured.length, 2, 'reopening configuration must reuse the saved key')
-  assert.deepEqual(f.calls.sessions[2].fingerprint, first.fingerprint)
-  assert.deepEqual(f.calls.sessions[2].storageState, first.storage_state)
+  assert.deepEqual(f.calls.sessions[2].fingerprint, firstProfile.fingerprint)
+  assert.deepEqual(f.calls.sessions[2].storageState, firstProfile.storage_state)
   assert.equal(f.calls.closed.length, 3)
 })
 
@@ -262,6 +276,8 @@ test('a different logged-in email cannot create a project key or contaminate acc
   assert.equal(saved.key_id, '')
   assert.equal(f.calls.configured.length, 0)
   assert.equal(saved.storage_state, null)
+  await f.manager.browserManager.close(entry.vm.id)
+  assert.equal(f.profiles.get(entry.vm.id).storage_state, null)
 })
 
 test('changing an account proxy during key creation rejects the stale task before saving a secret', async (t) => {
@@ -315,7 +331,7 @@ test('a shared organization can refresh through another account when the first a
   assert.equal(f.repo.getOrg('org-test').balance, '37.000')
 })
 
-test('opening another login while one is active reports busy without queuing a hidden setup', async (t) => {
+test('another requested login is visibly queued while one is active and both are removed on shutdown', async (t) => {
   const f = fixture(t)
   const a = f.add()
   const b = f.add('vm-b', 'account-b')
@@ -324,14 +340,16 @@ test('opening another login while one is active reports busy without queuing a h
   await until(() => f.manager.sessions.get(a.vm.id)?.waiting)
   const ticket = await f.manager.browserTicket(a.vm.id)
   assert.match(ticket.url, new RegExp(`ticket=${ticket.ticket}$`))
-  await assert.rejects(f.manager.browserTicket(b.vm.id), { code: 'platform_browser_busy' })
-  assert.equal(f.manager.jobs.has(b.vm.id), false)
-  assert.equal(f.repo.getAccount(b.accountId).setup_status, 'idle')
+  const queuedTicket = await f.manager.browserTicket(b.vm.id)
+  assert.match(queuedTicket.url, /ticket=/)
+  assert.equal(f.manager.jobs.has(b.vm.id), true)
+  assert.equal(f.manager.browserManager.state(b.vm.id).status, 'queued')
+  assert.equal(f.repo.getAccount(b.accountId).setup_status, 'configuring')
   await f.manager.stop()
   await f.settle()
   assert.equal(f.manager.jobs.size, 0)
   assert.equal(f.manager.sessions.size, 0)
-  assert.equal(f.manager.tickets.size, 0)
+  assert.equal(f.manager.browserManager.tickets.size, 0)
 })
 
 test('deleted slots cannot interrupt queue cleanup or leak a newly opened browser', async (t) => {
@@ -347,8 +365,8 @@ test('deleted slots cannot interrupt queue cleanup or leak a newly opened browse
     await options.onKey(result)
     return result
   }
-  f.manager.setup(a.vm.id)
-  f.manager.setup(b.vm.id)
+  f.manager.enqueue(f.credits.accountForVm(a.vm.id), 'setup', false)
+  f.manager.enqueue(f.credits.accountForVm(b.vm.id), 'setup', false)
   await f.settle()
   assert.equal(f.manager.sessions.size, 0)
   assert.equal(f.calls.closed.length, 2)
@@ -359,13 +377,13 @@ test('deleted slots cannot interrupt queue cleanup or leak a newly opened browse
 test('stopping while a browser is launching closes it before any Platform operation can run', async (t) => {
   const f = fixture(t)
   const entry = f.add()
-  const originalCreate = f.manager.createSession
+  const originalCreate = f.manager.browserManager.createSession
   let release
   let launching = false
   const gate = new Promise((resolve) => {
     release = resolve
   })
-  f.manager.createSession = async (options) => {
+  f.manager.browserManager.createSession = async (options) => {
     launching = true
     await gate
     return originalCreate(options)
@@ -390,10 +408,11 @@ test('browser tickets cannot attach to a slot after its account identity changes
   await until(() => f.manager.sessions.get(entry.vm.id)?.waiting)
   const ticket = await f.manager.browserTicket(entry.vm.id)
   entry.accountId = 'replacement-account'
+  entry.vm.codex.chatgpt_account_id = 'replacement-account'
   let upgraded = false
   let destroyed = false
   let response = ''
-  f.manager.wss.handleUpgrade = () => {
+  f.manager.browserManager.wss.handleUpgrade = () => {
     upgraded = true
   }
   const socket = {
@@ -408,5 +427,76 @@ test('browser tickets cannot attach to a slot after its account identity changes
   assert.equal(upgraded, false)
   assert.equal(destroyed, true)
   assert.match(response, /401 Unauthorized/)
-  assert.equal(f.manager.tickets.has(ticket.ticket), false)
+  assert.equal(f.manager.browserManager.tickets.has(ticket.ticket), false)
+})
+
+test('a late key creation response after cancellation cannot save an account key or endpoint', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  let release
+  let awaitingKey = false
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  f.behavior.configure = async (options) => {
+    awaitingKey = true
+    await gate
+    await options.onKey({ organizationId: 'org-test', projectId: 'proj-test', apiKey: 'sk-late-after-cancel' })
+  }
+  f.manager.setup(entry.vm.id)
+  await until(() => awaitingKey)
+  const cancelling = f.manager.cancel(entry.vm.id)
+  assert.equal(f.manager.jobs.get(entry.vm.id).abort.signal.aborted, true)
+  release()
+  await cancelling
+  await f.settle()
+  assert.equal(f.repo.getAccount(entry.accountId).key_id, '')
+  assert.equal(f.store.listRaw().length, 0)
+  assert.equal(f.calls.models.length, 0)
+  assert.notEqual(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+  assert.equal(f.manager.browserManager.state(entry.vm.id).active, false)
+})
+
+test('a deferred Billing result after cancellation cannot replace the old balance, fetch models or write ready', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  f.repo.upsertOrg('org-test', { balance: '12.5000', balance_checked_at: '2020-01-01T00:00:00Z' })
+  let release
+  let reading = false
+  f.behavior.readBalance = async () => {
+    reading = true
+    return new Promise((resolve) => {
+      release = resolve
+    })
+  }
+  f.manager.setup(entry.vm.id)
+  await until(() => reading)
+  const cancelling = f.manager.cancel(entry.vm.id)
+  release({ balance: '999.000', paid_balance: '999.000' })
+  await cancelling
+  await f.settle()
+  assert.equal(f.repo.getOrg('org-test').balance, '12.5000')
+  assert.equal(f.repo.getOrg('org-test').balance_checked_at, '2020-01-01T00:00:00Z')
+  assert.equal(f.calls.models.length, 0)
+  assert.notEqual(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+})
+
+test('cancelling a background balance task waiting on a retained same-slot browser does not reopen it', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  const manual = await f.manager.browserManager.acquire(entry.vm.id, { purpose: 'oauth', interactive: true })
+  f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'balance', false)
+  await until(() => f.manager.running)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.calls.configured.length, 0)
+  await f.manager.cancel(entry.vm.id)
+  await f.settle()
+  await manual.closed
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.calls.models.length, 0)
+  assert.equal(f.manager.browserManager.state(entry.vm.id).active, false)
 })

@@ -20,6 +20,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  isOpenaiApiBalancePending,
+  isOpenaiApiKeyCandidate,
+} from '@/features/vm/openai-api-state'
+import { openaiApiAccountChoices } from './key-account-choices'
 import type { KeyGroupType, KeyLimitsDraft } from './key-payload'
 
 const CONC = [0, 1, 2, 4, 8, 16, 20, 32, 64]
@@ -136,8 +141,15 @@ export function KeyLimitsDialog({
 
   const quotaOpts = mode === 'edit' ? QUOTA_EDIT : QUOTA_CREATE
   const rpmOpts = mode === 'edit' ? RPM_EDIT : RPM_CREATE
-  const listed = vmsInGroup(vms || [], draft.group_type)
   const apiAccounts = draft.group_type === 'openai_apikey'
+  const retainedIds =
+    mode === 'edit' && initial?.group_type === 'openai_apikey'
+      ? initial.allowed_vms || []
+      : []
+  const retained = new Set(retainedIds)
+  const listed = apiAccounts
+    ? openaiApiAccountChoices(vms, retainedIds, draft.allowed_vms)
+    : vmsInGroup(vms, draft.group_type)
   const scopeBlocked =
     draft.group_type === 'pool'
       ? !draft.vm_pool_id
@@ -146,7 +158,10 @@ export function KeyLimitsDialog({
           (apiAccounts &&
             draft.allowed_vms.some(
               (id) =>
-                !listed.some((vm) => vm.id === id && vm.openai_api?.has_key)
+                !retained.has(id) &&
+                !listed.some(
+                  (vm) => vm.id === id && isOpenaiApiKeyCandidate(vm)
+                )
             )))
 
   return (
@@ -323,7 +338,7 @@ export function KeyLimitsDialog({
                   {listed.length === 0 ? (
                     <p className='text-xs text-muted-foreground'>
                       {apiAccounts
-                        ? '尚无 OpenAI 账号，请先在账号中配置 API'
+                        ? '尚无已配置 key 且有 API 余额的账号'
                         : '该分组下没有 VM'}
                     </p>
                   ) : (
@@ -338,7 +353,7 @@ export function KeyLimitsDialog({
                           checked={draft.allowed_vms.includes(vm.id)}
                           disabled={
                             apiAccounts &&
-                            !vm.openai_api?.has_key &&
+                            !isOpenaiApiKeyCandidate(vm) &&
                             !draft.allowed_vms.includes(vm.id)
                           }
                           onChange={(e) => {
@@ -355,12 +370,18 @@ export function KeyLimitsDialog({
                           <span className='min-w-0 flex-1'>
                             <span className='block truncate'>
                               {vm.email || vm.name || vm.id}
+                              {!isOpenaiApiKeyCandidate(vm) &&
+                              retained.has(vm.id)
+                                ? ' · 已选账号'
+                                : ''}
                             </span>
                             <span className='block text-xs text-muted-foreground'>
                               {vm.openai_api?.balance != null
                                 ? `API $${trimDecimalZeros(vm.openai_api.balance)}`
                                 : 'API 余额未知'}
-                              {vm.openai_api?.balance_error ? ' · 待刷新' : ''}
+                              {isOpenaiApiBalancePending(vm.openai_api)
+                                ? ' · 待刷新'
+                                : ''}
                               {' · '}
                               {vm.openai_api?.has_key
                                 ? `key 已就绪 · API ${vm.openai_api.enabled ? '已开启' : '已关闭'}`
@@ -383,8 +404,9 @@ export function KeyLimitsDialog({
                 </div>
                 {apiAccounts ? (
                   <p className='text-xs text-muted-foreground'>
-                    仅使用勾选账号的 API key，各账号请求沿用其绑定代理。API
-                    独立开关关闭时暂停调用。
+                    新候选仅显示已配置 key 且有 API
+                    余额的账号；已有绑定可保留或移除。
+                    各账号请求沿用绑定代理，API 独立开关关闭时暂停调用。
                   </p>
                 ) : null}
               </Field>
@@ -437,8 +459,8 @@ function groupOf(value: string | undefined): KeyGroupType {
 }
 
 function vmsInGroup(vms: Vm[], group: KeyGroupType): Vm[] {
-  if (group === 'openai' || group === 'openai_apikey')
-    return vms.filter((vm) => isCodexVm(vm))
+  if (group === 'openai_apikey') return vms.filter(isOpenaiApiKeyCandidate)
+  if (group === 'openai') return vms.filter((vm) => isCodexVm(vm))
   if (group === 'anthropic') return vms.filter((vm) => !isCodexVm(vm))
   return []
 }

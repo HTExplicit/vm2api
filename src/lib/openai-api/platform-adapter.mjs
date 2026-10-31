@@ -60,19 +60,94 @@ export function platformIdentityObservation(url, payload, organizationHeader = '
   }
 }
 
-/** A number is a balance only when the Billing page explicitly labels it as one. */
-export function parsePlatformCreditBalance(body) {
-  const values = []
-  const label =
-    /(?:credit balance|available credits?|可用余额|信用余额|额度余额)\s*[:：]?\s*(?:USD\s*)?(-?\s*\$\s*-?\s*[\d,]+(?:\.\d+)?|[\d,]+(?:\.\d+)?\s*USD)/gi
-  for (const match of String(body || '').matchAll(label)) {
-    const raw = match[1].replace(/USD|\$|,|\s/gi, '')
-    if (/^-?\d+(?:\.\d+)?$/.test(raw) && !values.includes(raw)) values.push(raw)
+const MONEY_FIELDS = new Set(['total_available', 'total_paid_available', 'grant_amount', 'used_amount'])
+
+function decimal(value) {
+  if (typeof value !== 'string') return null
+  const match = value.match(/^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i)
+  if (!match) return null
+  const fraction = match[3] || ''
+  const scale = fraction.length - Number(match[4] || 0)
+  let units = BigInt(match[2] + fraction) * (match[1] ? -1n : 1n)
+  if (scale < 0) units *= 10n ** BigInt(-scale)
+  return { units, scale: Math.max(0, scale) }
+}
+
+function decimalText({ units, scale }) {
+  const negative = units < 0n
+  let digits = (negative ? -units : units).toString().padStart(scale + 1, '0')
+  if (scale) digits = `${digits.slice(0, -scale)}.${digits.slice(-scale)}`.replace(/\.?0+$/, '')
+  return `${negative && units !== 0n ? '-' : ''}${digits}`
+}
+
+function combineDecimals(a, b, subtract = false) {
+  const scale = Math.max(a.scale, b.scale)
+  return {
+    units: a.units * 10n ** BigInt(scale - a.scale) + b.units * 10n ** BigInt(scale - b.scale) * (subtract ? -1n : 1n),
+    scale,
   }
-  if (values.length !== 1) {
-    throw problem('platform_balance_unavailable', '官方 Billing 页面未显示唯一的组织可用余额，请在登录窗口核对页面。')
+}
+
+function grantTime(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  const date = new Date(value * 1000)
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null
+}
+
+/** Read monetary JSON tokens before JavaScript can round them to binary floats. */
+export function parsePlatformCreditSummary(raw, now = Date.now()) {
+  const payload = JSON.parse(raw, (key, value, context) =>
+    MONEY_FIELDS.has(key) && typeof value === 'number' ? context.source : value,
+  )
+  const balance = decimal(payload?.total_available)
+  const paid = decimal(payload?.total_paid_available)
+  const grants = []
+  for (const row of items(payload?.grants)) {
+    const granted = decimal(row.grant_amount)
+    const used = decimal(row.used_amount)
+    const effectiveAt = grantTime(row.effective_at)
+    const expiresAt = row.expires_at === null ? null : grantTime(row.expires_at)
+    if (
+      !granted ||
+      !used ||
+      granted.units < 0n ||
+      used.units < 0n ||
+      !effectiveAt ||
+      (row.expires_at !== null && !expiresAt) ||
+      row.is_scheduled ||
+      row.is_held_for_prepaid_transition ||
+      Date.parse(effectiveAt) > now ||
+      (expiresAt && Date.parse(expiresAt) <= now)
+    )
+      continue
+    const remaining = combineDecimals(granted, used, true)
+    if (remaining.units <= 0n) continue
+    grants.push({
+      id: text(row.id),
+      name: text(row.name || row.title) || 'API credit',
+      granted: decimalText(granted),
+      remaining: decimalText(remaining),
+      effective_at: effectiveAt,
+      expires_at: expiresAt,
+    })
   }
-  return values[0]
+  const nextExpiry =
+    grants
+      .map((grant) => grant.expires_at)
+      .filter(Boolean)
+      .sort()[0] || null
+  const expiring = nextExpiry
+    ? grants
+        .filter((grant) => grant.expires_at === nextExpiry)
+        .reduce((total, grant) => combineDecimals(total, decimal(grant.remaining)), { units: 0n, scale: 0 })
+    : null
+  return {
+    balance: balance ? decimalText(balance) : null,
+    paid_balance: paid ? decimalText(paid) : null,
+    grants,
+    next_expiring_amount: expiring ? decimalText(expiring) : null,
+    next_expiring_at: nextExpiry,
+  }
 }
 
 /** Accept only an unmasked secret returned by the key-creation request. */
@@ -111,15 +186,19 @@ async function button(scope, name, message) {
 }
 
 export class PlatformAdapter {
-  constructor({ page, context, email, organizationId = '', projectId = '', onKey = null }) {
+  constructor({ page, context, email, organizationId = '', projectId = '', onKey = null, now = Date.now }) {
     this.page = page
     this.context = context
     this.email = text(email).toLowerCase()
     this.organizationId = organizationId
     this.projectId = projectId
     this.onKey = onKey
+    this.now = now
     this.identity = { email: null, organizations: [], projects: [], organizationId: null }
     this.projectLists = new Set()
+    this.creditSummaries = new Map()
+    this.creditSequences = new Map()
+    this.creditSequence = 0
     this.createdKey = null
     this.keySave = null
     this.keyCallback = null
@@ -141,8 +220,19 @@ export class PlatformAdapter {
     if (!['platform.openai.com', 'api.openai.com'].includes(url.hostname) || !response.ok()) return
     if (!(response.headers()['content-type'] || '').includes('json')) return
     const request = response.request()
-    const payload = await response.json()
     const headers = request.headers()
+    if (url.origin === 'https://api.openai.com' && url.pathname === '/v1/dashboard/billing/credit_grants') {
+      const organizationId = headers['openai-organization']
+      if (request.method() !== 'GET' || !ORGANIZATION_ID.test(text(organizationId))) return
+      const sequence = ++this.creditSequence
+      const summary = parsePlatformCreditSummary(await response.text(), this.now())
+      if (sequence > (this.creditSequences.get(organizationId) || 0)) {
+        this.creditSummaries.set(organizationId, summary)
+        this.creditSequences.set(organizationId, sequence)
+      }
+      return
+    }
+    const payload = await response.json()
     const observed = platformIdentityObservation(url.href, payload, headers['openai-organization'])
     if (observed.email) this.identity.email = observed.email.toLowerCase()
     if (observed.organizationId) this.identity.organizationId = observed.organizationId
@@ -361,11 +451,31 @@ export class PlatformAdapter {
   async readBalance({ organizationId = this.organizationId } = {}) {
     await this.requireLogin()
     await this.selectOrganization(organizationId)
+    this.creditSummaries.delete(organizationId)
+    const observed = this.page.waitForResponse(
+      (response) => {
+        const request = response.request()
+        return (
+          response.url().split('?')[0] === 'https://api.openai.com/v1/dashboard/billing/credit_grants' &&
+          response.ok() &&
+          request.method() === 'GET' &&
+          request.headers()['openai-organization'] === organizationId
+        )
+      },
+      { timeout: 15_000 },
+    )
+    // Register before navigation; the Billing request can finish before DOMContentLoaded.
+    observed.catch(() => {})
     await this.goto(BILLING_URL)
+    await observed
+    await this.settled()
     const state = await this.requireLogin()
-    const balance = parsePlatformCreditBalance(await this.page.locator('body').innerText())
+    const summary = this.creditSummaries.get(organizationId)
+    if (summary?.balance == null) {
+      throw problem('platform_balance_unavailable', '尚未取得当前组织的官方 Billing 余额，请在登录窗口核对页面。')
+    }
     return {
-      balance,
+      ...summary,
       displayName: state.organizations.find((row) => row.id === organizationId)?.name || organizationId,
     }
   }
