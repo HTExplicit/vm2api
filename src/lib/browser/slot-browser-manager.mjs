@@ -345,7 +345,13 @@ export class SlotBrowserManager {
     const url = new URL(req.url, 'http://127.0.0.1')
     const match = url.pathname.match(BROWSER_PATH)
     if (!match) return false
-    const vmId = decodeURIComponent(match[1])
+    let vmId
+    try {
+      vmId = decodeURIComponent(match[1])
+    } catch {
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
+      return true
+    }
     const ticket = url.searchParams.get('ticket')
     const grant = this.tickets.get(ticket)
     this.tickets.delete(ticket)

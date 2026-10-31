@@ -233,3 +233,16 @@ test('WebSocket tickets work while queued, accept legacy paths, are one use, and
   assert.equal(f.manager.tickets.has(pending.ticket), false)
   await f.manager.close('a')
 })
+
+test('malformed browser path is rejected without throwing from the HTTP upgrade handler', (t) => {
+  const f = fixture(t)
+  let response
+  const socket = {
+    end: (value) => {
+      response = value
+    },
+  }
+  assert.equal(f.manager.handleUpgrade({ url: '/api/panel/vms/%ZZ/browser?ticket=bad' }, socket, Buffer.alloc(0)), true)
+  assert.match(response, /^HTTP\/1.1 400/)
+  assert.equal(f.calls.launched.length, 0)
+})
