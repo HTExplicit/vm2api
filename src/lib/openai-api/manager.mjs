@@ -133,7 +133,7 @@ export class OpenaiApiManager {
           if (current?.accountId === job.accountId) {
             const login = error.code === 'platform_login_required'
             this.repo.upsertAccount(job.accountId, {
-              setup_status: login ? 'needs_login' : current.record?.key_id ? 'ready' : 'error',
+              setup_status: login ? 'needs_login' : 'error',
               last_error: safeMessage(error),
             })
             if (current.record?.organization_id)
@@ -231,14 +231,10 @@ export class OpenaiApiManager {
         organizationId = created.organizationId || organizationId
         const organizationName =
           created.organizationName || identity.organizations?.find((x) => x.id === organizationId)?.name || 'OpenAI'
-        let organization = this.repo.getOrg(organizationId)
-        let endpoint = organization?.endpoint_id && this.apiEndpointStore.getRaw(organization.endpoint_id)
-        if (!endpoint)
-          endpoint = this.apiEndpointStore.create({ kind: 'openai', name: `OpenAI API · ${organizationName}` })
+        const endpoint = this.apiEndpointStore.create({ kind: 'openai', name: `OpenAI API · ${context.account.email}` })
         this.repo.upsertOrg(organizationId, {
           display_name: organizationName,
           project_id: created.projectId,
-          endpoint_id: endpoint.id,
         })
         const key = this.apiEndpointStore.addKey(endpoint.id, {
           api_key: created.apiKey,
@@ -253,13 +249,14 @@ export class OpenaiApiManager {
     }
     record = this.repo.getAccount(job.accountId)
     if (!record.key_id) throw problem('platform_key_missing', '项目 key 尚未完成保存')
+    if (this.repo.getKey(record.key_id)?.disabled)
+      throw problem('invalid_api_key', '已保存的项目 API key 已失效，请在 Platform 核对密钥')
     try {
       await this.updateBalance(live, organizationId)
     } catch (error) {
       this.repo.upsertOrg(organizationId, { balance_error: safeMessage(error) })
     }
-    const org = this.repo.getOrg(organizationId)
-    const endpoint = org?.endpoint_id && this.apiEndpointStore.getRaw(org.endpoint_id)
+    const endpoint = this.apiEndpointStore.getRaw(this.repo.getKey(record.key_id).endpoint_id)
     if (endpoint && (!endpoint.models?.length || job.kind === 'setup')) {
       const current = this.assertCurrent(job)
       const key = this.repo.getKey(record.key_id)

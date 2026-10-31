@@ -9,6 +9,25 @@ import { UsageLogsView } from '../../src/lib/db/repos/usage-logs-view.mjs'
 
 let seq = 0
 
+test('account API logs display their account endpoint while keeping OAuth VM identity empty', () => {
+  const db = freshDb()
+  try {
+    db.exec(`
+      INSERT INTO api_endpoints (id, name, base_url, kind, created_at, updated_at)
+      VALUES ('ep-account', 'OpenAI API · api@example.test', 'https://api.openai.com', 'openai', '2026-01-01', '2026-01-01');
+      INSERT INTO api_endpoint_keys (id, endpoint_id, api_key, source_vm_id, source_account_id, created_at)
+      VALUES ('ek-account', 'ep-account', 'sk-test-fixture', 'vm-a', 'chatgpt-account', '2026-01-01');
+    `)
+    seed(db, [{ account_id: 'ek-account', final_account_id: 'ek-account', vm_id: null, via: 'api-kernel' }])
+    const row = new UsageLogsView(db).listBatch({}).logs[0]
+    assert.equal(row.providerName, 'OpenAI API · api@example.test')
+    assert.equal(row.accountId, 'ek-account')
+    assert.equal(row.vmId, null)
+  } finally {
+    db.close()
+  }
+})
+
 function freshDb() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-ulview-'))
   const db = createDatabase({ dbPath: path.join(dir, 'logs.db') })

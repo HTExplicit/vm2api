@@ -97,7 +97,13 @@ export function lookupNames(db, { userIds = [], keyIds = [], vmIds = [], account
     keys: pick('SELECT id, name FROM api_keys WHERE id IN ($IN)', keyIds, (r) => r.name || r.id),
     vms: pick('SELECT id, name FROM vms WHERE id IN ($IN)', vmIds, (r) => r.name || r.id),
     accounts: pick(
-      'SELECT id, email, name FROM accounts WHERE id IN ($IN)',
+      `SELECT id, email, name FROM (
+        SELECT id, email, name FROM accounts
+        UNION ALL
+        SELECT k.id, NULL AS email, ep.name AS name
+        FROM api_endpoint_keys k JOIN api_endpoints ep ON ep.id = k.endpoint_id
+        WHERE k.source_account_id <> ''
+      ) WHERE id IN ($IN)`,
       accountIds,
       (r) => r.email || r.name || r.id,
     ),

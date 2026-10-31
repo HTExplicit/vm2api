@@ -204,7 +204,7 @@ test('two accounts get separate saved fingerprints, sessions and keys while shar
   assert.equal(first.enabled, true)
   assert.equal(second.setup_status, 'ready')
   assert.equal(f.calls.configured[1].projectId, 'proj-test')
-  assert.equal(f.store.listRaw().length, 1)
+  assert.equal(f.store.listRaw().length, 2, 'account endpoints keep model catalogs and display names separate')
   f.manager.setup(a.vm.id)
   await f.settle()
   assert.equal(f.calls.configured.length, 2, 'reopening configuration must reuse the saved key')

@@ -6,6 +6,7 @@ import path from 'node:path'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { buildDashboard, buildVmList, buildVmDetail } from '../../src/lib/admin/panel-api.mjs'
 import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
+import { ApiEndpointStore } from '../../src/lib/admin/api-endpoints.mjs'
 import { createDatabase } from '../../src/lib/db/database.mjs'
 import { authorizePanelRoute } from '../../src/lib/admin/panel-acl.mjs'
 
@@ -226,4 +227,103 @@ test('restore waits for account browsers to close and restarts the monitor after
         : ['closing', 'closed', 'restoring', 'rebound', 'started'],
     )
   }
+})
+
+test('both model-fetch routes use the account current proxy and ignore manual overrides', async (t) => {
+  const root = fixture(t)
+  const db = createDatabase({ dbPath: ':memory:' })
+  t.after(() => db.close())
+  const store = new ApiEndpointStore({ db })
+  const ep = store.create({ kind: 'openai' })
+  const key = store.addKey(ep.id, {
+    api_key: 'sk-account-fixture',
+    source_vm_id: 'vm-api',
+    source_account_id: 'account-api',
+    proxy_url: 'socks5h://old-proxy:1080',
+  })
+  const seen = []
+  let proxyUrl = 'socks5h://new-proxy:1080'
+  const manager = {
+    resolveAccountKey(input) {
+      assert.equal(input.id, key.id)
+      return proxyUrl ? { accountId: 'account-api', proxyUrl, enabled: false } : null
+    },
+  }
+  const extra = {
+    apiEndpointStore: store,
+    apiScheduler: { reload() {} },
+    manager,
+    forwardApi: async (request) => {
+      seen.push(request)
+      return {
+        statusCode: 200,
+        async *[Symbol.asyncIterator]() {
+          yield Buffer.from(JSON.stringify({ data: [{ id: 'gpt-5.4' }] }))
+        },
+      }
+    },
+  }
+  for (const url of [`/api/panel/api-endpoints/${ep.id}/fetch-models`, '/api/panel/api-endpoints/fetch-models']) {
+    const body = {
+      key_id: key.id,
+      api_key: 'sk-wrong-override',
+      base_url: 'https://unrelated.example',
+      kind: 'custom',
+      protocol: 'anthropic',
+      proxy_id: 'unrelated-proxy',
+      proxy_url: 'socks5h://unrelated-proxy:1080',
+      apply: false,
+    }
+    const out = await handler(root, { ...extra, body })('POST', url)
+    assert.equal(out.status, 200, JSON.stringify(out.body))
+    assert.equal(seen.at(-1).url, 'https://api.openai.com/v1/models')
+    assert.equal(seen.at(-1).headers.authorization, 'Bearer sk-account-fixture')
+    assert.equal(seen.at(-1).proxyUrl, proxyUrl)
+    proxyUrl = ''
+    const count = seen.length
+    const missing = await handler(root, { ...extra, body })('POST', url)
+    assert.equal(missing.status, 400)
+    assert.equal(missing.body.error.code, 'proxy_required')
+    assert.equal(seen.length, count, 'missing binding must not forward a request')
+    proxyUrl = 'socks5h://another-current-proxy:1080'
+  }
+})
+
+test('generic endpoint edits cannot detach an account key from its identity or official upstream', async (t) => {
+  const root = fixture(t)
+  const db = createDatabase({ dbPath: ':memory:' })
+  t.after(() => db.close())
+  const store = new ApiEndpointStore({ db })
+  const ep = store.create({ kind: 'openai' })
+  const key = store.addKey(ep.id, {
+    api_key: 'sk-account-fixture',
+    source_vm_id: 'vm-api',
+    source_account_id: 'account-api',
+  })
+  const base = { apiEndpointStore: store, apiScheduler: { reload() {} } }
+  for (const body of [
+    { source_vm_id: '' },
+    { source_account_id: 'other-account' },
+    { proxy_url: '' },
+    { proxy_id: 'px-other' },
+    { api_key: 'sk-other' },
+  ]) {
+    const out = await handler(root, { ...base, body })('PATCH', `/api/panel/api-endpoints/${ep.id}/keys/${key.id}`)
+    assert.equal(out.status, 400)
+    assert.equal(out.body.error.code, 'account_api_key_managed')
+  }
+  for (const body of [{ kind: 'custom', base_url: 'https://unrelated.example' }, { kind: 'claude' }]) {
+    const out = await handler(root, { ...base, body })('PATCH', `/api/panel/api-endpoints/${ep.id}`)
+    assert.equal(out.status, 400)
+    assert.equal(out.body.error.code, 'account_api_endpoint_managed')
+  }
+  const throughEndpoint = await handler(root, { ...base, body: { key_id: key.id, proxy_id: '' } })(
+    'PATCH',
+    `/api/panel/api-endpoints/${ep.id}`,
+  )
+  assert.equal(throughEndpoint.status, 400)
+  assert.equal(throughEndpoint.body.error.code, 'account_api_key_managed')
+  assert.equal(store.getKey(key.id).source_account_id, 'account-api')
+  assert.equal(store.getKey(key.id).api_key, 'sk-account-fixture')
+  assert.equal(store.getRaw(ep.id).kind, 'openai')
 })

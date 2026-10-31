@@ -128,11 +128,11 @@ export class OpenaiApiCreditsService {
   }
 
   preview(vmId) {
-    return this.exclusive(vmId, () => this.previewAccount(vmId))
+    return this.exclusive(vmId, 'preview', () => this.previewAccount(vmId))
   }
 
   claim(vmId, { destination_account_id: destination } = {}) {
-    return this.exclusive(vmId, async () => {
+    return this.exclusive(vmId, 'claim', async () => {
       let context = this.promoContext(vmId)
       if (['pending', 'claimed'].includes(context.record?.claim_status)) {
         throw problem('api_promo_already_linked', '该账号已领取，后续按期自动发放', 409)
@@ -165,7 +165,7 @@ export class OpenaiApiCreditsService {
   }
 
   refreshClaim(vmId) {
-    return this.exclusive(vmId, async () => {
+    return this.exclusive(vmId, 'refreshClaim', async () => {
       const context = this.promoContext(vmId, { requirePro: false })
       if (context.record?.claim_status === 'claimed') return this.view(context.vm)
       if (!context.record?.operation_id || !context.record.destination_account_id) {
@@ -176,12 +176,16 @@ export class OpenaiApiCreditsService {
     })
   }
 
-  exclusive(vmId, action) {
-    if (this.inflight.has(vmId)) return this.inflight.get(vmId)
+  exclusive(vmId, kind, action) {
+    const running = this.inflight.get(vmId)
+    if (running) {
+      if (running.kind === kind) return running.promise
+      return Promise.reject(problem('api_promo_busy', '账号正在执行其他 API 赠额操作，请稍后重试', 409))
+    }
     const pending = Promise.resolve()
       .then(action)
       .finally(() => this.inflight.delete(vmId))
-    this.inflight.set(vmId, pending)
+    this.inflight.set(vmId, { kind, promise: pending })
     return pending
   }
 
@@ -198,7 +202,8 @@ export class OpenaiApiCreditsService {
   }
 
   async mcp(context) {
-    const fetch = this.fetchImpl || makeProxyFetch(hostProxyUrlForVm(context.vm), 20_000)
+    context.proxyUrl = hostProxyUrlForVm(context.vm)
+    const fetch = this.fetchImpl || makeProxyFetch(context.proxyUrl, 20_000)
     const headers = {
       authorization: `Bearer ${context.account.access_token}`,
       'ChatGPT-Account-Id': context.accountId,
@@ -210,6 +215,7 @@ export class OpenaiApiCreditsService {
     }
     let nextId = 0
     const rpc = async (method, params, notification = false) => {
+      this.ensureCurrent(context)
       const id = notification ? undefined : ++nextId
       const response = await fetch(MCP_URL, {
         method: 'POST',
@@ -261,6 +267,8 @@ export class OpenaiApiCreditsService {
     const current = this.accountForVm(context.vm.id)
     if (current.accountId !== context.accountId)
       throw problem('api_account_changed', '账号已更换，未写入旧账号结果', 409)
+    if (!hasBoundExit(current.vm.proxy) || hostProxyUrlForVm(current.vm) !== context.proxyUrl)
+      throw problem('api_proxy_changed', '账号代理已更换，请重新查询状态', 409)
   }
 
   async previewAccount(vmId) {

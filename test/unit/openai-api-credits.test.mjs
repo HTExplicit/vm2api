@@ -303,6 +303,115 @@ test('missing proxy rejects before a promo request and does not fall back to dir
   assert.equal(requests, 0)
 })
 
+test('same-action calls join while a concurrent claim cannot return an in-flight preview as success', async (t) => {
+  const slot = fixture(t)
+  let resumeInitialize
+  let markStarted
+  const started = new Promise((resolve) => {
+    markStarted = resolve
+  })
+  const gate = new Promise((resolve) => {
+    resumeInitialize = resolve
+  })
+  const mock = mcpMock({ link: () => assert.fail('a busy claim must not be submitted') })
+  const service = slot.service(async (url, init) => {
+    if (JSON.parse(init.body).method === 'initialize') {
+      markStarted()
+      await gate
+    }
+    return mock.fetch(url, init)
+  })
+  const firstPreview = service.preview(slot.vmId)
+  await started
+  const joinedPreview = service.preview(slot.vmId)
+  assert.equal(joinedPreview, firstPreview)
+  await assert.rejects(service.claim(slot.vmId), { code: 'api_promo_busy', status: 409 })
+  await assert.rejects(service.refreshClaim(slot.vmId), { code: 'api_promo_busy', status: 409 })
+  resumeInitialize()
+  const [first, joined] = await Promise.all([firstPreview, joinedPreview])
+  assert.equal(first, joined)
+  assert.equal(first.claim_status, 'eligible')
+  assert.equal(mock.tools().filter((call) => call.params.name === 'link_api_org').length, 0)
+})
+
+test('proxy rebind after MCP initialize stops the claim before another RPC is sent', async (t) => {
+  const slot = fixture(t)
+  slot.repo.upsertAccount(ACCOUNT_ID, {
+    vm_id: slot.vmId,
+    claim_status: 'eligible',
+    offer: OFFER,
+    destinations: [DESTINATION],
+  })
+  const mock = mcpMock({ link: () => assert.fail('the old proxy must not submit the link') })
+  const service = slot.service(async (url, init) => {
+    const response = await mock.fetch(url, init)
+    if (JSON.parse(init.body).method === 'initialize') {
+      atomicWriteJson(path.join(slot.projectRoot, 'vms', `${slot.vmId}.json`), {
+        ...slot.vm(),
+        proxy: { url: 'socks5h://127.0.0.1:2080' },
+      })
+    }
+    return response
+  })
+  await assert.rejects(service.claim(slot.vmId), { code: 'api_proxy_changed' })
+  assert.deepEqual(
+    mock.calls.map((call) => call.method),
+    ['initialize'],
+  )
+  const record = slot.repo.getAccount(ACCOUNT_ID)
+  assert.equal(record.claim_status, 'eligible')
+  assert.equal(record.organization_id, '')
+  assert.equal(record.delivery, null)
+  assert.ok(record.operation_id, 'the original operation remains available for a deliberate status recheck')
+})
+
+test('proxy rebind before preview persistence discards the old proxy result', async (t) => {
+  const slot = fixture(t)
+  const mock = mcpMock()
+  const service = slot.service(async (url, init) => {
+    const response = await mock.fetch(url, init)
+    if (JSON.parse(init.body).params?.name === 'discover_api_orgs') {
+      atomicWriteJson(path.join(slot.projectRoot, 'vms', `${slot.vmId}.json`), {
+        ...slot.vm(),
+        proxy: { url: 'socks5h://127.0.0.1:2080' },
+      })
+    }
+    return response
+  })
+  await assert.rejects(service.preview(slot.vmId), { code: 'api_proxy_changed' })
+  const record = slot.repo.getAccount(ACCOUNT_ID)
+  assert.equal(record.claim_status, 'unknown')
+  assert.equal(record.offer, null)
+  assert.deepEqual(record.destinations, [])
+})
+
+test('proxy rebind during link response leaves only the persisted operation for recovery', async (t) => {
+  const slot = fixture(t)
+  slot.repo.upsertAccount(ACCOUNT_ID, {
+    vm_id: slot.vmId,
+    claim_status: 'eligible',
+    offer: OFFER,
+    destinations: [DESTINATION],
+  })
+  const mock = mcpMock({
+    link: () => {
+      atomicWriteJson(path.join(slot.projectRoot, 'vms', `${slot.vmId}.json`), {
+        ...slot.vm(),
+        proxy: { url: 'socks5h://127.0.0.1:2080' },
+      })
+      return linked('issued')
+    },
+  })
+  const service = slot.service(mock.fetch)
+  await assert.rejects(service.claim(slot.vmId), { code: 'api_proxy_changed' })
+  const record = slot.repo.getAccount(ACCOUNT_ID)
+  assert.equal(record.claim_status, 'eligible')
+  assert.equal(record.organization_id, '')
+  assert.equal(record.delivery, null)
+  assert.equal(slot.repo.getOrg(ORG_ID), null)
+  assert.equal(mock.tools().filter((call) => call.params.name === 'link_api_org').length, 1)
+})
+
 test('replacing the OAuth account does not inherit the previous account claim, key, session or balance', async (t) => {
   const slot = fixture(t)
   slot.repo.upsertOrg(ORG_ID, { display_name: 'Personal', balance: '37.00' })

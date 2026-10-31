@@ -99,6 +99,7 @@ import { setPriceOverride, listPriceOverrides, syncModelsDev } from './price-cat
 import { buildPricing } from './pricing-view.mjs'
 import { publicKeyView } from './api-keys.mjs'
 import { assertVmScope, normalizeKeyScope } from './key-scope.mjs'
+import { resolvePreset } from '../pool/api-presets.mjs'
 import {
   assertVmPoolExists,
   createVmPool,
@@ -928,6 +929,39 @@ export function createPanelHandler(ctx) {
       if (!openaiApiManager?.view(vm)?.has_key) {
         throw Object.assign(new Error('所选账号尚未配置 API key'), { code: 'key_api_account_not_ready' })
       }
+    }
+  }
+
+  function endpointKeyProxy(key) {
+    if (!key?.source_account_id && !key?.source_vm_id) return key?.proxy_url || ''
+    const source = openaiApiManager?.resolveAccountKey(key)
+    if (!source?.proxyUrl || source.accountId !== key.source_account_id) {
+      throw Object.assign(new Error('账号未绑定可用代理'), { code: 'proxy_required', status: 400 })
+    }
+    return source.proxyUrl
+  }
+
+  function accountModelOptions(key) {
+    if (!key?.source_account_id && !key?.source_vm_id) return null
+    return {
+      kind: 'openai',
+      protocol: 'openai',
+      base_url: 'https://api.openai.com',
+      api_key: key.api_key,
+      proxy_url: endpointKeyProxy(key),
+      headers: {},
+    }
+  }
+
+  function assertEndpointKeyPatch(key, patch = {}) {
+    if (Object.hasOwn(patch, 'source_vm_id') || Object.hasOwn(patch, 'source_account_id')) {
+      throw Object.assign(new Error('账号 API key 的归属由账号配置管理'), { code: 'account_api_key_managed' })
+    }
+    if (
+      (key?.source_account_id || key?.source_vm_id) &&
+      ['api_key', 'proxy_id', 'proxy_url'].some((field) => Object.hasOwn(patch, field))
+    ) {
+      throw Object.assign(new Error('账号 API key 与代理请在对应账号中管理'), { code: 'account_api_key_managed' })
     }
   }
 
@@ -1862,18 +1896,20 @@ export function createPanelHandler(ctx) {
         const body = await readBody(req, 8192).catch(() => ({}))
         try {
           const saved = savedEndpointKey(apiEndpointStore, body?.key_id)
-          const proxyUrl = Object.prototype.hasOwnProperty.call(body || {}, 'proxy_id')
-            ? resolveConsoleProxyUrl(proxyPool, body.proxy_id)
-            : saved?.proxy_url || body?.proxy_url
+          const accountOptions = accountModelOptions(saved)
           const result = await fetchUpstreamModels({
             cfg,
-            kind: body?.kind,
-            protocol: body?.protocol,
-            base_url: body?.base_url || saved?.base_url,
-            api_key: body?.api_key || saved?.api_key,
-            proxy_url: proxyUrl,
-            headers: body?.headers,
-            auth_scheme: body?.auth_scheme || body?.authScheme || saved?.auth_scheme,
+            ...(accountOptions || {
+              kind: body?.kind,
+              protocol: body?.protocol,
+              base_url: body?.base_url || saved?.base_url,
+              api_key: body?.api_key || saved?.api_key,
+              proxy_url: Object.prototype.hasOwnProperty.call(body || {}, 'proxy_id')
+                ? resolveConsoleProxyUrl(proxyPool, body.proxy_id)
+                : saved?.proxy_url || body?.proxy_url,
+              headers: body?.headers,
+              auth_scheme: body?.auth_scheme || body?.authScheme || saved?.auth_scheme,
+            }),
             forward: ctx.forwardApi,
           })
           return json(res, 200, { ok: true, ...result })
@@ -1890,6 +1926,7 @@ export function createPanelHandler(ctx) {
           const proxyUrl = body?.proxy_id ? resolveConsoleProxyUrl(proxyPool, body.proxy_id) : ''
           if (Array.isArray(body?.api_key_entries)) {
             for (const entry of body.api_key_entries) {
+              assertEndpointKeyPatch(null, entry)
               if (!entry.proxy_url) entry.proxy_url = proxyUrl
               if (body?.proxy_id != null) entry.proxy_id = String(body.proxy_id || '').trim()
             }
@@ -1908,11 +1945,31 @@ export function createPanelHandler(ctx) {
         const id = p.split('/').pop()
         const body = await readBody(req, 1 << 20).catch(() => ({}))
         try {
+          const previous = apiEndpointStore.getRaw(id)
+          if ((previous?.api_key_entries || []).some((key) => key.source_account_id || key.source_vm_id)) {
+            const preset = resolvePreset(body?.kind ?? previous.kind, { ...previous, ...body })
+            if (
+              preset.kind !== 'openai' ||
+              preset.protocol !== 'openai' ||
+              preset.base_url !== 'https://api.openai.com'
+            ) {
+              throw Object.assign(new Error('账号 API key 只能使用 OpenAI 官方上游'), {
+                code: 'account_api_endpoint_managed',
+              })
+            }
+          }
+          const keyId = String(body?.key_id || '').trim()
+          const apiKey = String(body?.api_key || '').trim()
+          if (keyId) {
+            const keyPatch = {
+              ...(apiKey ? { api_key: apiKey } : {}),
+              ...(body?.proxy_id != null ? { proxy_id: body.proxy_id } : {}),
+            }
+            assertEndpointKeyPatch(apiEndpointStore.getKey(keyId), keyPatch)
+          }
           const proxyUrl = body?.proxy_id ? resolveConsoleProxyUrl(proxyPool, body.proxy_id) : ''
           const rec = apiEndpointStore.update(id, body || {})
           if (!rec) return json(res, 404, { ok: false, error: { message: 'endpoint not found' } })
-          const keyId = String(body?.key_id || '').trim()
-          const apiKey = String(body?.api_key || '').trim()
           if (keyId) {
             apiEndpointStore.updateKey(keyId, {
               ...(apiKey ? { api_key: apiKey } : {}),
@@ -1950,12 +2007,15 @@ export function createPanelHandler(ctx) {
         try {
           const result = await fetchUpstreamModels({
             cfg,
-            kind: ep.kind,
-            protocol: ep.protocol,
-            base_url: ep.base_url,
-            api_key: key.api_key,
-            proxy_url: key.proxy_url,
-            headers: ep.headers,
+            ...(accountModelOptions(key) || {
+              kind: ep.kind,
+              protocol: ep.protocol,
+              base_url: ep.base_url,
+              api_key: key.api_key,
+              proxy_url: key.proxy_url,
+              headers: ep.headers,
+            }),
+            forward: ctx.forwardApi,
           })
           const apply = body?.apply !== false
           const rec = apply ? apiEndpointStore.mergeFetchedModels(id, result.models) : ep
@@ -1977,6 +2037,7 @@ export function createPanelHandler(ctx) {
         const id = p.split('/')[4]
         const body = await readBody(req, 8192).catch(() => ({}))
         try {
+          assertEndpointKeyPatch(null, body || {})
           const key = apiEndpointStore.addKey(id, body || {})
           apiScheduler.reload(apiEndpointStore.listRaw())
           const view = publicEndpointView(apiEndpointStore.getRaw(id), { reveal: true })
@@ -1996,6 +2057,11 @@ export function createPanelHandler(ctx) {
       if (req.method === 'PATCH' && /^\/api\/panel\/api-endpoints\/[^/]+\/keys\/[^/]+$/.test(p)) {
         const kid = p.split('/').pop()
         const body = await readBody(req, 8192).catch(() => ({}))
+        try {
+          assertEndpointKeyPatch(apiEndpointStore.getKey(kid), body || {})
+        } catch (error) {
+          return json(res, 400, { ok: false, error: { code: error.code, message: error.message } })
+        }
         const rec = apiEndpointStore.updateKey(kid, body || {})
         if (!rec) return json(res, 404, { ok: false, error: { message: 'key not found' } })
         apiScheduler.reload(apiEndpointStore.listRaw())
