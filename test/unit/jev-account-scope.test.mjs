@@ -65,7 +65,11 @@ test('a platform and plan are one key, and a named account is a union', () => {
 test('a plan-only 1.3.158 save migrates onto GPT pairs, and an explicit empty list does not', () => {
   const legacy = normalizeJevConfig({ account_plan_types: ['Pro', 'self_serve_business_prolite', 'none'] })
   assert.deepEqual(legacy.account_platform_plans, ['gpt:pro', 'gpt:business', 'claude:none', 'gpt:none'])
-  assert.equal(jevAccountInScope(legacy, { platform: 'gpt', plan_type: 'pro' }), true)
+  for (const plan_type of ['prolite', 'pro', 'promax']) {
+    assert.equal(jevAccountInScope(legacy, { platform: 'gpt', plan_type }), true, plan_type)
+  }
+  assert.equal(jevAccountInScope(legacy, { platform: 'gpt', plan_type: 'plus' }), false)
+  assert.equal(jevAccountInScope(legacy, { platform: 'gpt', plan_type: 'free' }), false)
   assert.equal(jevAccountInScope(legacy, { platform: 'gpt', plan_type: 'Self_Serve_Business_ProLite' }), true)
   assert.equal(jevAccountInScope(legacy, { platform: 'claude', account_tier: 'pro' }), false)
   assert.equal(jevAccountInScope(legacy, { platform: 'claude' }), true)
