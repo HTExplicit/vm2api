@@ -1,5 +1,6 @@
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import { codexQuotaDisplayVm } from '@/lib/codex-quota-display'
 import { usedPctOf } from '@/lib/format'
 import { windowProbed } from '@/lib/pool-quota'
 import { fleetGroup, type FleetGroup } from '@/lib/vm-status'
@@ -99,22 +100,23 @@ export type WindowReadout = {
 
 /** 5H → 7D → Fable。Fable 只在 Max 且有读数或明确态时出现。 */
 export function vmWindows(vm: Vm): WindowReadout[] {
+  const display = codexQuotaDisplayVm(vm)
   const probed = (w: '5h' | '7d') =>
-    vm.has_token && windowProbed(vm, w) ? usedPctOf(vm, w) : null
+    vm.has_token && windowProbed(display, w) ? usedPctOf(display, w) : null
   const windows: WindowReadout[] = [
     {
       key: '5h',
       label: '5H',
       pct: probed('5h'),
       note: null,
-      reset: vm.reset_5h,
+      reset: display.reset_5h,
     },
     {
       key: '7d',
       label: '7D',
       pct: probed('7d'),
       note: null,
-      reset: vm.reset_7d,
+      reset: display.reset_7d,
     },
   ]
   const fable = fableRow(vm)
@@ -140,7 +142,9 @@ export function bladeState(vm: Vm): BladeState {
   const zone = zoneOf(vm)
   if (zone === 'dead') return 'dead'
   if (zone === 'none' || !vm.has_token) return 'vacant'
-  if (!windowProbed(vm, '5h') && !windowProbed(vm, '7d')) return 'unprobed'
+  const display = codexQuotaDisplayVm(vm)
+  if (!windowProbed(display, '5h') && !windowProbed(display, '7d'))
+    return 'unprobed'
   return 'live'
 }
 

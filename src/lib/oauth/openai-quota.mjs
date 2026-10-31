@@ -8,13 +8,13 @@ import { getVm, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { isLocalEgressProxy } from '../vm/egress.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
-import { readCodexAccounts, upsertCodexAccount, persistCodexQuotaSnapshot } from '../vm/codex-slot.mjs'
 import {
-  buildCodexUsageView,
-  extraToCodexSnapshot,
-  normalizeCodexCredits,
-  normalizeCodexLimits,
-} from '../protocol/codex-usage.mjs'
+  readCodexAccounts,
+  upsertCodexAccount,
+  persistCodexQuotaSnapshot,
+  markCodexQuotaRefreshPending,
+} from '../vm/codex-slot.mjs'
+import { buildCodexUsageView, extraToCodexSnapshot, normalizeCodexCredits } from '../protocol/codex-usage.mjs'
 import { CODEX_OAUTH_ORIGINATOR, makeProxyFetch, refreshCodexAccessToken } from '../protocol/codex-models.mjs'
 import { openaiIdentityFromJwt } from './openai-jwt.mjs'
 import { refreshOpenaiSubscription } from './openai-subscription.mjs'
@@ -92,41 +92,32 @@ function resetAtIso(window = {}, now = Date.now()) {
 
 function pickWindow(window) {
   if (!window || typeof window !== 'object') return null
-  return {
-    used_percent: num(window.used_percent ?? window.usedPercent),
-    reset_after_seconds: int(window.reset_after_seconds ?? window.resetAfterSeconds),
-    window_minutes: windowMinutes(window),
-    reset_at: resetAtIso(window),
-  }
+  const used = num(window.used_percent ?? window.usedPercent)
+  if (used == null) return null
+  return Object.fromEntries(
+    Object.entries({
+      used_percent: used,
+      reset_after_seconds: int(window.reset_after_seconds ?? window.resetAfterSeconds),
+      window_minutes: windowMinutes(window),
+      reset_at: resetAtIso(window),
+    }).filter(([, value]) => value != null),
+  )
 }
 
 export function extraFromRateLimit(rateLimit = {}, now = Date.now()) {
   const primary = pickWindow(rateLimit.primary_window || rateLimit.primaryWindow)
   const secondary = pickWindow(rateLimit.secondary_window || rateLimit.secondaryWindow)
+  if (!primary && !secondary) return null
   const extra = {
     codex_usage_updated_at: new Date(now).toISOString(),
   }
-  if (primary) {
-    extra.codex_primary_used_percent = primary.used_percent
-    extra.codex_primary_reset_after_seconds = primary.reset_after_seconds
-    extra.codex_primary_window_minutes = primary.window_minutes
-    extra.codex_primary_reset_at = primary.reset_at
+  for (const [role, window] of [
+    ['primary', primary],
+    ['secondary', secondary],
+  ]) {
+    if (!window) continue
+    for (const [key, value] of Object.entries(window)) extra[`codex_${role}_${key}`] = value
   }
-  if (secondary) {
-    extra.codex_secondary_used_percent = secondary.used_percent
-    extra.codex_secondary_reset_after_seconds = secondary.reset_after_seconds
-    extra.codex_secondary_window_minutes = secondary.window_minutes
-    extra.codex_secondary_reset_at = secondary.reset_at
-  }
-  const limits = normalizeCodexLimits(extraToCodexSnapshot(extra))
-  extra.codex_5h_used_percent = limits.used_5h_percent
-  extra.codex_7d_used_percent = limits.used_7d_percent
-  extra.codex_5h_reset_after_seconds = limits.reset_5h_seconds
-  extra.codex_7d_reset_after_seconds = limits.reset_7d_seconds
-  extra.codex_5h_window_minutes = limits.window_5h_minutes
-  extra.codex_7d_window_minutes = limits.window_7d_minutes
-  extra.codex_5h_reset_at = limits.reset_5h_at
-  extra.codex_7d_reset_at = limits.reset_7d_at
   return extra
 }
 
@@ -375,6 +366,13 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
         upstream_status: usage.status,
       })
     }
+    const extra = extraFromRateLimit(usage.payload?.rate_limit || usage.payload?.rateLimit || {})
+    if (!extra) {
+      if (isOpenaiAuthCurrent(current.auth)) {
+        markCodexQuotaRefreshPending(projectRoot, vmId, { reason: 'quota_sample_missing' })
+      }
+      return fail('quota_sample_missing', '未取得有效额度数据，保留上次结果', 502)
+    }
     const details = await quotaFetch(CHATGPT_RESET_CREDITS_URL, {
       headers: headersOf(access),
       proxyUrl: current.proxyUrl,
@@ -382,7 +380,7 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
       direct: current.direct,
       auth: current.auth,
     })
-    return { usage, details }
+    return { usage, details, extra }
   }
 
   let pack = await run(current.access)
@@ -403,7 +401,7 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
   if (pack.ok === false || pack.error) return pack
   if (!isOpenaiAuthCurrent(current.auth)) return fail('credential_changed', '账号或凭据已更新，未写入旧额度结果', 409)
 
-  const extra = extraFromRateLimit(pack.usage.payload?.rate_limit || pack.usage.payload?.rateLimit || {})
+  const extra = pack.extra
   const usageCredits = pack.usage.payload?.rate_limit_reset_credits || pack.usage.payload?.rateLimitResetCredits
   const detailCredits = pack.details?.ok ? parseResetCreditDetails(pack.details.payload) : null
   const resetCredits = mergeResetCredits(
@@ -419,8 +417,9 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
   )
   const persistable = resetCredits.available_count <= 0 || resetCredits.credits.length > 0 ? resetCredits : null
   const credits = normalizeCodexCredits(pack.usage.payload?.credits)
-  persistCodexQuotaSnapshot(projectRoot, vmId, {
+  const saved = persistCodexQuotaSnapshot(projectRoot, vmId, {
     extra,
+    sampledAt: extra.codex_usage_updated_at,
     credits,
     planType: pack.usage.payload?.plan_type || pack.usage.payload?.planType,
     ...(persistable ? { resetCredits: persistable } : {}),
@@ -430,7 +429,7 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
   })
   return {
     ok: true,
-    ...publicUsage(extra, persistable || resetCredits, credits, pack.usage.payload || {}),
+    ...publicUsage(saved?.codex?.extra || extra, persistable || resetCredits, credits, pack.usage.payload || {}),
     fetched_at: resetCredits.fetched_at,
     warning: persistable ? undefined : 'reset_credit_cache_refresh_failed',
   }

@@ -323,7 +323,11 @@ test('a failed subscription supplement does not fail successful quota refresh', 
       fetchImpl: async (rawUrl) => {
         const pathname = new URL(rawUrl).pathname
         calls.push(pathname)
-        if (pathname.endsWith('/usage')) return response(200, { plan_type: 'pro', rate_limit: {} })
+        if (pathname.endsWith('/usage'))
+          return response(200, {
+            plan_type: 'pro',
+            rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 18000 } },
+          })
         if (pathname.endsWith('/rate-limit-reset-credits')) return response(200, { available_count: 0, credits: [] })
         assert.equal(slot.read().codex.auth_block, undefined, 'quota success has recovered the previous block')
         return response(status, {})

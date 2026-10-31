@@ -37,7 +37,7 @@ export function extraFromCodexHeaders(headers = {}, now = Date.now()) {
     const minutes = int(h[`x-codex-${role}-window-minutes`])
     const resetAtEpoch = int(h[`x-codex-${role}-reset-at`])
     const resetAfter = int(h[`x-codex-${role}-reset-after-seconds`])
-    if (used == null && minutes == null && resetAtEpoch == null && resetAfter == null) continue
+    if (used == null) continue
     seen = true
     const resetMs =
       resetAtEpoch != null && resetAtEpoch > 0
@@ -46,10 +46,11 @@ export function extraFromCodexHeaders(headers = {}, now = Date.now()) {
           ? now + resetAfter * 1000
           : null
     extra[`codex_${role}_used_percent`] = used
-    extra[`codex_${role}_window_minutes`] = minutes
-    extra[`codex_${role}_reset_at`] = resetMs == null ? null : new Date(resetMs).toISOString()
-    extra[`codex_${role}_reset_after_seconds`] =
-      resetAfter != null ? resetAfter : resetMs == null ? null : Math.max(0, Math.round((resetMs - now) / 1000))
+    if (minutes != null) extra[`codex_${role}_window_minutes`] = minutes
+    if (resetMs != null) {
+      extra[`codex_${role}_reset_at`] = new Date(resetMs).toISOString()
+      extra[`codex_${role}_reset_after_seconds`] = resetAfter ?? Math.max(0, Math.round((resetMs - now) / 1000))
+    }
   }
   if (!seen) return null
   const overSecondary = num(h['x-codex-primary-over-secondary-limit-percent'])
@@ -163,23 +164,36 @@ function lowerHeaders(headers) {
 
 export function extraToCodexSnapshot(extra = {}) {
   if (!extra || typeof extra !== 'object') return emptySnapshot()
+  const primaryWindow = primaryIsFiveHour(
+    num(extra.codex_primary_window_minutes),
+    num(extra.codex_secondary_window_minutes),
+  )
+    ? '5h'
+    : '7d'
+  const secondaryWindow = primaryWindow === '5h' ? '7d' : '5h'
   return {
     primary_used_percent: num(
       Object.hasOwn(extra, 'codex_primary_used_percent')
         ? extra.codex_primary_used_percent
-        : extra.codex_7d_used_percent,
+        : extra[`codex_${primaryWindow}_used_percent`],
     ),
-    primary_reset_after_seconds: int(extra.codex_primary_reset_after_seconds ?? extra.codex_7d_reset_after_seconds),
-    primary_window_minutes: int(extra.codex_primary_window_minutes ?? extra.codex_7d_window_minutes),
-    primary_reset_at: extra.codex_primary_reset_at || extra.codex_7d_reset_at || null,
+    primary_reset_after_seconds: int(
+      extra.codex_primary_reset_after_seconds ?? extra[`codex_${primaryWindow}_reset_after_seconds`],
+    ),
+    primary_window_minutes: int(extra.codex_primary_window_minutes ?? extra[`codex_${primaryWindow}_window_minutes`]),
+    primary_reset_at: extra.codex_primary_reset_at || extra[`codex_${primaryWindow}_reset_at`] || null,
     secondary_used_percent: num(
       Object.hasOwn(extra, 'codex_secondary_used_percent')
         ? extra.codex_secondary_used_percent
-        : extra.codex_5h_used_percent,
+        : extra[`codex_${secondaryWindow}_used_percent`],
     ),
-    secondary_reset_after_seconds: int(extra.codex_secondary_reset_after_seconds ?? extra.codex_5h_reset_after_seconds),
-    secondary_window_minutes: int(extra.codex_secondary_window_minutes ?? extra.codex_5h_window_minutes),
-    secondary_reset_at: extra.codex_secondary_reset_at || extra.codex_5h_reset_at || null,
+    secondary_reset_after_seconds: int(
+      extra.codex_secondary_reset_after_seconds ?? extra[`codex_${secondaryWindow}_reset_after_seconds`],
+    ),
+    secondary_window_minutes: int(
+      extra.codex_secondary_window_minutes ?? extra[`codex_${secondaryWindow}_window_minutes`],
+    ),
+    secondary_reset_at: extra.codex_secondary_reset_at || extra[`codex_${secondaryWindow}_reset_at`] || null,
     primary_over_secondary_percent: num(extra.codex_primary_over_secondary_percent),
     updated_at: extra.codex_usage_updated_at || extra.updated_at || null,
   }
@@ -200,25 +214,18 @@ function emptySnapshot() {
   }
 }
 
+function primaryIsFiveHour(primaryMins, secondaryMins) {
+  if (primaryMins != null && secondaryMins != null) return primaryMins < secondaryMins
+  if (primaryMins != null) return primaryMins <= 360
+  if (secondaryMins != null) return secondaryMins > 360
+  return false
+}
+
 export function normalizeCodexLimits(snapshot = {}) {
-  const primaryMins = num(snapshot.primary_window_minutes)
-  const secondaryMins = num(snapshot.secondary_window_minutes)
-  const hasPrimary = primaryMins != null
-  const hasSecondary = secondaryMins != null
-  let fiveFromPrimary = false
-  let sevenFromPrimary = false
-  if (hasPrimary && hasSecondary) {
-    if (primaryMins < secondaryMins) fiveFromPrimary = true
-    else sevenFromPrimary = true
-  } else if (hasPrimary) {
-    if (primaryMins <= 360) fiveFromPrimary = true
-    else sevenFromPrimary = true
-  } else if (hasSecondary) {
-    if (secondaryMins <= 360) sevenFromPrimary = true
-    else fiveFromPrimary = true
-  } else {
-    sevenFromPrimary = true
-  }
+  const fiveFromPrimary = primaryIsFiveHour(
+    num(snapshot.primary_window_minutes),
+    num(snapshot.secondary_window_minutes),
+  )
   if (fiveFromPrimary) {
     return {
       used_5h_percent: snapshot.primary_used_percent,
@@ -304,5 +311,55 @@ export function buildCodexUsageView(extraOrSnapshot = {}) {
         window_minutes: limits.window_7d_minutes,
       },
     ],
+  }
+}
+
+/** Keep the legacy aliases aligned with the merged, authoritative windows. */
+export function normalizeCodexExtra(extra = {}) {
+  const limits = normalizeCodexLimits(extraToCodexSnapshot(extra))
+  const merged = { ...extra }
+  for (const key of ['5h', '7d']) {
+    merged[`codex_${key}_used_percent`] = limits[`used_${key}_percent`]
+    merged[`codex_${key}_reset_after_seconds`] = limits[`reset_${key}_seconds`]
+    merged[`codex_${key}_window_minutes`] = limits[`window_${key}_minutes`]
+    merged[`codex_${key}_reset_at`] = limits[`reset_${key}_at`]
+  }
+  return merged
+}
+
+function hasUsageSample(view) {
+  return view?.windows?.some((window) => window.used_percent != null) === true
+}
+
+/** Last measured windows are display-only; the root quota always remains authoritative. */
+export function codexUsageWithSample(extra, previous = {}, { sampledAt = null, pendingReason = null } = {}) {
+  const current = buildCodexUsageView(extra)
+  const old = previous.last_success || (hasUsageSample(previous) ? buildCodexUsageView(previous) : null)
+  let sample = old
+  if (sampledAt && hasUsageSample(current)) {
+    const sampleExtra = { codex_usage_updated_at: sampledAt }
+    for (const key of ['5h', '7d']) {
+      const measured = current.windows.find((window) => window.id === key)
+      const window = measured.used_percent != null ? measured : old?.windows?.find((item) => item.id === key)
+      if (!window) continue
+      sampleExtra[`codex_${key}_used_percent`] = window.used_percent
+      sampleExtra[`codex_${key}_reset_at`] = window.reset_at
+      sampleExtra[`codex_${key}_reset_after_seconds`] = window.reset_after_seconds
+      sampleExtra[`codex_${key}_window_minutes`] = window.window_minutes
+    }
+    sample = buildCodexUsageView(sampleExtra)
+  }
+  const missing =
+    sample?.windows?.some(
+      (window) =>
+        window.used_percent != null && current.windows.find((item) => item.id === window.id)?.used_percent == null,
+    ) === true
+  const pending = !!pendingReason || missing || (!sampledAt && previous.pending_refresh === true)
+  return {
+    ...current,
+    pending_refresh: pending,
+    pending_reason: pending ? pendingReason || previous.pending_reason || 'quota_sample_missing' : null,
+    last_success_at: sampledAt || previous.last_success_at || sample?.snapshot?.updated_at || null,
+    last_success: sample,
   }
 }

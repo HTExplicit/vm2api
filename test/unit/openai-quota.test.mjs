@@ -15,6 +15,8 @@ import {
   CHATGPT_RESET_CONSUME_URL,
 } from '../../src/lib/oauth/openai-quota.mjs'
 import { persistCodexQuotaSnapshot } from '../../src/lib/vm/codex-slot.mjs'
+import { buildCodexUsageView, extraToCodexSnapshot } from '../../src/lib/protocol/codex-usage.mjs'
+import { captureOpenaiAuth, recordOpenaiAuthResult } from '../../src/lib/oauth/openai-auth-state.mjs'
 import {
   evaluateOpenAIQuotaGate,
   effectiveOpenAIPolicy,
@@ -67,7 +69,7 @@ test('OpenAI policy pins and null-reset inheritance remain platform-local', () =
   assert.equal(effectiveOpenAIPolicy({ policy: { maxSessions: 6, sessionsOverride: true } }, global).max_sessions, 6)
 })
 
-test('extraFromRateLimit maps shorter window to 5h', () => {
+test('extraFromRateLimit preserves sparse measurements and maps shorter window to 5h', () => {
   const extra = extraFromRateLimit({
     primary_window: {
       used_percent: 6,
@@ -82,10 +84,16 @@ test('extraFromRateLimit maps shorter window to 5h', () => {
       reset_at: 1_800_100_000,
     },
   })
-  assert.equal(extra.codex_5h_used_percent, 6)
-  assert.equal(extra.codex_7d_used_percent, 34)
-  assert.equal(extra.codex_5h_window_minutes, 300)
-  assert.equal(extra.codex_7d_window_minutes, 10080)
+  const view = buildCodexUsageView(extraToCodexSnapshot(extra))
+  assert.equal(view.limits.used_5h_percent, 6)
+  assert.equal(view.limits.used_7d_percent, 34)
+  assert.equal(view.limits.window_5h_minutes, 300)
+  assert.equal(view.limits.window_7d_minutes, 10080)
+  assert.equal(extraFromRateLimit({ primary_window: {}, secondary_window: {} }), null)
+  const sparse = extraFromRateLimit({ primary_window: { used_percent: 0 } })
+  assert.equal(sparse.codex_primary_used_percent, 0)
+  assert.equal(Object.hasOwn(sparse, 'codex_primary_reset_at'), false)
+  assert.equal(Object.hasOwn(sparse, 'codex_secondary_used_percent'), false)
 })
 
 test('parseResetCreditDetails accepts array and object containers', () => {
@@ -159,6 +167,86 @@ function writeGptSlot(root, id = 'vm-codex-01') {
     }),
   )
 }
+
+function seedMeasuredQuota(root) {
+  const extra = extraFromRateLimit({
+    primary_window: { used_percent: 12, limit_window_seconds: 18000, reset_at: 1_800_000_000 },
+    secondary_window: { used_percent: 40, limit_window_seconds: 604800, reset_at: 1_800_100_000 },
+  })
+  return persistCodexQuotaSnapshot(root, 'vm-codex-01', {
+    extra,
+    sampledAt: extra.codex_usage_updated_at,
+  }).codex
+}
+
+test('empty WHAM responses fail without overwriting the last successful quota', async (t) => {
+  for (const body of [null, {}, { rate_limit: { primary_window: {}, secondary_window: {} } }]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-openai-quota-empty-'))
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    writeGptSlot(root)
+    const previous = seedMeasuredQuota(root)
+    recordOpenaiAuthResult(captureOpenaiAuth(root, 'vm-codex-01'), { status: 401, source: 'inference' })
+    let calls = 0
+    const result = await queryOpenaiQuota({
+      projectRoot: root,
+      vmId: 'vm-codex-01',
+      rotate: false,
+      fetchImpl: async (url) => {
+        calls += 1
+        assert.equal(String(url), CHATGPT_USAGE_URL)
+        return {
+          status: 200,
+          json: async () => {
+            if (body === null) throw new SyntaxError('invalid JSON')
+            return body
+          },
+        }
+      },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.error, 'quota_sample_missing')
+    assert.equal(result.status, 502)
+    assert.equal(calls, 1, 'no details, subscription or refresh calls for an empty measurement')
+    const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-codex-01.json'), 'utf8'))
+    assert.deepEqual(saved.codex.extra, previous.extra)
+    assert.deepEqual(saved.codex.usage.quota, previous.usage.quota)
+    assert.equal(saved.codex.usage.pending_refresh, true)
+    assert.deepEqual(saved.codex.usage.last_success.quota, previous.usage.quota)
+    assert.equal(saved.codex.usage.last_success_at, previous.usage.last_success_at)
+    assert.equal(!!saved.codex.auth_block, body === null, 'valid JSON authentication is independent of quota validity')
+  }
+})
+
+test('a partial WHAM measurement keeps the other window and omitted fields in the returned quota', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-openai-quota-partial-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeGptSlot(root)
+  const previous = seedMeasuredQuota(root)
+  const result = await queryOpenaiQuota({
+    projectRoot: root,
+    vmId: 'vm-codex-01',
+    fetchImpl: async (url) => {
+      if (String(url) === CHATGPT_USAGE_URL) {
+        return { status: 200, json: async () => ({ rate_limit: { primary_window: { used_percent: 0 } } }) }
+      }
+      if (String(url) === CHATGPT_RESET_CREDITS_URL) {
+        return { status: 200, json: async () => ({ available_count: 0, credits: [] }) }
+      }
+      return { status: 403, json: async () => ({}) }
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.quota.utilization_5h, 0)
+  assert.equal(result.quota.utilization_7d, 0.4)
+  assert.equal(result.quota.reset_5h, previous.usage.quota.reset_5h)
+  assert.equal(result.quota.reset_7d, previous.usage.quota.reset_7d)
+  assert.equal(result.quota.status_5h, 'ok')
+  const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-codex-01.json'), 'utf8'))
+  assert.deepEqual(result.quota, saved.codex.usage.quota)
+  assert.deepEqual(result.windows, saved.codex.usage.windows)
+  assert.equal(saved.codex.extra.codex_primary_window_minutes, previous.extra.codex_primary_window_minutes)
+  assert.equal(saved.codex.extra.codex_secondary_used_percent, previous.extra.codex_secondary_used_percent)
+})
 
 test('quota refresh and reset return business errors for upstream 401 while retaining the authentication block', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-openai-quota-auth-'))

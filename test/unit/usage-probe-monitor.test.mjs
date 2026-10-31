@@ -254,3 +254,108 @@ test('#163 A18: a failed hop keeps the old sample and backs off instead of retry
   assert.equal(second.reason, 'probe_backoff')
   assert.equal(calls, 1)
 })
+
+function codexSlot(now, usage = {}) {
+  return {
+    ...live,
+    platform: 'openai',
+    family: 'codex',
+    codex_usage: {
+      last_success_at: new Date(now).toISOString(),
+      pending_refresh: false,
+      windows: [
+        { id: '5h', used_percent: 0, reset_at: new Date(now + 3600_000).toISOString() },
+        { id: '7d', used_percent: 69, reset_at: new Date(now + 7 * 86400_000).toISOString() },
+      ],
+      ...usage,
+    },
+  }
+}
+
+test('GPT monitor uses successful slot samples and does not query again until stale_sec', async () => {
+  let now = Date.parse('2026-10-31T10:00:00.000Z')
+  const vm = codexSlot(now)
+  const calls = []
+  const monitor = createUsageProbeMonitor({
+    config: { interval_sec: 60, stale_sec: 300 },
+    now: () => now,
+    listTargets: () => [vm, { ...vm, id: 'stopped-gpt', status: 'stopped' }],
+    accountForVm: () => assert.fail('GPT must not read a leftover Claude account sample'),
+    isActive: () => false,
+    probeOne: async (slot) => {
+      calls.push(slot.id)
+      slot.codex_usage.last_success_at = new Date(now).toISOString()
+      return { ok: true, source: 'openai-wham-usage' }
+    },
+  })
+  assert.equal((await monitor.runOnce()).due, 0, 'zero is a valid successful reading')
+  now += 300_000
+  const stale = await monitor.runOnce()
+  assert.equal(stale.due, 1)
+  assert.equal(stale.items[0].reason, 'sample_stale')
+  assert.equal((await monitor.runOnce()).due, 0)
+  now += 60_000
+  assert.equal((await monitor.runOnce()).due, 0, 'next timer tick recognizes the successful query')
+  assert.deepEqual(calls, [vm.id])
+})
+
+test('GPT monitor refreshes missing, pending, and elapsed samples using slot metadata', async () => {
+  const now = Date.parse('2026-10-31T10:00:00.000Z')
+  const cases = [
+    {
+      usage: { last_success_at: null, snapshot: { updated_at: new Date(now).toISOString() } },
+      reason: 'never_sampled_official',
+    },
+    { usage: { windows: [{ id: '5h', used_percent: null }] }, reason: 'never_sampled_official' },
+    { usage: { pending_refresh: true }, reason: 'quota_pending' },
+    {
+      usage: {
+        last_success_at: new Date(now - 240_000).toISOString(),
+        windows: [{ id: '5h', used_percent: 100, reset_at: new Date(now - 120_000).toISOString() }],
+      },
+      reason: 'extra_window_elapsed',
+    },
+  ]
+  for (const { usage, reason } of cases) {
+    const vm = codexSlot(now, usage)
+    let calls = 0
+    const monitor = createUsageProbeMonitor({
+      now: () => now,
+      listTargets: () => [vm],
+      probeOne: async () => {
+        calls++
+        return { ok: true, source: 'openai-wham-usage' }
+      },
+    })
+    const run = await monitor.runOnce()
+    assert.equal(run.items[0].reason, reason)
+    assert.equal(calls, 1)
+  }
+})
+
+test('GPT authentication recovery bypasses sample freshness and reset delay, retaining failure backoff', async () => {
+  let now = Date.parse('2026-10-31T10:00:00.000Z')
+  const vm = {
+    ...codexSlot(now, {
+      last_success_at: new Date(now - 240_000).toISOString(),
+      windows: [{ id: '5h', used_percent: 100, reset_at: new Date(now - 120_000).toISOString() }],
+    }),
+    auth_block: { reason: 'upstream_401' },
+  }
+  let calls = 0
+  const monitor = createUsageProbeMonitor({
+    config: { interval_sec: 60, stale_sec: 300, reset_delay_sec: 3600 },
+    now: () => now,
+    listTargets: () => [vm],
+    probeOne: async () => {
+      calls++
+      return { ok: false }
+    },
+  })
+  assert.equal((await monitor.runOnce()).items[0].reason, 'credential_recovery')
+  assert.equal((await monitor.runOnce()).items[0].reason, 'probe_backoff')
+  assert.equal(calls, 1)
+  now += 60_000
+  assert.equal((await monitor.runOnce()).items[0].reason, 'credential_recovery')
+  assert.equal(calls, 2)
+})

@@ -8,8 +8,9 @@ import { isCodexVm } from '../protocol/codex-route.mjs'
 import {
   buildCodexUsageView,
   codexQuotaPark,
-  extraToCodexSnapshot,
   hasSpendableCodexCredits,
+  normalizeCodexExtra,
+  codexUsageWithSample,
 } from '../protocol/codex-usage.mjs'
 import { decodeJwtPayload, openaiClaimsFromIdToken, openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
 import { openaiAuthBlock, resetOpenaiAuth } from '../oauth/openai-auth-state.mjs'
@@ -358,7 +359,11 @@ function reconcileCodexLimitedUntil(vm, now = Date.now()) {
   else delete vm.codex.extra.codex_limited_until
 }
 
-export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredits, credits, planType } = {}) {
+export function persistCodexQuotaSnapshot(
+  projectRoot,
+  vmId,
+  { extra, resetCredits, credits, planType, sampledAt } = {},
+) {
   if (!projectRoot || !vmId) throw new Error('projectRoot and vmId required')
   const file = path.join(projectRoot, 'vms', `${vmId}.json`)
   let vm
@@ -370,8 +375,11 @@ export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredi
   if (!vm || typeof vm !== 'object') return null
   vm.codex = vm.codex && typeof vm.codex === 'object' ? { ...vm.codex } : {}
   if (extra && typeof extra === 'object') {
-    vm.codex.extra = { ...(vm.codex.extra || {}), ...extra }
-    vm.codex.usage = buildCodexUsageView(extraToCodexSnapshot(vm.codex.extra))
+    const previous = vm.codex.usage || buildCodexUsageView(vm.codex.extra || {})
+    vm.codex.extra = normalizeCodexExtra({ ...(vm.codex.extra || {}), ...extra })
+    vm.codex.usage = codexUsageWithSample(vm.codex.extra, previous, {
+      sampledAt: sampledAt || extra.codex_usage_updated_at || null,
+    })
   }
   if (credits) vm.codex.credits = credits
   if (extra && typeof extra === 'object') {
@@ -398,12 +406,23 @@ export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredi
   return vm
 }
 
+export function markCodexQuotaRefreshPending(projectRoot, vmId, { reason = 'quota_sample_missing' } = {}) {
+  const file = path.join(projectRoot, 'vms', `${vmId}.json`)
+  const vm = readJsonCached(file)
+  if (!vm?.codex) return null
+  const previous = vm.codex.usage || buildCodexUsageView(vm.codex.extra || {})
+  vm.codex.usage = codexUsageWithSample(vm.codex.extra || {}, previous, { pendingReason: reason })
+  atomicWriteJson(file, vm, { mode: 0o600 })
+  return vm
+}
+
 export function summarizeCodexSlot(projectRoot, vm = {}) {
   const accounts = projectRoot && vm?.id ? readCodexAccounts(projectRoot, vm.id) : []
   const first = enrichCodexAccountIdentity(accounts[0] || {})
   const extra = vm.codex?.extra || vm.codex_extra || {}
   // extra is the source of truth; the stored view is only a fallback for slots without extra.
-  const usage = buildCodexUsageView(Object.keys(extra).length ? extraToCodexSnapshot(extra) : vm.codex?.usage || {})
+  const previous = vm.codex?.usage || buildCodexUsageView(extra)
+  const usage = codexUsageWithSample(Object.keys(extra).length ? extra : previous.snapshot || {}, previous)
   const hasAccess = !!(first.access_token || vm.codex?.has_access)
   const hasRefresh = !!(first.refresh_token || vm.codex?.has_refresh)
   const subscription = codexSubscriptionView(first, vm)

@@ -1,5 +1,17 @@
 import type { WindowEstimate } from './panel-pricing'
 
+export type CodexUsageView = {
+  windows?: Array<{
+    id?: string
+    used_percent?: number | null
+    reset_at?: string | null
+  }>
+  quota?: {
+    utilization_5h?: number | null
+    utilization_7d?: number | null
+  }
+}
+
 export type OpenaiSubscription = {
   active_until: string | null
   plan_type: string | null
@@ -300,17 +312,14 @@ export type Vm = {
   reset_7d?: string
   reset_7d_oi?: string
   reset_7d_sonnet?: string
-  codex_usage?: {
-    windows?: Array<{
-      id?: string
-      used_percent?: number | null
-      reset_at?: string | null
-    }>
-    quota?: {
-      utilization_5h?: number | null
-      utilization_7d?: number | null
-    }
-  } | null
+  codex_usage?:
+    | (CodexUsageView & {
+        pending_refresh?: boolean
+        pending_reason?: string | null
+        last_success_at?: string | null
+        last_success?: CodexUsageView | null
+      })
+    | null
   /** OpenAI plan from WHAM, then the same-account subscription query (GPT only). */
   plan_type?: string | null
   /** Same-account subscription query result, falling back to the OAuth credential. */
