@@ -540,7 +540,7 @@ sessionKey / 授权码导入必须走该槽 SOCKS5。
 
 POST `/setup` 继续 Platform 登录、专用项目和账号 key 配置；POST `/refresh` 刷新发放或组织总余额；PATCH `/enabled` 接收 `{ enabled: boolean }`，独立于 OAuth 启停、调度及登录会话。账号行 `openai_api` 返回领取、配置、key 尾号、组织余额及更新时间，不返回 secret、指纹或登录会话。
 
-POST `/browser-ticket` 返回 `{ ticket, url }`，url 含30秒单次票据，连接 WebSocket `/browser?ticket=…`。服务端发送 `frame`（JPEG base64、width、height）及 `status`；客户端发送 `click/move/scroll/key/text/continue/close`。浏览器固定使用该账号独立指纹和当前绑定代理。
+POST `/browser-ticket` 返回 `{ ticket, url }`，url 含30秒单次票据，连接 WebSocket `/browser?ticket=…`。服务端发送 `frame`（JPEG base64、width、height）及 `status`；客户端发送 `click/move/scroll/key/text/continue/close`。浏览器固定使用该账号独立指纹和当前绑定代理。反代须为该 `/browser` 路径保留 WebSocket Upgrade，配置见[部署反代](DEPLOY.md#反代)。
 
 生成密钥使用 `group_type: "openai_apikey"`、`category: "api"`、`allowed_vms: [...]`，至少选择一个已配置 key 的 OpenAI 账号；模型列表和推理均限所选账号，普通 API 全局池不隐式使用账号 key。401/余额耗尽/临时限流保留官方错误码，API 请求不计入 OAuth 5H/7D 窗口估算。
 
