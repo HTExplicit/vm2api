@@ -103,7 +103,34 @@ export class OpenaiApiManager {
 
   enqueue(context, kind, interactive) {
     const vmId = context.vm.id
-    if (this.jobs.has(vmId)) return this.jobs.get(vmId)
+    const existing = this.jobs.get(vmId)
+    if (existing) {
+      if (interactive && !existing.interactive) {
+        if (existing.promoted) {
+          if (kind === 'setup') existing.promoted.kind = 'setup'
+          return existing
+        }
+        existing.promoted = { kind }
+        // Background work can be waiting for this very manual window to close.
+        // Cancel only that work, retain the window, then reuse it interactively.
+        const live = this.sessions.get(vmId)
+        if (live?.job === existing) live.retained = true
+        existing.abort.abort()
+        live?.cancel?.()
+        void existing.finished.then(() => {
+          const requested = existing.promoted
+          existing.promoted = null
+          if (!requested || this.stopped) return
+          try {
+            const current = this.credits.accountForVm(vmId)
+            if (current.accountId === existing.accountId) this.enqueue(current, requested.kind, true)
+          } catch {
+            /* A deleted slot has no task to promote. */
+          }
+        })
+      }
+      return existing
+    }
     if (!hasBoundExit(context.vm.proxy) || !hostProxyUrlForVm(context.vm))
       throw problem('proxy_required', '账号未绑定可用代理')
     let ready, finished
@@ -152,7 +179,7 @@ export class OpenaiApiManager {
         const live = this.sessions.get(job.vmId)
         if (live) live.persistable = false
       }
-      if (current?.accountId === job.accountId && !job.abort.signal.aborted) {
+      if (current?.accountId === job.accountId && !job.abort.signal.aborted && this.jobs.get(job.vmId) === job) {
         const login = error.code === 'platform_login_required'
         this.repo.upsertAccount(job.accountId, {
           setup_status: login ? 'needs_login' : 'error',
@@ -163,7 +190,7 @@ export class OpenaiApiManager {
       }
     } finally {
       const live = this.sessions.get(job.vmId)
-      if (live) {
+      if (live?.job === job) {
         await this.persistSession(live)
         const status = this.repo.getAccount(job.accountId)?.setup_status || 'error'
         this.browserManager.setStatus(
@@ -176,10 +203,10 @@ export class OpenaiApiManager {
         live.cancel = null
         live.checkLogin = null
         await this.browserManager.release(live)
-        this.sessions.delete(job.vmId)
+        if (this.sessions.get(job.vmId) === live) this.sessions.delete(job.vmId)
       }
       job.resolveReady(null)
-      this.jobs.delete(job.vmId)
+      if (this.jobs.get(job.vmId) === job) this.jobs.delete(job.vmId)
       job.resolveFinished()
     }
     this.running = this.jobs.size > 0
@@ -187,6 +214,7 @@ export class OpenaiApiManager {
 
   assertCurrent(job) {
     job.abort.signal.throwIfAborted()
+    if (this.jobs.get(job.vmId) !== job) throw problem('api_task_replaced', 'API 任务已取消或替换')
     const context = this.credits.accountForVm(job.vmId)
     if (context.accountId !== job.accountId) throw problem('api_account_changed', '账号已更换，请重新打开配置', 409)
     const proxyUrl = hostProxyUrlForVm(context.vm)
@@ -389,7 +417,11 @@ export class OpenaiApiManager {
     const active = this.sessions.get(vmId)
     if (!closeBrowser && active && !active.waiting)
       throw problem('platform_browser_busy', 'API 配置正在执行，请完成后再开始 OAuth 登录', 409)
-    this.jobs.get(vmId)?.abort.abort()
+    const currentJob = this.jobs.get(vmId)
+    if (currentJob) {
+      currentJob.promoted = null
+      currentJob.abort.abort()
+    }
     const queued = this.queue.filter((job) => job.vmId === vmId)
     this.queue = this.queue.filter((job) => job.vmId !== vmId)
     for (const job of queued) {

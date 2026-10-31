@@ -546,3 +546,71 @@ test('a background refresh waiting on manual A cannot block interactive B after 
   assert.equal(f.calls.liveBrowsers, 0)
   assert.equal(f.repo.getAccount(a.accountId).setup_status, 'ready')
 })
+
+test('manual Platform setup promotes a same-slot background refresh without waiting for its own window to close', async (t) => {
+  const f = fixture(t)
+  const a = f.add()
+  f.installKey(a)
+  f.repo.upsertOrg('org-test', { balance_checked_at: '2020-01-01T00:00:00Z' })
+  const manual = await f.manager.browserManager.acquire(a.vm.id, { purpose: 'oauth', interactive: true })
+  await f.manager.tick()
+  await until(() => f.manager.jobs.has(a.vm.id))
+  f.manager.setup(a.vm.id)
+  await f.manager.browserTicket(a.vm.id)
+  await until(
+    () => f.repo.getAccount(a.accountId).setup_status === 'ready',
+    'manual setup waited for its own retained browser to close',
+  )
+  assert.equal(f.manager.browserManager.jobs.get(a.vm.id), manual)
+  assert.equal(f.manager.browserManager.state(a.vm.id).status, 'api_ready')
+  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.calls.maxLiveBrowsers, 1)
+  assert.equal(
+    f.calls.models.length,
+    1,
+    'manual setup keeps the setup model refresh rather than the old balance-only task',
+  )
+})
+
+test('promotion waits for an in-flight background task to finish before reusing its browser', async (t) => {
+  const f = fixture(t)
+  const a = f.add()
+  f.installKey(a)
+  let release
+  let reads = 0
+  f.behavior.readBalance = async () => {
+    if (++reads === 1)
+      return new Promise((resolve) => {
+        release = resolve
+      })
+    return { balance: '37.000' }
+  }
+  f.manager.enqueue(f.credits.accountForVm(a.vm.id), 'balance', false)
+  await until(() => reads === 1)
+  f.manager.setup(a.vm.id)
+  assert.equal(f.manager.jobs.get(a.vm.id).abort.signal.aborted, true)
+  release({ balance: '999.000' })
+  await until(() => f.repo.getAccount(a.accountId).setup_status === 'ready')
+  assert.equal(reads, 2)
+  assert.equal(f.repo.getOrg('org-test').balance, '37.000')
+  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.calls.closed.length, 0)
+  assert.equal(f.calls.maxLiveBrowsers, 1)
+  assert.equal(f.manager.browserManager.state(a.vm.id).status, 'api_ready')
+})
+
+test('cancelling before a pending promotion runs prevents the interactive follow-up', async (t) => {
+  const f = fixture(t)
+  const a = f.add()
+  f.installKey(a)
+  await f.manager.browserManager.acquire(a.vm.id, { purpose: 'oauth', interactive: true })
+  f.manager.enqueue(f.credits.accountForVm(a.vm.id), 'balance', false)
+  f.manager.setup(a.vm.id)
+  await f.manager.cancel(a.vm.id)
+  await f.settle()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.calls.configured.length, 0)
+  assert.equal(f.calls.models.length, 0)
+  assert.equal(f.manager.browserManager.state(a.vm.id).active, false)
+})
