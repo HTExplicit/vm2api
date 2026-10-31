@@ -8,6 +8,7 @@ import {
   createPlatformBrowserSession,
   fingerprintAtLocation,
   fingerprintFromLaunch,
+  localeForLocation,
 } from '../../src/lib/openai-api/platform-browser.mjs'
 
 const original = {
@@ -34,6 +35,16 @@ const location = {
   latitude: 51.5,
   longitude: -0.1,
 }
+
+test('location locale uses a launcher-supported language-region without an inferred script', async () => {
+  const { normalizeLocale } = await import('camoufox/dist/locales.js')
+  for (const requested of [undefined, 'C', 'en-Latn-US', 'en-US', 'de-DE']) {
+    const result = localeForLocation({ country_code: 'US' }, undefined, requested)
+    assert.equal(result, 'en-US')
+    assert.equal(normalizeLocale(result).asString, 'en-US')
+  }
+  assert.equal(localeForLocation({ country_code: 'TW' }, undefined, 'zh-Hant-TW'), 'zh-TW')
+})
 
 test('concrete identity storage excludes proxy, environment and machine paths', () => {
   const json = JSON.stringify({ ...original.config, addons: ['/absolute/addon'] })

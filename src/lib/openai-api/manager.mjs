@@ -188,6 +188,15 @@ export class OpenaiApiManager {
     }
     const live = { job, browser, page: browser.page, clients: new Set(), touchedAt: this.now(), waiting: false }
     this.sessions.set(job.vmId, live)
+    await browser.context.route?.('**/*', async (route) => {
+      try {
+        this.assertCurrent(job)
+        await route.continue()
+      } catch {
+        await route.abort().catch(() => {})
+        live.cancel?.()
+      }
+    })
     job.resolveReady(live)
     const adapter = new this.Adapter({
       page: browser.page,

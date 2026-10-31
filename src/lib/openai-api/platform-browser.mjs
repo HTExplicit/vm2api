@@ -115,15 +115,17 @@ export function fingerprintFromLaunch(options) {
   return { config, firefoxUserPrefs: { ...(options.firefoxUserPrefs || {}) } }
 }
 
-function localeForLocation(location, previous, requested) {
+export function localeForLocation(location, previous, requested) {
   const country = location.country_code
   for (const candidate of [requested, previous]) {
     if (!candidate) continue
     try {
-      if (new Intl.Locale(candidate).maximize().region === country) return candidate
+      const locale = new Intl.Locale(candidate).maximize()
+      if (locale.region === country) return `${locale.language}-${locale.region}`
     } catch {}
   }
-  return new Intl.Locale(`und-${country}`).maximize().toString()
+  const locale = new Intl.Locale(`und-${country}`).maximize()
+  return `${locale.language}-${locale.region}`
 }
 
 /** Hardware identity remains fixed; location follows a deliberate proxy change. */

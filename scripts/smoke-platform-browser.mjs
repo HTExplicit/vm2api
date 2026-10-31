@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createPlatformBrowserSession } from '../src/lib/openai-api/platform-browser.mjs'
 
 // Build-time offline launch check. No real account, website or proxy is used.
-const options = { proxyUrl: 'socks5h://127.0.0.1:1', locale: 'en-US' }
+const options = { proxyUrl: 'socks5h://127.0.0.1:1' }
 const deps = {
   proxyLocation: async () => ({
     ip: '198.51.100.10',
