@@ -3,11 +3,13 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
-import { fmtUsd } from '@/lib/format'
+import { codexQuotaDisplayVm } from '@/lib/codex-quota-display'
+import { fmtUsd, usedPctOf } from '@/lib/format'
 import { formatWindowSpend } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { dashboardQueryOptions } from '@/features/overview/queries'
+import { CodexQuotaSampleStatus } from '@/features/vm/codex-quota-sample-status'
 import { Meter, ResetAt } from '@/features/vm/detail-section-primitives'
 import { vmQueryOptions } from '@/features/vm/queries'
 import { useVmPerms } from '@/features/vm/vm-perms'
@@ -39,6 +41,9 @@ export function OpenaiQuotaPanel({
   const qc = useQueryClient()
   const [confirm, setConfirm] = useState(false)
   const canUse = useVmPerms().credential
+  const display = codexQuotaDisplayVm(vm)
+  const shownU5 = display === vm ? u5 : usedPctOf(display, '5h')
+  const shownU7 = display === vm ? u7 : usedPctOf(display, '7d')
   const credits = vm.reset_credits
   const available = Math.max(0, Number(credits?.available_count) || 0)
   const expiry = credits?.credits?.[0]?.expires_at
@@ -91,21 +96,22 @@ export function OpenaiQuotaPanel({
   return (
     <div className='grid gap-3'>
       <p className='m-0 text-xs text-muted-foreground'>Codex 额度 · 短时窗口</p>
+      <CodexQuotaSampleStatus vm={vm} />
       <Meter
         label='5 小时已用'
-        value={u5}
+        value={shownU5}
         hint={quotaHint(vm.status_5h, cost5, vm.estimate_5h)}
       />
       <div className='text-[11px] text-muted-foreground'>
-        5h 重置 <ResetAt value={vm.reset_5h} now={now} />
+        5h 重置 <ResetAt value={display.reset_5h} now={now} />
       </div>
       <Meter
         label='7 天已用'
-        value={u7}
+        value={shownU7}
         hint={quotaHint(vm.status_7d, cost7, vm.estimate_7d)}
       />
       <div className='text-[11px] text-muted-foreground'>
-        7d 重置 <ResetAt value={vm.reset_7d} now={now} />
+        7d 重置 <ResetAt value={display.reset_7d} now={now} />
       </div>
       {canUse ? (
         <div className='flex flex-wrap items-center gap-2'>

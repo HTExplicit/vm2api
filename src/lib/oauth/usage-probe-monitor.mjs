@@ -14,6 +14,7 @@ import { shouldProbeFable, usageProbeBackoffRemainingMs } from './crs-usage-prob
 import { hasRefreshPresence } from './oauth-credentials.mjs'
 import { vmHasProxyPath } from './credential-refresh-monitor.mjs'
 import { hasLiveExtraSample, hasOfficialUsageSample, parseResetMs } from '../pool/quota-window.mjs'
+import { isCodexVm } from '../vm/vm-kind.mjs'
 export const DEFAULT_USAGE_PROBE = Object.freeze({
   enabled: false,
   interval_sec: 60,
@@ -156,14 +157,38 @@ export function isUsageProbeDue(account = {}, opts = {}) {
   return { due: true, reason: 'extra_window_elapsed' }
 }
 
+function elapsedCodexResetMs(usage, now, sampledMs) {
+  const resets = (usage?.windows || [])
+    .map((window) => parseResetMs(window.reset_at))
+    .filter((reset) => Number.isFinite(reset) && reset <= now && reset > sampledMs)
+  return resets.length ? Math.min(...resets) : null
+}
+
+/** GPT samples live on the slot, not in the Claude account quota repository. */
+function codexUsageProbeDue(vm, { now, staleMs }) {
+  if (vm.auth_block) return { due: true, reason: 'credential_recovery' }
+  const usage = vm.codex_usage
+  if (usage?.pending_refresh) return { due: true, reason: 'quota_pending' }
+  const sampledMs = Date.parse(usage?.last_success_at || '')
+  const hasReading = usage?.windows?.some((window) => window.used_percent != null)
+  if (!Number.isFinite(sampledMs) || !hasReading) return { due: true, reason: 'never_sampled_official' }
+  if (elapsedCodexResetMs(usage, now, sampledMs) != null) return { due: true, reason: 'extra_window_elapsed' }
+  if (now - sampledMs >= staleMs) return { due: true, reason: 'sample_stale' }
+  return { due: false, reason: 'list_passive_only' }
+}
+
 /** A stable deadline, not a sleep or a fresh random draw on each timer tick.
  * Only gates an already-due periodic hop; never creates extra requests or delays
  * real traffic, manual probeNow, or the separate Messages health monitor.
  */
 function resetProbeAt(account, vm, config, now) {
   if (!config.reset_delay_sec && !config.reset_jitter_sec) return null
+  const codex = isCodexVm(vm)
+  if (codex && (vm.auth_block || vm.codex_usage?.pending_refresh)) return null
   const unified = account?.unified || {}
-  const reset = parseResetMs(unified.headers?.['5h']?.reset)
+  const reset = codex
+    ? elapsedCodexResetMs(vm.codex_usage, now, Date.parse(vm.codex_usage?.last_success_at || ''))
+    : parseResetMs(unified.headers?.['5h']?.reset)
   if (!Number.isFinite(reset) || reset > now) return null
   const probe = account?.last_probe || unified.last_probe
   const probed = Date.parse(probe?.at || probe?.probed_at || '')
@@ -282,19 +307,22 @@ export function createUsageProbeMonitor(opts = {}) {
       const due = []
       const staleMs = config.stale_sec * 1000
       for (const vm of targets) {
-        const account = typeof opts.accountForVm === 'function' ? opts.accountForVm(vm) : null
+        const codex = isCodexVm(vm)
+        const account = !codex && typeof opts.accountForVm === 'function' ? opts.accountForVm(vm) : null
         if (typeof opts.reconcile === 'function') {
           try {
             opts.reconcile(vm, account)
           } catch {}
         }
         let active = false
-        if (typeof opts.isActive === 'function') {
+        if (!codex && typeof opts.isActive === 'function') {
           try {
             active = !!opts.isActive(vm, account)
           } catch {}
         }
-        const decision = isUsageProbeDue(account || {}, { now: nowFn(), staleMs, active })
+        const decision = codex
+          ? codexUsageProbeDue(vm, { now: nowFn(), staleMs })
+          : isUsageProbeDue(account || {}, { now: nowFn(), staleMs, active })
         if (!decision.due || typeof opts.probeOne !== 'function') {
           items.push({
             vm_id: vm.id,

@@ -186,6 +186,33 @@ describe('vmWindows', () => {
       null,
     ])
   })
+
+  it('uses the last measured window only for missing pending display readings', () => {
+    const previousReset = '2099-01-01T00:00:00Z'
+    const source = vm({
+      platform: 'openai',
+      utilization_5h: null,
+      utilization_7d: null,
+      codex_usage: {
+        pending_refresh: true,
+        windows: [
+          { id: '5h', used_percent: 100 },
+          { id: '7d', used_percent: null },
+        ],
+        last_success: {
+          windows: [
+            { id: '5h', used_percent: 2 },
+            { id: '7d', used_percent: 32, reset_at: previousReset },
+          ],
+        },
+      },
+    })
+    const displayed = vmWindows(source)
+    expect(displayed.map((window) => window.pct)).toEqual([100, 32])
+    expect(displayed[1].reset).toBe(previousReset)
+    expect(source.codex_usage?.windows?.[1].used_percent).toBeNull()
+    expect(bladeState(source)).toBe('live')
+  })
 })
 
 describe('bladeState', () => {

@@ -42,6 +42,8 @@ import {
   codexCreditsFromHeaders,
   codexQuotaPark,
   hasSpendableCodexCredits,
+  normalizeCodexExtra,
+  codexUsageWithSample,
 } from '../protocol/codex-usage.mjs'
 
 import { summarizeCodexSlot } from './codex-slot.mjs'
@@ -233,6 +235,7 @@ export function persistCodexUsage(
   vm.codex = { ...(vm.codex || {}) }
   const fromHeaders = extraFromCodexHeaders(headers || {}, now)
   const cached = { ...(vm.codex.extra || {}) }
+  const previousUsage = vm.codex.usage || buildCodexUsageView(extraToCodexSnapshot(cached))
   if (quotaExceeded) {
     // The error proves exhaustion, not which window or its percentage. Drop
     // cached below-cap readings (including aliases) instead of inventing 100%.
@@ -257,8 +260,12 @@ export function persistCodexUsage(
     if (parked.limited) merged.codex_limited_until = new Date(parked.until).toISOString()
     else delete merged.codex_limited_until
   }
-  vm.codex.extra = merged
-  vm.codex.usage = buildCodexUsageView(extraToCodexSnapshot(merged))
+  vm.codex.extra = normalizeCodexExtra(merged)
+  const sampledAt = fromHeaders?.codex_usage_updated_at || extra?.codex_usage_updated_at || null
+  vm.codex.usage = codexUsageWithSample(vm.codex.extra, previousUsage, {
+    sampledAt,
+    pendingReason: quotaExceeded && !sampledAt ? 'usage_limit_reached' : null,
+  })
   const q = vm.codex.usage.quota || {}
   vm.codex.window_history = rollWindowHistory(
     vm.codex.window_history,

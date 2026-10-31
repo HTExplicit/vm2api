@@ -7,6 +7,7 @@ import { subscriptionListLabel } from '@/lib/subscription-expiry'
 import { cn } from '@/lib/utils'
 import { slotCredentialLabel } from '@/lib/vm-kind'
 import { vmCostLedger } from '@/lib/vm-usage'
+import { CodexQuotaSampleStatus } from '@/features/vm/codex-quota-sample-status'
 import { RISK_SOLID, riskFg, riskLevel } from '@/features/vm/usage-meter'
 import {
   BLADE_STATE_CLASS,
@@ -100,6 +101,7 @@ export const VmUnit = memo(function VmUnit({
         <span className='font-mono text-[11px] text-muted-foreground'>
           {vm.id}
         </span>
+        <CodexQuotaSampleStatus vm={vm} compact />
         <TierBadge vm={vm} className='ms-auto h-4 px-1 text-[9.5px]' />
       </div>
       <span

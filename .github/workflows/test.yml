@@ -59,6 +59,9 @@ jobs:
             test/unit/openai-auth-state.test.mjs \
             test/unit/openai-subscription.test.mjs \
             test/unit/openai-quota.test.mjs \
+            test/unit/codex-usage.test.mjs \
+            test/unit/codex-quota-stale.test.mjs \
+            test/unit/usage-probe-monitor.test.mjs \
             test/unit/panel-subscription.test.mjs \
             test/unit/jev-account-scope.test.mjs \
             test/unit/codex-slot-reload.test.mjs \
@@ -84,4 +87,5 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm exec vitest run src/config/repo.test.ts src/features/settings/about-pane.test.ts
           pnpm exec vitest run src/lib/vm-status.test.ts -t 'GPT plan label follows OpenAI plan_type'
+          pnpm exec vitest run src/features/vm/usage-windows.test.tsx src/features/vm/vm-rack-model.test.ts
           pnpm build
