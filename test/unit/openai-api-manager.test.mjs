@@ -25,7 +25,16 @@ function fixture(t) {
   const profiles = new SlotBrowserRepo(db)
   const store = new ApiEndpointStore({ db })
   const identities = new Map()
-  const calls = { sessions: [], configured: [], models: [], closed: [], refreshed: [], reloaded: 0 }
+  const calls = {
+    sessions: [],
+    configured: [],
+    models: [],
+    closed: [],
+    refreshed: [],
+    reloaded: 0,
+    liveBrowsers: 0,
+    maxLiveBrowsers: 0,
+  }
   const behavior = {
     authenticated: true,
     balance: '37.000',
@@ -98,6 +107,8 @@ function fixture(t) {
       calls.sessions.push(options)
       const fingerprint = options.fingerprint || { independentDevice: options.proxyUrl }
       await options.onFingerprint(fingerprint)
+      calls.liveBrowsers++
+      calls.maxLiveBrowsers = Math.max(calls.maxLiveBrowsers, calls.liveBrowsers)
       let closed = false
       return {
         page: { async goto() {} },
@@ -107,7 +118,10 @@ function fixture(t) {
           return { cookies: [], origins: [{ origin: options.proxyUrl }] }
         },
         async close() {
-          if (!closed) calls.closed.push(options.proxyUrl)
+          if (!closed) {
+            calls.closed.push(options.proxyUrl)
+            calls.liveBrowsers--
+          }
           closed = true
         },
       }
@@ -499,4 +513,36 @@ test('cancelling a background balance task waiting on a retained same-slot brows
   assert.equal(f.calls.sessions.length, 1)
   assert.equal(f.calls.models.length, 0)
   assert.equal(f.manager.browserManager.state(entry.vm.id).active, false)
+})
+
+test('a background refresh waiting on manual A cannot block interactive B after A closes', async (t) => {
+  const f = fixture(t)
+  const a = f.add()
+  const b = f.add('vm-b', 'account-b')
+  f.installKey(a)
+  f.repo.upsertOrg('org-test', { balance_checked_at: '2020-01-01T00:00:00Z' })
+  await f.manager.browserManager.acquire(a.vm.id, { purpose: 'oauth', interactive: true })
+  await f.manager.tick()
+  await until(() => f.manager.jobs.has(a.vm.id))
+  f.manager.setup(b.vm.id)
+  const ticket = await f.manager.browserTicket(b.vm.id)
+  assert.match(ticket.url, /ticket=/)
+  assert.equal(f.manager.browserManager.state(b.vm.id).status, 'queued')
+  assert.equal(f.calls.sessions.length, 1, 'background A and interactive B wait for the open manual browser')
+  await f.manager.browserManager.close(a.vm.id)
+  await until(
+    () => f.repo.getAccount(b.accountId).setup_status === 'ready',
+    'interactive B was blocked by a background task waiting on A',
+  )
+  assert.equal(f.manager.browserManager.state(b.vm.id).status, 'api_ready')
+  assert.equal(f.manager.browserManager.state(b.vm.id).active, true)
+  assert.equal(f.calls.sessions.length, 2, 'background A cannot start while B is retained')
+  assert.equal(f.calls.maxLiveBrowsers, 1)
+  assert.equal(f.calls.configured.length, 1)
+  assert.equal(f.calls.configured[0].email, b.account.email)
+  await f.manager.browserManager.close(b.vm.id)
+  await f.settle()
+  assert.equal(f.calls.maxLiveBrowsers, 1)
+  assert.equal(f.calls.liveBrowsers, 0)
+  assert.equal(f.repo.getAccount(a.accountId).setup_status, 'ready')
 })

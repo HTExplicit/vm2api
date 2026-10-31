@@ -126,61 +126,63 @@ export class OpenaiApiManager {
     this.jobs.set(vmId, job)
     if (interactive) this.queue.unshift(job)
     else this.queue.push(job)
-    if (!this.running) this.draining = this.drain()
+    this.drain()
     return job
   }
 
-  async drain() {
-    if (this.running || this.stopped) return
+  drain() {
+    if (this.stopped) return
     this.running = true
+    while (this.queue.length) {
+      const job = this.queue.shift()
+      job.execution = this.runJob(job)
+    }
+    this.draining = Promise.allSettled([...this.jobs.values()].map((job) => job.finished))
+  }
+
+  async runJob(job) {
     try {
-      while (this.queue.length && !this.stopped) {
-        const job = this.queue.shift()
-        try {
-          await this.run(job)
-        } catch (error) {
-          let current
-          try {
-            current = this.credits.accountForVm(job.vmId)
-          } catch {}
-          if (error.code === 'platform_account_mismatch') {
-            const live = this.sessions.get(job.vmId)
-            if (live) live.persistable = false
-          }
-          if (current?.accountId === job.accountId && !job.abort.signal.aborted) {
-            const login = error.code === 'platform_login_required'
-            this.repo.upsertAccount(job.accountId, {
-              setup_status: login ? 'needs_login' : 'error',
-              last_error: safeMessage(error),
-            })
-            if (current.record?.organization_id)
-              this.repo.upsertOrg(current.record.organization_id, { balance_error: safeMessage(error) })
-          }
-        } finally {
-          const live = this.sessions.get(job.vmId)
-          if (live) {
-            await this.persistSession(live)
-            const status = this.repo.getAccount(job.accountId)?.setup_status || 'error'
-            this.browserManager.setStatus(
-              live,
-              status === 'ready' ? 'api_ready' : status,
-              this.repo.getAccount(job.accountId)?.last_error,
-            )
-            live.adapter?.dispose?.()
-            live.inputLocked = false
-            live.cancel = null
-            live.checkLogin = null
-            await this.browserManager.release(live)
-            this.sessions.delete(job.vmId)
-          }
-          job.resolveReady(null)
-          this.jobs.delete(job.vmId)
-          job.resolveFinished()
-        }
+      await this.run(job)
+    } catch (error) {
+      let current
+      try {
+        current = this.credits.accountForVm(job.vmId)
+      } catch {}
+      if (error.code === 'platform_account_mismatch') {
+        const live = this.sessions.get(job.vmId)
+        if (live) live.persistable = false
+      }
+      if (current?.accountId === job.accountId && !job.abort.signal.aborted) {
+        const login = error.code === 'platform_login_required'
+        this.repo.upsertAccount(job.accountId, {
+          setup_status: login ? 'needs_login' : 'error',
+          last_error: safeMessage(error),
+        })
+        if (current.record?.organization_id)
+          this.repo.upsertOrg(current.record.organization_id, { balance_error: safeMessage(error) })
       }
     } finally {
-      this.running = false
+      const live = this.sessions.get(job.vmId)
+      if (live) {
+        await this.persistSession(live)
+        const status = this.repo.getAccount(job.accountId)?.setup_status || 'error'
+        this.browserManager.setStatus(
+          live,
+          status === 'ready' ? 'api_ready' : status,
+          this.repo.getAccount(job.accountId)?.last_error,
+        )
+        live.adapter?.dispose?.()
+        live.inputLocked = false
+        live.cancel = null
+        live.checkLogin = null
+        await this.browserManager.release(live)
+        this.sessions.delete(job.vmId)
+      }
+      job.resolveReady(null)
+      this.jobs.delete(job.vmId)
+      job.resolveFinished()
     }
+    this.running = this.jobs.size > 0
   }
 
   assertCurrent(job) {
