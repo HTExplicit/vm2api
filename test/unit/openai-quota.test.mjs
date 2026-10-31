@@ -160,6 +160,27 @@ function writeGptSlot(root, id = 'vm-codex-01') {
   )
 }
 
+test('quota refresh and reset return business errors for upstream 401 while retaining the authentication block', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-openai-quota-auth-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeGptSlot(root)
+  for (const operation of [queryOpenaiQuota, resetOpenaiQuota]) {
+    const result = await operation({
+      projectRoot: root,
+      vmId: 'vm-codex-01',
+      rotate: false,
+      fetchImpl: async () => ({ status: 401, json: async () => ({ error: 'unauthorized' }) }),
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.error, 'upstream_auth')
+    assert.equal(result.status, 502, 'the panel must not interpret upstream 401 as an expired login')
+    assert.equal(result.upstream_status, 401)
+    const vm = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-codex-01.json'), 'utf8'))
+    assert.equal(vm.codex.auth_block.status, 401)
+    assert.equal(vm.codex.auth_block.source, 'quota')
+  }
+})
+
 test('queryOpenaiQuota persists 5h/7d extra and reset credits', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-openai-quota-'))
   writeGptSlot(root)

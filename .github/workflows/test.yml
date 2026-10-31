@@ -58,6 +58,7 @@ jobs:
             test/unit/panel-billing-lookup.test.mjs \
             test/unit/openai-auth-state.test.mjs \
             test/unit/openai-subscription.test.mjs \
+            test/unit/openai-quota.test.mjs \
             test/unit/panel-subscription.test.mjs \
             test/unit/handle-codex.test.mjs \
             test/unit/vm-package.test.mjs; do

@@ -238,7 +238,8 @@ async function readJson(res) {
 }
 
 function mapUpstreamStatus(status) {
-  if (status === 401 || status === 403 || status === 429) return status
+  // Upstream authentication failure is not a panel-session authentication failure.
+  if (status === 403 || status === 429) return status
   return 502
 }
 
