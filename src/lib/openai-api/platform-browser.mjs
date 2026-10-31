@@ -161,7 +161,7 @@ export function fingerprintAtLocation(fingerprint, location, locale) {
   return result
 }
 
-async function proxyLocation(proxyUrl) {
+async function proxyLocation(proxyUrl, signal) {
   const { default: fetch } = await import('node-fetch')
   const { getMmdbPath } = await import('camoufox/dist/geolocation.js')
   const { default: maxmind } = await import('maxmind')
@@ -171,7 +171,7 @@ async function proxyLocation(proxyUrl) {
     const response = await fetch('https://api.ipify.org?format=json', {
       agent,
       headers: { accept: 'application/json' },
-      signal: AbortSignal.timeout(15_000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000),
     })
     if (!response.ok) throw new Error('exit lookup failed')
     ip = (await response.json()).ip
@@ -215,21 +215,23 @@ async function runtime() {
 }
 
 export async function createPlatformBrowserSession(
-  { fingerprint, storageState, proxyUrl, locale, onFingerprint },
+  { fingerprint, storageState, proxyUrl, locale, onFingerprint, signal },
   overrides = {},
 ) {
   const proxy = boundProxy(proxyUrl)
+  signal?.throwIfAborted()
   const resources = await (overrides.runtime || runtime)()
-  const location = await (overrides.proxyLocation || proxyLocation)(proxy)
+  signal?.throwIfAborted()
+  const location = await (overrides.proxyLocation || proxyLocation)(proxy, signal)
+  signal?.throwIfAborted()
   const relay = await (overrides.createRelay || createBoundProxyRelay)(proxy)
   let browser
   try {
-    const os = { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform]
     let saved = fingerprint
     if (!saved) {
       const options = await resources.launchOptions({
         executable_path: resources.executable,
-        os,
+        os: ['windows', 'macos', 'linux'],
         headless: true,
         exclude_addons: ['UBO'],
         locale: localeForLocation(location, null, locale),
@@ -240,6 +242,7 @@ export async function createPlatformBrowserSession(
     // Persist before opening any authenticated website. A failed save must not
     // leave a new, unrecorded identity behind for this account.
     await onFingerprint?.(saved)
+    signal?.throwIfAborted()
     const uaOs = saved.config['navigator.userAgent']?.includes('Windows')
       ? 'win'
       : saved.config['navigator.userAgent']?.includes('Macintosh')
@@ -259,7 +262,28 @@ export async function createPlatformBrowserSession(
         proxy: { server: relay.url },
       },
     })
-    const context = await browser.newContext({ viewport: null, ...(storageState ? { storageState } : {}) })
+    signal?.throwIfAborted()
+    const { sessionStorage: savedSessionStorage = {}, ...playwrightStorage } = storageState || {}
+    const context = await browser.newContext({
+      viewport: null,
+      ...(storageState ? { storageState: playwrightStorage } : {}),
+    })
+    const sessions = structuredClone(savedSessionStorage)
+    await context.exposeBinding?.('__vm2apiSessionStorage', ({ page, frame }, origin, values) => {
+      if (frame !== page.mainFrame()) return
+      try {
+        if (new URL(frame.url()).origin === origin && /^https?:\/\//.test(origin)) sessions[origin] = values
+      } catch {}
+    })
+    await context.addInitScript?.((origins) => {
+      if (!['http:', 'https:'].includes(location.protocol)) return
+      const values = origins[location.origin]
+      if (values && !sessionStorage.length)
+        for (const [key, value] of Object.entries(values)) sessionStorage.setItem(key, value)
+      addEventListener('pagehide', () => {
+        void globalThis.__vm2apiSessionStorage?.(location.origin, { ...sessionStorage })
+      })
+    }, savedSessionStorage)
     const page = await context.newPage()
     let closed = false
     return {
@@ -267,7 +291,19 @@ export async function createPlatformBrowserSession(
       context,
       page,
       fingerprint: saved,
-      storageState: () => context.storageState({ indexedDB: true }),
+      async storageState() {
+        const state = await context.storageState({ indexedDB: true })
+        const sessionStorage = { ...sessions }
+        for (const current of context.pages?.() || [page]) {
+          try {
+            const sample = await current.evaluate(() => ({ origin: location.origin, values: { ...sessionStorage } }))
+            if (/^https?:\/\//.test(sample.origin)) sessionStorage[sample.origin] = sample.values
+          } catch {
+            /* A closing or navigating page keeps the last successful saved state. */
+          }
+        }
+        return Object.keys(sessionStorage).length ? { ...state, sessionStorage } : state
+      },
       async close() {
         if (closed) return
         closed = true

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
-import { WebSocketServer } from 'ws'
+import { SlotBrowserManager } from '../browser/slot-browser-manager.mjs'
+import { SlotBrowserRepo } from '../db/repos/slot-browser-repo.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
 import { hasBoundExit } from '../vm/egress.mjs'
 import { fetchUpstreamModels } from '../admin/api-endpoints.mjs'
@@ -8,7 +9,6 @@ import { PlatformAdapter } from './platform-adapter.mjs'
 
 const BALANCE_INTERVAL = 10 * 60_000
 const IDLE_TIMEOUT = 15 * 60_000
-const BROWSER_PATH = /^\/api\/panel\/vms\/([^/]+)\/openai-api\/browser$/
 
 function problem(code, message, status = 400) {
   return Object.assign(new Error(message), { code, status })
@@ -23,6 +23,7 @@ export class OpenaiApiManager {
     apiEndpointStore,
     apiScheduler,
     createSession = createPlatformBrowserSession,
+    browserManager,
     Adapter = PlatformAdapter,
     fetchModels = fetchUpstreamModels,
     now = Date.now,
@@ -41,15 +42,23 @@ export class OpenaiApiManager {
     this.queue = []
     this.jobs = new Map()
     this.sessions = new Map()
-    this.tickets = new Map()
     this.running = false
     this.stopped = false
-    this.wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 })
+    this.ownsBrowserManager = !browserManager
+    this.browserManager =
+      browserManager ||
+      new SlotBrowserManager({
+        cfg,
+        profileRepo: new SlotBrowserRepo(repo.db),
+        createSession,
+        getVm: (id) => credits.accountForVm(id).vm,
+        getAccountIdentity: (id) => credits.accountForVm(id).accountId,
+      })
   }
 
   view(vm) {
     const view = this.credits.view(vm)
-    return view ? { ...view, browser_active: this.sessions.has(vm.id) } : null
+    return view ? { ...view, browser_active: !!this.browserManager.state(vm.id).active } : null
   }
 
   resolveAccountKey(key) {
@@ -95,11 +104,43 @@ export class OpenaiApiManager {
 
   enqueue(context, kind, interactive) {
     const vmId = context.vm.id
-    if (this.jobs.has(vmId)) return this.jobs.get(vmId)
+    const existing = this.jobs.get(vmId)
+    if (existing) {
+      if (interactive && !existing.interactive) {
+        if (existing.promoted) {
+          if (kind === 'setup') existing.promoted.kind = 'setup'
+          return existing
+        }
+        existing.promoted = { kind }
+        // Background work can be waiting for this very manual window to close.
+        // Cancel only that work, retain the window, then reuse it interactively.
+        const live = this.sessions.get(vmId)
+        if (live?.job === existing) live.retained = true
+        existing.abort.abort()
+        live?.cancel?.()
+        void existing.finished.then(() => {
+          const requested = existing.promoted
+          existing.promoted = null
+          if (!requested || this.stopped) return
+          try {
+            const current = this.credits.accountForVm(vmId)
+            if (current.accountId === existing.accountId) this.enqueue(current, requested.kind, true)
+          } catch {
+            /* A deleted slot has no task to promote. */
+          }
+        })
+      }
+      return existing
+    }
     if (!hasBoundExit(context.vm.proxy) || !hostProxyUrlForVm(context.vm))
       throw problem('proxy_required', '账号未绑定可用代理')
-    let ready
+    let ready, finished
     const job = {
+      abort: new AbortController(),
+      finished: new Promise((resolve) => {
+        finished = resolve
+      }),
+      resolveFinished: () => finished(),
       vmId,
       accountId: context.accountId,
       kind,
@@ -113,52 +154,68 @@ export class OpenaiApiManager {
     this.jobs.set(vmId, job)
     if (interactive) this.queue.unshift(job)
     else this.queue.push(job)
-    if (!this.running) this.draining = this.drain()
+    this.drain()
     return job
   }
 
-  async drain() {
-    if (this.running || this.stopped) return
+  drain() {
+    if (this.stopped) return
     this.running = true
+    while (this.queue.length) {
+      const job = this.queue.shift()
+      job.execution = this.runJob(job)
+    }
+    this.draining = Promise.allSettled([...this.jobs.values()].map((job) => job.finished))
+  }
+
+  async runJob(job) {
     try {
-      while (this.queue.length && !this.stopped) {
-        const job = this.queue.shift()
-        try {
-          await this.run(job)
-        } catch (error) {
-          let current
-          try {
-            current = this.credits.accountForVm(job.vmId)
-          } catch {}
-          if (current?.accountId === job.accountId) {
-            const login = error.code === 'platform_login_required'
-            this.repo.upsertAccount(job.accountId, {
-              setup_status: login ? 'needs_login' : 'error',
-              last_error: safeMessage(error),
-            })
-            if (current.record?.organization_id)
-              this.repo.upsertOrg(current.record.organization_id, { balance_error: safeMessage(error) })
-          }
-        } finally {
-          const live = this.sessions.get(job.vmId)
-          if (live) {
-            await this.persistSession(live)
-            this.send(live, { type: 'status', status: this.repo.getAccount(job.accountId)?.setup_status || 'error' })
-            live.adapter?.dispose?.()
-            await live.browser.close().catch(() => {})
-            for (const ws of live.clients) ws.close()
-            this.sessions.delete(job.vmId)
-          }
-          job.resolveReady(null)
-          this.jobs.delete(job.vmId)
-        }
+      await this.run(job)
+    } catch (error) {
+      let current
+      try {
+        current = this.credits.accountForVm(job.vmId)
+      } catch {}
+      if (error.code === 'platform_account_mismatch') {
+        const live = this.sessions.get(job.vmId)
+        if (live) live.persistable = false
+      }
+      if (current?.accountId === job.accountId && !job.abort.signal.aborted && this.jobs.get(job.vmId) === job) {
+        const login = error.code === 'platform_login_required'
+        this.repo.upsertAccount(job.accountId, {
+          setup_status: login ? 'needs_login' : 'error',
+          last_error: safeMessage(error),
+        })
+        if (current.record?.organization_id)
+          this.repo.upsertOrg(current.record.organization_id, { balance_error: safeMessage(error) })
       }
     } finally {
-      this.running = false
+      const live = this.sessions.get(job.vmId)
+      if (live?.job === job) {
+        await this.persistSession(live)
+        const status = this.repo.getAccount(job.accountId)?.setup_status || 'error'
+        this.browserManager.setStatus(
+          live,
+          status === 'ready' ? 'api_ready' : status,
+          this.repo.getAccount(job.accountId)?.last_error,
+        )
+        live.adapter?.dispose?.()
+        live.inputLocked = false
+        live.cancel = null
+        live.checkLogin = null
+        await this.browserManager.release(live)
+        if (this.sessions.get(job.vmId) === live) this.sessions.delete(job.vmId)
+      }
+      job.resolveReady(null)
+      if (this.jobs.get(job.vmId) === job) this.jobs.delete(job.vmId)
+      job.resolveFinished()
     }
+    this.running = this.jobs.size > 0
   }
 
   assertCurrent(job) {
+    job.abort.signal.throwIfAborted()
+    if (this.jobs.get(job.vmId) !== job) throw problem('api_task_replaced', 'API 任务已取消或替换')
     const context = this.credits.accountForVm(job.vmId)
     if (context.accountId !== job.accountId) throw problem('api_account_changed', '账号已更换，请重新打开配置', 409)
     const proxyUrl = hostProxyUrlForVm(context.vm)
@@ -171,33 +228,24 @@ export class OpenaiApiManager {
   async run(job) {
     const context = this.assertCurrent(job)
     job.proxyUrl = hostProxyUrlForVm(context.vm)
-    const browser = await this.createSession({
-      fingerprint: context.record?.fingerprint,
-      storageState: context.record?.storage_state,
-      proxyUrl: job.proxyUrl,
-      timezone: context.vm.timezone,
-      locale: context.vm.locale,
-      onFingerprint: (fingerprint) => {
-        this.assertCurrent(job)
-        this.repo.upsertAccount(job.accountId, { fingerprint })
-      },
+    const live = await this.browserManager.acquire(job.vmId, {
+      purpose: 'platform',
+      interactive: job.interactive,
+      retain: job.interactive,
+      signal: job.abort.signal,
     })
-    if (this.stopped) {
-      await browser.close()
+    if (this.stopped || job.abort.signal.aborted) {
+      await this.browserManager.close(job.vmId)
       return
     }
-    const live = { job, browser, page: browser.page, clients: new Set(), touchedAt: this.now(), waiting: false }
+    this.assertCurrent(job)
+    const browser = live.browser
+    live.job = job
+    live.waiting = false
+    live.inputLocked = true
     this.sessions.set(job.vmId, live)
-    await browser.context.route?.('**/*', async (route) => {
-      try {
-        this.assertCurrent(job)
-        await route.continue()
-      } catch {
-        await route.abort().catch(() => {})
-        live.cancel?.()
-      }
-    })
     job.resolveReady(live)
+    this.browserManager.setStatus(live, 'opening', '正在打开 OpenAI Platform')
     const adapter = new this.Adapter({
       page: browser.page,
       context: browser.context,
@@ -214,12 +262,15 @@ export class OpenaiApiManager {
     if (!identity.authenticated) {
       if (!job.interactive) throw problem('platform_login_required', 'Platform 会话已失效，请补充登录')
       this.repo.upsertAccount(job.accountId, { setup_status: 'needs_login', last_error: null })
-      this.send(live, { type: 'status', status: 'needs_login', message: '请在此窗口完成 OpenAI Platform 登录' })
+      live.inputLocked = false
+      this.browserManager.setStatus(live, 'needs_login', '请在此窗口完成 OpenAI Platform 登录')
       identity = await this.waitForLogin(live)
     }
     if (String(identity.email || '').toLowerCase() !== String(context.account.email || '').toLowerCase())
       throw problem('platform_account_mismatch', 'Platform 登录邮箱与当前账号不一致', 409)
     live.identityVerified = true
+    live.inputLocked = true
+    this.browserManager.bindAccount(live, job.accountId)
     this.assertCurrent(job)
     this.repo.upsertAccount(job.accountId, { setup_status: 'configuring', last_error: null })
     await this.persistSession(live)
@@ -263,6 +314,7 @@ export class OpenaiApiManager {
     try {
       await this.updateBalance(live, organizationId)
     } catch (error) {
+      this.assertCurrent(job)
       this.repo.upsertOrg(organizationId, { balance_error: safeMessage(error) })
     }
     const endpoint = this.apiEndpointStore.getRaw(this.repo.getKey(record.key_id).endpoint_id)
@@ -275,20 +327,27 @@ export class OpenaiApiManager {
         api_key: key.api_key,
         proxy_url: hostProxyUrlForVm(current.vm),
       })
+      this.assertCurrent(job)
       this.apiEndpointStore.mergeFetchedModels(endpoint.id, fetched.models)
     }
+    this.assertCurrent(job)
     this.repo.upsertAccount(job.accountId, { setup_status: 'ready', last_error: null })
     this.reload()
-    this.send(live, { type: 'status', status: 'ready' })
+    this.browserManager.setStatus(live, 'api_ready', 'API 配置已完成')
   }
 
   async updateBalance(live, organizationId) {
     this.assertCurrent(live.job)
     const result = await live.adapter.readBalance({ organizationId })
+    this.assertCurrent(live.job)
     if (result.balance == null || !/^-?\d+(?:\.\d+)?$/.test(String(result.balance)))
       throw problem('platform_balance_missing', '官方 Billing 尚未返回可用余额')
     this.repo.upsertOrg(organizationId, {
       balance: String(result.balance),
+      paid_balance: result.paid_balance ?? null,
+      grants: result.grants || [],
+      next_expiring_amount: result.next_expiring_amount ?? null,
+      next_expiring_at: result.next_expiring_at ?? null,
       balance_checked_at: new Date(this.now()).toISOString(),
       balance_error: null,
     })
@@ -302,13 +361,10 @@ export class OpenaiApiManager {
   }
 
   async persistSession(live) {
-    if (!live.identityVerified) return
+    if (live.persistable === false) return
     try {
-      this.assertCurrent(live.job)
-      this.repo.upsertAccount(live.job.accountId, { storage_state: await live.browser.storageState() })
-    } catch {
-      // Keep the last saved session if a closed browser or a changed account cannot be sampled.
-    }
+      await this.browserManager.persist(live)
+    } catch {}
   }
 
   async waitForLogin(live) {
@@ -317,12 +373,14 @@ export class OpenaiApiManager {
       let inspecting = false
       const finish = (value, error) => {
         clearInterval(timer)
+        live.closeSignal.removeEventListener('abort', live.cancel)
         live.waiting = false
         live.checkLogin = null
         live.cancel = null
         error ? reject(error) : resolve(value)
       }
       live.cancel = () => finish(null, problem('platform_login_required', '登录尚未完成，可继续配置'))
+      live.closeSignal.addEventListener('abort', live.cancel, { once: true })
       live.checkLogin = async () => {
         if (inspecting) return
         inspecting = true
@@ -342,118 +400,40 @@ export class OpenaiApiManager {
     })
   }
 
-  async browserTicket(vmId) {
-    const context = this.credits.accountForVm(vmId)
-    const active = [...this.sessions.values()][0]
-    if (active && active.job.vmId !== vmId)
-      throw problem('platform_browser_busy', '另一账号正在登录，请完成后再打开', 409)
+  browserTicket(vmId) {
+    this.credits.accountForVm(vmId)
     if (!this.jobs.has(vmId)) this.setup(vmId)
-    const job = this.jobs.get(vmId)
-    const live =
-      this.sessions.get(vmId) ||
-      (job &&
-        (await Promise.race([
-          job.ready,
-          new Promise((resolve) => {
-            const timer = setTimeout(() => resolve(null), 30_000)
-            timer.unref?.()
-          }),
-        ])))
-    if (!live || context.accountId !== live.job.accountId)
-      throw problem('platform_browser_unavailable', '浏览器尚未就绪，请稍后重试', 409)
-    const ticket = crypto.randomBytes(24).toString('hex')
-    for (const [key, value] of this.tickets) if (value.expires < this.now()) this.tickets.delete(key)
-    this.tickets.set(ticket, { vmId, accountId: context.accountId, expires: this.now() + 30_000 })
-    return { ticket, url: `/api/panel/vms/${encodeURIComponent(vmId)}/openai-api/browser?ticket=${ticket}` }
+    return this.browserManager.browserTicket(vmId, { purpose: 'platform' })
   }
 
   handleUpgrade(req, socket, head) {
-    const url = new URL(req.url, 'http://127.0.0.1')
-    const match = url.pathname.match(BROWSER_PATH)
-    if (!match) return false
-    const ticket = url.searchParams.get('ticket')
-    const grant = this.tickets.get(ticket)
-    this.tickets.delete(ticket)
-    const vmId = decodeURIComponent(match[1])
-    const live = this.sessions.get(vmId)
-    let current = false
-    try {
-      if (live) {
-        this.assertCurrent(live.job)
-        current = true
-      }
-    } catch {}
-    if (
-      !grant ||
-      grant.vmId !== vmId ||
-      grant.expires < this.now() ||
-      !live ||
-      !current ||
-      grant.accountId !== live.job.accountId
-    ) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
-      socket.destroy()
-      return true
-    }
-    this.wss.handleUpgrade(req, socket, head, (ws) => this.attach(ws, live))
-    return true
-  }
-
-  attach(ws, live) {
-    live.clients.add(ws)
-    live.touchedAt = this.now()
-    let capturing = false
-    const capture = async () => {
-      if (capturing || ws.readyState !== 1 || ws.bufferedAmount > 1024 * 1024) return
-      capturing = true
-      try {
-        this.assertCurrent(live.job)
-        const image = await live.page.screenshot({ type: 'jpeg', quality: 65 })
-        const viewport = await live.page.evaluate(() => ({ width: innerWidth, height: innerHeight }))
-        ws.send(JSON.stringify({ type: 'frame', image: image.toString('base64'), mime: 'image/jpeg', ...viewport }))
-      } catch {
-        /* Page navigation can interrupt one screenshot. */
-      } finally {
-        capturing = false
-      }
-    }
-    const timer = setInterval(() => void capture(), 750)
-    timer.unref?.()
-    void capture()
-    ws.send(JSON.stringify({ type: 'status', status: this.repo.getAccount(live.job.accountId)?.setup_status }))
-    ws.on('message', async (raw) => {
-      try {
-        const input = JSON.parse(String(raw))
-        this.assertCurrent(live.job)
-        live.touchedAt = this.now()
-        if (input.type === 'close') {
-          live.cancel?.()
-          return ws.close()
-        }
-        if (input.type === 'continue') {
-          await live.checkLogin?.()
-          return
-        }
-        if (!live.waiting) return
-        if (input.type === 'click')
-          await live.page.mouse.click(Number(input.x), Number(input.y), { button: input.button || 'left' })
-        else if (input.type === 'move') await live.page.mouse.move(Number(input.x), Number(input.y))
-        else if (input.type === 'scroll')
-          await live.page.mouse.wheel(Number(input.deltaX) || 0, Number(input.deltaY) || 0)
-        else if (input.type === 'key') await live.page.keyboard.press(String(input.key))
-        else if (input.type === 'text') await live.page.keyboard.insertText(String(input.text))
-      } catch (error) {
-        ws.send(JSON.stringify({ type: 'status', status: 'error', message: safeMessage(error) }))
-      }
-    })
-    ws.on('close', () => {
-      clearInterval(timer)
-      live.clients.delete(ws)
-    })
+    return this.browserManager.handleUpgrade(req, socket, head)
   }
 
   send(live, message) {
-    for (const ws of live.clients) if (ws.readyState === 1) ws.send(JSON.stringify(message))
+    this.browserManager.send(live, message)
+  }
+
+  async cancel(vmId, { forget = false, closeBrowser = true } = {}) {
+    const active = this.sessions.get(vmId)
+    if (!closeBrowser && active && !active.waiting)
+      throw problem('platform_browser_busy', 'API 配置正在执行，请完成后再开始 OAuth 登录', 409)
+    const currentJob = this.jobs.get(vmId)
+    if (currentJob) {
+      currentJob.promoted = null
+      currentJob.abort.abort()
+    }
+    const queued = this.queue.filter((job) => job.vmId === vmId)
+    this.queue = this.queue.filter((job) => job.vmId !== vmId)
+    for (const job of queued) {
+      job.resolveReady(null)
+      job.resolveFinished()
+      this.jobs.delete(vmId)
+    }
+    this.sessions.get(vmId)?.cancel?.()
+    if (closeBrowser) await this.browserManager.close(vmId, { forget })
+    const job = this.jobs.get(vmId)
+    if (job) await job.finished
   }
 
   reload() {
@@ -494,6 +474,7 @@ export class OpenaiApiManager {
 
   start() {
     this.stopped = false
+    this.browserManager.start()
     if (this.timer) return
     this.timer = setInterval(() => void this.tick(), 30_000)
     this.timer.unref?.()
@@ -505,16 +486,13 @@ export class OpenaiApiManager {
     this.timer = null
     for (const job of this.queue) {
       job.resolveReady(null)
+      job.resolveFinished()
       this.jobs.delete(job.vmId)
     }
     this.queue.length = 0
-    this.tickets.clear()
-    for (const live of this.sessions.values()) {
-      live.cancel?.()
-      await this.persistSession(live)
-      await live.browser.close().catch(() => {})
-      for (const ws of live.clients) ws.close()
-    }
+    for (const job of this.jobs.values()) job.abort.abort()
+    if (this.ownsBrowserManager) await this.browserManager.stop()
+    else for (const vmId of this.jobs.keys()) await this.browserManager.close(vmId)
     await this.draining
   }
 }

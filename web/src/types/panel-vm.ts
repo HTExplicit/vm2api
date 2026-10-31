@@ -30,6 +30,15 @@ export type OpenaiApiCreditBenefit = {
   expires_at: string
 }
 
+export type OpenaiApiCreditGrant = {
+  id: string
+  name: string
+  granted: string
+  remaining: string
+  effective_at: string
+  expires_at: string | null
+}
+
 export type OpenaiApiView = {
   pro_eligible: boolean
   claim_status: 'unknown' | 'eligible' | 'ineligible' | 'pending' | 'claimed'
@@ -47,6 +56,13 @@ export type OpenaiApiView = {
   key_suffix?: string | null
   setup_status: 'idle' | 'needs_login' | 'configuring' | 'ready' | 'error'
   balance: string | null
+  paid_balance?: string | null
+  grants?: OpenaiApiCreditGrant[]
+  next_expiring_amount?: string | null
+  next_expiring_at?: string | null
+  offer_checked_at?: string | null
+  link_checked_at?: string | null
+  offer_stale?: boolean
   balance_checked_at?: string | null
   balance_error?: string | null
   last_error?: string | null

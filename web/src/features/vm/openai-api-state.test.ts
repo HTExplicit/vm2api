@@ -4,6 +4,8 @@ import { browserInputPoint } from './browser-input'
 import {
   hasOpenaiApiFeature,
   isProApiAccount,
+  isOpenaiApiKeyCandidate,
+  isOpenaiApiBalancePending,
   openaiApiClaimLabel,
   openaiApiClaimLocked,
 } from './openai-api-state'
@@ -95,6 +97,81 @@ describe('account API feature gates', () => {
       })
     ).toBe(true)
     expect(hasOpenaiApiFeature({ ...vm, plan_type: 'free' })).toBe(false)
+  })
+
+  it('offers funded account keys independently of subscription, freshness and API switch', () => {
+    for (const balance of ['37.000', '0001.00', '+0.00000000000000000000001']) {
+      expect(
+        isOpenaiApiKeyCandidate({
+          ...vm,
+          plan_type: 'free',
+          openai_api: {
+            ...state,
+            has_key: true,
+            enabled: false,
+            balance,
+            balance_error: '待登录',
+          },
+        })
+      ).toBe(true)
+    }
+    for (const balance of [null, '', '0', '0.000', '-0.000', '-1', 'NaN']) {
+      expect(
+        isOpenaiApiKeyCandidate({
+          ...vm,
+          openai_api: { ...state, has_key: true, balance },
+        })
+      ).toBe(false)
+    }
+    expect(
+      isOpenaiApiKeyCandidate({
+        ...vm,
+        openai_api: { ...state, balance: '37', has_key: false },
+      })
+    ).toBe(false)
+    expect(
+      isOpenaiApiKeyCandidate({
+        ...vm,
+        family: 'claude',
+        platform: 'anthropic',
+        openai_api: { ...state, balance: '37', has_key: true },
+      })
+    ).toBe(false)
+  })
+
+  it('marks old successful balances pending without discarding the candidate', () => {
+    const now = Date.parse('2026-11-01T00:10:00Z')
+    const current = {
+      ...state,
+      balance: '37',
+      balance_checked_at: '2026-11-01T00:09:00Z',
+    }
+    expect(isOpenaiApiBalancePending(current, now)).toBe(false)
+    expect(
+      isOpenaiApiBalancePending({ ...current, balance_error: '需要登录' }, now)
+    ).toBe(true)
+    expect(
+      isOpenaiApiBalancePending(
+        { ...current, balance_checked_at: '2026-11-01T00:00:00Z' },
+        now
+      )
+    ).toBe(true)
+    expect(
+      isOpenaiApiBalancePending(
+        { ...current, balance_checked_at: undefined },
+        now
+      )
+    ).toBe(true)
+    expect(isOpenaiApiBalancePending({ ...current, balance: null }, now)).toBe(
+      false
+    )
+    expect(
+      openaiApiClaimLabel({
+        ...state,
+        claim_status: 'eligible',
+        offer_stale: true,
+      })
+    ).toBe('资格已过期，请重新查询')
   })
 
   it('scales browser interaction coordinates into the actual remote viewport', () => {

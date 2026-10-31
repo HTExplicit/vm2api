@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import http from 'node:http'
 import { once } from 'node:events'
+import vm from 'node:vm'
 import {
   createBoundProxyRelay,
   createPlatformBrowserSession,
@@ -169,6 +170,159 @@ test('failed identity persistence closes the relay without launching an unrecord
     /save failed/,
   )
   assert.equal(closed, true)
+})
+
+test('new slots request complete randomly selected desktop identities while restored slots never regenerate', async () => {
+  const generated = []
+  const deps = {
+    runtime: async () => ({
+      executable: 'paired-browser',
+      async launchOptions(options) {
+        generated.push(options)
+        return {
+          env: { CAMOU_CONFIG_1: JSON.stringify({ ...original.config, identity: generated.length }) },
+          firefoxUserPrefs: {},
+        }
+      },
+      getEnvVars: () => ({}),
+      getPrefEnvVars: () => ({}),
+      Camoufox: async () => ({
+        newContext: async () => ({
+          newPage: async () => ({}),
+          storageState: async () => ({ cookies: [], origins: [] }),
+        }),
+        close: async () => {},
+      }),
+    }),
+    proxyLocation: async () => location,
+    createRelay: async () => ({ url: 'http://127.0.0.1:12345', close: async () => {} }),
+  }
+  let saved
+  const a = await createPlatformBrowserSession(
+    {
+      proxyUrl: 'socks5h://127.0.0.1:1080',
+      onFingerprint: (fp) => {
+        saved = fp
+      },
+    },
+    deps,
+  )
+  const b = await createPlatformBrowserSession({ proxyUrl: 'socks5h://127.0.0.1:1081' }, deps)
+  const restored = await createPlatformBrowserSession(
+    { proxyUrl: 'socks5h://127.0.0.1:1080', fingerprint: saved },
+    deps,
+  )
+  assert.equal(generated.length, 2)
+  assert.deepEqual(generated[0].os, ['windows', 'macos', 'linux'])
+  assert.notDeepEqual(a.fingerprint, b.fingerprint)
+  assert.deepEqual(a.fingerprint, restored.fingerprint)
+  await Promise.all([a.close(), b.close(), restored.close()])
+})
+
+test('cancellation during launch closes browser and relay before any page can open', async () => {
+  const controller = new AbortController()
+  const calls = []
+  await assert.rejects(
+    createPlatformBrowserSession(
+      { fingerprint: original, proxyUrl: 'socks5h://127.0.0.1:1080', signal: controller.signal },
+      {
+        runtime: async () => ({
+          executable: 'paired-browser',
+          getEnvVars: () => ({}),
+          getPrefEnvVars: () => ({}),
+          Camoufox: async () => {
+            controller.abort(new Error('cancelled'))
+            return {
+              newContext: () => {
+                throw Error('must not create context')
+              },
+              close: async () => calls.push('browser'),
+            }
+          },
+        }),
+        proxyLocation: async () => location,
+        createRelay: async () => ({ close: async () => calls.push('relay') }),
+      },
+    ),
+    /cancelled/,
+  )
+  assert.deepEqual(calls, ['browser', 'relay'])
+})
+
+test('session storage is restored only for matching origins and saved with the encrypted browser state', async () => {
+  let script
+  let values
+  let observed
+  let restored
+  const state = { cookies: [], origins: [], sessionStorage: { 'https://auth.openai.com': { step: 'same-slot' } } }
+  const page = { evaluate: async () => ({ origin: 'https://platform.openai.com', values: { project: 'selected' } }) }
+  const context = {
+    exposeBinding: async (_name, callback) => {
+      observed = callback
+    },
+    addInitScript: async (callback, argument) => {
+      script = callback
+      values = argument
+    },
+    newPage: async () => page,
+    storageState: async () => ({ cookies: [], origins: [] }),
+    pages: () => [page],
+  }
+  const session = await createPlatformBrowserSession(
+    { fingerprint: original, storageState: state, proxyUrl: 'socks5h://127.0.0.1:1080' },
+    {
+      runtime: async () => ({
+        executable: 'paired-browser',
+        getEnvVars: () => ({}),
+        getPrefEnvVars: () => ({}),
+        Camoufox: async () => ({
+          newContext: async (options) => {
+            restored = options.storageState
+            return context
+          },
+          close: async () => {},
+        }),
+      }),
+      proxyLocation: async () => location,
+      createRelay: async () => ({ close: async () => {} }),
+    },
+  )
+  assert.equal(typeof script, 'function')
+  assert.deepEqual(values, state.sessionStorage)
+  assert.deepEqual(restored, { cookies: [], origins: [] })
+  const webStorage = new Map()
+  const storage = {
+    get length() {
+      return webStorage.size
+    },
+    setItem(key, value) {
+      webStorage.set(key, value)
+    },
+  }
+  const execute = (origin) =>
+    vm.runInNewContext(`(${script.toString()})(origins)`, {
+      origins: values,
+      location: { origin, protocol: 'https:' },
+      sessionStorage: storage,
+      addEventListener() {},
+    })
+  execute('https://unrelated.example')
+  assert.equal(webStorage.size, 0)
+  execute('https://auth.openai.com')
+  assert.equal(webStorage.get('step'), 'same-slot')
+  webStorage.set('step', 'new-step-written-by-page')
+  execute('https://auth.openai.com')
+  assert.equal(webStorage.get('step'), 'new-step-written-by-page')
+  const frame = { url: () => 'https://auth.openai.com/log-in' }
+  await observed({ page: { mainFrame: () => frame }, frame }, 'https://auth.openai.com', { step: 'updated' })
+  await observed({ page: { mainFrame: () => frame }, frame }, 'https://wrong-account.test', { private: 'rejected' })
+  const saved = await session.storageState()
+  assert.deepEqual(saved.sessionStorage, {
+    'https://auth.openai.com': { step: 'updated' },
+    'https://platform.openai.com': { project: 'selected' },
+  })
+  assert.deepEqual(state.sessionStorage, { 'https://auth.openai.com': { step: 'same-slot' } })
+  await session.close()
 })
 
 test('a missing or unsupported account proxy never starts browser resources', async () => {

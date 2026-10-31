@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { OpenaiApiView, Vm } from '@/types/panel-vm'
 import { Gift, KeyRound, RefreshCw } from 'lucide-react'
@@ -26,6 +26,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { CodexCreditSummary } from '@/features/vm/codex-credit-summary'
+import { OpenaiApiCreditDetails } from '@/features/vm/openai-api-credit-details'
 import {
   hasOpenaiApiFeature,
   isProApiAccount,
@@ -149,9 +150,11 @@ export function OpenaiApiDialog({
     (destinations.length === 1 ? destinations[0].destination_account_id : '')
   const offer = state?.offer
   const benefit = offer || state?.benefit
-  const browserOpen =
-    manualBrowser ||
-    (state?.setup_status === 'needs_login' && !browserDismissed)
+  useEffect(() => {
+    if (open && state?.setup_status === 'needs_login' && !browserDismissed)
+      setManualBrowser(true)
+  }, [open, state?.setup_status, browserDismissed])
+  const browserOpen = manualBrowser
   const busy = action.isPending
   const showingAction = busy ? action.variables?.name : null
 
@@ -251,7 +254,11 @@ export function OpenaiApiDialog({
                     )}
                     aria-hidden
                   />
-                  {showingAction === 'preview' ? '查询中…' : '查询领取资格'}
+                  {showingAction === 'preview'
+                    ? '查询中…'
+                    : state?.offer_stale
+                      ? '重新查询领取资格'
+                      : '查询领取资格'}
                 </Button>
               ) : null}
               {pro || locked ? (
@@ -261,6 +268,7 @@ export function OpenaiApiDialog({
                     busy ||
                     locked ||
                     state?.claim_status !== 'eligible' ||
+                    !!state?.offer_stale ||
                     !destination
                   }
                   onClick={() =>
@@ -280,6 +288,17 @@ export function OpenaiApiDialog({
                 </Button>
               ) : null}
             </div>
+            {state?.offer_checked_at ? (
+              <p className='m-0 text-xs text-muted-foreground'>
+                资格查询：{fmtExpiresAt(state.offer_checked_at)}
+                {state.offer_stale && !locked ? ' · 已过期，请重新查询' : ''}
+              </p>
+            ) : null}
+            {state?.link_checked_at ? (
+              <p className='m-0 text-xs text-muted-foreground'>
+                关联确认：{fmtExpiresAt(state.link_checked_at)}
+              </p>
+            ) : null}
             {locked ? (
               <p className='m-0 text-xs text-muted-foreground'>
                 已关联订阅权益，后续符合条件时由官方按期发放，无需再次领取。
@@ -310,6 +329,7 @@ export function OpenaiApiDialog({
               独立于 GPT 内核启停与 OAuth 调度，使用组织可用余额。
             </p>
             <CodexCreditSummary vm={currentVm} />
+            <OpenaiApiCreditDetails state={state} />
             <p className='m-0 text-xs text-muted-foreground'>
               {state?.has_key
                 ? `项目 key 已保存${state.key_suffix ? ` · 尾号 ${state.key_suffix}` : ''}`

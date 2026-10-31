@@ -52,6 +52,10 @@ import { ApiScheduler } from './lib/pool/api-scheduler.mjs'
 import { OpenaiApiRepo } from './lib/db/repos/openai-api-repo.mjs'
 import { OpenaiApiCreditsService } from './lib/oauth/openai-api-credits.mjs'
 import { OpenaiApiManager } from './lib/openai-api/manager.mjs'
+import { SlotBrowserRepo } from './lib/db/repos/slot-browser-repo.mjs'
+import { SlotBrowserManager } from './lib/browser/slot-browser-manager.mjs'
+import { CodexBrowserLoginService } from './lib/oauth/codex-browser-login.mjs'
+import { commitImportedCodexVm } from './lib/admin/panel-routes.mjs'
 import { resolveInferenceBackend } from './lib/pool/api-protocol.mjs'
 import { bootApiKernel, apiKernelPaths, apiKernelSnapshot } from './lib/transport/api-kernel-client.mjs'
 import { PanelUserStore } from './lib/admin/panel-users.mjs'
@@ -314,20 +318,55 @@ const apiEndpointStore = new ApiEndpointStore({ dataDir: cfg.paths.data })
 const apiScheduler = new ApiScheduler()
 apiScheduler.reload(apiEndpointStore.listRaw())
 const openaiApiRepo = new OpenaiApiRepo()
+const slotBrowserRepo = new SlotBrowserRepo(undefined, { projectRoot: cfg.paths.project })
+const slotAccountIdentity = (id) => {
+  try {
+    const current = openaiApiCredits.accountForVm(id)
+    return { accountId: current.accountId, email: current.account.email || '' }
+  } catch {
+    return {}
+  }
+}
+const slotBrowserManager = new SlotBrowserManager({
+  cfg,
+  profileRepo: slotBrowserRepo,
+  getAccountIdentity: (id) => slotAccountIdentity(id).accountId || '',
+})
 let openaiApiManager
 const openaiApiCredits = new OpenaiApiCreditsService({
   projectRoot: cfg.paths.project,
   repo: openaiApiRepo,
   onLinked: (vmId) => {
-    Promise.resolve(openaiApiManager.setup(vmId)).catch(() => {})
+    Promise.resolve()
+      .then(() => codexBrowserLogin.cancel(vmId))
+      .then(() => openaiApiManager.setup(vmId))
+      .catch(() => {})
   },
 })
 openaiApiManager = new OpenaiApiManager({
   cfg,
   repo: openaiApiRepo,
+  browserManager: slotBrowserManager,
   credits: openaiApiCredits,
   apiEndpointStore,
   apiScheduler,
+})
+const codexBrowserLogin = new CodexBrowserLoginService({
+  browserManager: slotBrowserManager,
+  getVm: (id) => getVm(cfg.paths.project, id),
+  getAccountIdentity: slotAccountIdentity,
+  commitCredentials: async ({ vmId, account }) => {
+    const existing = getVm(cfg.paths.project, vmId)
+    if (!existing) throw Object.assign(new Error('槽位已删除'), { code: 'vm_not_found' })
+    return commitImportedCodexVm({
+      cfg,
+      vmPath: path.join(cfg.paths.project, 'vms', `${vmId}.json`),
+      existing,
+      account,
+      routingConfig,
+      catalogClientVersion: routingConfig.codex?.catalog_client_version,
+    })
+  },
 })
 apiScheduler.resolveAccountKey = (key) => openaiApiManager.resolveAccountKey(key)
 apiScheduler.onAccountKeyError = (key, error) => openaiApiManager.recordKeyError(key, error)
@@ -590,6 +629,7 @@ backupService.onRestored((db) => {
   }
   groupsRepo = new GroupsRepo(db)
   openaiApiRepo.rebind(db)
+  slotBrowserRepo.rebind(db)
   apiScheduler.reload(apiEndpointStore.listRaw())
 
   routingConfig = loadRoutingConfig()
@@ -1012,6 +1052,10 @@ const handlePanel = createPanelHandler({
   panelUsers,
   openaiApiManager,
   openaiApiCredits,
+  openaiApiRepo,
+  slotBrowserRepo,
+  slotBrowserManager,
+  codexBrowserLogin,
   requestLog,
   vmTestSchedule,
   backupService,
@@ -1203,7 +1247,7 @@ const server = http.createServer(async (req, res) => {
 server.on('upgrade', (req, socket, head) => {
   if (responsesWs.handleUpgrade(req, socket, head)) return
   if (clusterRoutes.handleUpgrade(req, socket, head)) return
-  if (openaiApiManager.handleUpgrade(req, socket, head)) return
+  if (slotBrowserManager.handleUpgrade(req, socket, head)) return
   if (!slotShell.handleUpgrade(req, socket, head)) socket.destroy()
 })
 
@@ -1286,6 +1330,8 @@ async function shutdown(signal) {
     usageProbeMonitor?.stop?.()
   } catch {}
   try {
+    await codexBrowserLogin.stop()
+    await slotBrowserManager.stop()
     await openaiApiManager.stop()
   } catch {}
   try {

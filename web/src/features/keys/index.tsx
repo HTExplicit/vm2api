@@ -87,7 +87,14 @@ export function KeysPage() {
       api(`/api/panel/api-keys/${encodeURIComponent(id)}`, {
         method: 'PATCH',
         body: JSON.stringify(
-          keyLimitsPayload(draft, 'edit', { isAdmin, vms: vmItems })
+          keyLimitsPayload(draft, 'edit', {
+            isAdmin,
+            vms: vmItems,
+            currentAllowedVms:
+              editing?.group_type === 'openai_apikey'
+                ? editing.allowed_vms
+                : [],
+          })
         ),
       }),
     onSuccess: async () => {

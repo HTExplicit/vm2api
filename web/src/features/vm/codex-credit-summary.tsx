@@ -8,7 +8,11 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { hasOpenaiApiFeature } from '@/features/vm/openai-api-state'
+import { openaiApiCreditDetailRows } from '@/features/vm/openai-api-credit-details'
+import {
+  hasOpenaiApiFeature,
+  isOpenaiApiBalancePending,
+} from '@/features/vm/openai-api-state'
 
 /** Balance credits are separate from the reset vouchers below the quota windows. */
 export function CodexCreditSummary({
@@ -64,14 +68,20 @@ export function CodexCreditSummary({
     .join('\n')
   const apiState = vm.openai_api
   const apiLabel = `API ${apiState?.balance != null ? `$${trimDecimalZeros(apiState.balance)}` : '未知'}`
+  const apiPending = isOpenaiApiBalancePending(apiState)
   const apiFacts = [
     apiLabel,
     apiState?.organization_name ? `组织：${apiState.organization_name}` : '',
     '组织总可用余额，包括赠额和购买余额。',
+    ...openaiApiCreditDetailRows(apiState).map(
+      ([label, value]) => `${label}：${value}`
+    ),
     apiState?.balance_checked_at
       ? `最近刷新：${fmtExpiresAt(apiState.balance_checked_at)}`
       : '尚无 API 余额样本',
-    apiState?.balance_error ? `待刷新：${apiState.balance_error}` : '',
+    apiPending
+      ? `待刷新${apiState?.balance_error ? `：${apiState.balance_error}` : ''}`
+      : '',
     apiState?.benefit
       ? `每${apiState.benefit.cadence === 'annual' ? '年' : '月'}权益：$${trimDecimalZeros(apiState.benefit.period_credit_amount_usd)}`
       : '',
@@ -123,7 +133,7 @@ export function CodexCreditSummary({
               className='flex min-w-0 cursor-help items-baseline gap-1 text-[11px] text-muted-foreground'
             >
               <span className='tabular-nums'>{apiLabel}</span>
-              {apiState?.balance_error ? (
+              {apiPending ? (
                 <span className='text-[color:var(--status-warn)]'>待刷新</span>
               ) : null}
             </div>

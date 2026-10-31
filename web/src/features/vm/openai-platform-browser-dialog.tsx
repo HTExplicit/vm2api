@@ -10,41 +10,79 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  browserNeedsOpening,
+  browserSocketUrl,
+  browserStatusMessage,
+  decodeBrowserFrame,
+  LatestBrowserFrames,
+  type BrowserFrameMetadata,
+  type BrowserQuality,
+  type DisplayedBrowserFrame,
+} from '@/features/vm/browser-frames'
 import { browserInputPoint } from '@/features/vm/browser-input'
+import type { CommitResult } from '@/features/vm/credential-panel'
 
-type BrowserFrame = {
-  type: 'frame'
-  image: string
-  mime: string
-  width: number
-  height: number
+type BrowserPurpose = 'oauth' | 'platform'
+
+type BrowserStatus = {
+  type: 'status'
+  status: string
+  message?: string
+  purpose?: BrowserPurpose
+  result?: CommitResult
 }
 
-export function OpenaiPlatformBrowserDialog({
+type SlotBrowserDialogProps = {
+  vmId: string
+  email?: string | null
+  purpose: BrowserPurpose
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onComplete?: (result?: CommitResult) => void
+}
+
+export function OpenaiPlatformBrowserDialog(
+  props: Omit<SlotBrowserDialogProps, 'purpose'>
+) {
+  return <SlotBrowserDialog {...props} purpose='platform' />
+}
+
+export function SlotBrowserDialog({
   vmId,
   email,
+  purpose,
   open,
   onOpenChange,
   onComplete,
-}: {
-  vmId: string
-  email?: string | null
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onComplete: () => void
-}) {
+}: SlotBrowserDialogProps) {
   const socket = useRef<WebSocket | null>(null)
   const keyboard = useRef<HTMLTextAreaElement | null>(null)
   const viewport = useRef<HTMLDivElement | null>(null)
   const lastMoveAt = useRef(0)
+  const inputSeq = useRef(0)
   const callbacks = useRef({ onOpenChange, onComplete })
   callbacks.current = { onOpenChange, onComplete }
-  const [frame, setFrame] = useState<BrowserFrame | null>(null)
-  const [message, setMessage] = useState('正在连接账号浏览器…')
+  const lifecycle = useRef({ vmId: '', epoch: 0 })
+  const opened = useRef('')
+  const opening = useRef<{ vmId: string; promise: Promise<unknown> } | null>(
+    null
+  )
+  const completed = useRef(new Set<string>())
+  const resultReported = useRef(false)
+  const qualityRef = useRef<BrowserQuality>('smooth')
+  const purposeRef = useRef(purpose)
+  const [frame, setFrame] = useState<DisplayedBrowserFrame | null>(null)
+  const [currentPurpose, setCurrentPurpose] = useState(purpose)
+  const [message, setMessage] = useState('正在连接槽位浏览器…')
   const [error, setError] = useState('')
+  const [status, setStatus] = useState('starting')
   const [connected, setConnected] = useState(false)
   const [attempt, setAttempt] = useState(0)
   const [originalSize, setOriginalSize] = useState(false)
+  const [quality, setQuality] = useState<BrowserQuality>('smooth')
+  const [switching, setSwitching] = useState(false)
+  const base = `/api/panel/vms/${encodeURIComponent(vmId)}/browser`
 
   useEffect(() => {
     const element = viewport.current
@@ -55,65 +93,182 @@ export function OpenaiPlatformBrowserDialog({
   }, [originalSize])
 
   useEffect(() => {
+    const element = viewport.current
+    if (!element || !open) return
+    const wheel = (event: WheelEvent) => {
+      event.preventDefault()
+      if (socket.current?.readyState === WebSocket.OPEN)
+        socket.current.send(
+          JSON.stringify({
+            type: 'scroll',
+            deltaX: event.deltaX,
+            deltaY: event.deltaY,
+            seq: ++inputSeq.current,
+          })
+        )
+    }
+    element.addEventListener('wheel', wheel, { passive: false })
+    return () => element.removeEventListener('wheel', wheel)
+  }, [open])
+
+  useEffect(() => {
+    const epoch = lifecycle.current.epoch + 1
+    lifecycle.current = { vmId: open ? vmId : '', epoch }
+    if (!open) {
+      opened.current = ''
+      opening.current = null
+      return
+    }
+    return () => {
+      // Reconnecting the transport keeps the browser alive. Closing the dialog
+      // or leaving this slot releases it, including during an in-flight start.
+      const starting =
+        opening.current?.vmId === vmId ? opening.current.promise : undefined
+      void Promise.resolve(starting)
+        .catch(() => {})
+        .then(() => {
+          if (
+            lifecycle.current.vmId !== vmId ||
+            lifecycle.current.epoch === epoch
+          )
+            void api(`${base}/close`, { method: 'POST' }).catch(() => {})
+        })
+    }
+  }, [open, vmId, base])
+
+  useEffect(() => {
     if (!open) return
     let cancelled = false
     let ws: WebSocket | null = null
-    api<{ ticket: string; url: string }>(
-      `/api/panel/vms/${encodeURIComponent(vmId)}/openai-api/browser-ticket`,
-      { method: 'POST' }
+    const frames = new LatestBrowserFrames(
+      decodeBrowserFrame,
+      (next) => {
+        if (!cancelled) setFrame(next)
+      },
+      (url) => URL.revokeObjectURL(url),
+      () => {
+        if (!cancelled) setError('网页画面解码失败，请重新连接。')
+      }
     )
-      .then((ticket) => {
+    setConnected(false)
+    setFrame(null)
+    setError('')
+    setMessage('正在连接槽位浏览器…')
+    async function connect() {
+      const reopen = await browserNeedsOpening(vmId, opened.current, () =>
+        api<{ active: boolean }>(base)
+      )
+      if (cancelled) return
+      if (reopen) {
+        if (opened.current === vmId) {
+          opened.current = ''
+          opening.current = null
+        }
+        const targetPurpose = attempt ? purposeRef.current : purpose
+        purposeRef.current = targetPurpose
+        setCurrentPurpose(targetPurpose)
+        completed.current.clear()
+        resultReported.current = false
+        if (opening.current?.vmId !== vmId) {
+          const request = {
+            vmId,
+            promise: api(`${base}/open`, {
+              method: 'POST',
+              body: JSON.stringify({ purpose: targetPurpose }),
+            }),
+          }
+          opening.current = request
+          void request.promise.catch(() => {
+            if (opening.current === request) opening.current = null
+          })
+        }
+        await opening.current?.promise
         if (cancelled) return
-        const url = new URL(ticket.url, apiBase() || window.location.href)
-        if (!url.searchParams.has('ticket')) {
-          url.searchParams.set('ticket', ticket.ticket)
+        opened.current = vmId
+      }
+      if (cancelled) return
+      const ticket = await api<{ ticket: string; url: string }>(
+        `/api/panel/vms/${encodeURIComponent(vmId)}/browser-ticket`,
+        { method: 'POST' }
+      )
+      if (cancelled) return
+      ws = new WebSocket(
+        browserSocketUrl(
+          ticket.url,
+          ticket.ticket,
+          apiBase() || window.location.href
+        )
+      )
+      ws.binaryType = 'blob'
+      socket.current = ws
+      ws.onopen = () => {
+        if (cancelled || !ws) return
+        setConnected(true)
+        setError('')
+        ws.send(JSON.stringify({ type: 'quality', mode: qualityRef.current }))
+      }
+      ws.onmessage = (event: MessageEvent<string | Blob>) => {
+        if (cancelled) return
+        if (typeof event.data !== 'string') {
+          frames.receive(event.data)
+          return
         }
-        if (url.protocol === 'https:') url.protocol = 'wss:'
-        else if (url.protocol === 'http:') url.protocol = 'ws:'
-        ws = new WebSocket(url)
-        socket.current = ws
-        ws.onopen = () => {
-          setConnected(true)
-          setError('')
+        const payload = JSON.parse(event.data) as
+          BrowserFrameMetadata | BrowserStatus | { type: 'input_ack' }
+        if (payload.type === 'frame') {
+          frames.describe(payload)
+        } else if (payload.type === 'status') {
+          const nextPurpose = payload.purpose || purposeRef.current
+          purposeRef.current = nextPurpose
+          setCurrentPurpose(nextPurpose)
+          setStatus(payload.status)
           setMessage(
-            '请在此窗口完成官方登录或验证码，再点“登录完成，继续配置”。'
+            payload.message || browserStatusMessage(payload.status, nextPurpose)
           )
-        }
-        ws.onmessage = (event) => {
-          const payload = JSON.parse(event.data) as
-            BrowserFrame | { type: 'status'; status: string; message?: string }
-          if (payload.type === 'frame') {
-            setFrame(payload)
-          } else if (payload.type === 'status') {
-            if (payload.message) setMessage(payload.message)
-            if (payload.status === 'error') {
-              setError(payload.message || '浏览器任务失败，请关闭后继续配置。')
-            }
-            if (payload.status === 'ready') {
-              callbacks.current.onComplete()
-              callbacks.current.onOpenChange(false)
+          if (payload.status === 'closed') {
+            opened.current = ''
+            opening.current = null
+          }
+          if (payload.status === 'error')
+            setError(payload.message || '浏览器任务失败，请重新连接。')
+          if (
+            payload.status === 'oauth_complete' ||
+            payload.status === 'api_ready'
+          ) {
+            if (!completed.current.has(payload.status)) {
+              completed.current.add(payload.status)
+              callbacks.current.onComplete?.(payload.result)
+              if (payload.result) resultReported.current = true
+            } else if (payload.result && !resultReported.current) {
+              resultReported.current = true
+              callbacks.current.onComplete?.(payload.result)
             }
           }
         }
-        ws.onerror = () => setError('账号浏览器连接失败，请重新连接。')
-        ws.onclose = () => setConnected(false)
-      })
-      .catch((reason: Error) => {
-        if (!cancelled) setError(reason.message)
-      })
+      }
+      ws.onerror = () => {
+        if (!cancelled) setError('槽位浏览器连接失败，请重新连接。')
+      }
+      ws.onclose = () => {
+        if (!cancelled) setConnected(false)
+      }
+    }
+    void connect().catch((reason: Error) => {
+      if (!cancelled) setError(reason.message)
+    })
     return () => {
       cancelled = true
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'close' }))
-      }
+      frames.close()
       ws?.close()
-      socket.current = null
+      if (socket.current === ws) socket.current = null
     }
-  }, [open, vmId, attempt])
+  }, [open, vmId, purpose, attempt, base])
 
   const send = (payload: object) => {
     if (socket.current?.readyState === WebSocket.OPEN) {
-      socket.current.send(JSON.stringify(payload))
+      socket.current.send(
+        JSON.stringify({ ...payload, seq: ++inputSeq.current })
+      )
     }
   }
 
@@ -123,10 +278,12 @@ export function OpenaiPlatformBrowserDialog({
         <DialogHeader className='pe-6'>
           <DialogTitle className='flex items-center gap-2 text-base'>
             <ExternalLink className='size-4' aria-hidden />
-            连接 OpenAI Platform
+            {currentPurpose === 'oauth'
+              ? 'OpenAI 浏览器登录'
+              : '连接 OpenAI Platform'}
           </DialogTitle>
           <DialogDescription>
-            {email || '当前账号'} · 独立固定指纹 · 使用账号绑定代理
+            {email || '首次登录'} · 槽位固定指纹 · 使用当前绑定代理
           </DialogDescription>
         </DialogHeader>
         <p className='m-0 text-xs text-muted-foreground' role='status'>
@@ -191,10 +348,6 @@ export function OpenaiPlatformBrowserDialog({
               text: event.clipboardData.getData('text/plain'),
             })
           }}
-          onWheel={(event) => {
-            event.preventDefault()
-            send({ type: 'scroll', deltaX: event.deltaX, deltaY: event.deltaY })
-          }}
         >
           <textarea
             ref={keyboard}
@@ -209,8 +362,8 @@ export function OpenaiPlatformBrowserDialog({
           />
           {frame ? (
             <img
-              src={`data:${frame.mime};base64,${frame.image}`}
-              alt='OpenAI Platform 官方网页'
+              src={frame.url}
+              alt='OpenAI 官方登录与账号网页'
               draggable={false}
               className={
                 originalSize
@@ -257,7 +410,6 @@ export function OpenaiPlatformBrowserDialog({
               size='sm'
               disabled={connected}
               onClick={() => {
-                setFrame(null)
                 setAttempt((value) => value + 1)
               }}
             >
@@ -265,22 +417,74 @@ export function OpenaiPlatformBrowserDialog({
               重新连接
             </Button>
             {frame ? (
-              <Button
-                variant='outline'
-                size='sm'
-                onClick={() => setOriginalSize((value) => !value)}
-              >
-                {originalSize ? '适应窗口' : '放大网页'}
-              </Button>
+              <>
+                <Button
+                  variant='outline'
+                  size='sm'
+                  aria-pressed={quality === 'native'}
+                  onClick={() => {
+                    const mode = quality === 'smooth' ? 'native' : 'smooth'
+                    qualityRef.current = mode
+                    setQuality(mode)
+                    send({ type: 'quality', mode })
+                  }}
+                >
+                  {quality === 'smooth'
+                    ? '流畅画面 · 切原图'
+                    : '原图画面 · 切流畅'}
+                </Button>
+                <Button
+                  variant='outline'
+                  size='sm'
+                  aria-pressed={originalSize}
+                  onClick={() => setOriginalSize((value) => !value)}
+                >
+                  {originalSize ? '适应窗口' : '放大网页'}
+                </Button>
+              </>
             ) : null}
           </div>
-          <Button
-            size='sm'
-            disabled={!connected}
-            onClick={() => send({ type: 'continue' })}
-          >
-            登录完成，继续配置
-          </Button>
+          {currentPurpose === 'oauth' ? (
+            status === 'oauth_complete' ? (
+              <Button
+                size='sm'
+                disabled={!connected || switching}
+                loading={switching}
+                onClick={async () => {
+                  setSwitching(true)
+                  setError('')
+                  try {
+                    await api(`${base}/open`, {
+                      method: 'POST',
+                      body: JSON.stringify({ purpose: 'platform' }),
+                    })
+                    purposeRef.current = 'platform'
+                    setCurrentPurpose('platform')
+                    setStatus('opening')
+                    setMessage('正在打开 OpenAI Platform…')
+                  } catch (reason) {
+                    setError((reason as Error).message)
+                  } finally {
+                    setSwitching(false)
+                  }
+                }}
+              >
+                继续进入 Platform
+              </Button>
+            ) : (
+              <p className='m-0 text-xs text-muted-foreground'>
+                授权成功后自动保存凭据
+              </p>
+            )
+          ) : (
+            <Button
+              size='sm'
+              disabled={!connected || status === 'api_ready'}
+              onClick={() => send({ type: 'continue' })}
+            >
+              {status === 'api_ready' ? 'API 配置已完成' : '登录完成，继续配置'}
+            </Button>
+          )}
         </div>
       </DialogContent>
     </Dialog>

@@ -1,6 +1,33 @@
 import type { OpenaiApiView, Vm } from '@/types/panel-vm'
 import { isCodexVm } from '@/lib/vm-kind'
 
+const API_BALANCE_MAX_AGE = 10 * 60_000
+
+/** The last successful sample decides selection; subscription tier and API switch do not. */
+export function isOpenaiApiKeyCandidate(vm: Vm): boolean {
+  const balance = vm.openai_api?.balance?.trim()
+  return (
+    isCodexVm(vm) &&
+    !!vm.openai_api?.has_key &&
+    !!balance &&
+    /^\+?\d+(?:\.\d+)?$/.test(balance) &&
+    /[1-9]/.test(balance)
+  )
+}
+
+export function isOpenaiApiBalancePending(
+  state?: OpenaiApiView | null,
+  now = Date.now()
+): boolean {
+  if (state?.balance == null) return false
+  const checkedAt = Date.parse(state.balance_checked_at || '')
+  return (
+    !!state.balance_error ||
+    !Number.isFinite(checkedAt) ||
+    now - checkedAt >= API_BALANCE_MAX_AGE
+  )
+}
+
 const PRO_PLANS = new Set([
   'prolite',
   'pro',
@@ -37,7 +64,8 @@ export function hasOpenaiApiFeature(vm: Vm): boolean {
 export function openaiApiClaimLabel(state?: OpenaiApiView | null): string {
   if (state?.claim_status === 'pending') return '发放中'
   if (state?.claim_status === 'claimed') return '已领取，后续按期自动发放'
-  if (state?.claim_status === 'eligible') return '可以领取'
+  if (state?.claim_status === 'eligible')
+    return state.offer_stale ? '资格已过期，请重新查询' : '可以领取'
   if (state?.claim_status === 'ineligible') {
     return (
       {

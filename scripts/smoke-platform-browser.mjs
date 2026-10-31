@@ -13,7 +13,9 @@ const deps = {
   }),
 }
 let fingerprint
-for (let attempt = 0; attempt < 2; attempt++) {
+let firstFingerprint
+for (let attempt = 0; attempt < 3; attempt++) {
+  if (attempt === 2) fingerprint = null
   const session = await createPlatformBrowserSession(
     {
       ...options,
@@ -21,6 +23,8 @@ for (let attempt = 0; attempt < 2; attempt++) {
       onFingerprint: (value) => {
         if (fingerprint) assert.deepEqual(value, fingerprint)
         fingerprint = value
+        if (attempt === 0) firstFingerprint = structuredClone(value)
+        if (attempt === 2) assert.notDeepEqual(value, firstFingerprint)
       },
     },
     deps,
@@ -38,4 +42,4 @@ for (let attempt = 0; attempt < 2; attempt++) {
     await session.close()
   }
 }
-console.log('Camoufox launch, saved identity restore and screenshot passed')
+console.log('Camoufox launch, fixed identity restore, independent slot identity and screenshot passed')
