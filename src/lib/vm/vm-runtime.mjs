@@ -438,7 +438,7 @@ export function slotWorkerNeedsRecreate(existing, vm, paths) {
  * KVM without a relay sock is still live and must not be recreated for that reason.
  * KVM restarts the guest kin-kernel unit; docker restart would reboot the VM.
  */
-export async function reloadSlotWorker(vm, projectRoot, { routing } = {}) {
+export async function reloadSlotWorker(vm, projectRoot, { routing, startupRecoveryCheck } = {}) {
   if (!vm?.id) return { ok: false, error: 'vm required' }
   // Outside the cached-config fallback: invalid quotas must never reach restart.
   if (!isKvmRuntime(vm)) slotDockerCpus(vm)
@@ -456,10 +456,12 @@ export async function reloadSlotWorker(vm, projectRoot, { routing } = {}) {
     worker = paths
   }
   const existing = inspectContainer(name)
-  if (!existing) return await startVmRuntime(vm, projectRoot, { recreate: false, routing })
+  const changed = startupRecoveryCheck?.()
+  if (changed) return changed
+  if (!existing) return await startVmRuntime(vm, projectRoot, { recreate: false, routing, startupRecoveryCheck })
   // Before the KVM branch so a runner on the wrong kin-eg-* is recreated too.
   if (slotWorkerNeedsRecreate(existing, vm, paths)) {
-    return await startVmRuntime(vm, projectRoot, { recreate: true, routing })
+    return await startVmRuntime(vm, projectRoot, { recreate: true, routing, startupRecoveryCheck })
   }
   if (isKvmRuntime(vm)) {
     if (!existing.running) {
@@ -934,7 +936,11 @@ export function dockerSlotResourceArgs(vm, routing) {
   return ['--memory', memory, '--memory-swap', memory, ...(cpus > 0 ? ['--cpus', String(cpus)] : [])]
 }
 
-export async function startVmRuntime(vm, projectRoot, { recreate = false, routing, accel: accelOpt } = {}) {
+export async function startVmRuntime(
+  vm,
+  projectRoot,
+  { recreate = false, routing, accel: accelOpt, startupRecoveryCheck } = {},
+) {
   if (!isKvmRuntime(vm)) slotDockerCpus(vm) // reject corrupt persisted quotas before any lifecycle changes
   if (isKvmRuntime(vm) && accelOpt !== 'kvm' && accelOpt !== 'tcg') {
     const recorded = vm.runtime?.accel
@@ -970,6 +976,8 @@ export async function startVmRuntime(vm, projectRoot, { recreate = false, routin
   const proxy = ensureOuterSocks(vm)
   if (!proxy.ok) return proxy
   const eg = await ensureProxyEgress(projectRoot, vm.proxy)
+  const changed = startupRecoveryCheck?.()
+  if (changed) return changed
   if (!eg.ok) return eg
   if (!eg.network && !eg.name) return { ok: false, error: 'egress network missing; refusing host fallback' }
 

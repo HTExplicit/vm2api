@@ -219,6 +219,7 @@ import {
 import {
   startSlotReady,
   reloadSlotReady,
+  restoreCodexSlotReady,
   stopSlot,
   destroySlot,
   switchSlotInferenceEngine,
@@ -2640,7 +2641,9 @@ export function createPanelHandler(ctx) {
         const id = p.split('/')[4]
         const vm = getVm(cfg.paths.project, id)
         if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
-        const reloaded = await reloadSlotReady(vm, cfg.paths.project, { routing: ctx.routingConfig })
+        const body = await readBody(req, 1024).catch(() => ({}))
+        const reload = body.mode === 'startup' ? restoreCodexSlotReady : reloadSlotReady
+        const reloaded = await reload(vm, cfg.paths.project, { routing: ctx.routingConfig })
         if (!reloaded.ok) {
           return json(res, 500, {
             ok: false,

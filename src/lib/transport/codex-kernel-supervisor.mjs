@@ -206,7 +206,7 @@ export function stopCodexKernelAndWait(exec, opts = {}) {
   return settled
 }
 
-export async function ensureCodexKernel(exec, { timeoutMs = 8000 } = {}) {
+export async function ensureCodexKernel(exec, { timeoutMs = 8000, startupRecoveryCheck } = {}) {
   const stopping = stops.get(exec?.vmId)
   if (stopping) {
     const stopped = await stopping
@@ -235,6 +235,8 @@ export async function ensureCodexKernel(exec, { timeoutMs = 8000 } = {}) {
   if (live.ok) return { ok: true, reused: true, health: live.health }
   const current = starts.get(exec.vmId)
   if (!childHasExited(current)) return waitForHealth(exec, timeoutMs)
+  const changed = startupRecoveryCheck?.()
+  if (changed) return changed
   try {
     if (paths.socketPath) fs.unlinkSync(paths.socketPath)
   } catch {}

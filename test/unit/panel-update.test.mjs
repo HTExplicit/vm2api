@@ -36,6 +36,7 @@ test('panel version remains the loaded backend version until a new handler boots
     await oldBackend({ method: 'GET' }, {}, new URL('http://localhost/api/panel/version'))
     assert.equal(response.status, 200)
     assert.equal(response.body.data.current, '1.2.6')
+    assert.equal(response.body.data.codex_startup_recovery, true)
     assert.equal(response.body.data.update_available, true)
     await oldBackend({ method: 'GET' }, {}, new URL('http://localhost/api/panel/me'))
     assert.equal(response.body.data.version, '1.2.6')
@@ -52,4 +53,32 @@ test('panel version remains the loaded backend version until a new handler boots
     fs.rmSync(project, { recursive: true, force: true })
     clearReleaseCache()
   }
+})
+
+test('startup reload keeps an explicitly stopped GPT slot stopped', async (t) => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-panel-startup-'))
+  t.after(() => fs.rmSync(project, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(project, 'vms'))
+  const file = path.join(project, 'vms', 'vm-stopped.json')
+  const vm = { id: 'vm-stopped', platform: 'openai', status: 'stopped', runtime: { type: 'docker' } }
+  fs.writeFileSync(file, JSON.stringify(vm))
+  const response = {}
+  const handle = createPanelHandler({
+    cfg: { paths: { project } },
+    routingConfig: {},
+    requireAuth(req) {
+      req.apiKeyKind = 'master'
+      req.panelRole = 'admin'
+      return true
+    },
+    readBody: async () => ({ mode: 'startup' }),
+    json(_res, status, body) {
+      Object.assign(response, { status, body })
+      return true
+    },
+  })
+  await handle({ method: 'POST' }, {}, new URL('http://localhost/api/panel/vms/vm-stopped/reload'))
+  assert.equal(response.status, 200)
+  assert.equal(response.body.data.reload.skipped, true)
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), vm)
 })

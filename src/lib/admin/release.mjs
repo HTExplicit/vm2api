@@ -297,6 +297,7 @@ export async function buildUpdateStatus({ projectRoot: root, currentVersion, upg
   return {
     current,
     current_tag: normalizeTag(current),
+    codex_startup_recovery: true,
     latest,
     latest_tag: latest ? normalizeTag(latest) : null,
     update_available: updateAvailable,
