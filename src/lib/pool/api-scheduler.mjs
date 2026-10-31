@@ -72,29 +72,50 @@ export function endpointMatchesModel(ep, requestedModel) {
 
 function keyReady(key, now, disableCooling) {
   if (!key || key.disabled) return false
+  if (key.source_account_id && key.cooldown_until === '9999-12-31T23:59:59.999Z') return false
   if (disableCooling) return true
   if (!key.cooldown_until) return true
   return Date.parse(key.cooldown_until) <= now
 }
 
 export class ApiScheduler {
-  constructor() {
+  constructor({ resolveAccountKey = null, onAccountKeyError = null } = {}) {
     this.endpoints = []
     this.parentCursor = 0
     this.childCursor = new Map()
     this.modelCursor = new Map()
     this.forcePrefix = false
+    this.resolveAccountKey = resolveAccountKey
+    this.onAccountKeyError = onAccountKeyError
   }
 
   reload(endpoints = []) {
     this.endpoints = Array.isArray(endpoints) ? endpoints : []
   }
 
-  catalog() {
+  /** Resolve again immediately before sending: proxy bindings are live configuration. */
+  resolveKey(key, scope = {}) {
+    const owned = !!(key?.source_vm_id || key?.source_account_id)
+    if (scope?.group_type !== 'openai_apikey') return owned ? null : key
+    if (!key?.source_vm_id || !key.source_account_id || !scope.allowed_vms?.includes(key.source_vm_id)) return null
+    const source = this.resolveAccountKey?.(key)
+    if (!source?.enabled || source.accountId !== key.source_account_id || !source.proxyUrl) return null
+    return { ...key, proxy_url: source.proxyUrl, source_email: source.email || null }
+  }
+
+  catalog(scope = {}) {
     const data = []
     const seen = new Set()
     for (const ep of this.endpoints) {
       if (ep.disabled) continue
+      if (scope.group_type === 'openai_apikey' && ep.kind !== 'openai') continue
+      const visibleKeys = (ep.api_key_entries || []).filter((key) => this.resolveKey(key, scope))
+      if (!visibleKeys.length && (scope.group_type === 'openai_apikey' || ep.api_key_entries?.length)) continue
+      if (
+        scope.group_type === 'openai_apikey' &&
+        !visibleKeys.some((key) => keyReady(key, Date.now(), ep.disable_cooling))
+      )
+        continue
       for (const id of modelIdsForEndpoint(ep, { forcePrefix: this.forcePrefix })) {
         const k = lower(id)
         if (seen.has(k)) continue
@@ -111,9 +132,12 @@ export class ApiScheduler {
     return { object: 'list', data, source: 'api-endpoints' }
   }
 
-  pick(requestedModel, now = Date.now()) {
+  pick(requestedModel, now = Date.now(), scope = {}) {
     const parents = this.endpoints
-      .filter((ep) => endpointMatchesModel(ep, requestedModel))
+      .filter(
+        (ep) =>
+          endpointMatchesModel(ep, requestedModel) && (scope.group_type !== 'openai_apikey' || ep.kind === 'openai'),
+      )
       .sort((a, b) => (Number(b.priority) || 0) - (Number(a.priority) || 0))
     if (!parents.length) {
       return { ok: false, code: 'model_not_found', message: `no api endpoint serves ${requestedModel}` }
@@ -121,7 +145,10 @@ export class ApiScheduler {
     const start = this.parentCursor % parents.length
     for (let off = 0; off < parents.length; off++) {
       const ep = parents[(start + off) % parents.length]
-      const keys = (ep.api_key_entries || []).filter((k) => keyReady(k, now, ep.disable_cooling))
+      const keys = (ep.api_key_entries || [])
+        .filter((key) => keyReady(key, now, ep.disable_cooling))
+        .map((key) => this.resolveKey(key, scope))
+        .filter(Boolean)
       if (!keys.length) continue
       const c = this.childCursor.get(ep.id) || 0
       const key = keys[c % keys.length]

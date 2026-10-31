@@ -75,6 +75,8 @@ export function publicEndpointView(ep, { reveal = false } = {}) {
       id: k.id,
       proxy_url: k.proxy_url || '',
       proxy_id: k.proxy_id || '',
+      source_vm_id: k.source_vm_id || '',
+      source_account_id: k.source_account_id || '',
       disabled: !!k.disabled,
       cooldown_until: k.cooldown_until || null,
       api_key: reveal ? k.api_key : maskUpstreamKey(k.api_key),
@@ -111,6 +113,10 @@ export class ApiEndpointStore {
 
   getRaw(id) {
     return this.repo.getHydrated(id)
+  }
+
+  getKey(id) {
+    return this.repo.getKey(id)
   }
 
   create(input = {}) {
@@ -193,6 +199,8 @@ export class ApiEndpointStore {
       api_key,
       proxy_url: String(input.proxy_url || '').trim(),
       proxy_id: String(input.proxy_id || '').trim(),
+      source_vm_id: String(input.source_vm_id || '').trim(),
+      source_account_id: String(input.source_account_id || '').trim(),
       disabled: !!input.disabled,
       cooldown_until: null,
       created_at: nowIso(),

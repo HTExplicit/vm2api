@@ -57,6 +57,16 @@ jobs:
             test/unit/usage-logs-repo.test.mjs \
             test/unit/panel-billing-lookup.test.mjs \
             test/unit/openai-auth-state.test.mjs \
+            test/unit/openai-api-credits.test.mjs \
+            test/unit/openai-api-manager.test.mjs \
+            test/unit/openai-platform-adapter.test.mjs \
+            test/unit/platform-browser.test.mjs \
+            test/unit/panel-openai-api.test.mjs \
+            test/unit/api-account-routing.test.mjs \
+            test/unit/api-scheduler.test.mjs \
+            test/unit/api-endpoints.test.mjs \
+            test/unit/key-scope.test.mjs \
+            test/unit/api-backend.test.mjs \
             test/unit/openai-subscription.test.mjs \
             test/unit/openai-quota.test.mjs \
             test/unit/codex-usage.test.mjs \
@@ -93,4 +103,5 @@ jobs:
           pnpm exec vitest run src/config/repo.test.ts src/features/settings/about-pane.test.ts
           pnpm exec vitest run src/lib/vm-status.test.ts -t 'GPT plan label follows OpenAI plan_type'
           pnpm exec vitest run src/features/vm/usage-windows.test.tsx src/features/vm/vm-rack-model.test.ts
+          pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts
           pnpm build

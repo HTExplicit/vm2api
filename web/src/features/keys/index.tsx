@@ -63,7 +63,7 @@ export function KeysPage() {
 
   const create = useMutation({
     mutationFn: (draft: KeyLimitsDraft) => {
-      const body = keyLimitsPayload(draft, 'create', { isAdmin })
+      const body = keyLimitsPayload(draft, 'create', { isAdmin, vms: vmItems })
       return api<unknown>('/api/panel/api-keys', {
         method: 'POST',
         body: JSON.stringify(body),
@@ -86,10 +86,12 @@ export function KeysPage() {
     mutationFn: ({ id, draft }: { id: string; draft: KeyLimitsDraft }) =>
       api(`/api/panel/api-keys/${encodeURIComponent(id)}`, {
         method: 'PATCH',
-        body: JSON.stringify(keyLimitsPayload(draft, 'edit', { isAdmin })),
+        body: JSON.stringify(
+          keyLimitsPayload(draft, 'edit', { isAdmin, vms: vmItems })
+        ),
       }),
     onSuccess: async () => {
-      toast.success('并发已更新')
+      toast.success('密钥设置已更新')
       setEditId('')
       await refresh()
     },
@@ -449,5 +451,7 @@ function scopeText(item: ApiKeyItem): string {
     return `Anthropic · ${item.allowed_vms?.length || 0} 台`
   if (item.group_type === 'openai')
     return `OpenAI · ${item.allowed_vms?.length || 0} 台`
+  if (item.group_type === 'openai_apikey')
+    return `OpenAI(apikey) · ${item.allowed_vms?.length || 0} 个账号`
   return '全局'
 }

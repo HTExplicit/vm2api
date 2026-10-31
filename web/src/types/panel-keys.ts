@@ -27,8 +27,8 @@ export type ApiKeyItem = {
   last_used_at?: string
   requests?: number
   inflight?: number
-  /** all = 全局可调度。anthropic / openai 必须带 allowed_vms。 */
-  group_type?: 'all' | 'anthropic' | 'openai'
+  /** 平台分组带 allowed_vms；openai_apikey 仅使用所选账号的 API key。 */
+  group_type?: 'all' | 'anthropic' | 'openai' | 'openai_apikey'
   allowed_vms?: string[]
   vm_pool_id?: string | null
   vm_pool_name?: string | null

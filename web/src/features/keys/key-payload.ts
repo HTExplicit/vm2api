@@ -1,4 +1,7 @@
-export type KeyGroupType = 'all' | 'anthropic' | 'openai' | 'pool'
+import type { Vm } from '@/types/panel-vm'
+
+export type KeyGroupType =
+  'all' | 'anthropic' | 'openai' | 'openai_apikey' | 'pool'
 
 export type KeyLimitsDraft = {
   name: string
@@ -20,16 +23,19 @@ function nonNegative(value: number, label: string): number {
 }
 
 function groupTypeOf(value: string): KeyGroupType {
-  if (value === 'anthropic' || value === 'openai') return value
+  if (value === 'anthropic' || value === 'openai' || value === 'openai_apikey')
+    return value
   return 'all'
 }
 
 export function keyLimitsPayload(
   draft: KeyLimitsDraft,
   mode: 'create' | 'edit',
-  options: { isAdmin?: boolean } = {}
+  options: { isAdmin?: boolean; vms?: Vm[] } = {}
 ): Record<string, unknown> {
   const isAdmin = options.isAdmin ?? true
+  if (!isAdmin && draft.group_type === 'openai_apikey')
+    throw new Error('OpenAI(apikey) 分组仅管理员可设置')
   const requests = nonNegative(draft.quota_requests, '请求额度')
   if (!Number.isInteger(requests)) throw new Error('请求额度必须是整数')
   const body: Record<string, unknown> = {
@@ -38,8 +44,10 @@ export function keyLimitsPayload(
     quota_usd: nonNegative(draft.quota_usd, 'USD 额度'),
     rpm: nonNegative(draft.rpm, 'RPM'),
   }
-  // API 直连不经过槽位，只有管理员可以设置
-  if (isAdmin) body.category = draft.category
+  // 账号 API key 使用 API 后端，账号勾选范围仍由分组保存。
+  if (isAdmin)
+    body.category =
+      draft.group_type === 'openai_apikey' ? 'api' : draft.category
   if (isAdmin && draft.group_type === 'pool') {
     const vm_pool_id = String(draft.vm_pool_id || '').trim()
     if (!vm_pool_id) throw new Error('选择一个账号池')
@@ -53,11 +61,26 @@ export function keyLimitsPayload(
         ? []
         : [...new Set(draft.allowed_vms.map((id) => id.trim()).filter(Boolean))]
     if (group_type !== 'all' && allowed_vms.length === 0) {
-      throw new Error('至少选择一台 VM')
+      throw new Error(
+        group_type === 'openai_apikey'
+          ? '至少选择一个 API 账号'
+          : '至少选择一台 VM'
+      )
+    }
+    if (group_type === 'openai_apikey' && options.vms) {
+      const configured = new Set(
+        options.vms.filter((vm) => vm.openai_api?.has_key).map((vm) => vm.id)
+      )
+      if (allowed_vms.some((id) => !configured.has(id)))
+        throw new Error('所选账号尚未配置 API key，请先完成账号 API 配置')
     }
     body.group_type = group_type
     body.allowed_vms = allowed_vms
-    if (isAdmin && draft.vm_pool_id !== undefined) body.vm_pool_id = null
+    if (
+      isAdmin &&
+      (draft.vm_pool_id !== undefined || group_type === 'openai_apikey')
+    )
+      body.vm_pool_id = null
   }
   if (mode === 'create') {
     body.name = draft.name.trim()

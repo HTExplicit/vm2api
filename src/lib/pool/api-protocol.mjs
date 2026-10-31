@@ -20,6 +20,7 @@ import { BETA_CONTEXT_1M } from '../protocol/claude-code-betas.mjs'
 import { shouldPassContext1mByPolicy } from '../protocol/model-policy.mjs'
 import { createStreamTiming } from '../protocol/stream-timing.mjs'
 import { mergeUsage } from '../protocol/openai-usage.mjs'
+import { keyScopeFromRequest } from '../admin/key-scope.mjs'
 
 export function resolveInferenceBackend(req) {
   if (req?.apiKeyKind !== 'managed') return 'oauth'
@@ -189,7 +190,11 @@ function openAIResponsesFailure(event) {
 
 function mappedOpenAIResponsesFailure(resultBase, event, committed, extras = {}) {
   const declared = Number(event?.error?.status || event?.status)
-  const mapped = mapUpstreamError(declared >= 400 && declared < 600 ? declared : 500, event)
+  const preserved = event?.error?.code
+    ? { ...event, error: { ...event.error, upstream_code: event.error.code } }
+    : event
+  const mapped = mapUpstreamError(declared >= 400 && declared < 600 ? declared : 500, preserved)
+  if (event?.error?.code && mapped.body?.error) mapped.body.error.upstream_code = event.error.code
   return {
     ...resultBase,
     ...mapped,
@@ -197,6 +202,27 @@ function mappedOpenAIResponsesFailure(resultBase, event, committed, extras = {})
     terminalState: committed ? 'incomplete' : 'rejected',
     committed,
     ...extras,
+  }
+}
+
+function recordApiKeyFailure(picked, { status, code, message, headers = {} }, store, scheduler) {
+  const accountKey = !!picked.key.source_account_id
+  const exhausted = ['credit_balance_exhausted', 'insufficient_quota'].includes(code)
+  const invalid = status === 401 || ['invalid_api_key', 'invalid_key'].includes(code)
+  if (accountKey && (exhausted || invalid)) {
+    // Balance refresh releases exhaustion; invalid keys require reconnecting.
+    if (invalid) store.updateKey(picked.key.id, { disabled: true })
+    else store.setKeyCooldown(picked.key.id, '9999-12-31T23:59:59.999Z')
+    scheduler.onAccountKeyError?.(picked.key, {
+      code: code || 'invalid_api_key',
+      message: String(message).slice(0, 300),
+    })
+    scheduler.reload(store.listRaw())
+  } else if (status === 429 && !picked.endpoint.disable_cooling) {
+    const retry = Number(headers['retry-after'] || 30)
+    const until = new Date(Date.now() + Math.max(1, retry) * 1000).toISOString()
+    store.setKeyCooldown(picked.key.id, until)
+    scheduler.reload(store.listRaw())
   }
 }
 
@@ -217,10 +243,12 @@ export async function runApiInference({
   cacheTtl,
   converters,
   requestContext = null,
+  forwardImpl = forwardApi,
 } = {}) {
   const canonical = officialMessagesBody(convertedBody)
   const model = canonical.model
-  const picked = scheduler.pick(model)
+  const scope = keyScopeFromRequest(req)
+  const picked = scheduler.pick(model, Date.now(), scope)
   if (!picked.ok) {
     return {
       ok: false,
@@ -273,12 +301,25 @@ export async function runApiInference({
   const timing = createStreamTiming()
   let upstream
   try {
-    upstream = await forwardApi({
+    const currentKey = scheduler.resolveKey ? scheduler.resolveKey(picked.key, scope) : picked.key
+    if (!currentKey) {
+      return {
+        ok: false,
+        status: 503,
+        via: 'api-kernel',
+        body: {
+          type: 'error',
+          error: { type: 'api_error', code: 'api_account_unavailable', message: '所选 API 账号或绑定代理不可用' },
+        },
+        terminalState: 'exhausted',
+      }
+    }
+    upstream = await forwardImpl({
       cfg,
       url: isOpenAI ? responsesUrl(preset.base_url) : messagesUrl(preset.base_url),
       headers,
       body,
-      proxyUrl: picked.key.proxy_url,
+      proxyUrl: currentKey.proxy_url,
       signal,
       timeoutMs,
     })
@@ -301,15 +342,6 @@ export async function runApiInference({
   }
 
   const status = Number(upstream.statusCode) || 502
-  if (status === 429 && !picked.endpoint.disable_cooling) {
-    const retry = Number(upstream.headers['retry-after'] || 30)
-    const until = new Date(Date.now() + Math.max(1, retry) * 1000).toISOString()
-    try {
-      store.setKeyCooldown(picked.key.id, until)
-    } catch {}
-    scheduler.reload(store.listRaw())
-  }
-
   const resultBase = {
     ok: status >= 200 && status < 300,
     status,
@@ -319,6 +351,9 @@ export async function runApiInference({
     endpointId: picked.endpoint.id,
     model: picked.upstream_model,
     headers: { ...upstream.headers },
+    ...(picked.key.source_vm_id
+      ? { sourceVmId: picked.key.source_vm_id, sourceAccountId: picked.key.source_account_id }
+      : {}),
   }
 
   if (status >= 400) {
@@ -326,6 +361,7 @@ export async function runApiInference({
     const message = payload?.error?.message || payload?.message || `upstream ${status}`
     const upstreamCode = String(payload?.error?.code || payload?.code || '').trim()
     const contentCode = isContentPolicyErrorCode(upstreamCode) ? upstreamCode.toLowerCase() : ''
+    recordApiKeyFailure(picked, { status, code: upstreamCode, message, headers: upstream.headers }, store, scheduler)
     return {
       ...resultBase,
       ok: false,
@@ -333,8 +369,8 @@ export async function runApiInference({
         type: 'error',
         error: {
           ...(requestContext ? payload?.error : {}),
-          ...(requestContext && payload?.error?.code ? { upstream_code: payload.error.code } : {}),
-          ...(!requestContext && contentCode ? { code: contentCode } : {}),
+          ...(upstreamCode ? { upstream_code: upstreamCode } : {}),
+          ...(!requestContext && (contentCode || upstreamCode) ? { code: contentCode || upstreamCode } : {}),
           type: requestContext ? payload?.error?.type || 'api_error' : 'api_error',
           message: String(message).slice(0, 300),
         },
@@ -344,7 +380,7 @@ export async function runApiInference({
   }
 
   if (isOpenAI) {
-    return await runOpenAIResponsesUpstream({
+    const result = await runOpenAIResponsesUpstream({
       upstream,
       resultBase,
       protocol,
@@ -356,6 +392,20 @@ export async function runApiInference({
       body,
       timing,
     })
+    if (!result.ok) {
+      recordApiKeyFailure(
+        picked,
+        {
+          status: result.status,
+          code: result.body?.error?.upstream_code || result.body?.error?.details?.upstream_code,
+          message: result.body?.error?.message,
+          headers: result.headers,
+        },
+        store,
+        scheduler,
+      )
+    }
+    return result
   }
 
   const classifierSseState = { dataBuf: '' }

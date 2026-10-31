@@ -247,6 +247,10 @@ export function authorizePanelRoute(method, path, role) {
   const m = String(method || 'GET').toUpperCase()
   const p = String(path || '')
 
+  if (/^\/api\/panel\/vms\/[^/]+\/openai-api(?:\/|$)/.test(p)) {
+    return { ok: false, role: r, code: 'forbidden', message: '只有管理员可以管理账号 API' }
+  }
+
   if (p === '/api/panel/test-schedule/default' && m === 'PUT') {
     return { ok: false, role: r, code: 'forbidden', message: '当前权限无法执行此操作' }
   }

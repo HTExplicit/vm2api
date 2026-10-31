@@ -12,6 +12,7 @@ import { dashboardQueryOptions } from '@/features/overview/queries'
 import { CodexCreditSummary } from '@/features/vm/codex-credit-summary'
 import { CodexQuotaSampleStatus } from '@/features/vm/codex-quota-sample-status'
 import { Meter, ResetAt } from '@/features/vm/detail-section-primitives'
+import { OpenaiApiActions } from '@/features/vm/openai-api-actions'
 import { vmQueryOptions } from '@/features/vm/queries'
 import { useVmPerms } from '@/features/vm/vm-perms'
 
@@ -115,6 +116,7 @@ export function OpenaiQuotaPanel({
         7d 重置 <ResetAt value={display.reset_7d} now={now} />
       </div>
       <CodexCreditSummary vm={vm} />
+      <OpenaiApiActions vm={vm} />
       {canUse ? (
         <div className='flex flex-wrap items-center gap-2'>
           <Button

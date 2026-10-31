@@ -22,6 +22,37 @@ export type OpenaiSubscription = {
   last_error: string | null
 }
 
+export type OpenaiApiCreditBenefit = {
+  currency: 'USD'
+  cadence: 'monthly' | 'annual'
+  period_credit_amount_usd: string | number
+  claimable_credit_amount_usd?: string | number
+  expires_at: string
+}
+
+export type OpenaiApiView = {
+  pro_eligible: boolean
+  claim_status: 'unknown' | 'eligible' | 'ineligible' | 'pending' | 'claimed'
+  ineligibility_reason?: string | null
+  offer?: OpenaiApiCreditBenefit | null
+  benefit?: OpenaiApiCreditBenefit | null
+  destinations?: Array<{
+    destination_account_id: string
+    display_name: string
+  }>
+  organization_id?: string | null
+  organization_name?: string | null
+  enabled: boolean
+  has_key: boolean
+  key_suffix?: string | null
+  setup_status: 'idle' | 'needs_login' | 'configuring' | 'ready' | 'error'
+  balance: string | null
+  balance_checked_at?: string | null
+  balance_error?: string | null
+  last_error?: string | null
+  browser_active?: boolean
+}
+
 /**
  * 出站认证头方案。gateway 规范化后只有这两个值。
  *
@@ -327,6 +358,8 @@ export type Vm = {
   /** Plan label fallback from OAuth `id_token` when `plan_type` from usage is absent. */
   chatgpt_plan_type?: string | null
   subscription?: OpenaiSubscription | null
+  /** Account API channel; independent from OAuth kernel lifecycle and quota. */
+  openai_api?: OpenaiApiView | null
   /** Last official balance sample; status is the server's current spending verdict. */
   codex_credits?: {
     has_credits: boolean

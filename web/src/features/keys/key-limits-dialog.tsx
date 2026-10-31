@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type { ApiKeyItem, VmPool } from '@/types/panel-keys'
 import type { Vm } from '@/types/panel-vm'
+import { trimDecimalZeros } from '@/lib/decimal-display'
 import { isCodexVm } from '@/lib/vm-kind'
 import { Button } from '@/components/ui/button'
 import {
@@ -113,7 +114,10 @@ export function KeyLimitsDialog({
       const group = pooled ? 'pool' : groupOf(initial.group_type)
       setDraft({
         name: initial.name || '',
-        category: initial.category === 'api' ? 'api' : 'oauth',
+        category:
+          group === 'openai_apikey' || initial.category === 'api'
+            ? 'api'
+            : 'oauth',
         max_concurrency: Number(initial.max_concurrency ?? 20),
         quota_requests: Number(initial.quota_requests ?? 0),
         quota_usd: Number(initial.quota_usd ?? 0),
@@ -133,10 +137,17 @@ export function KeyLimitsDialog({
   const quotaOpts = mode === 'edit' ? QUOTA_EDIT : QUOTA_CREATE
   const rpmOpts = mode === 'edit' ? RPM_EDIT : RPM_CREATE
   const listed = vmsInGroup(vms || [], draft.group_type)
+  const apiAccounts = draft.group_type === 'openai_apikey'
   const scopeBlocked =
     draft.group_type === 'pool'
       ? !draft.vm_pool_id
-      : draft.group_type !== 'all' && draft.allowed_vms.length === 0
+      : draft.group_type !== 'all' &&
+        (draft.allowed_vms.length === 0 ||
+          (apiAccounts &&
+            draft.allowed_vms.some(
+              (id) =>
+                !listed.some((vm) => vm.id === id && vm.openai_api?.has_key)
+            )))
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -176,6 +187,9 @@ export function KeyLimitsDialog({
                   setDraft((d) => ({
                     ...d,
                     category: v === 'api' ? 'api' : 'oauth',
+                    ...(v === 'oauth' && d.group_type === 'openai_apikey'
+                      ? { group_type: 'openai' as const }
+                      : {}),
                   }))
                 }
               >
@@ -247,6 +261,12 @@ export function KeyLimitsDialog({
                 setDraft((d) => ({
                   ...d,
                   group_type: group,
+                  category:
+                    group === 'openai_apikey'
+                      ? 'api'
+                      : d.group_type === 'openai_apikey'
+                        ? 'oauth'
+                        : d.category,
                   allowed_vms:
                     group === 'all' || group === 'pool'
                       ? []
@@ -265,6 +285,9 @@ export function KeyLimitsDialog({
                 {pools ? <SelectItem value='pool'>账号池</SelectItem> : null}
                 <SelectItem value='anthropic'>anthropic</SelectItem>
                 <SelectItem value='openai'>openai</SelectItem>
+                {pools ? (
+                  <SelectItem value='openai_apikey'>OpenAI(apikey)</SelectItem>
+                ) : null}
               </SelectContent>
             </Select>
           </Field>
@@ -295,11 +318,13 @@ export function KeyLimitsDialog({
             </p>
           ) : (
             <div className='sm:col-span-2'>
-              <Field label='可用 VM'>
+              <Field label={apiAccounts ? '使用这些账号的 API key' : '可用 VM'}>
                 <div className='max-h-40 space-y-1 overflow-y-auto rounded-md border p-2'>
                   {listed.length === 0 ? (
                     <p className='text-xs text-muted-foreground'>
-                      该分组下没有 VM
+                      {apiAccounts
+                        ? '尚无 OpenAI 账号，请先在账号中配置 API'
+                        : '该分组下没有 VM'}
                     </p>
                   ) : (
                     listed.map((vm) => (
@@ -311,6 +336,11 @@ export function KeyLimitsDialog({
                           type='checkbox'
                           className='size-3.5'
                           checked={draft.allowed_vms.includes(vm.id)}
+                          disabled={
+                            apiAccounts &&
+                            !vm.openai_api?.has_key &&
+                            !draft.allowed_vms.includes(vm.id)
+                          }
                           onChange={(e) => {
                             const on = e.target.checked
                             setDraft((d) => ({
@@ -321,16 +351,42 @@ export function KeyLimitsDialog({
                             }))
                           }}
                         />
-                        <span className='truncate'>
-                          {vm.name || vm.email || vm.id}
-                        </span>
-                        <span className='font-mono text-xs text-muted-foreground'>
-                          {vm.id}
-                        </span>
+                        {apiAccounts ? (
+                          <span className='min-w-0 flex-1'>
+                            <span className='block truncate'>
+                              {vm.email || vm.name || vm.id}
+                            </span>
+                            <span className='block text-xs text-muted-foreground'>
+                              {vm.openai_api?.balance != null
+                                ? `API $${trimDecimalZeros(vm.openai_api.balance)}`
+                                : 'API 余额未知'}
+                              {vm.openai_api?.balance_error ? ' · 待刷新' : ''}
+                              {' · '}
+                              {vm.openai_api?.has_key
+                                ? `key 已就绪 · API ${vm.openai_api.enabled ? '已开启' : '已关闭'}`
+                                : '尚未配置 key'}
+                            </span>
+                          </span>
+                        ) : (
+                          <>
+                            <span className='truncate'>
+                              {vm.name || vm.email || vm.id}
+                            </span>
+                            <span className='font-mono text-xs text-muted-foreground'>
+                              {vm.id}
+                            </span>
+                          </>
+                        )}
                       </label>
                     ))
                   )}
                 </div>
+                {apiAccounts ? (
+                  <p className='text-xs text-muted-foreground'>
+                    仅使用勾选账号的 API key，各账号请求沿用其绑定代理。API
+                    独立开关关闭时暂停调用。
+                  </p>
+                ) : null}
               </Field>
             </div>
           )}
@@ -375,12 +431,14 @@ function blankDraft(): KeyLimitsDraft {
 }
 
 function groupOf(value: string | undefined): KeyGroupType {
-  if (value === 'anthropic' || value === 'openai') return value
+  if (value === 'anthropic' || value === 'openai' || value === 'openai_apikey')
+    return value
   return 'all'
 }
 
 function vmsInGroup(vms: Vm[], group: KeyGroupType): Vm[] {
-  if (group === 'openai') return vms.filter((vm) => isCodexVm(vm))
+  if (group === 'openai' || group === 'openai_apikey')
+    return vms.filter((vm) => isCodexVm(vm))
   if (group === 'anthropic') return vms.filter((vm) => !isCodexVm(vm))
   return []
 }
