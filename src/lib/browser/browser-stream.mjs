@@ -1,6 +1,5 @@
 const ACTIVE_INTERVAL = 200
 const IDLE_INTERVAL = 1000
-const ACTIVE_DURATION = 2000
 const MAX_DIMENSION = 1280
 
 async function resizeJpeg(image, { width, height, maxDimension }) {
@@ -43,7 +42,8 @@ export class BrowserStream {
     this.closed = false
     this.capturing = false
     this.lastCaptureAt = -Infinity
-    this.activeUntil = 0
+    this.frameRequested = false
+    this.pendingInputs = 0
     this.sequence = 0
     this.inputTail = Promise.resolve()
     this.viewportDirty = true
@@ -82,7 +82,7 @@ export class BrowserStream {
 
   requestFrame() {
     if (this.closed) return
-    this.activeUntil = this.now() + ACTIVE_DURATION
+    this.frameRequested = true
     this.schedule(Math.max(0, this.lastCaptureAt + ACTIVE_INTERVAL - this.now()))
   }
 
@@ -93,7 +93,7 @@ export class BrowserStream {
   }
 
   schedule(delay) {
-    if (this.closed || !this.clients.size || this.capturing) return
+    if (this.closed || !this.clients.size || this.capturing || this.pendingInputs) return
     const at = this.now() + delay
     if (this.timer != null && this.timerAt <= at) return
     this.clearSchedule()
@@ -107,8 +107,10 @@ export class BrowserStream {
   }
 
   async capture() {
-    if (this.closed || this.capturing || !this.clients.size) return
+    if (this.closed || this.capturing || this.pendingInputs || !this.clients.size) return
+    this.clearSchedule()
     this.capturing = true
+    this.frameRequested = false
     this.lastCaptureAt = this.now()
     try {
       try {
@@ -154,8 +156,11 @@ export class BrowserStream {
       // A navigation can interrupt a screenshot; the next frame samples the current page.
     } finally {
       this.capturing = false
-      const interval = this.now() < this.activeUntil ? ACTIVE_INTERVAL : IDLE_INTERVAL
-      this.schedule(Math.max(0, this.lastCaptureAt + interval - this.now()))
+      // A completed input asks for its frame immediately. Otherwise leave a full
+      // quiet second after encoding; never catch up with a slow capture loop.
+      this.schedule(
+        this.frameRequested ? Math.max(0, this.lastCaptureAt + ACTIVE_INTERVAL - this.now()) : IDLE_INTERVAL,
+      )
     }
   }
 
@@ -194,7 +199,19 @@ export class BrowserStream {
   }
 
   enqueue(action) {
-    this.inputTail = this.inputTail.then(action).catch(() => {})
+    this.pendingInputs++
+    this.clearSchedule()
+    this.inputTail = this.inputTail
+      .then(action)
+      .catch(() => {})
+      .finally(() => {
+        this.pendingInputs--
+        if (!this.pendingInputs) {
+          this.schedule(
+            this.frameRequested ? Math.max(0, this.lastCaptureAt + ACTIVE_INTERVAL - this.now()) : IDLE_INTERVAL,
+          )
+        }
+      })
   }
 
   async input(ws, input) {
@@ -222,7 +239,7 @@ export class BrowserStream {
       else if (input.type === 'text') await this.page.keyboard.insertText(String(input.text))
       else return
       if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'input_ack', seq: input.seq ?? null }))
-      this.requestFrame()
+      if (input.type !== 'move') this.requestFrame()
     } catch (error) {
       if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'status', status: 'error', message: message(error) }))
     }

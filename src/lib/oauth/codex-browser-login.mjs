@@ -73,6 +73,7 @@ export class CodexBrowserLoginService {
   constructor({
     browserManager,
     getVm,
+    getAccountIdentity,
     commitCredentials,
     generateAuthUrl = generateCodexAuthUrl,
     exchangeCode = exchangeCodexAuthCode,
@@ -82,6 +83,7 @@ export class CodexBrowserLoginService {
     Object.assign(this, {
       browserManager,
       getVm,
+      getAccountIdentity,
       commitCredentials,
       generateAuthUrl,
       exchangeCode,
@@ -91,13 +93,24 @@ export class CodexBrowserLoginService {
     this.jobs = new Map()
   }
 
+  resolveIdentity(vmId, vm) {
+    const fallback = identityOf(vm)
+    const identity = this.getAccountIdentity?.(vmId)
+    return {
+      accountId: String(identity?.accountId || identity?.chatgpt_account_id || fallback.accountId),
+      email: String(identity?.email || fallback.email)
+        .trim()
+        .toLowerCase(),
+    }
+  }
+
   start(vmId) {
     const vm = this.getVm(vmId)
     if (!vm) throw problem('vm_not_found', '账号槽位不存在。')
     if (this.jobs.has(vmId)) return this.browserManager.state(vmId)
     const job = {
       vmId,
-      expected: identityOf(vm),
+      expected: this.resolveIdentity(vmId, vm),
       abort: new AbortController(),
       completed: deferred(),
       installationId: vm.device_id || vm.codex?.installation_id,
@@ -111,7 +124,7 @@ export class CodexBrowserLoginService {
     if (job.abort.signal.aborted) throw job.abort.signal.reason
     const vm = this.getVm(job.vmId)
     if (!vm) throw problem('vm_not_found', '账号槽位已删除。')
-    if (!sameIdentity(job.expected, identityOf(vm))) {
+    if (!sameIdentity(job.expected, this.resolveIdentity(job.vmId, vm))) {
       throw problem('oauth_account_changed', '槽位账号已变化，请重新打开浏览器登录。')
     }
     if (job.live) this.browserManager.assertCurrent(job.live)
@@ -209,7 +222,7 @@ export class CodexBrowserLoginService {
       const result = await this.commitCredentials({ vmId: job.vmId, account })
       job.saved = true
       const committedVm = this.getVm(job.vmId)
-      const committedIdentity = identityOf(committedVm)
+      const committedIdentity = committedVm ? this.resolveIdentity(job.vmId, committedVm) : null
       const expectedIdentity = { accountId: identity.chatgpt_account_id, email: identity.email.toLowerCase() }
       if (
         job.abort.signal.aborted ||

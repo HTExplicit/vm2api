@@ -52,6 +52,7 @@ export class OpenaiApiManager {
         profileRepo: new SlotBrowserRepo(repo.db),
         createSession,
         getVm: (id) => credits.accountForVm(id).vm,
+        getAccountIdentity: (id) => credits.accountForVm(id).accountId,
       })
   }
 

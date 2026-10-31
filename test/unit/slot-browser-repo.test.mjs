@@ -10,6 +10,7 @@ import { OpenaiApiRepo } from '../../src/lib/db/repos/openai-api-repo.mjs'
 import { VmsRepo } from '../../src/lib/db/repos/vms-repo.mjs'
 import { ApiEndpointStore } from '../../src/lib/admin/api-endpoints.mjs'
 import { maybeEncrypt } from '../../src/lib/db/secure.mjs'
+import { writeCodexAccounts } from '../../src/lib/vm/codex-slot.mjs'
 
 const migrations = fileURLToPath(new URL('../../src/lib/db/migrations/', import.meta.url))
 
@@ -117,6 +118,60 @@ test('legacy migration never replaces a slot identity already generated for that
   api.upsertAccount('account-a', { vm_id: 'slot-a', fingerprint: { generated: 'legacy-identity' } })
   assert.equal(profiles.migrateLegacyProfiles(), 1)
   assert.deepEqual(profiles.get('slot-a').fingerprint, { generated: 'slot-identity' })
+  assert.equal(api.getAccount('account-a').fingerprint, null)
+})
+
+test('legacy migration uses the current access-token account identity when the slot mirror differs', (t) => {
+  const { directory, db } = fixture(t)
+  new VmsRepo(db).upsertFromVmJson({ id: 'slot-a', codex: { chatgpt_account_id: 'user-legacy-id' } })
+  const jwt = (payload) => `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`
+  fs.mkdirSync(path.join(directory, 'vms', 'slot-a'), { recursive: true })
+  writeCodexAccounts(directory, 'slot-a', [
+    {
+      email: 'same-account@example.test',
+      chatgpt_account_id: 'user-legacy-id',
+      access_token: jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'account-current' } }),
+    },
+  ])
+  const api = new OpenaiApiRepo(db)
+  api.upsertAccount('account-current', {
+    vm_id: 'slot-a',
+    fingerprint: { generated: 'preserve-existing-browser-identity' },
+    storage_state: { cookies: [{ value: 'preserved-platform-session' }] },
+  })
+  const profiles = new SlotBrowserRepo(db, { projectRoot: directory })
+  assert.equal(profiles.get('slot-a').account_id, 'account-current')
+  assert.deepEqual(profiles.get('slot-a').fingerprint, { generated: 'preserve-existing-browser-identity' })
+  assert.deepEqual(profiles.get('slot-a').storage_state, { cookies: [{ value: 'preserved-platform-session' }] })
+  assert.equal(api.getAccount('account-current').fingerprint, null)
+})
+
+test('legacy migration preserves a browser identity when the current slot mirror has no account field', (t) => {
+  const { directory, db } = fixture(t)
+  new VmsRepo(db).upsertFromVmJson({ id: 'slot-a', family: 'codex' })
+  fs.mkdirSync(path.join(directory, 'vms', 'slot-a'), { recursive: true })
+  const access = `header.${Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'account-current' } })).toString('base64url')}.signature`
+  writeCodexAccounts(directory, 'slot-a', [{ email: 'existing@example.test', access_token: access }])
+  const api = new OpenaiApiRepo(db)
+  api.upsertAccount('account-current', { vm_id: 'slot-a', fingerprint: { generated: 'legacy-existing' } })
+  const profiles = new SlotBrowserRepo(db, { projectRoot: directory })
+  assert.deepEqual(profiles.get('slot-a').fingerprint, { generated: 'legacy-existing' })
+  assert.equal(profiles.get('slot-a').account_id, 'account-current')
+  assert.equal(api.getAccount('account-current').fingerprint, null)
+})
+
+test('targeted cleanup may open the profile repository without migrating unrelated legacy identities', (t) => {
+  const { db } = fixture(t)
+  new VmsRepo(db).upsertFromVmJson({ id: 'slot-a', codex: { chatgpt_account_id: 'account-a' } })
+  const api = new OpenaiApiRepo(db)
+  api.upsertAccount('account-a', { vm_id: 'slot-a', fingerprint: { generated: 'legacy-identity' } })
+  const profiles = new SlotBrowserRepo(db, { migrateLegacy: false })
+  assert.equal(profiles.get('slot-a'), null)
+  profiles.rebind(db)
+  assert.equal(profiles.get('slot-a'), null)
+  assert.deepEqual(api.getAccount('account-a').fingerprint, { generated: 'legacy-identity' })
+  profiles.rebind(db, { migrateLegacy: true })
+  assert.deepEqual(profiles.get('slot-a').fingerprint, { generated: 'legacy-identity' })
   assert.equal(api.getAccount('account-a').fingerprint, null)
 })
 

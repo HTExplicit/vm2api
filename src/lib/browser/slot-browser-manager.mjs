@@ -58,12 +58,13 @@ export class SlotBrowserManager {
     cfg,
     profileRepo,
     getVm = (id) => readVm(cfg.paths.project, id),
+    getAccountIdentity = (_id, vm) => vm.codex?.chatgpt_account_id || '',
     resolveProxy = hostProxyUrlForVm,
     createSession = createPlatformBrowserSession,
     Stream = BrowserStream,
     now = Date.now,
   } = {}) {
-    Object.assign(this, { cfg, profileRepo, getVm, resolveProxy, createSession, Stream, now })
+    Object.assign(this, { cfg, profileRepo, getVm, getAccountIdentity, resolveProxy, createSession, Stream, now })
     this.jobs = new Map()
     this.states = new Map()
     this.queue = []
@@ -78,7 +79,7 @@ export class SlotBrowserManager {
     if (!vm) throw problem('vm_not_found', '账号槽位不存在', 404)
     const proxyUrl = this.resolveProxy(vm)
     if (!hasBoundExit(vm.proxy) || !proxyUrl) throw problem('proxy_required', '槽位未绑定可用代理', 400)
-    return { vm, proxyUrl }
+    return { vm, proxyUrl, accountId: this.getAccountIdentity(vmId, vm) || '' }
   }
 
   state(vmId) {
@@ -147,7 +148,7 @@ export class SlotBrowserManager {
       interactive,
       retained: retain,
       proxyUrl: current.proxyUrl,
-      accountId: this.profileRepo.get(vmId)?.account_id || current.vm.codex?.chatgpt_account_id || '',
+      accountId: this.profileRepo.get(vmId)?.account_id || current.accountId,
       status: 'queued',
       message: '浏览器任务已排队',
       clients: new Set(),
@@ -199,7 +200,7 @@ export class SlotBrowserManager {
     const current = this.currentVm(live.vmId)
     if (current.proxyUrl !== live.proxyUrl) throw problem('api_proxy_changed', '槽位代理已更换，请重新打开浏览器')
     const expected = live.accountId
-    const actual = current.vm.codex?.chatgpt_account_id || ''
+    const actual = current.accountId
     if (expected && actual && expected !== actual)
       throw problem('api_account_changed', '槽位账号已变更，请重新打开浏览器')
     return current
@@ -271,8 +272,8 @@ export class SlotBrowserManager {
   }
 
   bindAccount(live, accountId) {
-    const { vm } = this.assertCurrent(live)
-    if (vm.codex?.chatgpt_account_id && vm.codex.chatgpt_account_id !== accountId)
+    const current = this.assertCurrent(live)
+    if (current.accountId && current.accountId !== accountId)
       throw problem('api_account_changed', '槽位账号已变更，请重新打开浏览器')
     live.accountId = accountId
     this.profileRepo.upsert(live.vmId, { account_id: accountId })

@@ -203,6 +203,18 @@ test('a stale or cancelled OAuth callback cannot recreate a deleted profile thro
   assert.equal(f.records.has('a'), false)
 })
 
+test('credential-derived account identity is authoritative when legacy VM metadata is absent', async (t) => {
+  let account = 'token-account-a'
+  const f = fixture(t, { getAccountIdentity: () => account })
+  const live = await f.manager.acquire('a', { interactive: true })
+  assert.equal(live.accountId, 'token-account-a')
+  f.manager.bindAccount(live, account)
+  account = 'token-account-b'
+  assert.throws(() => f.manager.assertCurrent(live), { code: 'api_account_changed' })
+  assert.throws(() => f.manager.bindAccount(live, account), { code: 'api_account_changed' })
+  assert.equal(f.repo.get('a').account_id, 'token-account-a')
+})
+
 test('WebSocket tickets work while queued, accept legacy paths, are one use, and are revoked by close', async (t) => {
   const f = fixture(t)
   await f.manager.acquire('a', { interactive: true })

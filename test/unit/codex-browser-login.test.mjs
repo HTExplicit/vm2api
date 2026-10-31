@@ -38,6 +38,7 @@ function fixture(t, options = {}) {
   }
   let routeMatch, routeHandler, rejectAcquire
   let current = vm
+  let tokenIdentity = options.tokenIdentity
   const live = {
     vmId: vm.id,
     proxyUrl: 'socks5h://bound-proxy.test:1080',
@@ -95,10 +96,12 @@ function fixture(t, options = {}) {
   const service = new CodexBrowserLoginService({
     browserManager: manager,
     getVm: () => current,
+    ...(options.tokenIdentity !== undefined ? { getAccountIdentity: () => tokenIdentity } : {}),
     async commitCredentials(value) {
       calls.committed.push(value)
       const identity = openaiIdentityFromOauthTokens(value.account)
-      vm.codex = { email: identity.email, chatgpt_account_id: identity.chatgpt_account_id }
+      if (options.tokenIdentity !== undefined) tokenIdentity = identity
+      if (!options.tokenOnly) vm.codex = { email: identity.email, chatgpt_account_id: identity.chatgpt_account_id }
       if (options.commitWait) await options.commitWait
       return { vm: { id: vm.id, email: identity.email }, platform: 'openai' }
     },
@@ -127,6 +130,7 @@ function fixture(t, options = {}) {
     calls,
     close: () => closeController.abort(),
     remove: () => (current = null),
+    setTokenIdentity: (identity) => (tokenIdentity = identity),
     async waiting() {
       await until(() => routeHandler && calls.navigation)
     },
@@ -195,6 +199,51 @@ test('reauthorization verifies the existing identity before saving credentials',
   assert.equal(f.calls.committed.length, 1)
   assert.equal(f.calls.acquired[0].retain, true)
   assert.equal(f.calls.generated[0].installationId, f.vm.device_id)
+})
+
+test('token identity supports old slots whose VM metadata has no account id', async (t) => {
+  const f = fixture(t, {
+    identity: { email: 'first@example.test' },
+    tokenIdentity: { email: 'FIRST@example.test', chatgpt_account_id: 'account-first' },
+    tokenOnly: true,
+  })
+  f.service.start(f.vm.id)
+  await f.waiting()
+  await f.callback()
+  await until(() => !f.service.jobs.size)
+  assert.equal(f.vm.codex.chatgpt_account_id, undefined)
+  assert.equal(f.calls.committed.length, 1)
+  assert.deepEqual(f.calls.bound, ['account-first'])
+  assert.equal(f.calls.statuses.at(-1).status, 'oauth_complete')
+})
+
+test('token account id takes precedence over stale VM metadata for account verification', async (t) => {
+  const f = fixture(t, {
+    identity: { email: 'first@example.test', chatgpt_account_id: 'stale-metadata-account' },
+    tokenIdentity: { email: 'first@example.test', accountId: 'current-token-account' },
+    exchange: () => tokens('first@example.test', 'different-account'),
+  })
+  f.service.start(f.vm.id)
+  await f.waiting()
+  await f.callback()
+  await until(() => !f.service.jobs.size)
+  assert.equal(f.calls.committed.length, 0)
+  assert.equal(f.calls.statuses.at(-1).error, 'oauth_account_mismatch')
+})
+
+test('changes to the token identity invalidate a pending login even when VM metadata is unchanged', async (t) => {
+  const f = fixture(t, {
+    identity: { email: 'first@example.test' },
+    tokenIdentity: { email: 'first@example.test', chatgpt_account_id: 'account-first' },
+  })
+  f.service.start(f.vm.id)
+  await f.waiting()
+  f.setTokenIdentity({ email: 'first@example.test', chatgpt_account_id: 'account-changed' })
+  await f.callback()
+  await until(() => !f.service.jobs.size)
+  assert.equal(f.calls.exchanged.length, 0)
+  assert.equal(f.calls.committed.length, 0)
+  assert.equal(f.calls.statuses.at(-1).error, 'oauth_account_changed')
 })
 
 test('a different account is never committed or persisted over the slot owner', async (t) => {

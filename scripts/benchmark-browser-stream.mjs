@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { performance } from 'node:perf_hooks'
-import sharp from 'sharp'
 import { BrowserStream } from '../src/lib/browser/browser-stream.mjs'
 import { createPlatformBrowserSession } from '../src/lib/openai-api/platform-browser.mjs'
 
@@ -11,10 +10,6 @@ import { createPlatformBrowserSession } from '../src/lib/openai-api/platform-bro
 // can leave this process. Browser assets must already be installed in the image.
 const VIEWPORT = { width: 1920, height: 1080 }
 const PHASES = [0, 40, 120, 220, 350, 500, 650, 710]
-const COLORS = [
-  [24, 165, 118],
-  [205, 36, 83],
-]
 const PAGE = `<!doctype html><html><head><meta charset="utf-8"><style>
 *{box-sizing:border-box}body{margin:0;background:#e8edf4;color:#172b46;font:18px system-ui}
 #marker{position:fixed;left:0;top:0;width:64px;height:64px;background:rgb(24,165,118)}
@@ -85,7 +80,7 @@ class Receiver extends EventEmitter {
   pendingMeta = null
   first = deferred()
   samples = []
-  decoding = Promise.resolve()
+  captureInfo = () => null
 
   send(payload) {
     const bytes = Buffer.isBuffer(payload) ? payload.length : Buffer.byteLength(payload)
@@ -106,36 +101,25 @@ class Receiver extends EventEmitter {
     this.frame(payload, metadata, bytes + metaBytes)
   }
 
-  frame(image, metadata, bytes) {
+  frame(_image, metadata, bytes) {
     const arrivedAt = performance.now()
     this.frames++
     this.frameBytes.push(bytes)
-    this.decoding = this.decoding
-      .then(async () => {
-        const actual = await sharp(image).metadata()
-        const imageWidth = actual.width
-        const imageHeight = actual.height
-        assert.equal(metadata.width, VIEWPORT.width)
-        assert.equal(metadata.height, VIEWPORT.height)
-        const x = Math.max(1, Math.round((16 * imageWidth) / VIEWPORT.width))
-        const y = Math.max(1, Math.round((16 * imageHeight) / VIEWPORT.height))
-        const pixel = await sharp(image)
-          .extract({ left: x, top: y, width: 1, height: 1 })
-          .removeAlpha()
-          .raw()
-          .toBuffer()
-        this.first.resolve(performance.now())
-        const waiter = this.waiter
-        if (!waiter || arrivedAt < waiter.startedAt) return
-        const expected = COLORS[waiter.state]
-        if (expected.some((value, index) => Math.abs(value - pixel[index]) > 35)) return
-        this.waiter = null
-        waiter.ready.resolve(performance.now() - waiter.startedAt)
-      })
-      .catch((error) => {
-        this.first.reject(error)
-        this.waiter?.ready.reject(error)
-      })
+    assert.equal(metadata.width, VIEWPORT.width)
+    assert.equal(metadata.height, VIEWPORT.height)
+    this.first.resolve(arrivedAt)
+    const waiter = this.waiter
+    const captured = this.captureInfo()
+    // The click handler synchronously changes the synthetic page. Count only a
+    // screenshot started after Playwright acknowledged that input, never a frame
+    // which happened to arrive afterwards but was captured before the click.
+    if (!waiter || waiter.appliedAt == null || !captured || captured.startedAt < waiter.appliedAt) return
+    this.waiter = null
+    waiter.ready.resolve(arrivedAt - waiter.startedAt)
+  }
+
+  applied() {
+    if (this.waiter) this.waiter.appliedAt = performance.now()
   }
 
   expect(state) {
@@ -194,6 +178,15 @@ async function run(kind, fingerprint) {
     const bounds = await session.page.locator('#toggle').boundingBox()
     const point = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }
     const receiver = new Receiver()
+    const captures = []
+    const screenshot = session.page.screenshot.bind(session.page)
+    session.page.screenshot = async (options) => {
+      const startedAt = performance.now()
+      const image = await screenshot(options)
+      captures.push({ startedAt, endedAt: performance.now() })
+      return image
+    }
+    receiver.captureInfo = () => captures.at(-1)
     const startCpu = process.cpuUsage()
     const startedAt = performance.now()
     if (kind === 'old') stream = oldStream(session.page, receiver)
@@ -213,20 +206,24 @@ async function run(kind, fingerprint) {
       await sleep(phase)
       const visible = receiver.expect((index + 1) % 2)
       await stream.click(point, index)
+      receiver.applied()
       receiver.samples.push(await visible)
     }
     const wallMs = performance.now() - startedAt
     const cpu = process.cpuUsage(startCpu)
     await stream.close()
     stream = null
-    await receiver.decoding
     return {
       fingerprint: session.fingerprint,
       result: {
         browser_ready_ms: rounded(browserReadyMs),
         first_frame_ms: rounded(firstFrameMs),
-        input_to_visible_frame_ms: receiver.samples.map(rounded),
-        input_to_visible_frame_median_ms: rounded(median(receiver.samples)),
+        input_to_fresh_frame_ms: receiver.samples.map(rounded),
+        input_to_fresh_frame_median_ms: rounded(median(receiver.samples)),
+        input_to_fresh_frame_mean_ms: rounded(
+          receiver.samples.reduce((sum, value) => sum + value, 0) / receiver.samples.length,
+        ),
+        capture_ms_median: rounded(median(captures.map((sample) => sample.endedAt - sample.startedAt))),
         frame_bytes_median: Math.round(median(receiver.frameBytes)),
         total_bytes: receiver.bytes,
         frames: receiver.frames,
@@ -256,13 +253,12 @@ console.log(
     page: 'offline-data-url',
     viewport: VIEWPORT,
     samples: PHASES.length,
-    note: 'Local transport and JPEG decode only; Node process CPU excludes Firefox child CPU. No account, model or upstream network request.',
+    note: 'Server input to fresh JPEG ready to send; receiver does not decode or resize. No network RTT or frontend decode. Node process CPU excludes Firefox child CPU. No account, model or upstream network request.',
     old: original.result,
     optimized: optimized.result,
     improvement: {
       input_latency_percent: rounded(
-        (1 - optimized.result.input_to_visible_frame_median_ms / original.result.input_to_visible_frame_median_ms) *
-          100,
+        (1 - optimized.result.input_to_fresh_frame_median_ms / original.result.input_to_fresh_frame_median_ms) * 100,
       ),
       frame_bytes_percent: rounded(
         (1 - optimized.result.frame_bytes_median / original.result.frame_bytes_median) * 100,

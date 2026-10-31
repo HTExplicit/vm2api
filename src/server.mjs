@@ -318,8 +318,20 @@ const apiEndpointStore = new ApiEndpointStore({ dataDir: cfg.paths.data })
 const apiScheduler = new ApiScheduler()
 apiScheduler.reload(apiEndpointStore.listRaw())
 const openaiApiRepo = new OpenaiApiRepo()
-const slotBrowserRepo = new SlotBrowserRepo()
-const slotBrowserManager = new SlotBrowserManager({ cfg, profileRepo: slotBrowserRepo })
+const slotBrowserRepo = new SlotBrowserRepo(undefined, { projectRoot: cfg.paths.project })
+const slotAccountIdentity = (id) => {
+  try {
+    const current = openaiApiCredits.accountForVm(id)
+    return { accountId: current.accountId, email: current.account.email || '' }
+  } catch {
+    return {}
+  }
+}
+const slotBrowserManager = new SlotBrowserManager({
+  cfg,
+  profileRepo: slotBrowserRepo,
+  getAccountIdentity: (id) => slotAccountIdentity(id).accountId || '',
+})
 let openaiApiManager
 const openaiApiCredits = new OpenaiApiCreditsService({
   projectRoot: cfg.paths.project,
@@ -342,6 +354,7 @@ openaiApiManager = new OpenaiApiManager({
 const codexBrowserLogin = new CodexBrowserLoginService({
   browserManager: slotBrowserManager,
   getVm: (id) => getVm(cfg.paths.project, id),
+  getAccountIdentity: slotAccountIdentity,
   commitCredentials: async ({ vmId, account }) => {
     const existing = getVm(cfg.paths.project, vmId)
     if (!existing) throw Object.assign(new Error('槽位已删除'), { code: 'vm_not_found' })

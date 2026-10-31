@@ -1,5 +1,6 @@
 import { getDb, withTransaction } from '../database.mjs'
 import { maybeDecrypt, maybeEncrypt } from '../secure.mjs'
+import { codexSubscriptionAccountId, enrichCodexAccountIdentity, readCodexAccounts } from '../../vm/codex-slot.mjs'
 
 const FIELDS = {
   account_id: 'account_id',
@@ -21,16 +22,20 @@ function profile(row) {
 
 /** One persistent web identity per slot. No browser cache or secret duplicates. */
 export class SlotBrowserRepo {
-  constructor(db = getDb()) {
+  constructor(db = getDb(), { projectRoot, migrateLegacy = true } = {}) {
+    this.projectRoot = projectRoot
+    this.migrateLegacy = migrateLegacy
     this.rebind(db)
   }
 
-  rebind(db) {
+  rebind(db, { projectRoot = this.projectRoot, migrateLegacy = this.migrateLegacy } = {}) {
     this.db = db
+    this.projectRoot = projectRoot
+    this.migrateLegacy = migrateLegacy
     this._get = db.prepare('SELECT * FROM slot_browser_profiles WHERE vm_id = ?')
     this._list = db.prepare('SELECT * FROM slot_browser_profiles ORDER BY vm_id')
     this._remove = db.prepare('DELETE FROM slot_browser_profiles WHERE vm_id = ?')
-    this.migrateLegacyProfiles()
+    if (migrateLegacy) this.migrateLegacyProfiles()
     return this
   }
 
@@ -86,7 +91,12 @@ export class SlotBrowserRepo {
         } catch {
           continue
         }
-        if (vm?.id !== row.vm_id || vm.codex?.chatgpt_account_id !== row.account_id) continue
+        if (vm?.id !== row.vm_id) continue
+        const account = this.projectRoot
+          ? enrichCodexAccountIdentity(readCodexAccounts(this.projectRoot, row.vm_id)[0] || {})
+          : {}
+        const accountId = codexSubscriptionAccountId(account) || vm.codex?.chatgpt_account_id || ''
+        if (accountId !== row.account_id) continue
         const existing = this._get.get(row.vm_id)
         if (existing && existing.account_id !== row.account_id) continue
         if (!existing) {

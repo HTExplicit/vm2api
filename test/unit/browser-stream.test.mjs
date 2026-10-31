@@ -249,8 +249,59 @@ test('capture stays serialized when input requests an update during an in-flight
   complete()
   await pending
   assert.equal(f.calls.screenshots, 1)
-  assert.equal(f.nextAt(), 0, 'initial attach timer is harmless while a capture is already in flight')
+  assert.equal(f.nextAt(), 200, 'the input update is retained for a fresh frame after the current capture')
   assert.ok(ws.json().find((x) => x.type === 'input_ack' && x.seq === 1))
+})
+
+test('slow captures leave a full quiet second instead of starting catch-up screenshots', async (t) => {
+  const f = fixture(t)
+  const ws = new Socket()
+  f.stream.attach(ws)
+  f.page.screenshot = async () => {
+    f.calls.screenshots++
+    f.setTime(650)
+    return Buffer.from('slow-image')
+  }
+  await f.fire()
+  assert.equal(f.nextAt(), 1650)
+  assert.equal(f.calls.screenshots, 1)
+})
+
+test('pending input takes priority over a scheduled screenshot and requests one frame when complete', async (t) => {
+  const f = fixture(t)
+  const ws = new Socket()
+  let finish
+  f.stream.attach(ws)
+  await f.fire()
+  f.page.keyboard.insertText = async () =>
+    new Promise((resolve) => {
+      finish = resolve
+    })
+  ws.input({ type: 'text', text: 'typing' })
+  for (let i = 0; i < 10 && !finish; i++) await Promise.resolve()
+  assert.equal(f.timers.size, 0)
+  await f.stream.capture()
+  assert.equal(f.calls.screenshots, 1)
+  f.setTime(550)
+  finish()
+  await f.stream.inputTail
+  assert.equal(f.nextAt(), 550)
+  await f.fire()
+  assert.equal(f.calls.screenshots, 2)
+  assert.equal(f.nextAt(), 1550, 'one input does not start a sustained screenshot burst')
+})
+
+test('mouse motion alone does not trigger repeated screenshots', async (t) => {
+  const f = fixture(t)
+  const ws = new Socket()
+  f.stream.attach(ws)
+  await f.fire()
+  f.setTime(300)
+  ws.input({ type: 'move', x: 30, y: 40 })
+  await f.stream.inputTail
+  assert.deepEqual(f.calls.input, [['move', 30, 40]])
+  assert.equal(f.nextAt(), 1300)
+  assert.equal(f.calls.screenshots, 1)
 })
 
 test('a proxy change discovered by input immediately closes before the next periodic screenshot', async (t) => {
