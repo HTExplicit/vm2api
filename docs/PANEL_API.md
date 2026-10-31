@@ -534,6 +534,16 @@ kin-egress 的 UDP DNS 与 TCP 一致：上游全部不可达或解析失败时�
 
 sessionKey / 授权码导入必须走该槽 SOCKS5。
 
+## OpenAI 账号 API（仅 admin）
+
+基址 `/vms/:id/openai-api`。GET 返回公开状态；POST `/preview` 查询 Pro 三档赠额资格与接收组织，POST `/claim` 接收 `{ destination_account_id? }`，唯一组织可省略。关联后的 `pending/claimed` 状态锁定领取，复查沿用原操作编号。外部已领取账号也可继续配置。
+
+POST `/setup` 继续 Platform 登录、专用项目和账号 key 配置；POST `/refresh` 刷新发放或组织总余额；PATCH `/enabled` 接收 `{ enabled: boolean }`，独立于 OAuth 启停、调度及登录会话。账号行 `openai_api` 返回领取、配置、key 尾号、组织余额及更新时间，不返回 secret、指纹或登录会话。
+
+POST `/browser-ticket` 返回 `{ ticket, url }`，url 含30秒单次票据，连接 WebSocket `/browser?ticket=…`。服务端发送 `frame`（JPEG base64、width、height）及 `status`；客户端发送 `click/move/scroll/key/text/continue/close`。浏览器固定使用该账号独立指纹和当前绑定代理。
+
+生成密钥使用 `group_type: "openai_apikey"`、`category: "api"`、`allowed_vms: [...]`，至少选择一个已配置 key 的 OpenAI 账号；模型列表和推理均限所选账号，普通 API 全局池不隐式使用账号 key。401/余额耗尽/临时限流保留官方错误码，API 请求不计入 OAuth 5H/7D 窗口估算。
+
 ## 集群（SSH 节点，仅 admin；super 只读 `GET /cluster/nodes`）
 
 控制面主动拨 SSH（出站 22），本机在 NAT 后也能接入；远端在 NAT 后时 `jump_node_id` 经已接入节点跳转。远端 Docker 走 SSH `direct-streamlocal` 转发 `/var/run/docker.sock`，dockerd 不开 TCP、远端不装 agent。

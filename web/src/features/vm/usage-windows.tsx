@@ -13,6 +13,7 @@ import { useNow } from '@/hooks/use-now'
 import { ClaudeResetActions } from '@/features/vm/claude-reset-actions'
 import { CodexCreditSummary } from '@/features/vm/codex-credit-summary'
 import { CodexQuotaSampleStatus } from '@/features/vm/codex-quota-sample-status'
+import { OpenaiApiActions } from '@/features/vm/openai-api-actions'
 import { OpenaiQuotaActions } from '@/features/vm/openai-quota-actions'
 import { riskFg, UsageMeter } from '@/features/vm/usage-meter'
 import { vmWindows, type WindowReadout } from '@/features/vm/vm-rack-model'
@@ -95,7 +96,14 @@ function WindowRow({
 /** GPT 槽：查询 / 重置券；Claude 完整 OAuth：原生限额查询 / 重置。 */
 export function VmQuotaActions({ vm, now }: { vm: Vm; now: number }) {
   return isCodexVm(vm) ? (
-    <OpenaiQuotaActions vm={vm} compact />
+    <div
+      className='flex flex-wrap items-center gap-1'
+      data-row-actions
+      onClick={(event) => event.stopPropagation()}
+    >
+      <OpenaiQuotaActions vm={vm} compact />
+      <OpenaiApiActions vm={vm} compact />
+    </div>
   ) : (
     <ClaudeResetActions vm={vm} compact now={now} />
   )

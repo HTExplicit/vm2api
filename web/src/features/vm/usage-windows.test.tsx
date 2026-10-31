@@ -130,4 +130,66 @@ describe('Codex quota readings after a quota error', () => {
     expect(html).toContain(new Date(checkedAt).toLocaleString())
     expect(html).not.toContain('到期')
   })
+
+  it('shows points and organization API balance together without trailing zeroes', () => {
+    const html = renderToStaticMarkup(
+      <CodexCreditSummary
+        vm={{
+          id: 'vm-api',
+          platform: 'openai',
+          has_token: true,
+          codex_credits: {
+            has_credits: true,
+            unlimited: false,
+            balance: '12.3400',
+            status: 'available',
+            fetched_at: '',
+            invalidated_at: null,
+          },
+          openai_api: {
+            pro_eligible: true,
+            claim_status: 'claimed',
+            setup_status: 'ready',
+            has_key: true,
+            enabled: true,
+            balance: '37.000',
+            balance_checked_at: '2026-10-31T12:34:00Z',
+          },
+        }}
+      />
+    )
+    expect(html).toContain('余额 12.34 点')
+    expect(html).toContain('API $37')
+    expect(html).not.toContain('37.000')
+    expect(html).not.toContain('12.3400')
+  })
+
+  it('keeps API balance visible without OAuth tokens and preserves failed refresh history', () => {
+    const base: Vm = {
+      id: 'vm-api',
+      platform: 'openai',
+      has_token: false,
+      plan_type: 'free',
+      openai_api: {
+        pro_eligible: false,
+        claim_status: 'claimed',
+        setup_status: 'needs_login',
+        has_key: true,
+        enabled: true,
+        balance: '12.345678901',
+        balance_error: '需要重新登录',
+      },
+    }
+    const html = renderToStaticMarkup(<CodexCreditSummary vm={base} />)
+    expect(html).toContain('API $12.345678901')
+    expect(html).toContain('待刷新')
+    expect(html).not.toContain('点数不可用')
+    const unknown = renderToStaticMarkup(
+      <CodexCreditSummary
+        vm={{ ...base, openai_api: { ...base.openai_api!, balance: null } }}
+      />
+    )
+    expect(unknown).toContain('API 未知')
+    expect(unknown).not.toContain('API $0')
+  })
 })

@@ -253,6 +253,7 @@ export class ApiKeyStore {
         }),
       ),
     }
+    if (rec.group_type === 'openai_apikey') rec.category = 'api'
     if (rec.expires_at && Number.isNaN(Date.parse(rec.expires_at))) {
       throw Object.assign(new Error('invalid expires_at'), { code: 'invalid_expires_at' })
     }
@@ -305,6 +306,7 @@ export class ApiKeyStore {
     }
     const scope = normalizeKeyScope(patch, { partial: true, current: rec })
     if (scope) Object.assign(rec, storedKeyScope(scope))
+    if (rec.group_type === 'openai_apikey') rec.category = 'api'
     rec.updated_at = nowIso()
     return this.repo.update(rec)
   }

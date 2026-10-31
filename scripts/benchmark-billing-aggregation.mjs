@@ -82,7 +82,7 @@ const ms = (value) => Math.round(value * 100) / 100
 try {
   db.exec('PRAGMA foreign_keys = ON')
   const migrations = applyMigrations(db)
-  assert.equal(migrations.length, 47)
+  assert.equal(migrations.length, 48)
   db.prepare('UPDATE schema_migrations SET applied_at = ?').run('2026-09-01T00:00:00.000Z')
   const insert = db.prepare(`
     INSERT INTO usage_logs (

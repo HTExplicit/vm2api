@@ -68,6 +68,12 @@ function directKeys(input = {}, store = null) {
   for (const [row, item] of listed.entries()) {
     const source = item && typeof item === 'object' ? item : { api_key: item }
     const saved = source.key_id || source.keyId ? savedEndpointKey(store, source.key_id || source.keyId) : null
+    if (saved?.source_account_id || saved?.source_vm_id) {
+      throw Object.assign(new Error('账号 API key 请通过 OpenAI(apikey) 通道使用'), {
+        code: 'account_key_not_supported',
+        status: 400,
+      })
+    }
     const apiKey = String(source.api_key || source.apiKey || saved?.api_key || '').trim()
     if (!apiKey) continue
     const label = String(source.label || '')
@@ -104,6 +110,9 @@ export function savedEndpointKey(store, keyId) {
     const key = (endpoint.api_key_entries || []).find((item) => item.id === id)
     if (!key) continue
     return {
+      id: key.id,
+      source_account_id: key.source_account_id || '',
+      source_vm_id: key.source_vm_id || '',
       api_key: key.api_key,
       proxy_id: key.proxy_id || '',
       proxy_url: key.proxy_url || '',

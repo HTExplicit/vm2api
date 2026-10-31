@@ -49,6 +49,9 @@ import { GroupsRepo } from './lib/db/repos/groups-repo.mjs'
 import { SettingsRepo } from './lib/db/repos/settings-repo.mjs'
 import { ApiEndpointStore } from './lib/admin/api-endpoints.mjs'
 import { ApiScheduler } from './lib/pool/api-scheduler.mjs'
+import { OpenaiApiRepo } from './lib/db/repos/openai-api-repo.mjs'
+import { OpenaiApiCreditsService } from './lib/oauth/openai-api-credits.mjs'
+import { OpenaiApiManager } from './lib/openai-api/manager.mjs'
 import { resolveInferenceBackend } from './lib/pool/api-protocol.mjs'
 import { bootApiKernel, apiKernelPaths, apiKernelSnapshot } from './lib/transport/api-kernel-client.mjs'
 import { PanelUserStore } from './lib/admin/panel-users.mjs'
@@ -310,6 +313,24 @@ groupsRepo = new GroupsRepo()
 const apiEndpointStore = new ApiEndpointStore({ dataDir: cfg.paths.data })
 const apiScheduler = new ApiScheduler()
 apiScheduler.reload(apiEndpointStore.listRaw())
+const openaiApiRepo = new OpenaiApiRepo()
+let openaiApiManager
+const openaiApiCredits = new OpenaiApiCreditsService({
+  projectRoot: cfg.paths.project,
+  repo: openaiApiRepo,
+  onLinked: (vmId) => {
+    Promise.resolve(openaiApiManager.setup(vmId)).catch(() => {})
+  },
+})
+openaiApiManager = new OpenaiApiManager({
+  cfg,
+  repo: openaiApiRepo,
+  credits: openaiApiCredits,
+  apiEndpointStore,
+  apiScheduler,
+})
+apiScheduler.resolveAccountKey = (key) => openaiApiManager.resolveAccountKey(key)
+apiScheduler.onAccountKeyError = (key, error) => openaiApiManager.recordKeyError(key, error)
 const panelUsers = new PanelUserStore({ dataDir: cfg.paths.data, projectRoot: cfg.paths.project })
 try {
   panelUsers.bootstrapFromEnv(getPanelAdmin())
@@ -568,6 +589,7 @@ backupService.onRestored((db) => {
     store.rebind(db)
   }
   groupsRepo = new GroupsRepo(db)
+  openaiApiRepo.rebind(db)
   apiScheduler.reload(apiEndpointStore.listRaw())
 
   routingConfig = loadRoutingConfig()
@@ -988,6 +1010,8 @@ const handlePanel = createPanelHandler({
   apiEndpointStore,
   apiScheduler,
   panelUsers,
+  openaiApiManager,
+  openaiApiCredits,
   requestLog,
   vmTestSchedule,
   backupService,
@@ -1106,7 +1130,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/v1/models') {
       if (!requireAuth(req, res)) return
       if (resolveInferenceBackend(req) === 'api') {
-        return json(res, 200, apiScheduler.catalog())
+        return json(res, 200, apiScheduler.catalog(keyScopeFromRequest(req)))
       }
       const result = await fetchWorkerModels({ groupType: keyScopeFromRequest(req).group_type })
       return json(res, 200, result)
@@ -1179,6 +1203,7 @@ const server = http.createServer(async (req, res) => {
 server.on('upgrade', (req, socket, head) => {
   if (responsesWs.handleUpgrade(req, socket, head)) return
   if (clusterRoutes.handleUpgrade(req, socket, head)) return
+  if (openaiApiManager.handleUpgrade(req, socket, head)) return
   if (!slotShell.handleUpgrade(req, socket, head)) socket.destroy()
 })
 
@@ -1231,7 +1256,7 @@ process.on('unhandledRejection', (e) => console.error('[unhandled]', e))
 
 // Graceful shutdown: stop schedulers/watchers, close the DB (WAL checkpoint).
 let _shuttingDown = false
-function shutdown(signal) {
+async function shutdown(signal) {
   if (_shuttingDown) return
   _shuttingDown = true
   installJevUsageRecorder(null)
@@ -1259,6 +1284,9 @@ function shutdown(signal) {
   } catch {}
   try {
     usageProbeMonitor?.stop?.()
+  } catch {}
+  try {
+    await openaiApiManager.stop()
   } catch {}
   try {
     catalogMonitor?.stop?.()
@@ -1331,6 +1359,7 @@ server.listen(cfg.port, cfg.host, () => {
   }
   // The KIN_CRS_MOCK harness promises no outbound network; catalogs stay on builtin data there.
   if (process.env.KIN_CRS_MOCK !== '1') {
+    openaiApiManager.start()
     try {
       catalogMonitor?.start?.()
     } catch (e) {

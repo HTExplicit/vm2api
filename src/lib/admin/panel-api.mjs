@@ -631,6 +631,7 @@ export async function buildDashboard({
   poolScheduler = null,
   proxyPool = null,
   clusterNodes = [],
+  openaiApiManager = null,
 }) {
   try {
     accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
@@ -649,6 +650,7 @@ export async function buildDashboard({
       projectRoot: cfg.paths.project,
       clusterNodes,
       role: 'admin',
+      openaiApiManager,
     }),
   )
   const snap = accountQuota.snapshot()
@@ -761,6 +763,7 @@ export async function buildVmList({
   role = 'admin',
   requestLog = null,
   clusterNodes = [],
+  openaiApiManager = null,
 } = {}) {
   try {
     accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
@@ -779,6 +782,7 @@ export async function buildVmList({
       projectRoot: cfg.paths.project,
       clusterNodes,
       role,
+      openaiApiManager,
     }),
   )
   const accounts = (() => {
@@ -822,6 +826,7 @@ export async function buildVmDetail({
   slotProcessStatus = readSlotProcessStatus,
   clusterNodes = [],
   role = 'admin',
+  openaiApiManager = null,
 }) {
   const vm = getVm(cfg.paths.project, id)
   if (!vm) {
@@ -847,6 +852,7 @@ export async function buildVmDetail({
     projectRoot: cfg.paths.project,
     clusterNodes,
     role,
+    openaiApiManager,
   })
   const acc = findAccount(accountQuota, summary)
   const billing = (() => {
@@ -1990,6 +1996,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     account_uuid: v.account_uuid || (acc?.account_id && acc.account_id !== v.id ? acc.account_id : null),
     org_uuid: v.org_uuid || null,
     has_token: hasToken,
+    openai_api: isCodex ? extras.openaiApiManager?.view(v) || null : null,
     expires_at: expiresAt,
     oauth_source: v.oauth_source || null,
     credential_mode: v.credential_mode || v.claude?.mode || 'oauth',

@@ -99,6 +99,7 @@ import { setPriceOverride, listPriceOverrides, syncModelsDev } from './price-cat
 import { buildPricing } from './pricing-view.mjs'
 import { publicKeyView } from './api-keys.mjs'
 import { assertVmScope, normalizeKeyScope } from './key-scope.mjs'
+import { resolvePreset } from '../pool/api-presets.mjs'
 import {
   assertVmPoolExists,
   createVmPool,
@@ -635,6 +636,8 @@ export function createPanelHandler(ctx) {
   const apiKeyStore = ctx.apiKeyStore
   const apiEndpointStore = ctx.apiEndpointStore
   const apiScheduler = ctx.apiScheduler
+  const openaiApiManager = ctx.openaiApiManager
+  const openaiApiCredits = ctx.openaiApiCredits
   const panelUsers = ctx.panelUsers
   const requestLog = ctx.requestLog
   const vmTestSchedule = ctx.vmTestSchedule
@@ -916,6 +919,50 @@ export function createPanelHandler(ctx) {
   function keyScopeVms(req) {
     const ident = panelIdentity(req)
     return filterVmsForPanel(listVms(cfg.paths.project), { role: ident.role, userId: req.panelUserId })
+  }
+
+  function assertAccountApiScope(scope) {
+    if (scope?.group_type !== 'openai_apikey') return
+    scope.vm_pool_id = null
+    for (const id of scope.allowed_vms) {
+      const vm = getVm(cfg.paths.project, id)
+      if (!openaiApiManager?.view(vm)?.has_key) {
+        throw Object.assign(new Error('所选账号尚未配置 API key'), { code: 'key_api_account_not_ready' })
+      }
+    }
+  }
+
+  function endpointKeyProxy(key) {
+    if (!key?.source_account_id && !key?.source_vm_id) return key?.proxy_url || ''
+    const source = openaiApiManager?.resolveAccountKey(key)
+    if (!source?.proxyUrl || source.accountId !== key.source_account_id) {
+      throw Object.assign(new Error('账号未绑定可用代理'), { code: 'proxy_required', status: 400 })
+    }
+    return source.proxyUrl
+  }
+
+  function accountModelOptions(key) {
+    if (!key?.source_account_id && !key?.source_vm_id) return null
+    return {
+      kind: 'openai',
+      protocol: 'openai',
+      base_url: 'https://api.openai.com',
+      api_key: key.api_key,
+      proxy_url: endpointKeyProxy(key),
+      headers: {},
+    }
+  }
+
+  function assertEndpointKeyPatch(key, patch = {}) {
+    if (Object.hasOwn(patch, 'source_vm_id') || Object.hasOwn(patch, 'source_account_id')) {
+      throw Object.assign(new Error('账号 API key 的归属由账号配置管理'), { code: 'account_api_key_managed' })
+    }
+    if (
+      (key?.source_account_id || key?.source_vm_id) &&
+      ['api_key', 'proxy_id', 'proxy_url'].some((field) => Object.hasOwn(patch, field))
+    ) {
+      throw Object.assign(new Error('账号 API key 与代理请在对应账号中管理'), { code: 'account_api_key_managed' })
+    }
   }
 
   function rulesFile() {
@@ -1407,6 +1454,40 @@ export function createPanelHandler(ctx) {
       ) {
         return true
       }
+      const openaiApiRoute = p.match(/^\/api\/panel\/vms\/([^/]+)\/openai-api(?:\/([^/]+))?$/)
+      if (openaiApiRoute) {
+        if (panelIdentity(req).role !== 'admin') {
+          return json(res, 403, { ok: false, error: { code: 'forbidden', message: '只有管理员可以管理账号 API' } })
+        }
+        const [, vmId, action] = openaiApiRoute
+        try {
+          const vm = getVm(cfg.paths.project, vmId)
+          if (!vm) return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: '账号槽位不存在' } })
+          let result
+          if (req.method === 'GET' && !action) result = openaiApiManager.view(vm)
+          else if (req.method === 'POST' && action === 'preview') result = await openaiApiCredits.preview(vmId)
+          else if (req.method === 'POST' && action === 'claim') {
+            const body = await readBody(req, 8192)
+            result = await openaiApiCredits.claim(vmId, { destination_account_id: body?.destination_account_id })
+          } else if (req.method === 'POST' && action === 'setup') result = await openaiApiManager.setup(vmId)
+          else if (req.method === 'POST' && action === 'refresh') result = await openaiApiManager.refresh(vmId)
+          else if (req.method === 'POST' && action === 'browser-ticket')
+            result = await openaiApiManager.browserTicket(vmId)
+          else if (req.method === 'PATCH' && action === 'enabled') {
+            const body = await readBody(req, 8192)
+            if (typeof body?.enabled !== 'boolean') {
+              return json(res, 400, { ok: false, error: { code: 'invalid_enabled', message: 'enabled 必须为布尔值' } })
+            }
+            result = await openaiApiManager.setEnabled(vmId, body.enabled)
+          } else return json(res, 404, { ok: false, error: { code: 'not_found', message: '接口不存在' } })
+          return json(res, 200, panel.ok(result))
+        } catch (error) {
+          return json(res, error.status || 502, {
+            ok: false,
+            error: { code: error.code || 'openai_api_failed', message: String(error.message || error) },
+          })
+        }
+      }
       if ((req.method === 'GET' || req.method === 'PUT') && p === '/api/panel/onboarding') {
         if (req.method === 'PUT') {
           const body = await readBody(req, 4096).catch(() => ({}))
@@ -1623,7 +1704,13 @@ export function createPanelHandler(ctx) {
             error: { code: 'key_pool_forbidden', message: '只有管理员可以设置账号池' },
           })
         }
-        if (ident.role !== 'admin' && isApiCategory(body?.category)) {
+        if (
+          ident.role !== 'admin' &&
+          (isApiCategory(body?.category) ||
+            String(body?.group_type || '')
+              .trim()
+              .toLowerCase() === 'openai_apikey')
+        ) {
           return json(res, 403, {
             ok: false,
             error: { code: 'key_category_forbidden', message: '只有管理员可以创建 API 直连密钥' },
@@ -1635,7 +1722,14 @@ export function createPanelHandler(ctx) {
           if (ident.role === 'admin' && Object.prototype.hasOwnProperty.call(body || {}, 'vm_pool_id')) {
             scopeInput.vm_pool_id = body.vm_pool_id
           }
+          if (
+            String(scopeInput.group_type || '')
+              .trim()
+              .toLowerCase() === 'openai_apikey'
+          )
+            scopeInput.vm_pool_id = null
           const scope = normalizeKeyScope(scopeInput)
+          assertAccountApiScope(scope)
           const pools = vmPoolsFor(apiKeyStore.db)
           if (scope.vm_pool_id) assertVmPoolExists(pools, scope.vm_pool_id)
           else assertVmScope(keyScopeVms(req), scope)
@@ -1647,7 +1741,7 @@ export function createPanelHandler(ctx) {
           const rec = apiKeyStore.create({
             name: body?.name,
             key: body?.key || body?.custom_key || undefined,
-            category: body?.category,
+            category: scope.group_type === 'openai_apikey' ? 'api' : body?.category,
             user_id:
               panelIdentity(req).role === 'user' ? req.panelUserId || null : body?.user_id || req.panelUserId || null,
             group_id: input.group_id,
@@ -1692,7 +1786,13 @@ export function createPanelHandler(ctx) {
             error: { code: 'key_pool_forbidden', message: '只有管理员可以设置账号池' },
           })
         }
-        if (ident.role !== 'admin' && isApiCategory(body?.category)) {
+        if (
+          ident.role !== 'admin' &&
+          (isApiCategory(body?.category) ||
+            String(body?.group_type || '')
+              .trim()
+              .toLowerCase() === 'openai_apikey')
+        ) {
           return json(res, 403, {
             ok: false,
             error: { code: 'key_category_forbidden', message: '只有管理员可以创建 API 直连密钥' },
@@ -1701,12 +1801,25 @@ export function createPanelHandler(ctx) {
         try {
           const input = normalizePanelApiKeyInput(body || {}, req)
           const currentRec = apiKeyStore.getById(id)
+          if (ident.role !== 'admin' && currentRec?.group_type === 'openai_apikey') {
+            return json(res, 403, {
+              ok: false,
+              error: { code: 'key_category_forbidden', message: '只有管理员可以管理账号 API 密钥' },
+            })
+          }
           const scopeInput = { group_type: body?.group_type, allowed_vms: body?.allowed_vms }
           if (ident.role === 'admin' && Object.prototype.hasOwnProperty.call(body || {}, 'vm_pool_id')) {
             scopeInput.vm_pool_id = body.vm_pool_id
           }
+          if (
+            String(scopeInput.group_type || '')
+              .trim()
+              .toLowerCase() === 'openai_apikey'
+          )
+            scopeInput.vm_pool_id = null
           const scope = normalizeKeyScope(scopeInput, { partial: true, current: currentRec })
           if (scope) {
+            assertAccountApiScope(scope)
             if (ident.role !== 'admin' && currentRec?.vm_pool_id) {
               scope.vm_pool_id = currentRec.vm_pool_id
             }
@@ -1716,6 +1829,7 @@ export function createPanelHandler(ctx) {
             input.group_type = scope.group_type
             input.allowed_vms = scope.allowed_vms
             input.vm_pool_id = scope.vm_pool_id
+            if (scope.group_type === 'openai_apikey') input.category = 'api'
           }
           const rec = apiKeyStore.update(id, input)
           if (!rec) {
@@ -1782,18 +1896,20 @@ export function createPanelHandler(ctx) {
         const body = await readBody(req, 8192).catch(() => ({}))
         try {
           const saved = savedEndpointKey(apiEndpointStore, body?.key_id)
-          const proxyUrl = Object.prototype.hasOwnProperty.call(body || {}, 'proxy_id')
-            ? resolveConsoleProxyUrl(proxyPool, body.proxy_id)
-            : saved?.proxy_url || body?.proxy_url
+          const accountOptions = accountModelOptions(saved)
           const result = await fetchUpstreamModels({
             cfg,
-            kind: body?.kind,
-            protocol: body?.protocol,
-            base_url: body?.base_url || saved?.base_url,
-            api_key: body?.api_key || saved?.api_key,
-            proxy_url: proxyUrl,
-            headers: body?.headers,
-            auth_scheme: body?.auth_scheme || body?.authScheme || saved?.auth_scheme,
+            ...(accountOptions || {
+              kind: body?.kind,
+              protocol: body?.protocol,
+              base_url: body?.base_url || saved?.base_url,
+              api_key: body?.api_key || saved?.api_key,
+              proxy_url: Object.prototype.hasOwnProperty.call(body || {}, 'proxy_id')
+                ? resolveConsoleProxyUrl(proxyPool, body.proxy_id)
+                : saved?.proxy_url || body?.proxy_url,
+              headers: body?.headers,
+              auth_scheme: body?.auth_scheme || body?.authScheme || saved?.auth_scheme,
+            }),
             forward: ctx.forwardApi,
           })
           return json(res, 200, { ok: true, ...result })
@@ -1810,6 +1926,7 @@ export function createPanelHandler(ctx) {
           const proxyUrl = body?.proxy_id ? resolveConsoleProxyUrl(proxyPool, body.proxy_id) : ''
           if (Array.isArray(body?.api_key_entries)) {
             for (const entry of body.api_key_entries) {
+              assertEndpointKeyPatch(null, entry)
               if (!entry.proxy_url) entry.proxy_url = proxyUrl
               if (body?.proxy_id != null) entry.proxy_id = String(body.proxy_id || '').trim()
             }
@@ -1828,11 +1945,31 @@ export function createPanelHandler(ctx) {
         const id = p.split('/').pop()
         const body = await readBody(req, 1 << 20).catch(() => ({}))
         try {
+          const previous = apiEndpointStore.getRaw(id)
+          if ((previous?.api_key_entries || []).some((key) => key.source_account_id || key.source_vm_id)) {
+            const preset = resolvePreset(body?.kind ?? previous.kind, { ...previous, ...body })
+            if (
+              preset.kind !== 'openai' ||
+              preset.protocol !== 'openai' ||
+              preset.base_url !== 'https://api.openai.com'
+            ) {
+              throw Object.assign(new Error('账号 API key 只能使用 OpenAI 官方上游'), {
+                code: 'account_api_endpoint_managed',
+              })
+            }
+          }
+          const keyId = String(body?.key_id || '').trim()
+          const apiKey = String(body?.api_key || '').trim()
+          if (keyId) {
+            const keyPatch = {
+              ...(apiKey ? { api_key: apiKey } : {}),
+              ...(body?.proxy_id != null ? { proxy_id: body.proxy_id } : {}),
+            }
+            assertEndpointKeyPatch(apiEndpointStore.getKey(keyId), keyPatch)
+          }
           const proxyUrl = body?.proxy_id ? resolveConsoleProxyUrl(proxyPool, body.proxy_id) : ''
           const rec = apiEndpointStore.update(id, body || {})
           if (!rec) return json(res, 404, { ok: false, error: { message: 'endpoint not found' } })
-          const keyId = String(body?.key_id || '').trim()
-          const apiKey = String(body?.api_key || '').trim()
           if (keyId) {
             apiEndpointStore.updateKey(keyId, {
               ...(apiKey ? { api_key: apiKey } : {}),
@@ -1870,12 +2007,15 @@ export function createPanelHandler(ctx) {
         try {
           const result = await fetchUpstreamModels({
             cfg,
-            kind: ep.kind,
-            protocol: ep.protocol,
-            base_url: ep.base_url,
-            api_key: key.api_key,
-            proxy_url: key.proxy_url,
-            headers: ep.headers,
+            ...(accountModelOptions(key) || {
+              kind: ep.kind,
+              protocol: ep.protocol,
+              base_url: ep.base_url,
+              api_key: key.api_key,
+              proxy_url: key.proxy_url,
+              headers: ep.headers,
+            }),
+            forward: ctx.forwardApi,
           })
           const apply = body?.apply !== false
           const rec = apply ? apiEndpointStore.mergeFetchedModels(id, result.models) : ep
@@ -1897,6 +2037,7 @@ export function createPanelHandler(ctx) {
         const id = p.split('/')[4]
         const body = await readBody(req, 8192).catch(() => ({}))
         try {
+          assertEndpointKeyPatch(null, body || {})
           const key = apiEndpointStore.addKey(id, body || {})
           apiScheduler.reload(apiEndpointStore.listRaw())
           const view = publicEndpointView(apiEndpointStore.getRaw(id), { reveal: true })
@@ -1916,6 +2057,11 @@ export function createPanelHandler(ctx) {
       if (req.method === 'PATCH' && /^\/api\/panel\/api-endpoints\/[^/]+\/keys\/[^/]+$/.test(p)) {
         const kid = p.split('/').pop()
         const body = await readBody(req, 8192).catch(() => ({}))
+        try {
+          assertEndpointKeyPatch(apiEndpointStore.getKey(kid), body || {})
+        } catch (error) {
+          return json(res, 400, { ok: false, error: { code: error.code, message: error.message } })
+        }
         const rec = apiEndpointStore.updateKey(kid, body || {})
         if (!rec) return json(res, 404, { ok: false, error: { message: 'key not found' } })
         apiScheduler.reload(apiEndpointStore.listRaw())
@@ -2208,6 +2354,7 @@ export function createPanelHandler(ctx) {
           })
         }
         try {
+          await openaiApiManager?.stop()
           const out = await backupService.restoreBackup(id)
           return json(res, 200, { ok: true, ...out })
         } catch (e) {
@@ -2222,6 +2369,8 @@ export function createPanelHandler(ctx) {
             ok: false,
             error: { message: String(e.message || e), code: e.code || 'restore_failed' },
           })
+        } finally {
+          if (process.env.KIN_CRS_MOCK !== '1') openaiApiManager?.start()
         }
       }
       if (req.method === 'DELETE' && /^\/api\/panel\/backups\/[^/]+$/.test(p)) {
@@ -2245,6 +2394,7 @@ export function createPanelHandler(ctx) {
             poolScheduler: ctx.poolScheduler,
             proxyPool,
             clusterNodes: clusterNodesOf(ctx),
+            openaiApiManager,
           }),
         )
       }
@@ -2263,6 +2413,7 @@ export function createPanelHandler(ctx) {
             role: ident.role,
             ownerUserId: ident.role === 'user' ? req.panelUserId : null,
             clusterNodes: clusterNodesOf(ctx),
+            openaiApiManager,
           }),
         )
       }
@@ -2733,6 +2884,7 @@ export function createPanelHandler(ctx) {
           kernelHealth: panelKernelHealth,
           clusterNodes: clusterNodesOf(ctx),
           role: ident.role,
+          openaiApiManager,
         })
         if (result.status) return json(res, result.status, result.body)
         return json(res, 200, result)

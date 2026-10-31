@@ -400,6 +400,27 @@ test('anthropic console is admin-only', () => {
   assert.equal(authorizePanelRoute('POST', '/api/panel/anthropic/messages', 'user').ok, false)
   assert.equal(authorizePanelRoute('POST', '/api/panel/anthropic/messages', 'admin').ok, true)
 })
+
+test('direct Anthropic console rejects account-owned OpenAI keys before any request', async () => {
+  const accountEndpoint = {
+    ...endpoint,
+    api_key_entries: [
+      { id: 'ek-account', api_key: 'sk-account-fixture', source_vm_id: 'vm-api', source_account_id: 'account-api' },
+    ],
+  }
+  let forwarded = false
+  await assert.rejects(
+    runAnthropicConsole({
+      store: { listRaw: () => [accountEndpoint] },
+      input: { key_id: 'ek-account', model: 'claude-sonnet-4-5', message: 'Hi', proxy_id: '' },
+      forward: async () => {
+        forwarded = true
+      },
+    }),
+    { code: 'account_key_not_supported', status: 400 },
+  )
+  assert.equal(forwarded, false)
+})
 test('saved Anthropic row reloads its proxy and can test or fetch models without retyping the key', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-console-row-'))
   const store = new ApiEndpointStore({ dataDir: dir })

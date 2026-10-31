@@ -1,3 +1,4 @@
+import type { Vm } from '@/types/panel-vm'
 import { describe, expect, it } from 'vitest'
 import { keyLimitsPayload, type KeyLimitsDraft } from './key-payload'
 
@@ -109,5 +110,49 @@ describe('API key limit payload', () => {
     })
     expect(tenantTampered).not.toHaveProperty('vm_pool_id')
     expect(tenantTampered.group_type).toBe('all')
+  })
+
+  it('keeps the account API group explicit and clears a previous named pool', () => {
+    const body = keyLimitsPayload(
+      {
+        ...draft,
+        category: 'oauth',
+        group_type: 'openai_apikey',
+        allowed_vms: ['gpt-a', 'gpt-a', 'gpt-b'],
+        vm_pool_id: 'pool_12345678',
+      },
+      'edit'
+    )
+    expect(body).toMatchObject({
+      category: 'api',
+      group_type: 'openai_apikey',
+      allowed_vms: ['gpt-a', 'gpt-b'],
+      vm_pool_id: null,
+    })
+  })
+
+  it('requires configured account keys and does not open the group to tenants', () => {
+    const apiDraft: KeyLimitsDraft = {
+      ...draft,
+      group_type: 'openai_apikey',
+      allowed_vms: ['gpt-a'],
+    }
+    const configured = {
+      id: 'gpt-a',
+      family: 'codex',
+      openai_api: { has_key: true, enabled: false },
+    } as Vm
+    expect(
+      keyLimitsPayload(apiDraft, 'create', { vms: [configured] })
+    ).toMatchObject({ allowed_vms: ['gpt-a'], category: 'api' })
+    expect(() => keyLimitsPayload(apiDraft, 'create', { vms: [] })).toThrow(
+      '尚未配置 API key'
+    )
+    expect(() =>
+      keyLimitsPayload({ ...apiDraft, allowed_vms: [] }, 'create')
+    ).toThrow('至少选择一个 API 账号')
+    expect(() =>
+      keyLimitsPayload(apiDraft, 'create', { isAdmin: false })
+    ).toThrow('仅管理员')
   })
 })

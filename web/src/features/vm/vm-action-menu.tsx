@@ -4,6 +4,7 @@ import type { Vm } from '@/types/panel-vm'
 import {
   BarChart3,
   Download,
+  KeyRound,
   LifeBuoy,
   Link2,
   MoreHorizontal,
@@ -28,6 +29,8 @@ import {
 import { meQueryOptions } from '@/features/auth/queries'
 import { isActiveVmPointer } from '@/features/vm/active-vm'
 import { restrictionTitle } from '@/features/vm/clear-restriction'
+import { OpenaiApiDialog } from '@/features/vm/openai-api-actions'
+import { hasOpenaiApiFeature } from '@/features/vm/openai-api-state'
 import { useVmActions } from '@/features/vm/vm-actions-context'
 import { canReclaimVm } from '@/features/vm/vm-owner'
 import { VmPackageDialog } from '@/features/vm/vm-package-dialog'
@@ -55,6 +58,7 @@ export function VmActionMenu({
   const actions = useVmActions()
   const me = useQuery(meQueryOptions())
   const [packOpen, setPackOpen] = useState(false)
+  const [apiOpen, setApiOpen] = useState(false)
   const blocked = refreshBlockedReason(vm)
   const restricted = restrictionTitle(vm)
   const admin = me.data?.role === 'admin'
@@ -103,6 +107,12 @@ export function VmActionMenu({
                 刷新令牌
               </DropdownMenuItem>
             </>
+          ) : null}
+          {admin && hasOpenaiApiFeature(vm) ? (
+            <DropdownMenuItem onSelect={() => setApiOpen(true)}>
+              <KeyRound />
+              API 赠额与调用
+            </DropdownMenuItem>
           ) : null}
           {admin ? (
             <DropdownMenuItem onSelect={() => setPackOpen(true)}>
@@ -181,6 +191,9 @@ export function VmActionMenu({
           open={packOpen}
           onOpenChange={setPackOpen}
         />
+      ) : null}
+      {admin && apiOpen ? (
+        <OpenaiApiDialog vm={vm} open={apiOpen} onOpenChange={setApiOpen} />
       ) : null}
     </>
   )

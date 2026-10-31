@@ -43,7 +43,7 @@ export function parseAllowedVms(value) {
   ]
 }
 
-/** null when the value is present but not all/anthropic/openai. Empty uses fallback. */
+/** null for an unknown stored/written group. Empty uses fallback. */
 export function normalizeGroupType(value, { fallback = 'all' } = {}) {
   if (value == null || value === '') return fallback
   if (value === 'pool') return null
@@ -51,6 +51,7 @@ export function normalizeGroupType(value, { fallback = 'all' } = {}) {
   if (v === 'all') return 'all'
   if (v === 'anthropic' || v === 'claude') return 'anthropic'
   if (v === 'openai' || v === 'gpt' || v === 'codex') return 'openai'
+  if (v === 'openai_apikey') return 'openai_apikey'
   return null
 }
 
@@ -109,6 +110,8 @@ export function vmPoolDenial(scope) {
 }
 
 export function keyAllowsVm(scope, vm) {
+  // Account API keys have their own picker and must never enter OAuth scheduling.
+  if (scope?.group_type === 'openai_apikey') return false
   if (scope?.vm_pool_id) {
     if (scope.vm_pool_error) return false
     if (!vm?.id || !(scope.allowed_vms || []).includes(vm.id)) return false
@@ -140,7 +143,9 @@ export function normalizeKeyScope(input = {}, { partial = false, current = null 
   if (hasType) {
     const parsed = normalizeGroupType(input.group_type, { fallback: null })
     if (!parsed) {
-      throw Object.assign(new Error('group_type 只能是 all、anthropic 或 openai'), { code: 'invalid_group_type' })
+      throw Object.assign(new Error('group_type 只能是 all、anthropic、openai 或 openai_apikey'), {
+        code: 'invalid_group_type',
+      })
     }
     group_type = parsed
   }
@@ -148,12 +153,15 @@ export function normalizeKeyScope(input = {}, { partial = false, current = null 
   let vm_pool_id = hasPool ? parsePoolId(input.vm_pool_id) : base.vm_pool_id
   const manual = (hasType && group_type !== 'all') || (hasVms && allowed_vms.length > 0)
   if (!hasPool && manual) vm_pool_id = null
+  if (group_type === 'openai_apikey' && vm_pool_id) {
+    throw Object.assign(new Error('OpenAI(apikey) 请直接勾选账号'), { code: 'invalid_vm_pool_id' })
+  }
   if (vm_pool_id) {
     return { group_type, allowed_vms: [], vm_pool_id }
   }
   if (group_type === 'all') allowed_vms = []
   if (group_type !== 'all' && allowed_vms.length === 0) {
-    throw Object.assign(new Error('选择 anthropic 或 openai 时至少勾选一台 VM'), { code: 'key_vms_required' })
+    throw Object.assign(new Error('选择账号分组时至少勾选一台 VM'), { code: 'key_vms_required' })
   }
   return { group_type, allowed_vms, vm_pool_id: null }
 }
@@ -165,7 +173,8 @@ export function assertVmScope(vms, scope) {
   for (const id of scope.allowed_vms) {
     const vm = byId.get(id)
     if (!vm) throw Object.assign(new Error('所选 VM 不存在'), { code: 'key_vm_unknown' })
-    if (vmGroupType(vm) !== scope.group_type) {
+    const platform = scope.group_type === 'openai_apikey' ? 'openai' : scope.group_type
+    if (vmGroupType(vm) !== platform) {
       throw Object.assign(new Error('所选 VM 不属于该分组'), { code: 'key_vm_mismatch' })
     }
   }
