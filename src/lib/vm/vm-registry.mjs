@@ -47,6 +47,7 @@ import {
 } from '../protocol/codex-usage.mjs'
 
 import { summarizeCodexSlot } from './codex-slot.mjs'
+import { isOpenaiCredentialCurrent } from '../oauth/openai-auth-state.mjs'
 import { evaluateCodexQuotaSchedule } from '../pool/codex-slot-pool.mjs'
 import { effectiveOpenAIPolicy, normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import { runtimeKind } from './runtime-kind.mjs'
@@ -185,6 +186,7 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
         : null,
     reset_credits: codex?.reset_credits || null,
     codex_credits: codex?.credits || null,
+    codex_credits_checked_at: codex?.credits_checked_at || null,
     plan_type: codex?.plan_type || null,
     chatgpt_subscription_active_until: kind.kind === 'codex' ? codex?.chatgpt_subscription_active_until || null : null,
     chatgpt_plan_type: kind.kind === 'codex' ? codex?.chatgpt_plan_type || null : null,
@@ -226,9 +228,10 @@ export function persistAccountTier(projectRoot, vmId, tier, { source = null } = 
 export function persistCodexUsage(
   projectRoot,
   vmId,
-  { headers, extra, limitedUntil, quotaExceeded = false, now = Date.now(), policy = null } = {},
+  { headers, extra, limitedUntil, quotaExceeded = false, now = Date.now(), policy = null, auth = null } = {},
 ) {
   if (!projectRoot || !vmId) return null
+  if (auth && !isOpenaiCredentialCurrent(auth)) return null
   const file = path.join(projectRoot, 'vms', `${vmId}.json`)
   if (!fs.existsSync(file)) return null
   const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
@@ -247,13 +250,14 @@ export function persistCodexUsage(
     }
   }
   const merged = { ...cached, ...(fromHeaders || {}), ...(extra || {}) }
+  const credits = codexCreditsFromHeaders(headers || {}, now)
+  if (credits && (!quotaExceeded || !vm.codex.credits)) vm.codex.credits = credits
+  if (quotaExceeded && vm.codex.credits) {
+    vm.codex.credits = { ...vm.codex.credits, invalidated_at: new Date(now).toISOString() }
+  }
   if (limitedUntil) {
     merged.codex_limited_until = new Date(limitedUntil).toISOString()
-    // The refusal outranks any credits reading until a newer one arrives.
-    delete vm.codex.credits
   } else {
-    const credits = codexCreditsFromHeaders(headers || {}, now)
-    if (credits) vm.codex.credits = credits
     const parked = codexQuotaPark({ ...merged, codex_limited_until: null }, now, {
       waiveWindowCaps: hasSpendableCodexCredits(vm, now),
     })

@@ -366,6 +366,19 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
         upstream_status: usage.status,
       })
     }
+    const credits = normalizeCodexCredits(usage.payload?.credits)
+    if (
+      usage.status >= 200 &&
+      usage.status < 300 &&
+      usage.payload &&
+      typeof usage.payload === 'object' &&
+      isOpenaiAuthCurrent(current.auth)
+    ) {
+      persistCodexQuotaSnapshot(projectRoot, vmId, {
+        credits,
+        checkedAt: new Date().toISOString(),
+      })
+    }
     const extra = extraFromRateLimit(usage.payload?.rate_limit || usage.payload?.rateLimit || {})
     if (!extra) {
       if (isOpenaiAuthCurrent(current.auth)) {
@@ -380,7 +393,7 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
       direct: current.direct,
       auth: current.auth,
     })
-    return { usage, details, extra }
+    return { usage, details, extra, credits }
   }
 
   let pack = await run(current.access)
@@ -416,11 +429,10 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
     detailCredits,
   )
   const persistable = resetCredits.available_count <= 0 || resetCredits.credits.length > 0 ? resetCredits : null
-  const credits = normalizeCodexCredits(pack.usage.payload?.credits)
+  const credits = pack.credits
   const saved = persistCodexQuotaSnapshot(projectRoot, vmId, {
     extra,
     sampledAt: extra.codex_usage_updated_at,
-    credits,
     planType: pack.usage.payload?.plan_type || pack.usage.payload?.planType,
     ...(persistable ? { resetCredits: persistable } : {}),
   })

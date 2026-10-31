@@ -240,6 +240,23 @@ test('local egress imports as px-local and codex tokens stay out of vm.json', as
   assert.equal(gptVm.codex.access_token, undefined)
   assert.equal(readCodexAccounts(root, 'vm-gpt')[0].access_token, 'oa-access')
 
+  const gptFile = path.join(root, 'vms', 'vm-gpt.json')
+  gptVm.codex.credits = {
+    has_credits: true,
+    unlimited: false,
+    balance: '12.5',
+    fetched_at: new Date().toISOString(),
+    invalidated_at: new Date().toISOString(),
+  }
+  gptVm.codex.credits_checked_at = new Date().toISOString()
+  fs.writeFileSync(gptFile, JSON.stringify(gptVm))
+  const replaced = makeHandler(root, codex, { pool })
+  await replaced.handlePanel({ method: 'PUT' }, {}, new URL('http://localhost/api/panel/vms/vm-gpt/package'))
+  assert.equal(replaced.response.status, 200)
+  const after = JSON.parse(fs.readFileSync(gptFile, 'utf8'))
+  assert.equal(after.codex.credits, undefined)
+  assert.equal(after.codex.credits_checked_at, undefined)
+
   const mismatch = makeHandler(root, codex, { pool })
   await mismatch.handlePanel({ method: 'PUT' }, {}, new URL('http://localhost/api/panel/vms/vm-local/package'))
   assert.equal(mismatch.response.status, 409)

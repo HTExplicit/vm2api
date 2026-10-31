@@ -195,7 +195,7 @@ export function waitForOpenAICapacity({ deadline, signal = null, accounts = null
 export function reportOpenAIAttempt(id, kind, firstOutputMs = null, now = Date.now()) {
   const key = String(id || '')
   if (!key) return
-  if (kind === 'succeeded') holds.delete(key)
+  if (kind === 'succeeded' && holds.get(key)?.reason !== 'rate_limited') holds.delete(key)
   const entry = feedback.get(key) || { value: 0, updatedAt: null, latency: null }
   const sample = kind === 'succeeded' ? 0 : 1
   const alpha = kind === 'capacity_rejected' ? CAPACITY_ALPHA : FAILURE_ALPHA

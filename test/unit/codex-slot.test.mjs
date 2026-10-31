@@ -259,6 +259,10 @@ test('panel import replaces credentials and returns the current account email', 
     [jwt({ email: 'new@example.com' }), 'new@example.com'],
     ['opaque-at', null],
   ]) {
+    const before = JSON.parse(fs.readFileSync(vmFile, 'utf8'))
+    before.codex.credits = { has_credits: true, unlimited: false, balance: '42', fetched_at: new Date().toISOString() }
+    before.codex.credits_checked_at = new Date().toISOString()
+    fs.writeFileSync(vmFile, JSON.stringify(before))
     let status
     let response
     const handlePanel = createPanelHandler({
@@ -286,6 +290,8 @@ test('panel import replaces credentials and returns the current account email', 
     assert.equal(saved.refresh_token, '')
     assert.equal(saved.id_token, '')
     assert.equal(JSON.parse(fs.readFileSync(vmFile, 'utf8')).codex.email, expectedEmail)
+    assert.equal(JSON.parse(fs.readFileSync(vmFile, 'utf8')).codex.credits, undefined)
+    assert.equal(response.data.vm.codex_credits, null)
   }
 })
 

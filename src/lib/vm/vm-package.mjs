@@ -23,7 +23,7 @@ import {
 } from '../identity/workstation-fingerprint.mjs'
 import { assignComputerFingerprint } from '../identity/slot-computer.mjs'
 import { VM_ORIGIN, canBindProxyToVm, normalizeOwnerId } from '../admin/resource-owner.mjs'
-import { readCodexAccounts, writeCodexAccounts } from './codex-slot.mjs'
+import { readCodexAccounts, writeCodexAccounts, clearCodexCredits } from './codex-slot.mjs'
 import { resetOpenaiAuth } from '../oauth/openai-auth-state.mjs'
 import { hasBoundExit, isLocalEgressProxy } from './egress.mjs'
 import { OS_CATALOG, STANDARD_LOCALE, nextNumericIndex, padVm, parseVmIndex } from './vm-runtime.mjs'
@@ -505,6 +505,7 @@ function mirrorCodex(vm, account) {
   }
   delete vm.codex.subscription
   delete vm.codex.auth_block
+  clearCodexCredits(vm)
 }
 
 /**

@@ -173,6 +173,13 @@ function codexUsageProbeDue(vm, { now, staleMs }) {
   const hasReading = usage?.windows?.some((window) => window.used_percent != null)
   if (!Number.isFinite(sampledMs) || !hasReading) return { due: true, reason: 'never_sampled_official' }
   if (elapsedCodexResetMs(usage, now, sampledMs) != null) return { due: true, reason: 'extra_window_elapsed' }
+  if (usage.windows.some((window) => window.used_percent >= 100)) {
+    const creditTimes = [vm.codex_credits?.fetched_at, vm.codex_credits_checked_at]
+      .map((value) => Date.parse(value || ''))
+      .filter(Number.isFinite)
+    const checkedMs = creditTimes.length ? Math.max(...creditTimes) : null
+    if (checkedMs == null || now - checkedMs >= staleMs) return { due: true, reason: 'credits_stale' }
+  }
   if (now - sampledMs >= staleMs) return { due: true, reason: 'sample_stale' }
   return { due: false, reason: 'list_passive_only' }
 }

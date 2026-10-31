@@ -26,6 +26,7 @@ import { vmTotalCost, vmTotalTokens } from '@/lib/vm-usage'
 import { StatusMark } from '@/components/status-mark'
 import { ProxyChip } from '@/features/proxies/proxy-chip'
 import { ActiveVmBadge } from '@/features/vm/active-vm-badge'
+import { CodexCreditSummary } from '@/features/vm/codex-credit-summary'
 import { runtimeTypeLabel, runtimeTypeOf } from '@/features/vm/machine-spec'
 import {
   SchedulableSwitch,
@@ -508,6 +509,7 @@ export const VmBlade = memo(function VmBlade({
         ) : null}
       </div>
       <SpecLine vm={vm} />
+      {state !== 'live' ? <CodexCreditSummary vm={vm} /> : null}
       {state === 'live' ? (
         <BladeUsage vm={vm} accounts={accounts} now={now} />
       ) : state === 'unprobed' ? (

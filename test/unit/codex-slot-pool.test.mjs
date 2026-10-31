@@ -6,8 +6,11 @@ import {
   isCodexSlotParked,
   isCodexFailoverError,
   evaluateCodexQuotaSchedule,
+  codexAdmissionBlock,
 } from '../../src/lib/pool/codex-slot-pool.mjs'
 import { SessionLimitRegistry } from '../../src/lib/pool/session-limit.mjs'
+import { evaluateOpenAIQuotaGate } from '../../src/lib/pool/openai-quota-policy.mjs'
+import { CODEX_CREDITS_TTL_MS } from '../../src/lib/protocol/codex-usage.mjs'
 
 function gpt(id, patch = {}) {
   return {
@@ -53,6 +56,58 @@ test('master pin stays on that GPT slot', () => {
   const picked = pickCodexSlots([gpt('vm-a'), gpt('vm-b')], { pin: 'vm-b' })
   assert.deepEqual(picked.ids, ['vm-b'])
   assert.equal(picked.pin, 'vm-b')
+})
+
+test('fresh credits waive only full windows, including pinned and sticky admissions', () => {
+  const now = Date.parse('2026-10-31T00:00:00.000Z')
+  const reset = new Date(now + 3_600_000).toISOString()
+  const vm = gpt('vm-credits', {
+    codex: {
+      extra: {
+        codex_5h_used_percent: 85,
+        codex_5h_reset_at: reset,
+        codex_7d_used_percent: 100,
+        codex_7d_reset_at: reset,
+      },
+      credits: { has_credits: true, unlimited: false, fetched_at: new Date(now).toISOString() },
+    },
+  })
+  assert.equal(evaluateOpenAIQuotaGate(vm, { limit_5h: 1, limit_7d: 1 }, now).limited, false)
+  assert.equal(evaluateOpenAIQuotaGate(vm, { limit_5h: 0.8, limit_7d: 1 }, now).reason, 'quota_5h_local')
+  assert.equal(evaluateOpenAIQuotaGate(vm, { limit_5h: 1, limit_7d: 0.9 }, now).reason, 'quota_7d_local')
+  assert.deepEqual(orderCodexSessionSlots([vm], { pin: vm.id, now }).ids, [vm.id])
+  for (const options of [{}, { boundVmId: vm.id }, { pin: vm.id }]) {
+    assert.equal(
+      orderCodexSessionSlots([vm], { ...options, now, quotaPolicy: { limit_5h: 0.8 } }).error,
+      'quota_exhausted',
+    )
+  }
+  assert.equal(codexAdmissionBlock(vm, now, { limit_5h: 0.8 }).error, 'quota_exhausted')
+  const stale = now + CODEX_CREDITS_TTL_MS + 1
+  assert.equal(orderCodexSessionSlots([vm], { pin: vm.id, now: stale }).error, 'quota_exhausted')
+})
+
+test('pinned admissions honor runtime holds and return to the original slot when the hold expires', async () => {
+  const { holdOpenAIAccount, resetOpenAIAccountRuntime } = await import('../../src/lib/pool/openai-account-runtime.mjs')
+  resetOpenAIAccountRuntime()
+  try {
+    const now = Date.parse('2026-10-31T00:00:00.000Z')
+    const until = now + 30_000
+    const vms = [gpt('vm-a'), gpt('vm-b')]
+    holdOpenAIAccount('vm-a', { now, until, reason: 'rate_limited' })
+    assert.deepEqual(codexAdmissionBlock(vms[0], now), {
+      error: 'capacity_unavailable',
+      reason: 'rate_limited',
+      retryAt: until,
+    })
+    const pinned = orderCodexSessionSlots(vms, { pin: 'vm-a', now })
+    assert.equal(pinned.error, 'capacity_unavailable')
+    assert.equal(pinned.retryAt, until)
+    assert.deepEqual(pinned.ids, [])
+    assert.deepEqual(orderCodexSessionSlots(vms, { pin: 'vm-a', now: until }).ids, ['vm-a'])
+  } finally {
+    resetOpenAIAccountRuntime()
+  }
 })
 
 test('pin on a Claude slot is platform_mismatch', () => {

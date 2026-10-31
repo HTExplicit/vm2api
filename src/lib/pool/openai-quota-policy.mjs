@@ -118,7 +118,7 @@ function resetIsLive(value, now) {
 const OPEN_GATE = Object.freeze({ limited: false, reason: null, window: null, used: null, limit: null, until: null })
 
 export function evaluateOpenAIQuotaGate(vm, policy = OPENAI_QUOTA_DEFAULTS, now = Date.now()) {
-  if (hasSpendableCodexCredits(vm, now)) return OPEN_GATE
+  const spendableCredits = hasSpendableCodexCredits(vm, now)
   const effective = normalizeOpenAIQuotaPolicy(policy)
   const extra = vm?.codex?.extra || vm?.codex_extra || {}
   const usage = Object.keys(extra).length
@@ -127,6 +127,7 @@ export function evaluateOpenAIQuotaGate(vm, policy = OPENAI_QUOTA_DEFAULTS, now 
   let first = null
   let until = null
   for (const key of ['5h', '7d']) {
+    if (spendableCredits && effective[`limit_${key}`] === 1) continue
     const percent = extra[`codex_${key}_used_percent`]
     const normalized = usage[`utilization_${key}`] ?? vm?.[`utilization_${key}`]
     const used = percent == null ? usageFraction(normalized) : usageFraction(percent, { percent: true })

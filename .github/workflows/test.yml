@@ -60,12 +60,17 @@ jobs:
             test/unit/openai-subscription.test.mjs \
             test/unit/openai-quota.test.mjs \
             test/unit/codex-usage.test.mjs \
+            test/unit/codex-credits.test.mjs \
+            test/unit/codex-slot-pool.test.mjs \
+            test/unit/codex-slot.test.mjs \
             test/unit/codex-quota-stale.test.mjs \
             test/unit/usage-probe-monitor.test.mjs \
             test/unit/panel-subscription.test.mjs \
             test/unit/jev-account-scope.test.mjs \
             test/unit/codex-slot-reload.test.mjs \
             test/unit/handle-codex.test.mjs \
+            test/unit/handle-codex-search.test.mjs \
+            test/unit/handle-codex-images.test.mjs \
             test/unit/vm-package.test.mjs; do
             node --test "$file"
           done

@@ -4,7 +4,7 @@
 import path from 'node:path'
 import { resolveStreamIdleTimeoutMs } from '../core/config.mjs'
 import { isClientStream, fromClaudeToOpenAIChat, fromClaudeToOpenAICompletions } from './convert.mjs'
-import { getVm, listVms, persistCodexUsage, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
+import { getVm, listVms, persistCodexUsage, summarizeVm, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isValidVmId, listVmRecordFiles, readJsonCached } from '../vm/vm-file.mjs'
 import { isCodexProtocolAllowed, isCodexVm, normalizeCodexRouting } from './codex-route.mjs'
 import { keyAllowsVm, keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
@@ -56,7 +56,12 @@ import {
   makeProxyFetch,
   refreshCodexAccessToken,
 } from './codex-models.mjs'
-import { orderCodexSessionSlots, codexSlotAllowsModel, isCodexFailoverError } from '../pool/codex-slot-pool.mjs'
+import {
+  orderCodexSessionSlots,
+  codexAdmissionBlock,
+  codexSlotAllowsModel,
+  isCodexFailoverError,
+} from '../pool/codex-slot-pool.mjs'
 import {
   holdOpenAIAccount,
   reportOpenAIAttempt,
@@ -64,7 +69,12 @@ import {
   waitForOpenAICapacity,
   wakeOpenAIWaiter,
 } from '../pool/openai-account-runtime.mjs'
-import { CLIENT_POOL_BUSY_MESSAGE, CLIENT_POOL_UNAVAILABLE_MESSAGE, ErrorCode } from '../core/errors.mjs'
+import {
+  CLIENT_POOL_BUSY_MESSAGE,
+  CLIENT_POOL_UNAVAILABLE_MESSAGE,
+  ErrorCode,
+  retryAfterSeconds,
+} from '../core/errors.mjs'
 import { applyOpenaiWashLog } from './openai-wash.mjs'
 import { canonicalImageToolModel, imageGenerationTools } from './image-tool-models.mjs'
 import { isImageToolModelEnabled } from './gpt-model-policy.mjs'
@@ -287,21 +297,29 @@ export function pickCodexCandidates(
   return { ...ordered, sessionKey, stickyKeys }
 }
 
-function ingestCodexHop(projectRoot, vmId, result, now = Date.now(), policy = null) {
+function codexQuotaFailure(result) {
+  const code = String(result?.body?.error?.code || result?.body?.response?.error?.code || result?.error_code || '')
+  if (code === 'usage_limit_reached') return 'quota_exhausted'
+  return Number(result?.status) === 429 ? 'rate_limited' : null
+}
+
+function ingestCodexHop(projectRoot, vmId, result, now = Date.now(), policy = null, auth = null) {
+  if (auth && !isOpenaiCredentialCurrent(auth)) return null
   const headers = result?.headers || {}
   const extra = extraFromCodexHeaders(headers, now)
   let limitedUntil = null
-  let quotaExceeded = false
-  if (
-    isCodexFailoverError(result) &&
-    (Number(result?.status) === 429 || /usage_limit_reached/.test(String(result?.body?.error?.code || '')))
-  ) {
+  const quotaExceeded = codexQuotaFailure(result) === 'quota_exhausted'
+  if (quotaExceeded) {
     const park = extra ? codexQuotaPark(extra, now) : { limited: true, until: now + CODEX_DEFAULT_PARK_MS }
     limitedUntil = park.until || now + CODEX_DEFAULT_PARK_MS
-    quotaExceeded = String(result?.body?.error?.code || result?.error_code || '') === 'usage_limit_reached'
   }
+  const failureHold =
+    codexQuotaFailure(result) === 'rate_limited' && !readOpenaiAuthBlock(projectRoot, vmId)
+      ? codexFailureHold(result, now)
+      : null
+  if (failureHold) holdOpenAIAccount(vmId, failureHold)
   if (!extra && !limitedUntil && !codexCreditsFromHeaders(headers, now)) return null
-  return persistCodexUsage(projectRoot, vmId, { headers, extra, limitedUntil, quotaExceeded, now, policy })
+  return persistCodexUsage(projectRoot, vmId, { headers, extra, limitedUntil, quotaExceeded, now, policy, auth })
 }
 
 function execFor(projectRoot, vm) {
@@ -331,7 +349,7 @@ export function isRetryableCodexTransport(result) {
  * failures use persistent credential state. Committed streams are never parked.
  */
 export function codexFailureHold(result, now = Date.now()) {
-  if (!result || result.ok === true || result.committed === true) return null
+  if (!result || result.ok === true || result.committed === true || result.admissionBlocked) return null
   const status = Number(result.status) || 0
   const code = String(result.body?.error?.code || result.error_code || '')
   const message = String(result.body?.error?.message || result.error || '')
@@ -344,21 +362,48 @@ export function codexFailureHold(result, now = Date.now()) {
     return null
   if (status === 401 || code === 'credential_blocked') return null
   if (status === 403) return { until: now + 5 * 60_000, reason: 'permission_denied' }
-  if (status === 429) return { until: now + 60_000, reason: 'rate_limited' }
+  if (codexQuotaFailure(result) === 'quota_exhausted') return null
+  if (codexQuotaFailure(result) === 'rate_limited') {
+    const headers = result.headers || {}
+    const retry = retryAfterSeconds(
+      headers['retry-after'] ?? headers['Retry-After'] ?? headers.get?.('retry-after'),
+      now,
+    )
+    return { until: now + (retry ?? 60) * 1000, reason: 'rate_limited' }
+  }
   if (status === 408 || status >= 500) return { until: now + 30_000, reason: 'upstream_5xx' }
   if (result.transportError === true || status === 0) return { until: now + 30_000, reason: 'transport_error' }
   return null
 }
 
-function blockedCodexResult() {
+function blockedCodexResult(block = { error: 'credential_blocked' }) {
+  const status = block.error === 'capacity_unavailable' ? 429 : 503
+  const message =
+    block.error === 'credential_blocked'
+      ? '账号认证失败，已停止分配，请刷新凭据'
+      : block.error === 'quota_exhausted'
+        ? '账号额度受限，已停止分配'
+        : '账号暂时不可用'
   return {
     ok: false,
-    status: 503,
+    status,
     committed: false,
+    admissionBlocked: true,
+    retryAt: block.retryAt,
     body: {
-      error: { type: 'api_error', code: 'credential_blocked', message: '账号认证失败，已停止分配，请刷新凭据' },
+      error: { type: 'api_error', code: block.error, message },
     },
   }
+}
+
+function liveCodexAdmissionBlock(projectRoot, vmId, routing) {
+  const vm = getVm(projectRoot, vmId)
+  if (!vm) return { error: 'no_codex_vm' }
+  return codexAdmissionBlock(
+    summarizeVm(vm, projectRoot, routing),
+    Date.now(),
+    normalizeCodexRouting(routing.codex).quota,
+  )
 }
 
 /** Idle SOCKS / first hop 502 is retryable only before any SSE byte is committed. */
@@ -826,8 +871,11 @@ export async function handleCodexProtocol({
         if (captureOutbound) logBag.outbound_body = outboundBody
         logBag.outbound_headers = redactHeaders(outboundHeaders)
         let hopEmitted = false
+        let hopAuth = null
         const guardedHop = async (args) => {
-          if (readOpenaiAuthBlock(projectRoot, vm.id)) return blockedCodexResult()
+          hopAuth = null
+          const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
+          if (blocked) return blockedCodexResult(blocked)
           const auth = captureOpenaiAuth(projectRoot, vm.id)
           const result = await hop(args)
           recordOpenaiAuthResult(auth, {
@@ -837,6 +885,8 @@ export async function handleCodexProtocol({
             message: '模型请求认证失败，已停止分配',
             authenticated: Number(result?.status) >= 200 && Number(result?.status) < 300 && (result?.ok || hopEmitted),
           })
+          hopAuth = auth
+          ingestCodexHop(projectRoot, vm.id, result, Date.now(), normalizeCodexRouting(routing.codex).quota, auth)
           return result
         }
         const runHop = () =>
@@ -934,7 +984,6 @@ export async function handleCodexProtocol({
           result.terminalState = 'incomplete'
           result.body = { error: conversionError }
         }
-        ingestCodexHop(projectRoot, vm.id, result, Date.now(), normalizeCodexRouting(routing.codex).quota)
         if (result?.transport_retried) logBag.transport_retried = true
         if (result?.reasoning_history_retried) {
           logBag.attempt_count += 1
@@ -963,7 +1012,7 @@ export async function handleCodexProtocol({
           logBag.output_tokens = logged?.output_tokens ?? null
           logBag.cache_read_tokens = logged?.cache_read_input_tokens ?? logged?.cache_read_tokens ?? null
           logBag.cache_creation_tokens = logged?.cache_creation_input_tokens ?? logged?.cache_creation_tokens ?? null
-          reportOpenAIAttempt(vm.id, 'succeeded', result.ttftMs ?? null)
+          if (isOpenaiCredentialCurrent(hopAuth)) reportOpenAIAttempt(vm.id, 'succeeded', result.ttftMs ?? null)
           logBag.final_state = result?.ok ? result.terminalState || 'verified' : 'verified'
           logBag.upstream_model = converted.body.model
           if (hops > 1) logBag.codex_failed_over = true
@@ -995,16 +1044,22 @@ export async function handleCodexProtocol({
           if (!res.headersSent) writeSSEHeaders(res)
           return res.end()
         }
-        reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
-        const failureHold = readOpenaiAuthBlock(projectRoot, vm.id) ? null : codexFailureHold(result)
-        if (failureHold) holdOpenAIAccount(vm.id, failureHold)
+        if (isOpenaiCredentialCurrent(hopAuth)) reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
+        if (
+          isOpenaiCredentialCurrent(hopAuth) &&
+          !readOpenaiAuthBlock(projectRoot, vm.id) &&
+          codexQuotaFailure(result) !== 'rate_limited'
+        ) {
+          const failureHold = codexFailureHold(result)
+          if (failureHold) holdOpenAIAccount(vm.id, failureHold)
+        }
         if (res.headersSent || hopEmitted) {
           stats.errors++
           logBag.error_code = result?.body?.error?.code || 'codex_upstream'
           logBag.upstream_status = result?.status || 0
           return res.end()
         }
-        if (result?.body?.error?.code === 'credential_blocked' || isCodexFailoverError(result)) {
+        if (result?.admissionBlocked || isCodexFailoverError(result)) {
           pickOpts.excluded.add(vm.id)
           leaveSticky()
           switches += 1
@@ -1196,10 +1251,12 @@ async function postCodexJson({
   extraHeaders = {},
   fetchImpl,
   refresh = refreshCodexAccessToken,
+  routing = {},
 }) {
-  if (readOpenaiAuthBlock(projectRoot, vm.id)) {
-    const blocked = blockedCodexResult()
-    return { status: blocked.status, text: JSON.stringify(blocked.body), headers: {} }
+  const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
+  if (blocked) {
+    const result = blockedCodexResult(blocked)
+    return { ...result, text: JSON.stringify(result.body), headers: {} }
   }
   const proxyUrl = hostProxyUrlForVm(vm)
   if (!fetchImpl && !proxyUrl && !isLocalEgressProxy(vm.proxy)) return { status: 0, error: 'proxy_required' }
@@ -1207,7 +1264,12 @@ async function postCodexJson({
   const creds = searchCredentials(projectRoot, vm)
   let auth = captureOpenaiAuth(projectRoot, vm.id, creds.first)
   const source = url === CODEX_SEARCH_URL ? 'search' : 'images'
-  const send = async (access) => {
+  const send = async (access, recovering = false) => {
+    const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
+    if (blocked && !(recovering && blocked.error === 'credential_blocked')) {
+      const result = blockedCodexResult(blocked)
+      return { ...result, text: JSON.stringify(result.body), headers: {}, auth: auth && { ...auth } }
+    }
     // Same identity as the slot's kernel; the backend wants originator, User-Agent and version to agree.
     const headers = {
       authorization: `Bearer ${access}`,
@@ -1231,7 +1293,7 @@ async function postCodexJson({
       if (status >= 200 && status < 300 && payload && typeof payload === 'object') {
         recordOpenaiAuthResult(auth, { status, source, authenticated: true })
       }
-      return { status, text, headers: plainHeaders(res?.headers) }
+      return { status, text, headers: plainHeaders(res?.headers), auth: auth && { ...auth } }
     } catch (e) {
       return { status: 0, error: /abort/i.test(`${e?.name} ${e?.message}`) ? 'upstream_timeout' : 'upstream_transport' }
     }
@@ -1242,7 +1304,7 @@ async function postCodexJson({
     const recovered = await refreshSearchAccess(projectRoot, vm, creds.access, { proxyUrl, fetchImpl, refresh, auth })
     if (recovered && isOpenaiAuthCurrent(recovered.auth)) {
       auth = { ...recovered.auth }
-      out = await send(recovered.access)
+      out = await send(recovered.access, true)
     }
   }
   return out
@@ -1300,7 +1362,7 @@ export async function handleCodexSearch({
   for (const key of CODEX_SEARCH_DROP_FIELDS) delete outbound[key]
   const turnMetadata = headerString(req.headers, 'x-codex-turn-metadata')
   const post = ops.postCodexSearch || postCodexSearch
-  const pickOpts = { stickyRouter, sessions: null, body: outbound, excluded: new Set(), ownerScope }
+  const pickOpts = { stickyRouter, sessions: null, body: outbound, excluded: new Set(), ownerScope, routing }
   const deadline = Date.now() + codexWaitTimeoutMs(routing)
   const gone = clientGoneSignal(req, res)
   let last = null
@@ -1320,6 +1382,14 @@ export async function handleCodexSearch({
         const vm = getVm(projectRoot, admitted.vmId)
         pickOpts.excluded.add(admitted.vmId)
         if (!vm || !isCodexVm(vm)) continue
+        const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
+        if (blocked) {
+          const result = blockedCodexResult(blocked)
+          last = { ...result, text: JSON.stringify(result.body), headers: {} }
+          if (pinnedVmId(req)) break
+          continue
+        }
+        const auth = captureOpenaiAuth(projectRoot, vm.id)
         if (!attempts) {
           stats.requests++
           stats.by_route['openai.search'] = (stats.by_route['openai.search'] || 0) + 1
@@ -1335,14 +1405,23 @@ export async function handleCodexSearch({
           turnMetadata,
           fetchImpl: ops.fetchImpl,
           refresh: ops.refresh,
+          routing,
         })
         logBag.upstream_status = last.status || null
-        ingestCodexHop(projectRoot, vm.id, {
-          ok: last.status >= 200 && last.status < 300,
-          status: last.status,
-          headers: last.headers || {},
-          body: parseJson(last.text),
-        })
+        ingestCodexHop(
+          projectRoot,
+          vm.id,
+          {
+            ok: last.status >= 200 && last.status < 300,
+            status: last.status,
+            headers: last.headers || {},
+            body: parseJson(last.text),
+            admissionBlocked: last.admissionBlocked,
+          },
+          Date.now(),
+          normalizeCodexRouting(routing.codex).quota,
+          last.auth || auth,
+        )
         if (!isSearchFailover(last)) break
       } finally {
         admitted.lease.release()
@@ -1452,7 +1531,7 @@ export async function handleCodexImages({
   const post = ops.postCodexJson || postCodexJson
   // Selection-only body: the turn id becomes the sticky session; the upstream body is untouched.
   const pickBody = { model: model || null, ...(imageTurnId ? { session_id: `codex-image-turn:${imageTurnId}` } : {}) }
-  const pickOpts = { stickyRouter, sessions: null, body: pickBody, excluded, ownerScope }
+  const pickOpts = { stickyRouter, sessions: null, body: pickBody, excluded, ownerScope, routing }
   const deadline = Date.now() + codexWaitTimeoutMs(routing)
   const gone = clientGoneSignal(req, res)
   let last = null
@@ -1472,6 +1551,14 @@ export async function handleCodexImages({
         const vm = getVm(projectRoot, admitted.vmId)
         excluded.add(admitted.vmId)
         if (!vm || !isCodexVm(vm)) continue
+        const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
+        if (blocked) {
+          const result = blockedCodexResult(blocked)
+          last = { ...result, text: JSON.stringify(result.body), headers: {} }
+          if (pinnedVmId(req)) break
+          continue
+        }
+        const auth = captureOpenaiAuth(projectRoot, vm.id)
         if (!attempts) {
           stats.requests++
           stats.by_route['openai.images'] = (stats.by_route['openai.images'] || 0) + 1
@@ -1490,14 +1577,23 @@ export async function handleCodexImages({
           extraHeaders,
           fetchImpl: ops.fetchImpl,
           refresh: ops.refresh,
+          routing,
         })
         logBag.upstream_status = last.status || null
-        ingestCodexHop(projectRoot, vm.id, {
-          ok: last.status >= 200 && last.status < 300,
-          status: last.status,
-          headers: last.headers || {},
-          body: parseJson(last.text),
-        })
+        ingestCodexHop(
+          projectRoot,
+          vm.id,
+          {
+            ok: last.status >= 200 && last.status < 300,
+            status: last.status,
+            headers: last.headers || {},
+            body: parseJson(last.text),
+            admissionBlocked: last.admissionBlocked,
+          },
+          Date.now(),
+          normalizeCodexRouting(routing.codex).quota,
+          last.auth || auth,
+        )
         if (last.status >= 200 && last.status < 300 && stickyRouter?.bind) {
           for (const key of admitted.picked.stickyKeys || []) stickyRouter.bind(key, { accountId: vm.id, vmId: vm.id })
         }

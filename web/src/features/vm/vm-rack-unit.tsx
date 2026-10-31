@@ -7,6 +7,7 @@ import { subscriptionListLabel } from '@/lib/subscription-expiry'
 import { cn } from '@/lib/utils'
 import { slotCredentialLabel } from '@/lib/vm-kind'
 import { vmCostLedger } from '@/lib/vm-usage'
+import { CodexCreditSummary } from '@/features/vm/codex-credit-summary'
 import { CodexQuotaSampleStatus } from '@/features/vm/codex-quota-sample-status'
 import { RISK_SOLID, riskFg, riskLevel } from '@/features/vm/usage-meter'
 import {
@@ -151,6 +152,7 @@ export const VmUnit = memo(function VmUnit({
           </span>
         </span>
       ) : null}
+      <CodexCreditSummary vm={vm} compact className='col-span-2' />
       <div className='hairline-t col-span-2 mt-0.5 flex items-center gap-1 pt-1 text-[10.5px] text-muted-foreground'>
         <VmSeats vm={vm} compact />
         <BladeControls vm={vm} />

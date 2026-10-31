@@ -327,6 +327,16 @@ export type Vm = {
   /** Plan label fallback from OAuth `id_token` when `plan_type` from usage is absent. */
   chatgpt_plan_type?: string | null
   subscription?: OpenaiSubscription | null
+  /** Last official balance sample; status is the server's current spending verdict. */
+  codex_credits?: {
+    has_credits: boolean
+    unlimited: boolean
+    balance: string | null
+    fetched_at: string
+    status: 'available' | 'unavailable' | 'pending' | 'unknown'
+    invalidated_at: string | null
+  } | null
+  codex_credits_checked_at?: string | null
   reset_credits?: {
     available_count?: number
     credits?: Array<{ expires_at?: string }>
