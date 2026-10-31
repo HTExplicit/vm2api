@@ -24,6 +24,11 @@ function boundProxy(value) {
  * selected account's authenticated upstream proxy, including remote DNS. */
 export async function createBoundProxyRelay(proxyUrl) {
   const agent = createProxyAgent(boundProxy(proxyUrl))
+  const shutdown = new AbortController()
+  // SOCKS' own handshake timer closes a non-answering peer. HTTP proxy sockets
+  // are created before connect() returns, so abort them when this relay closes.
+  agent.timeout = 15_000
+  if (agent.connectOpts) agent.connectOpts.signal = shutdown.signal
   const sockets = new Set()
   const track = (socket) => {
     sockets.add(socket)
@@ -89,6 +94,7 @@ export async function createBoundProxyRelay(proxyUrl) {
   return {
     url: `http://127.0.0.1:${server.address().port}`,
     async close() {
+      shutdown.abort()
       for (const socket of sockets) socket.destroy()
       agent.destroy()
       await new Promise((resolve) => server.close(resolve))

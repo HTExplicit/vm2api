@@ -35,6 +35,7 @@ export function OpenaiPlatformBrowserDialog({
 }) {
   const socket = useRef<WebSocket | null>(null)
   const keyboard = useRef<HTMLTextAreaElement | null>(null)
+  const viewport = useRef<HTMLDivElement | null>(null)
   const lastMoveAt = useRef(0)
   const callbacks = useRef({ onOpenChange, onComplete })
   callbacks.current = { onOpenChange, onComplete }
@@ -43,6 +44,15 @@ export function OpenaiPlatformBrowserDialog({
   const [error, setError] = useState('')
   const [connected, setConnected] = useState(false)
   const [attempt, setAttempt] = useState(0)
+  const [originalSize, setOriginalSize] = useState(false)
+
+  useEffect(() => {
+    const element = viewport.current
+    if (element)
+      element.scrollLeft = originalSize
+        ? (element.scrollWidth - element.clientWidth) / 2
+        : 0
+  }, [originalSize])
 
   useEffect(() => {
     if (!open) return
@@ -128,6 +138,7 @@ export function OpenaiPlatformBrowserDialog({
           </p>
         ) : null}
         <div
+          ref={viewport}
           role='application'
           aria-label='账号浏览器，点击网页后可输入文字、粘贴、使用 Tab 和方向键'
           tabIndex={0}
@@ -201,7 +212,12 @@ export function OpenaiPlatformBrowserDialog({
               src={`data:${frame.mime};base64,${frame.image}`}
               alt='OpenAI Platform 官方网页'
               draggable={false}
-              className='mx-auto block h-auto max-w-full select-none'
+              className={
+                originalSize
+                  ? 'block h-auto max-w-none select-none'
+                  : 'mx-auto block h-auto max-w-full select-none'
+              }
+              style={originalSize ? { width: frame.width } : undefined}
               onClick={(event) => {
                 keyboard.current?.focus()
                 send({
@@ -235,15 +251,29 @@ export function OpenaiPlatformBrowserDialog({
           )}
         </div>
         <div className='flex flex-wrap items-center justify-between gap-2'>
-          <Button
-            variant='outline'
-            size='sm'
-            disabled={connected}
-            onClick={() => setAttempt((value) => value + 1)}
-          >
-            <RefreshCw className='size-3.5' aria-hidden />
-            重新连接
-          </Button>
+          <div className='flex items-center gap-2'>
+            <Button
+              variant='outline'
+              size='sm'
+              disabled={connected}
+              onClick={() => {
+                setFrame(null)
+                setAttempt((value) => value + 1)
+              }}
+            >
+              <RefreshCw className='size-3.5' aria-hidden />
+              重新连接
+            </Button>
+            {frame ? (
+              <Button
+                variant='outline'
+                size='sm'
+                onClick={() => setOriginalSize((value) => !value)}
+              >
+                {originalSize ? '适应窗口' : '放大网页'}
+              </Button>
+            ) : null}
+          </div>
           <Button
             size='sm'
             disabled={!connected}

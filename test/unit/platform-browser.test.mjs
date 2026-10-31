@@ -223,3 +223,21 @@ test('relay returns 502 when the account proxy fails instead of opening direct c
   assert.equal(response.statusCode, 502)
   socket.destroy()
 })
+
+test('closing relay also closes an HTTP proxy socket waiting for CONNECT response', async (t) => {
+  const peer = net.createServer()
+  peer.listen(0, '127.0.0.1')
+  await once(peer, 'listening')
+  t.after(() => peer.close())
+  const connected = once(peer, 'connection')
+  const relay = await createBoundProxyRelay(`http://127.0.0.1:${peer.address().port}`)
+  const req = http.request(relay.url, { method: 'CONNECT', path: 'private-upstream.invalid:443' })
+  req.on('error', () => {})
+  req.end()
+  const [upstream] = await connected
+  upstream.resume()
+  const closed = once(upstream, 'close')
+  await relay.close()
+  await closed
+  assert.equal(upstream.destroyed, true)
+})

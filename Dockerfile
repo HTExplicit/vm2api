@@ -39,6 +39,7 @@ RUN npx playwright-core install-deps firefox \
   && node --input-type=module -e "import {findInstalledVersion} from 'camoufox'; import {isModelInstalled} from 'camoufox/dist/fpgen/index.js'; import {getMmdbPath} from 'camoufox/dist/geolocation.js'; import fs from 'node:fs'; if (!findInstalledVersion('official/156.0.1-beta.36') || !isModelInstalled() || !fs.existsSync(getMmdbPath())) process.exit(1)"
 COPY src ./src
 COPY scripts ./scripts
+RUN node scripts/smoke-platform-browser.mjs
 COPY VERSION CHANGELOG.md ./
 COPY docker/kin-os ./docker/kin-os
 COPY docker/kin-kvm ./docker/kin-kvm
