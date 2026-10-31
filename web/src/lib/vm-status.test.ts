@@ -578,10 +578,19 @@ describe('near-gate and seats-full are not restrictions', () => {
 })
 
 describe('GPT plan label follows OpenAI plan_type', () => {
-  it('maps plan_type like codex-proxy-rs', () => {
+  it('preserves existing plan labels and distinguishes the three Pro tiers', () => {
     expect(openaiPlanLabel('team')).toBe('Business')
     expect(openaiPlanLabel('plus')).toBe('Plus')
-    expect(openaiPlanLabel('prolite')).toBe('Pro')
+    for (const [plan, label] of [
+      ['prolite', 'Pro 100'],
+      ['chatgptprolite', 'Pro 100'],
+      ['pro', 'Pro 200'],
+      ['chatgptpro', 'Pro 200'],
+      ['promax', 'Pro 500'],
+      ['chatgptpromax', 'Pro 500'],
+    ]) {
+      expect(openaiPlanLabel(plan)).toBe(label)
+    }
     expect(openaiPlanLabel(null)).toBe('GPT')
     expect(openaiPlanLabel('future_plan')).toBe('future_plan')
   })
@@ -591,11 +600,12 @@ describe('GPT plan label follows OpenAI plan_type', () => {
         platform: 'openai',
         family: 'codex',
         codex_kernel: true,
-        plan_type: 'team',
+        plan_type: 'promax',
       })
     )
     expect(tone.key).toBe('codex')
-    expect(tone.label).toBe('Business')
+    expect(tone.cls).toBe('codex')
+    expect(tone.label).toBe('Pro 500')
   })
 })
 

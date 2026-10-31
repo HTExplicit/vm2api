@@ -54,7 +54,7 @@ const GPT_PLAN_BUCKETS = Object.freeze([
   { id: 'free', label: 'Free', ids: ['free', 'free_workspace', 'guest'] },
   { id: 'go', label: 'Go', ids: ['go'] },
   { id: 'plus', label: 'Plus', ids: ['plus'] },
-  { id: 'pro', label: 'Pro', ids: ['pro', 'prolite'] },
+  { id: 'pro', label: 'Pro', ids: ['pro', 'prolite', 'promax'] },
   {
     id: 'business',
     label: 'Business',

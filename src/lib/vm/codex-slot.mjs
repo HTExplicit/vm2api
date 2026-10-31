@@ -288,7 +288,9 @@ export function normalizeCodexSubscriptionPlan(value) {
   const plan = firstString(value)
   return (
     {
+      chatgptprolite: 'prolite',
       chatgptpro: 'pro',
+      chatgptpromax: 'promax',
       chatgptteamplan: 'team',
       chatgptplus: 'plus',
       chatgptplusplan: 'plus',

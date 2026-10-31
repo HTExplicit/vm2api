@@ -16,6 +16,28 @@ test('panel dashboard, list and detail retain GPT subscription claims and authen
   const until = '2027-06-01T12:00:00Z'
   const tokenExpiry = 1_900_000_000
   const slots = [
+    ...[
+      ['chatgptprolite', 'prolite'],
+      ['chatgptpro', 'pro'],
+      ['chatgptpromax', 'promax'],
+    ].map(([rawPlan, plan]) => ({
+      id: `vm-tier-${plan}`,
+      platform: 'openai',
+      codex: {
+        subscription: {
+          account_id: `vm-tier-${plan}`,
+          active_until: '2028-06-01T12:00:00.000Z',
+          plan_type: rawPlan,
+          source: 'accounts_check',
+          last_success_at: '2026-10-31T00:00:00.000Z',
+        },
+      },
+      claims: { chatgpt_subscription_active_until: until, chatgpt_plan_type: 'plus' },
+      expectedUntil: '2028-06-01T12:00:00.000Z',
+      expectedPlan: 'plus',
+      expectedUsagePlan: plan,
+      expectedSource: 'accounts_check',
+    })),
     {
       id: 'vm-api-subscription',
       platform: 'openai',
