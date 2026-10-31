@@ -92,6 +92,25 @@ function parkUntil(vm, now) {
   return extraPark(vm, now).until || now
 }
 
+/** Live gates shared by pinned admission and the final check before sending. */
+export function codexAdmissionBlock(vm, now = Date.now(), policy = null) {
+  if (openaiAuthBlock(vm)) return { error: 'credential_blocked', reason: 'credential_blocked', retryAt: null }
+  const proxy = proxyBlockedReason(vm?.proxy)
+  if (proxy) return { error: proxy, reason: proxy, retryAt: null }
+  const hold = openAIAccountHold(vm?.id, now)
+  if (hold) return { error: 'capacity_unavailable', reason: hold.reason, retryAt: hold.until }
+  const local = evaluateOpenAIQuotaGate(vm, normalizeOpenAIQuotaPolicy(policy), now)
+  const reason = local.limited ? local.reason : codexQuotaWindowReason(vm, now)
+  if (reason || isCodexSlotParked(vm, now, policy)) {
+    return {
+      error: 'quota_exhausted',
+      reason: reason || 'quota_exhausted',
+      retryAt: local.limited ? local.until : codexRestrictionUntil(vm, now),
+    }
+  }
+  return null
+}
+
 /**
  * Ordered candidate ids. Pinned master hops stay on that slot.
  * Ready slots first (lowest 5h/7d stress), parked slots last so a
@@ -102,9 +121,8 @@ export function pickCodexSlots(vms, { pin = null, now = Date.now(), quotaPolicy 
   if (pin) {
     const vm = list.find((item) => item?.id === pin) || null
     if (!vm || !isCodexVm(vm)) return { error: 'platform_mismatch', pin, ids: [], ready: [], parked: [] }
-    if (openaiAuthBlock(vm)) return { error: 'credential_blocked', pin, ids: [], ready: [], parked: [] }
-    const blocked = proxyBlockedReason(vm.proxy)
-    if (blocked) return { error: blocked, pin, ids: [], ready: [], parked: [] }
+    const blocked = codexAdmissionBlock(vm, now, quotaPolicy)
+    if (blocked) return { ...blocked, pin, ids: [], ready: [], parked: [] }
     return { ids: [vm.id], pin, ready: [vm.id], parked: [] }
   }
   const ready = []

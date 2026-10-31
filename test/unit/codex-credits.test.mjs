@@ -4,14 +4,16 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { handleCodexProtocol } from '../../src/lib/protocol/handle-codex.mjs'
-import { getVm, listVms } from '../../src/lib/vm/vm-registry.mjs'
-import { persistCodexQuotaSnapshot } from '../../src/lib/vm/codex-slot.mjs'
+import { getVm, listVms, persistCodexUsage } from '../../src/lib/vm/vm-registry.mjs'
+import { persistCodexQuotaSnapshot, upsertCodexAccount } from '../../src/lib/vm/codex-slot.mjs'
+import { captureOpenaiAuth } from '../../src/lib/oauth/openai-auth-state.mjs'
 import { queryOpenaiQuota, CHATGPT_USAGE_URL, CHATGPT_RESET_CREDITS_URL } from '../../src/lib/oauth/openai-quota.mjs'
 import {
   CODEX_CREDITS_TTL_MS,
   codexCreditsFromHeaders,
   hasSpendableCodexCredits,
   normalizeCodexCredits,
+  codexCreditsView,
 } from '../../src/lib/protocol/codex-usage.mjs'
 import {
   codexAccountStatus,
@@ -158,9 +160,9 @@ test('spendable means fresh and either has_credits or unlimited; a hidden balanc
   assert.equal(hasSpendableCodexCredits(slot(), NOW), false)
 })
 
-test('a spent window with fresh credits passes every local quota gate', () => {
+test('a spent window with fresh credits passes default quota gates but respects manual thresholds', () => {
   const vm = slot({ extra: WEEK_SPENT, credits: credits() })
-  for (const policy of [null, { limit_5h: 1, limit_7d: 1 }, { limit_5h: 0.9, limit_7d: 0.9 }]) {
+  for (const policy of [null, { limit_5h: 1, limit_7d: 1 }]) {
     assert.equal(isCodexSlotParked(vm, NOW, policy), false)
     assert.equal(evaluateOpenAIQuotaGate(vm, policy || undefined, NOW).limited, false)
     assert.equal(codexAccountStatus(vm, NOW, policy), 'normal')
@@ -168,6 +170,8 @@ test('a spent window with fresh credits passes every local quota gate', () => {
   }
   assert.equal(codexQuotaWindowReason(vm, NOW), null)
   assert.deepEqual(pickCodexSlots([vm], { now: NOW }).ready, ['vm-a'])
+  assert.equal(evaluateOpenAIQuotaGate(vm, { limit_7d: 0.9 }, NOW).reason, 'quota_7d_local')
+  assert.equal(codexAccountStatus(vm, NOW, { limit_7d: 0.9 }), 'quota_exhausted')
 })
 
 test('credits never reopen an operator-disabled or credential-less slot', () => {
@@ -285,7 +289,7 @@ test('without credit headers a successful reply past the cap still parks as befo
   assert.equal(vm.temp_unschedulable_reason, 'quota_7d_header')
 })
 
-test('an upstream 429 drops the credits reading and parks the slot', async (t) => {
+test('explicit quota exhaustion invalidates credits without erasing the last balance', async (t) => {
   const root = fixture(t, { extra: WEEK_SPENT, credits: credits({}, Date.now()) })
   assert.deepEqual(pickCodexSlots(listVms(root)).ready, ['vm-a'])
   await hop(root, {
@@ -297,10 +301,70 @@ test('an upstream 429 drops the credits reading and parks the slot', async (t) =
     },
   })
   const vm = getVm(root, 'vm-a')
-  assert.equal(vm.codex.credits, undefined)
+  assert.ok(vm.codex.credits.invalidated_at)
+  assert.equal(vm.codex.credits.balance, '12.5', 'a refusal cannot erase the historical balance with partial headers')
+  assert.equal(hasSpendableCodexCredits(vm), false)
+  assert.equal(listVms(root)[0].codex_credits.status, 'pending')
   assert.ok(Date.parse(vm.codex.extra.codex_limited_until) > Date.now() + 86_400_000)
   assert.equal(vm.temp_unschedulable_reason, 'quota_7d_header')
   assert.deepEqual(pickCodexSlots(listVms(root)).parked, ['vm-a'])
+  persistCodexQuotaSnapshot(root, 'vm-a', {
+    credits: normalizeCodexCredits({ has_credits: true, unlimited: false, balance: '9.5' }),
+  })
+  assert.equal(getVm(root, 'vm-a').codex.credits.invalidated_at, undefined)
+  assert.equal(listVms(root)[0].codex_credits.status, 'available')
+})
+
+test('a generic 429 keeps spendable credits and uses a short provider hold', async (t) => {
+  const root = fixture(t, { extra: WEEK_SPENT, credits: credits({}, Date.now()) })
+  await hop(root, {
+    status: 429,
+    code: 'rate_limit_exceeded',
+    headers: {
+      ...WEEK_SPENT_HEADERS,
+      'retry-after': '12',
+      'x-codex-credits-has-credits': 'true',
+      'x-codex-credits-unlimited': 'false',
+      'x-codex-credits-balance': '12.5',
+    },
+  })
+  const vm = getVm(root, 'vm-a')
+  assert.equal(vm.codex.credits.balance, '12.5')
+  assert.equal(vm.codex.credits.invalidated_at, undefined)
+  assert.equal(vm.codex.extra.codex_limited_until, undefined)
+  assert.equal(hasSpendableCodexCredits(vm), true)
+  assert.equal(codexAccountStatus(listVms(root)[0]), 'cooldown')
+})
+
+test('credit state shares admission freshness and replacement rejects an old result', (t) => {
+  const root = fixture(t, { credits: credits({}, Date.now()), credits_checked_at: new Date().toISOString() })
+  const auth = captureOpenaiAuth(root, 'vm-a')
+  upsertCodexAccount(root, 'vm-a', { access_token: 'rotated-at' })
+  assert.equal(getVm(root, 'vm-a').codex.credits.balance, '12.5', 'normal token rotation retains points')
+  const oldRequest = captureOpenaiAuth(root, 'vm-a')
+  upsertCodexAccount(
+    root,
+    'vm-a',
+    { access_token: 'replacement', chatgpt_account_id: 'acc-2' },
+    { replaceCredentials: true },
+  )
+  assert.equal(getVm(root, 'vm-a').codex.credits, undefined)
+  assert.equal(getVm(root, 'vm-a').codex.credits_checked_at, undefined)
+  assert.equal(
+    persistCodexUsage(root, 'vm-a', {
+      auth: oldRequest,
+      headers: {
+        'x-codex-credits-has-credits': 'true',
+        'x-codex-credits-unlimited': 'false',
+      },
+    }),
+    null,
+  )
+  assert.equal(persistCodexUsage(root, 'vm-a', { auth }), null)
+  assert.equal(getVm(root, 'vm-a').codex.credits, undefined)
+  assert.equal(codexCreditsView(credits()).status, 'pending')
+  assert.equal(codexCreditsView(credits(), NOW).status, 'available')
+  assert.equal(codexCreditsView(credits({ has_credits: false }), NOW).status, 'unavailable')
 })
 
 test('credit-only reply headers refresh the reading', async (t) => {

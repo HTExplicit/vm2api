@@ -69,7 +69,16 @@ test('panel dashboard, list and detail retain GPT subscription claims and authen
     {
       id: 'vm-subscription',
       platform: 'openai',
-      codex: { plan_type: 'team' },
+      codex: {
+        plan_type: 'team',
+        credits: {
+          has_credits: true,
+          unlimited: false,
+          balance: '12.345678901234',
+          fetched_at: new Date().toISOString(),
+        },
+        credits_checked_at: '2026-10-31T00:00:00.000Z',
+      },
       claims: { chatgpt_subscription_active_until: until, chatgpt_plan_type: 'plus' },
       expectedUntil: until,
       expectedPlan: 'plus',
@@ -151,6 +160,11 @@ test('panel dashboard, list and detail retain GPT subscription claims and authen
       assert.equal(view.access_token, undefined)
       assert.equal(view.id_token, undefined)
       assert.equal(view.refresh_token, undefined)
+      if (slot.id === 'vm-subscription') {
+        assert.equal(view.codex_credits.balance, '12.345678901234')
+        assert.equal(view.codex_credits.status, 'available')
+        assert.equal(view.codex_credits_checked_at, '2026-10-31T00:00:00.000Z')
+      }
       if (slot.id === 'vm-api-subscription') {
         assert.equal(view.availability.key, 'bad')
         assert.equal(view.availability.accept, false)

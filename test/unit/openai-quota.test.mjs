@@ -180,11 +180,24 @@ function seedMeasuredQuota(root) {
 }
 
 test('empty WHAM responses fail without overwriting the last successful quota', async (t) => {
-  for (const body of [null, {}, { rate_limit: { primary_window: {}, secondary_window: {} } }]) {
+  for (const body of [
+    null,
+    {},
+    { rate_limit: { primary_window: {}, secondary_window: {} } },
+    { credits: { has_credits: true, unlimited: false, balance: '7.25' } },
+    { credits: { has_credits: false, unlimited: false, balance: '0' } },
+  ]) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-openai-quota-empty-'))
     t.after(() => fs.rmSync(root, { recursive: true, force: true }))
     writeGptSlot(root)
     const previous = seedMeasuredQuota(root)
+    const previousCredits = {
+      has_credits: true,
+      unlimited: false,
+      balance: '10',
+      fetched_at: new Date(Date.now() - 600_000).toISOString(),
+    }
+    persistCodexQuotaSnapshot(root, 'vm-codex-01', { credits: previousCredits })
     recordOpenaiAuthResult(captureOpenaiAuth(root, 'vm-codex-01'), { status: 401, source: 'inference' })
     let calls = 0
     const result = await queryOpenaiQuota({
@@ -214,6 +227,14 @@ test('empty WHAM responses fail without overwriting the last successful quota', 
     assert.deepEqual(saved.codex.usage.last_success.quota, previous.usage.quota)
     assert.equal(saved.codex.usage.last_success_at, previous.usage.last_success_at)
     assert.equal(!!saved.codex.auth_block, body === null, 'valid JSON authentication is independent of quota validity')
+    if (body?.credits) {
+      assert.equal(saved.codex.credits.balance, body.credits.balance)
+      assert.equal(saved.codex.credits.has_credits, body.credits.has_credits)
+      assert.ok(Date.parse(saved.codex.credits.fetched_at) > Date.parse(previousCredits.fetched_at))
+    } else {
+      assert.deepEqual(saved.codex.credits, previousCredits, 'omitted credits keep the original observation time')
+    }
+    assert.equal(Number.isFinite(Date.parse(saved.codex.credits_checked_at || '')), body !== null)
   }
 })
 
@@ -246,6 +267,8 @@ test('a partial WHAM measurement keeps the other window and omitted fields in th
   assert.deepEqual(result.windows, saved.codex.usage.windows)
   assert.equal(saved.codex.extra.codex_primary_window_minutes, previous.extra.codex_primary_window_minutes)
   assert.equal(saved.codex.extra.codex_secondary_used_percent, previous.extra.codex_secondary_used_percent)
+  assert.ok(Number.isFinite(Date.parse(saved.codex.credits_checked_at)))
+  assert.equal(saved.codex.credits, undefined, 'a successful balance check does not invent a missing credit sample')
 })
 
 test('quota refresh and reset return business errors for upstream 401 while retaining the authentication block', async (t) => {

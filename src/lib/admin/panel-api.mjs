@@ -2049,6 +2049,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     codex_usage: v.codex_usage || null,
     reset_credits: isCodex ? v.reset_credits || v.codex?.reset_credits || null : null,
     codex_credits: isCodex ? v.codex_credits || v.codex?.credits || null : null,
+    codex_credits_checked_at: isCodex ? v.codex_credits_checked_at || v.codex?.credits_checked_at || null : null,
     claude_reset_credits: isCodex ? null : v.claude_reset_credits || null,
     plan_type: isCodex ? v.plan_type || null : null,
     chatgpt_subscription_active_until: isCodex ? v.chatgpt_subscription_active_until || null : null,

@@ -11,6 +11,7 @@ import {
   hasSpendableCodexCredits,
   normalizeCodexExtra,
   codexUsageWithSample,
+  codexCreditsView,
 } from '../protocol/codex-usage.mjs'
 import { decodeJwtPayload, openaiClaimsFromIdToken, openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
 import { openaiAuthBlock, resetOpenaiAuth } from '../oauth/openai-auth-state.mjs'
@@ -345,7 +346,21 @@ export function upsertCodexAccount(projectRoot, vmId, patch = {}, { replaceCrede
   else accounts[0] = cur
   writeCodexAccounts(projectRoot, vmId, accounts)
   resetOpenaiAuth(projectRoot, vmId)
+  if (replaceCredentials) {
+    const file = path.join(projectRoot, 'vms', `${vmId}.json`)
+    const vm = readJsonCached(file)
+    if (vm?.codex) {
+      clearCodexCredits(vm)
+      atomicWriteJson(file, vm, { mode: 0o600 })
+    }
+  }
   return cur
+}
+
+export function clearCodexCredits(vm) {
+  if (!vm?.codex) return
+  delete vm.codex.credits
+  delete vm.codex.credits_checked_at
 }
 
 /** Drop stale manual parks when window caps no longer apply; same contract as persistCodexUsage. */
@@ -362,7 +377,7 @@ function reconcileCodexLimitedUntil(vm, now = Date.now()) {
 export function persistCodexQuotaSnapshot(
   projectRoot,
   vmId,
-  { extra, resetCredits, credits, planType, sampledAt } = {},
+  { extra, resetCredits, credits, planType, sampledAt, checkedAt } = {},
 ) {
   if (!projectRoot || !vmId) throw new Error('projectRoot and vmId required')
   const file = path.join(projectRoot, 'vms', `${vmId}.json`)
@@ -382,6 +397,7 @@ export function persistCodexQuotaSnapshot(
     })
   }
   if (credits) vm.codex.credits = credits
+  if (checkedAt) vm.codex.credits_checked_at = checkedAt
   if (extra && typeof extra === 'object') {
     reconcileCodexLimitedUntil(vm)
   } else if (credits && hasSpendableCodexCredits(vm) && vm.codex.extra?.codex_limited_until) {
@@ -441,7 +457,8 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
     account_count: accounts.length,
     usage,
     reset_credits: vm.codex?.reset_credits || null,
-    credits: vm.codex?.credits || null,
+    credits: codexCreditsView(vm.codex?.credits),
+    credits_checked_at: vm.codex?.credits_checked_at || null,
     plan_type:
       vm.codex?.plan_type ||
       (subscription.source === 'accounts_check' || subscription.source === 'subscriptions'

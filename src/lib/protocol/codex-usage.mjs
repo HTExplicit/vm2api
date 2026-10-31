@@ -147,9 +147,31 @@ export function codexCreditsFromHeaders(headers = {}, now = Date.now()) {
  */
 export function hasSpendableCodexCredits(vm, now = Date.now()) {
   const credits = vm?.codex?.credits ?? vm?.codex_credits
+  if (credits?.invalidated_at) return false
   const fetchedAt = Date.parse(credits?.fetched_at || '')
   if (!Number.isFinite(fetchedAt) || now - fetchedAt > CODEX_CREDITS_TTL_MS) return false
   return credits.unlimited === true || credits.has_credits === true
+}
+
+/** Public point balance and the same freshness verdict used by admission. */
+export function codexCreditsView(credits, now = Date.now()) {
+  if (!credits) return null
+  const fetchedAt = Date.parse(credits.fetched_at || '')
+  const pending = !!credits.invalidated_at || (Number.isFinite(fetchedAt) && now - fetchedAt > CODEX_CREDITS_TTL_MS)
+  return {
+    has_credits: credits.has_credits,
+    unlimited: credits.unlimited,
+    balance: credits.balance ?? null,
+    fetched_at: credits.fetched_at || null,
+    invalidated_at: credits.invalidated_at || null,
+    status: pending
+      ? 'pending'
+      : !Number.isFinite(fetchedAt)
+        ? 'unknown'
+        : credits.has_credits || credits.unlimited
+          ? 'available'
+          : 'unavailable',
+  }
 }
 
 function lowerHeaders(headers) {

@@ -28,7 +28,7 @@ import { JevUsageRepo } from '../db/repos/jev-usage-repo.mjs'
 import { RefusalGuardsRepo } from '../db/repos/refusal-guards-repo.mjs'
 import { RefusalDeviceBlocksRepo } from '../db/repos/refusal-device-blocks-repo.mjs'
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
-import { parseCodexImportPayload, upsertCodexAccount, readCodexAccounts } from '../vm/codex-slot.mjs'
+import { parseCodexImportPayload, upsertCodexAccount, readCodexAccounts, clearCodexCredits } from '../vm/codex-slot.mjs'
 import { generateAuthUrl, exchangeAuthCode, normalizeOauthFlavor } from '../oauth/oauth-auth-url.mjs'
 import { sessionKeyToOAuth, panelImportErrorPayload } from '../oauth/cookie-auth.mjs'
 import { enrichOauthIdentity } from '../oauth/oauth-identity.mjs'
@@ -442,6 +442,7 @@ async function commitImportedCodexVm({
   }
   delete existing.codex.auth_block
   delete existing.codex.subscription
+  clearCodexCredits(existing)
   const global = normalizeOpenAIQuotaPolicy(routingConfig.codex?.quota || {})
   const preservePin = (value, override) =>
     previousPolicy[override] === true &&

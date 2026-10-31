@@ -9,6 +9,7 @@ import { formatWindowSpend } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { dashboardQueryOptions } from '@/features/overview/queries'
+import { CodexCreditSummary } from '@/features/vm/codex-credit-summary'
 import { CodexQuotaSampleStatus } from '@/features/vm/codex-quota-sample-status'
 import { Meter, ResetAt } from '@/features/vm/detail-section-primitives'
 import { vmQueryOptions } from '@/features/vm/queries'
@@ -113,6 +114,7 @@ export function OpenaiQuotaPanel({
       <div className='text-[11px] text-muted-foreground'>
         7d 重置 <ResetAt value={display.reset_7d} now={now} />
       </div>
+      <CodexCreditSummary vm={vm} />
       {canUse ? (
         <div className='flex flex-wrap items-center gap-2'>
           <Button

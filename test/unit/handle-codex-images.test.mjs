@@ -8,7 +8,8 @@ import { handleCodexImages } from '../../src/lib/protocol/handle-codex.mjs'
 import { CODEX_IMAGE_EDITS_URL, CODEX_IMAGE_GENERATIONS_URL } from '../../src/lib/protocol/codex-models.mjs'
 import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
 import { loadGptModelPolicy, saveGptModelPolicy } from '../../src/lib/protocol/gpt-model-policy.mjs'
-import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
+import { openAIAccountHold, resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
+import { getVm } from '../../src/lib/vm/vm-registry.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
 import { readBody } from '../../src/lib/http/respond.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
@@ -37,8 +38,8 @@ function writeGptVm(id, { plan = null, account = {} } = {}) {
   )
 }
 
-function upstream(status, payload, { raw = null } = {}) {
-  return { status, headers: new Map(), text: async () => raw ?? JSON.stringify(payload) }
+function upstream(status, payload, { raw = null, headers = {} } = {}) {
+  return { status, headers: new Map(Object.entries(headers)), text: async () => raw ?? JSON.stringify(payload) }
 }
 
 async function images({ kind = 'generations', body, headers = {}, ops = {}, stickyRouter = null } = {}) {
@@ -192,6 +193,41 @@ test('a 429 moves to the next slot', async () => {
   assert.equal(res.statusCode, 200)
   assert.equal(seen.length, 2)
   assert.notEqual(seen[0], seen[1])
+})
+
+test('ordinary image 429 preserves full-window credits and only adds the provider hold', async () => {
+  writeGptVm('vm-a')
+  writeGptVm('vm-b')
+  const vm = getVm(root, 'vm-a')
+  const credits = { has_credits: true, balance: '4', fetched_at: new Date().toISOString() }
+  fs.writeFileSync(path.join(root, 'vms', 'vm-a.json'), JSON.stringify({ ...vm, codex: { credits } }))
+  const { res } = await images({
+    ops: {
+      fetchImpl: async (_url, init) => {
+        return init.headers['chatgpt-account-id'] === 'vm-a'
+          ? upstream(
+              429,
+              { error: { code: 'rate_limit_exceeded' } },
+              {
+                headers: {
+                  'retry-after': '13',
+                  'x-codex-primary-used-percent': '100',
+                  'x-codex-primary-window-minutes': '300',
+                  'x-codex-primary-reset-after-seconds': '3600',
+                },
+              },
+            )
+          : upstream(200, { data: [] })
+      },
+    },
+  })
+  assert.equal(res.statusCode, 200)
+  const stored = getVm(root, 'vm-a')
+  assert.deepEqual(stored.codex.credits, credits)
+  assert.equal(stored.codex.extra.codex_limited_until, undefined)
+  const hold = openAIAccountHold('vm-a')
+  assert.equal(hold.reason, 'rate_limited')
+  assert.ok(hold.until > Date.now() && hold.until <= Date.now() + 13_000)
 })
 
 test('a 401 refreshes the token once and retries on the same slot', async () => {

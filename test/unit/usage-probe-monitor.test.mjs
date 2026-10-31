@@ -333,6 +333,50 @@ test('GPT monitor refreshes missing, pending, and elapsed samples using slot met
   }
 })
 
+test('GPT capped windows refresh stale credits independently of fresh window samples', async () => {
+  const startedAt = Date.parse('2026-10-31T10:00:00.000Z')
+  const fresh = new Date(startedAt).toISOString()
+  const old = new Date(startedAt - 300_000).toISOString()
+  const cases = [
+    { credits: { fetched_at: old, has_credits: true }, checkedAt: old, due: true },
+    { credits: null, checkedAt: null, due: true },
+    { credits: { fetched_at: fresh, has_credits: false }, checkedAt: old, due: false },
+    { credits: { fetched_at: old, has_credits: true }, checkedAt: fresh, due: false },
+    { credits: null, checkedAt: fresh, due: false },
+  ]
+  for (const { credits, checkedAt, due } of cases) {
+    let now = startedAt
+    const vm = {
+      ...codexSlot(now, {
+        windows: [{ id: '7d', used_percent: 100, reset_at: new Date(now + 86400_000).toISOString() }],
+      }),
+      codex_credits: credits,
+      codex_credits_checked_at: checkedAt,
+    }
+    const calls = []
+    const monitor = createUsageProbeMonitor({
+      config: { stale_sec: 300 },
+      now: () => now,
+      listTargets: () => [vm],
+      probeOne: async (slot) => {
+        calls.push(slot.id)
+        slot.codex_credits_checked_at = new Date(now).toISOString()
+        return { ok: true, source: 'openai-wham-usage' }
+      },
+    })
+    const run = await monitor.runOnce()
+    assert.equal(run.due, Number(due))
+    if (due) assert.equal(run.items[0].reason, 'credits_stale')
+    assert.equal((await monitor.runOnce()).due, 0, 'a legal check with absent credits suppresses immediate repetition')
+    now += 300_000
+    vm.codex_usage.last_success_at = new Date(now).toISOString()
+    const stale = await monitor.runOnce()
+    assert.equal(stale.due, 1, 'new window headers do not refresh the independent credit observation')
+    assert.equal(stale.items[0].reason, 'credits_stale')
+    assert.equal(calls.length, Number(due) + 1)
+  }
+})
+
 test('GPT authentication recovery bypasses sample freshness and reset delay, retaining failure backoff', async () => {
   let now = Date.parse('2026-10-31T10:00:00.000Z')
   const vm = {

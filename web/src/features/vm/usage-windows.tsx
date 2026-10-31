@@ -11,6 +11,7 @@ import { isCodexVm } from '@/lib/vm-kind'
 import { vmCostLedger } from '@/lib/vm-usage'
 import { useNow } from '@/hooks/use-now'
 import { ClaudeResetActions } from '@/features/vm/claude-reset-actions'
+import { CodexCreditSummary } from '@/features/vm/codex-credit-summary'
 import { CodexQuotaSampleStatus } from '@/features/vm/codex-quota-sample-status'
 import { OpenaiQuotaActions } from '@/features/vm/openai-quota-actions'
 import { riskFg, UsageMeter } from '@/features/vm/usage-meter'
@@ -131,6 +132,7 @@ export function VmUsageWindows({
         />
       ))}
       <CodexQuotaSampleStatus vm={vm} />
+      <CodexCreditSummary vm={vm} />
       {quotaActions ? <VmQuotaActions vm={vm} now={now} /> : null}
     </div>
   )

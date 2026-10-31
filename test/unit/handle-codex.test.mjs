@@ -13,7 +13,13 @@ import {
 } from '../../src/lib/protocol/handle-codex.mjs'
 import { persistCodexUsage, getVm } from '../../src/lib/vm/vm-registry.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
-import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
+import {
+  holdOpenAIAccount,
+  openAIAccountHold,
+  reportOpenAIAttempt,
+  resetOpenAIAccountRuntime,
+} from '../../src/lib/pool/openai-account-runtime.mjs'
+import { upsertCodexAccount } from '../../src/lib/vm/codex-slot.mjs'
 import {
   captureOpenaiAuth,
   readOpenaiAuthBlock,
@@ -1086,6 +1092,123 @@ test('failure holds leave 401 to persistent auth state and ignore request-shaped
     ),
     null,
   )
+})
+
+test('ordinary 429 follows Retry-After without treating a similarly named error as quota exhaustion', () => {
+  const now = Date.parse('2026-10-31T00:00:00Z')
+  const limited = { ok: false, status: 429, body: { error: { code: 'rate_limit_exceeded' } } }
+  assert.equal(codexFailureHold(limited, now).until, now + 60_000)
+  assert.equal(codexFailureHold({ ...limited, headers: { 'retry-after': '17' } }, now).until, now + 17_000)
+  assert.equal(
+    codexFailureHold({ ...limited, headers: { 'retry-after': new Date(now + 31_000).toUTCString() } }, now).until,
+    now + 31_000,
+  )
+  assert.equal(
+    codexFailureHold({ ...limited, body: { error: { code: 'usage_limit_reached_extra' } } }, now).reason,
+    'rate_limited',
+  )
+  assert.equal(codexFailureHold({ ...limited, body: { error: { code: 'usage_limit_reached' } } }, now), null)
+  holdOpenAIAccount('still-limited', { until: now + 31_000, reason: 'rate_limited', now })
+  reportOpenAIAttempt('still-limited', 'succeeded', null, now + 1000)
+  assert.equal(openAIAccountHold('still-limited', now + 1000).until, now + 31_000)
+  assert.equal(openAIAccountHold('still-limited', now + 31_000), null)
+})
+
+test('ordinary 429 preserves fresh credits and full windows while only holding for Retry-After', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-credit-429-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeGptVm(root, 'vm-gpt-a')
+  const file = path.join(root, 'vms', 'vm-gpt-a.json')
+  const vm = getVm(root, 'vm-gpt-a')
+  const credits = { has_credits: true, balance: '12.50', fetched_at: new Date().toISOString() }
+  fs.writeFileSync(file, JSON.stringify({ ...vm, codex: { credits } }))
+  const started = Date.now()
+  const out = await handleCodexProtocol(
+    codexArgs(root, {
+      ensureCodexKernel: async () => ({ ok: true }),
+      streamCodexKernel: async () => ({
+        ok: false,
+        status: 429,
+        headers: {
+          'retry-after': '19',
+          'x-codex-primary-used-percent': '100',
+          'x-codex-primary-window-minutes': '300',
+          'x-codex-primary-reset-after-seconds': '3600',
+        },
+        body: { error: { code: 'rate_limit_exceeded' } },
+      }),
+    }),
+  )
+  assert.equal(out.status, 429)
+  const stored = getVm(root, 'vm-gpt-a')
+  assert.deepEqual(stored.codex.credits, credits)
+  assert.equal(stored.codex.extra.codex_primary_used_percent, 100)
+  assert.equal(stored.codex.extra.codex_limited_until, undefined)
+  const hold = openAIAccountHold('vm-gpt-a')
+  assert.equal(hold.reason, 'rate_limited')
+  assert.ok(hold.until >= started + 19_000 && hold.until <= Date.now() + 19_000)
+})
+
+test('a stale model quota response cannot invalidate replacement credentials or credits', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-old-credit-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeGptVm(root, 'vm-gpt-a')
+  const credits = { has_credits: true, balance: '9', fetched_at: new Date().toISOString() }
+  await handleCodexProtocol(
+    codexArgs(root, {
+      ensureCodexKernel: async () => ({ ok: true }),
+      streamCodexKernel: async () => {
+        upsertCodexAccount(
+          root,
+          'vm-gpt-a',
+          { access_token: 'new-at', chatgpt_account_id: 'new-account' },
+          { replaceCredentials: true },
+        )
+        const vm = getVm(root, 'vm-gpt-a')
+        fs.writeFileSync(
+          path.join(root, 'vms', 'vm-gpt-a.json'),
+          JSON.stringify({ ...vm, codex: { ...vm.codex, credits } }),
+        )
+        return { ok: false, status: 429, body: { error: { code: 'usage_limit_reached' } } }
+      },
+    }),
+  )
+  const stored = getVm(root, 'vm-gpt-a')
+  assert.deepEqual(stored.codex.credits, credits)
+  assert.equal(stored.codex.extra?.codex_limited_until, undefined)
+  assert.equal(openAIAccountHold('vm-gpt-a'), null)
+})
+
+test('quota changed during kernel preparation blocks pinned sends and reroutes ordinary requests', async (t) => {
+  for (const pinned of [false, true]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-quota-before-send-'))
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    for (const id of ['vm-gpt-a', 'vm-gpt-b']) writeGptVm(root, id)
+    const seen = []
+    const args = codexArgs(root, {
+      ensureCodexKernel: async (exec) => {
+        if (exec.vm.id === 'vm-gpt-a')
+          persistCodexUsage(root, exec.vm.id, {
+            headers: {
+              'x-codex-primary-used-percent': '100',
+              'x-codex-primary-window-minutes': '300',
+              'x-codex-primary-reset-after-seconds': '3600',
+            },
+          })
+        return { ok: true }
+      },
+      streamCodexKernel: async ({ exec }) => {
+        seen.push(exec.vm.id)
+        return { ok: true, status: 200, body: { id: 'response-ok' } }
+      },
+    })
+    if (pinned)
+      args.req = { ...args.req, apiKeyKind: 'master', headers: { ...args.req.headers, 'x-kin-vm': 'vm-gpt-a' } }
+    const out = await handleCodexProtocol(args)
+    assert.deepEqual(seen, pinned ? [] : ['vm-gpt-b'])
+    assert.equal(out.status, pinned ? 503 : 200)
+    if (pinned) assert.equal(out.body.error.code, 'quota_exhausted')
+  }
 })
 
 test('authentication blocked during kernel preparation never reaches that upstream slot', async (t) => {
