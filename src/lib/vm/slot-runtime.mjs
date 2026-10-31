@@ -23,11 +23,12 @@ import {
   containerHasKernelMount,
   containerName,
   inspectContainer,
+  slotWorkerNeedsRecreate,
   startVmRuntime,
   reloadSlotWorker,
 } from './vm-runtime.mjs'
 import { inspectWrapCliDir, materializeWrapCli, wrapCliHomeDir } from './wrap-cli-runtime.mjs'
-import { isLocalEgressProxy } from './egress.mjs'
+import { boundProxyUrl, ensureProxyEgress, isLocalEgressProxy } from './egress.mjs'
 import { vmNodeId } from '../cluster/placement.mjs'
 import { hostProxyUrlForVm, slotHost } from './slot-host.mjs'
 
@@ -83,7 +84,7 @@ export async function reloadSlot(vm, projectRoot, opts = {}) {
 
 export async function reloadSlotReady(vm, projectRoot, opts = {}) {
   const boot = await (opts.ops?.reloadSlot || reloadSlot)(vm, projectRoot, opts)
-  if (!boot?.ok) return boot
+  if (!boot?.ok || boot.skipped) return boot
   persistVmRuntime(projectRoot, vm.id, boot.runtime)
   if (isCodexVm(vm)) {
     // The GPT container holds identity/egress; the actual inference process is
@@ -98,11 +99,61 @@ export async function reloadSlotReady(vm, projectRoot, opts = {}) {
       }
     }
   }
+  const changed = opts.startupRecoveryCheck?.()
+  if (changed) return changed
   const attached = await attachInferenceRuntime(boot, vm, projectRoot, opts)
+  if (opts.startupRecoveryCheck && attached.rust?.skipped) return attached.rust
   if (isCodexVm(vm) && attached.rust?.ok === false) {
     return { ...attached, ok: false, code: attached.rust.code, error: attached.rust.error }
   }
   return attached
+}
+
+function startupBinding(vm) {
+  return JSON.stringify([
+    vm.node_id || null,
+    runtimeKind(vm),
+    vm.schedule_off === true,
+    vm.proxy?.id || null,
+    isLocalEgressProxy(vm.proxy),
+    boundProxyUrl(vm.proxy),
+  ])
+}
+
+/** Control-plane startup lost the host kernel, not necessarily the identity container. */
+export async function restoreCodexSlotReady(vm, projectRoot, opts = {}) {
+  const read = opts.ops?.getVm || getVm
+  const current = read(projectRoot, vm.id)
+  const supported = (record) => record && isCodexVm(record) && runtimeKind(record) === 'docker' && !vmNodeId(record)
+  if (!supported(current)) {
+    return { ok: false, code: 'startup_unsupported', error: '启动恢复只支持本机 Docker GPT 槽' }
+  }
+  const skipped = () => ({ ok: true, skipped: true, reason: 'slot_intent_changed', action: 'skipped' })
+  if (current.status !== 'running') return skipped()
+  const binding = startupBinding(current)
+  const check = () => {
+    const latest = read(projectRoot, vm.id)
+    if (!latest || latest.status !== 'running') return skipped()
+    if (!supported(latest) || startupBinding(latest) !== binding) {
+      return { ok: false, code: 'slot_intent_changed', error: '槽位意图或代理绑定已变化，未继续恢复' }
+    }
+    return null
+  }
+  const egress = await (opts.ops?.ensureProxyEgress || ensureProxyEgress)(projectRoot, current.proxy)
+  const changed = check()
+  if (changed) return changed
+  if (!egress?.ok) {
+    return { ok: false, code: 'egress_unavailable', error: egress?.error || '绑定出口尚未就绪' }
+  }
+  const latest = read(projectRoot, vm.id)
+  const existing = (opts.ops?.inspectContainer || inspectContainer)(containerName(vm.id))
+  const paths = { kernelSocket: path.join(projectRoot, 'vms', vm.id, 'run', 'kernel.sock') }
+  if (existing?.running && !slotWorkerNeedsRecreate(existing, latest, paths)) {
+    const result = await ensureSlotInferenceRuntime(latest, projectRoot, { ...opts, startupRecoveryCheck: check })
+    return { ...result, action: 'kernel-only', reused: result.kernel?.reused === true }
+  }
+  const result = await reloadSlotReady(latest, projectRoot, { ...opts, startupRecoveryCheck: check })
+  return { ...result, action: 'full-reload' }
 }
 
 /**
@@ -143,7 +194,11 @@ export async function ensureSlotInferenceRuntime(vm, projectRoot, opts = {}) {
       proxyRequired: !localExit || !!proxyUrl,
       routing,
     })
-    const kernel = await start(slotExec(projectRoot, vm), { timeoutMs: opts.timeoutMs })
+    const kernel = await start(slotExec(projectRoot, vm), {
+      timeoutMs: opts.timeoutMs,
+      startupRecoveryCheck: opts.startupRecoveryCheck,
+    })
+    if (kernel?.skipped) return { ...kernel, engine: 'codex' }
     if (!kernel?.ok) {
       return {
         ok: false,

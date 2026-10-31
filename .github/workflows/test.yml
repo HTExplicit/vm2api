@@ -61,6 +61,7 @@ jobs:
             test/unit/openai-quota.test.mjs \
             test/unit/panel-subscription.test.mjs \
             test/unit/jev-account-scope.test.mjs \
+            test/unit/codex-slot-reload.test.mjs \
             test/unit/handle-codex.test.mjs \
             test/unit/vm-package.test.mjs; do
             node --test "$file"

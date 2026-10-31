@@ -15,7 +15,7 @@ export function OpenaiPlanBadge({
   return (
     <span
       className={cn(
-        'inline-flex items-center rounded-full font-medium',
+        'inline-flex w-fit shrink-0 items-center rounded-full font-medium whitespace-nowrap',
         size === 'sm' ? 'px-1.5 py-0 text-[11px]' : 'px-2 py-0.5 text-xs',
         skin.badge
       )}

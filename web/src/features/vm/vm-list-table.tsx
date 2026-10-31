@@ -355,13 +355,13 @@ function SlotCell({ vm, now }: { vm: Vm; now: number }) {
   return (
     <div className='min-w-0 space-y-0.5 overflow-hidden'>
       <SlotIdentity vm={vm} compact className='text-sm font-medium' />
-      <div className='flex min-w-0 items-center gap-1.5'>
+      <div className='flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1'>
         <ActiveVmBadge vm={vm} />
         <TierBadge vm={vm} />
         <RuntimeChip vm={vm} />
         <NodeChip nodeId={vm.node_id} />
         <span
-          className='min-w-0 truncate text-[11px] text-muted-foreground'
+          className='min-w-0 flex-1 truncate text-[11px] text-muted-foreground'
           title={email ? name : undefined}
         >
           {name}
