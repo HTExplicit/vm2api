@@ -20,6 +20,7 @@ import { BETA_CONTEXT_1M } from '../protocol/claude-code-betas.mjs'
 import { shouldPassContext1mByPolicy } from '../protocol/model-policy.mjs'
 import { createStreamTiming } from '../protocol/stream-timing.mjs'
 import { mergeUsage } from '../protocol/openai-usage.mjs'
+import { fromClaudeToOpenAICompletions } from '../protocol/convert.mjs'
 import { keyScopeFromRequest } from '../admin/key-scope.mjs'
 
 export function resolveInferenceBackend(req) {
@@ -597,6 +598,7 @@ async function runOpenAIResponsesUpstream({
   let conversionError = null
   let committed = false
   let completed = false
+  let downstreamDone = false
   let sawTerminal = false
   let streamedUsage = null
   let terminalFailure = null
@@ -610,12 +612,30 @@ async function runOpenAIResponsesUpstream({
       return
     }
     try {
-      const mapped =
+      let mapped =
         protocol === 'anthropic.messages'
           ? responsesSseToAnthropicEvents(raw, anthropicSse)
           : responsesSseToChatChunk(raw, 'codex', chatSse)
+      if (mapped && protocol === 'openai.completions') {
+        mapped = mapped
+          .split('\n')
+          .map((line) => {
+            if (!line.startsWith('data:') || line.slice(5).trim() === '[DONE]') return line
+            const chunk = JSON.parse(line.slice(5))
+            const choice = chunk.choices?.[0]
+            const completion = fromClaudeToOpenAICompletions(
+              { id: chunk.id, content: [{ type: 'text', text: choice?.delta?.content || '' }], usage: chunk.usage },
+              inbound?.model || body.model,
+            )
+            completion.choices[0].finish_reason = choice?.finish_reason ?? null
+            if (!chunk.usage) delete completion.usage
+            return `data: ${JSON.stringify(completion)}`
+          })
+          .join('\n')
+      }
       if (mapped) {
         res.write(mapped)
+        if (mapped.includes('data: [DONE]')) downstreamDone = true
         if (mapped.includes('[DONE]') || mapped.includes('event: message_stop\n')) completed = true
       }
     } catch (error) {
@@ -667,10 +687,9 @@ async function runOpenAIResponsesUpstream({
     let outBody
     try {
       assembled = assembleCodexBodyFromSse(chunks, {})
-      outBody =
-        protocol === 'anthropic.messages'
-          ? codexBodyToAnthropicMessage(assembled, inbound?.model || body?.model)
-          : assembled
+      // The protocol handler converts this canonical message to each client's
+      // JSON shape, just as it does for Anthropic API upstreams.
+      outBody = codexBodyToAnthropicMessage(assembled, inbound?.model || body?.model)
     } catch (error) {
       if (!isToolArgumentsError(error)) throw error
       return {
@@ -719,6 +738,7 @@ async function runOpenAIResponsesUpstream({
     usage: streamedUsage,
     terminalState: completed ? 'verified' : committed ? 'incomplete' : 'rejected',
     committed,
+    downstreamDone,
     ...timing.snapshot(),
   }
 }

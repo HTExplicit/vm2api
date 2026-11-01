@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { EventEmitter } from 'node:events'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
 import { FailoverRunner } from '../../src/lib/pool/failover-runner.mjs'
@@ -18,6 +19,10 @@ import {
   runApiInference,
 } from '../../src/lib/pool/api-protocol.mjs'
 import { createClaudeMessageAssembler, applyClaudeSSELineToMessage } from '../../src/lib/protocol/convert.mjs'
+import { ApiScheduler } from '../../src/lib/pool/api-scheduler.mjs'
+import { classifierFixture } from '../fixtures/auto-mode.mjs'
+import { classifyClaudeRequestPurpose } from '../../src/lib/protocol/request-purpose.mjs'
+import { isOfficialClaudeCodeTraffic } from '../../src/lib/identity/crs-persona.mjs'
 
 const unixTest = process.platform === 'win32' ? test.skip : test
 
@@ -562,7 +567,7 @@ async function runManagedKeyHop(root, result) {
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: { ingestHeaders() {} },
     apiKeyStore: {
-      acquire: () => ({ ok: true }),
+      acquire: () => options.keyGate || { ok: true },
       release() {},
       recordUsage: (key, usage, opts) => charges.push({ key, usage, opts }),
     },
@@ -1601,4 +1606,306 @@ unixTest('API OpenAI flushes buffered metadata with the first real output', asyn
   assert.match(run.wire, /response\.queued/)
   assert.match(run.wire, /response\.output_text\.delta/)
   assert.match(run.wire, /response\.completed/)
+})
+
+async function runAccountApiProtocol(inbound, protocol, options = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-account-api-protocol-'))
+  const socket =
+    process.platform === 'win32' ? '\\\\.\\pipe\\' + path.basename(root) : path.join(root, 'api-kernel.sock')
+  const previousSocket = process.env.KIN_API_KERNEL_SOCK
+  process.env.KIN_API_KERNEL_SOCK = socket
+  const routingFile = path.join(root, 'routing.json')
+  const routing = {
+    compatibility: {
+      persona_preset: 'custom',
+      persona_inject: 'rewrite',
+      min_max_tokens: 4096,
+      persona_templates: { custom: [{ id: 'custom', type: 'text', text: 'MUST_NOT_BE_IN_ACCOUNT_API' }] },
+    },
+    codex: { model_mappings: { o3: 'gpt-5.4', 'gpt-4.1-nano': 'gpt-5.4' } },
+    failover: {},
+  }
+  fs.writeFileSync(routingFile, JSON.stringify(routing))
+  const sent = [],
+    billed = [],
+    logs = []
+  const kernel = http.createServer((request, response) => {
+    let raw = ''
+    request.on('data', (chunk) => {
+      raw += chunk
+    })
+    request.on('end', () => {
+      const envelope = JSON.parse(raw)
+      const body = JSON.parse(envelope.body)
+      sent.push({ ...envelope, body })
+      const message = {
+        type: 'message',
+        id: 'msg_offline',
+        role: 'assistant',
+        status: 'completed',
+        content: [{ type: 'output_text', text: 'OK' }],
+      }
+      const events = [
+        {
+          type: 'response.created',
+          response: { id: 'resp_offline', model: body.model, status: 'in_progress', output: [] },
+        },
+        {
+          type: 'response.output_item.added',
+          output_index: 0,
+          item: { ...message, status: 'in_progress', content: [] },
+        },
+        { type: 'response.output_text.delta', item_id: message.id, output_index: 0, content_index: 0, delta: 'OK' },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'resp_offline',
+            model: body.model,
+            status: 'completed',
+            output: [message],
+            usage: { input_tokens: 7, output_tokens: 1, total_tokens: 8 },
+          },
+        },
+      ]
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.end(events.map((event) => 'data: ' + JSON.stringify(event) + '\n\n').join('') + 'data: [DONE]\n\n')
+    })
+  })
+  await new Promise((resolve, reject) => {
+    kernel.once('error', reject)
+    kernel.listen(socket, resolve)
+  })
+  const response = Object.assign(new EventEmitter(), {
+    headersSent: false,
+    wire: '',
+    statusCode: 200,
+    write(chunk) {
+      this.wire += chunk
+    },
+    end() {
+      this.emit('finish')
+    },
+    setHeader() {},
+  })
+  const scheduler = new ApiScheduler({
+    resolveAccountKey: (key) => ({
+      accountId: key.source_account_id,
+      enabled: true,
+      proxyUrl: 'socks5h://bound-current:1080',
+    }),
+  })
+  scheduler.reload([
+    {
+      id: 'ep-b',
+      kind: 'openai',
+      protocol: 'openai',
+      models: [{ name: 'o3', alias: 'o3' }],
+      api_key_entries: [
+        { id: 'api-key-b', api_key: 'fixture-b', source_vm_id: 'vm-b', source_account_id: 'account-b' },
+      ],
+    },
+    {
+      id: 'ep-global',
+      kind: 'openai',
+      protocol: 'openai',
+      models: [{ name: 'o3', alias: 'o3' }],
+      api_key_entries: [{ id: 'api-key-global', api_key: 'fixture-global' }],
+    },
+    {
+      id: 'ep-a',
+      kind: 'openai',
+      protocol: 'openai',
+      models: [
+        { name: 'o3', alias: 'o3' },
+        { name: 'gpt-4.1-nano', alias: 'gpt-4.1-nano' },
+      ],
+      api_key_entries: [
+        { id: 'api-key-a', api_key: 'fixture-a', source_vm_id: 'vm-a', source_account_id: 'account-a' },
+      ],
+    },
+  ])
+  const handler = createHandleProtocol({
+    json: (_response, status, body) => {
+      response.statusCode = status
+      response.body = body
+      response.emit('finish')
+      return body
+    },
+    writeSSEHeaders: () => {
+      response.headersSent = true
+    },
+    readBody: async () => inbound,
+    requireAuth: () => true,
+    cfg: {
+      rewrite: { enabled: false },
+      intercept: { rules: options.intercept || [] },
+      distill: { enabled: false },
+      limits: { max_body_bytes: 1024 * 1024, upstream_timeout_ms: 2000 },
+      paths: { project: root, data: root },
+    },
+    requestLog: {
+      start: () => ({ request_id: 'account-api-fixture', t0: Date.now() }),
+      finish: (_context, row) => logs.push(row),
+    },
+    stickyRouter: new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('account API must not touch OAuth sticky state')
+        },
+      },
+    ),
+    accountQuota: new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('account API must not touch OAuth quota state')
+        },
+      },
+    ),
+    apiKeyStore: {
+      acquire: () => ({ ok: true }),
+      release() {},
+      recordUsage: (...args) => billed.push(args),
+      users: { getById: () => ({ role: options.ownerRole || 'admin' }) },
+    },
+    apiScheduler: scheduler,
+    apiEndpointStore: {},
+    stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
+    routingConfig: routing,
+    routingConfigPath: routingFile,
+    groupsRepo: { rateMultiplier: () => 1 },
+  })
+  const request = Object.assign(new EventEmitter(), {
+    method: 'POST',
+    url: options.path || '/v1/messages',
+    headers: options.headers || { 'user-agent': 'offline-api-fixture' },
+    apiKeyKind: 'managed',
+    apiKeyRecord: {
+      id: 'managed-a',
+      category: options.category || 'api',
+      group_type: options.groupType || 'openai_apikey',
+      allowed_vms: ['vm-a'],
+      ...(options.ownerRole ? { user_id: 'owner' } : {}),
+    },
+  })
+  try {
+    await handler.handleProtocol(request, response, protocol, request.url)
+    return { response, sent, billed, logs }
+  } finally {
+    kernel.closeAllConnections()
+    await new Promise((resolve) => kernel.close(resolve))
+    if (previousSocket === undefined) delete process.env.KIN_API_KERNEL_SOCK
+    else process.env.KIN_API_KERNEL_SOCK = previousSocket
+    assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep))
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+for (const [protocol, route, inbound, answer] of [
+  [
+    'openai.chat',
+    '/v1/chat/completions',
+    { model: 'gpt-4.1-nano', messages: [{ role: 'user', content: 'hello' }], max_completion_tokens: 16 },
+    (body) => body.choices?.[0]?.message?.content,
+  ],
+  [
+    'openai.completions',
+    '/v1/completions',
+    { model: 'o3', prompt: 'hello', max_tokens: 16 },
+    (body) => body.choices?.[0]?.text,
+  ],
+  [
+    'openai.responses',
+    '/v1/responses',
+    { model: 'o3', input: 'hello', max_output_tokens: 16 },
+    (body) =>
+      body.output?.find((item) => item.type === 'message')?.content?.find((block) => block.type === 'output_text')
+        ?.text,
+  ],
+  [
+    'anthropic.messages',
+    '/v1/messages',
+    { model: 'o3', messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 },
+    (body) => body.content?.find((block) => block.type === 'text')?.text,
+  ],
+]) {
+  test(`account API ${protocol} reaches only the selected API key, retains model/budget, and returns text`, async () => {
+    const run = await runAccountApiProtocol({ ...inbound, stream: false }, protocol, { path: route })
+    assert.equal(run.response.statusCode, 200, JSON.stringify(run.response.body))
+    assert.equal(answer(run.response.body), 'OK')
+    assert.equal(run.sent.length, 1)
+    assert.equal(run.sent[0].url, 'https://api.openai.com/v1/responses')
+    assert.equal(run.sent[0].headers.authorization, 'Bearer fixture-a')
+    assert.equal(run.sent[0].proxy_url, 'socks5h://bound-current:1080')
+    assert.equal(run.sent[0].body.model, inbound.model, 'OAuth model mappings must not rewrite account API models')
+    assert.equal(
+      run.sent[0].body.max_output_tokens,
+      16,
+      'OAuth/Claude minimum budgets must not inflate the API request',
+    )
+    assert.equal(JSON.stringify(run.sent[0].body).includes('MUST_NOT_BE_IN_ACCOUNT_API'), false)
+    assert.equal(run.billed.length, 1)
+    assert.equal(run.billed[0][0].id, 'managed-a')
+    assert.equal(run.logs[0].via, 'api-kernel')
+    assert.equal(run.logs[0].account_id, 'api-key-a')
+    assert.equal(run.logs[0].final_account_id, 'api-key-a')
+    assert.equal(run.logs[0].vm_id, null)
+  })
+}
+
+test('account API does not turn a caller classifier contract into the Claude classifier workflow', async () => {
+  const inbound = { ...classifierFixture({ model: 'o3' }), max_tokens: 16, stream: false }
+  inbound.metadata = { user_id: { device_id: 'fixture-device', session_id: 'fixture-session' } }
+  inbound.system.push({ type: 'text', text: '## Session Context\nCWD: /work' })
+  const headers = { 'user-agent': 'claude-cli/2.1.303 (external, cli)', 'x-app': 'cli' }
+  assert.equal(isOfficialClaudeCodeTraffic(headers, inbound), true)
+  assert.ok(classifyClaudeRequestPurpose(inbound, { officialTraffic: true }))
+  const run = await runAccountApiProtocol(inbound, 'anthropic.messages', { headers })
+  assert.equal(run.response.statusCode, 200, JSON.stringify(run.response.body))
+  assert.equal(run.sent.length, 1)
+  assert.equal(run.sent[0].body.model, 'o3')
+  assert.equal(run.sent[0].body.max_output_tokens, 16)
+  assert.equal(run.logs[0].classifier, undefined)
+})
+
+test('an unknown account API model is rejected by its scoped API catalog without an OAuth hop', async () => {
+  const run = await runAccountApiProtocol(
+    { model: 'not-in-selected-api-catalog', messages: [{ role: 'user', content: 'hello' }] },
+    'openai.chat',
+  )
+  assert.equal(run.response.statusCode, 404)
+  assert.equal(run.logs[0].error_code, 'model_not_found')
+  assert.equal(run.sent.length, 0)
+  assert.equal(run.billed.length, 0)
+  assert.equal(run.logs[0].via, 'api-kernel')
+})
+
+for (const [category, groupType, model] of [
+  ['oauth', 'anthropic', 'gpt-4.1-nano'],
+  ['oauth', 'openai', 'claude-haiku-4-5'],
+  ['oauth', 'openai_apikey', 'gpt-4.1-nano'],
+]) {
+  test(`the account API exception does not widen ${category}/${groupType} model permissions`, async () => {
+    const run = await runAccountApiProtocol({ model, messages: [{ role: 'user', content: 'hello' }] }, 'openai.chat', {
+      category,
+      groupType,
+    })
+    assert.equal(run.response.statusCode, 403)
+    assert.equal(run.response.body.error.code, 'key_group_mismatch')
+    assert.equal(run.sent.length, 0)
+    assert.equal(run.billed.length, 0)
+  })
+}
+
+test('tenant account API keys retain the existing platform API permission gate', async () => {
+  const run = await runAccountApiProtocol(
+    { model: 'o3', messages: [{ role: 'user', content: 'hello' }] },
+    'openai.chat',
+    { ownerRole: 'user' },
+  )
+  assert.equal(run.response.statusCode, 403)
+  assert.equal(run.response.body.error.code, 'api_backend_forbidden')
+  assert.equal(run.sent.length, 0)
+  assert.equal(run.billed.length, 0)
 })
