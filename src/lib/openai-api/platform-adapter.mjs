@@ -361,6 +361,14 @@ export class PlatformAdapter {
       !/(?:api[-_]?keys|\/keys)\/?$/i.test(url.pathname)
     )
       return false
+    const pathScope = url.pathname.match(
+      /^\/dashboard\/organizations\/(org[-_][a-z\d_-]+)\/projects\/(proj[-_][a-z\d_-]+)\/api_keys\/?$/i,
+    )
+    if (/^\/dashboard\/organizations(?:\/|$)/i.test(url.pathname) && !pathScope) {
+      setup.domTainted = true
+      setup.allowDom = false
+      return false
+    }
     if (setup.request) {
       if (setup.request !== request) {
         setup.domTainted = true
@@ -378,12 +386,14 @@ export class PlatformAdapter {
     const headers = request.headers()
     const name = text(body?.name)
     const projects = [
+      pathScope?.[2],
       body?.project_id,
       body?.project?.id,
       typeof body?.project === 'string' ? body.project : undefined,
       headers['openai-project'],
     ].filter((value) => value != null)
     const organizations = [
+      pathScope?.[1],
       headers['openai-organization'],
       body?.organization_id,
       body?.organization?.id,

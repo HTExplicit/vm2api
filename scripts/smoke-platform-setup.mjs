@@ -11,6 +11,7 @@ const ORGANIZATION_ID = 'org-fixture'
 const PROJECT_ID = 'proj_fixture'
 const KEY_NAME = 'vm2api-offline-fixture'
 const FAKE_KEY = 'sk-proj-offline-abcdefghijklmnopqrstuvwxyz0123456789'
+const KEY_CREATE_PATH = `/dashboard/organizations/${ORGANIZATION_ID}/projects/${PROJECT_ID}/api_keys`
 
 function fixturePage({ delay = 0, duplicate = false, existing = [] } = {}) {
   return `<!doctype html><html><head><meta charset="utf-8"><title>Offline Platform fixture</title>
@@ -50,12 +51,14 @@ function fixturePage({ delay = 0, duplicate = false, existing = [] } = {}) {
     async function submitKey() {
       document.body.dataset.submitted = String(Number(document.body.dataset.submitted) + 1);
       const dialog = document.getElementById('key-dialog');
-      await fetch('/dashboard/api_keys', { method: 'POST', headers: {
+      await fetch('${KEY_CREATE_PATH}', { method: 'POST', headers: {
         'content-type': 'application/json', 'openai-organization': '${ORGANIZATION_ID}',
       }, body: JSON.stringify({
+        action: 'create',
         name: dialog.querySelector('input').value,
-        project_id: dialog.querySelector('select').value,
-        expiration: document.body.dataset.expiration,
+        scopes: ['api.all'],
+        admin_key: false,
+        creation_source: 'default',
       }) });
     }
     void fetch('/dashboard/onboarding');
@@ -149,9 +152,24 @@ try {
           },
         },
       })
-    if (url.pathname === '/dashboard/api_keys' && request.method() === 'POST') {
-      submissions.push(request.postDataJSON())
-      return route.fulfill({ status: 200, json: { api_key: { id: 'key_fixture', secret: FAKE_KEY } } })
+    if (url.pathname === KEY_CREATE_PATH && request.method() === 'POST') {
+      const body = request.postDataJSON()
+      assert.equal(request.headers()['openai-organization'], ORGANIZATION_ID)
+      assert.equal(Object.hasOwn(body, 'project_id'), false, 'the project scope comes from the official URL')
+      submissions.push(body)
+      return route.fulfill({
+        status: 200,
+        json: {
+          result: 'success',
+          key: {
+            id: 'key_fixture',
+            sensitive_id: FAKE_KEY,
+            name: body.name,
+            organization: ORGANIZATION_ID,
+            project: PROJECT_ID,
+          },
+        },
+      })
     }
     unhandled.push(url.pathname)
     return route.abort()
@@ -192,7 +210,9 @@ try {
     assert.equal(state.hiddenClicks, '0')
     assert.equal(state.opened, '1')
     assert.equal(state.submitted, '1')
-    assert.deepEqual(submissions, [{ name: KEY_NAME, project_id: PROJECT_ID, expiration: 'Never' }])
+    assert.deepEqual(submissions, [
+      { action: 'create', name: KEY_NAME, scopes: ['api.all'], admin_key: false, creation_source: 'default' },
+    ])
   } finally {
     adapter.dispose()
   }
@@ -268,6 +288,7 @@ try {
       ambiguousEntryStopped: true,
       existingKeysPermitNewCreation: true,
       existingRemoteRecordsPreserved: true,
+      officialScopedCreateContract: true,
       delayedOrganizationElapsedMs,
       generalOrganizationHydrationObserved: true,
       organizationMenuClicks,

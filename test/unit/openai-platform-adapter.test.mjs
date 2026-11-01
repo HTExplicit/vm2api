@@ -223,6 +223,91 @@ function observeCreation(adapter, response) {
   return adapter.observe(response)
 }
 
+for (const suffix of ['', '/']) {
+  test(`key creation captures the official organization/project URL scope${suffix ? ' with a trailing slash' : ''} without body project fields`, async () => {
+    const page = pageFixture()
+    const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+    const saved = []
+    const setup = beginCapture(adapter, { onKey: (key) => saved.push(key) })
+    const response = jsonResponse(
+      `/dashboard/organizations/org-one/projects/proj_default/api_keys${suffix}`,
+      {
+        result: 'success',
+        key: {
+          sensitive_id: 'sk-proj-scoped-url-fixture-secret',
+          name: 'vm2api-account',
+          organization: 'org-one',
+          project: 'proj_default',
+        },
+      },
+      {
+        method: 'POST',
+        headers: { 'openai-organization': 'org-one' },
+        body: {
+          action: 'create',
+          name: 'vm2api-account',
+          scopes: ['api.all'],
+          admin_key: false,
+          creation_source: 'platform',
+        },
+      },
+    )
+    await observeCreation(adapter, response)
+    await adapter.observe(response)
+    assert.equal(setup.request, response.request())
+    assert.equal(setup.responseConfirmed, true)
+    assert.equal(saved.length, 1)
+    assert.equal(saved[0].apiKey, 'sk-proj-scoped-url-fixture-secret')
+    assert.equal(saved[0].organizationId, 'org-one')
+    assert.equal(saved[0].projectId, 'proj_default')
+    adapter.dispose()
+  })
+}
+
+for (const variant of [
+  { name: 'another URL organization', path: '/dashboard/organizations/org-other/projects/proj_default/api_keys' },
+  { name: 'another URL project', path: '/dashboard/organizations/org-one/projects/proj_other/api_keys' },
+  { name: 'conflicting organization header', headers: { 'openai-organization': 'org-other' } },
+  { name: 'conflicting project header', headers: { 'openai-project': 'proj_other' } },
+  { name: 'conflicting body organization', body: { organization_id: 'org-other' } },
+  { name: 'conflicting body project', body: { project_id: 'proj_other' } },
+  {
+    name: 'an extra scoped path component',
+    path: '/dashboard/organizations/org-one/projects/proj_default/other/api_keys',
+  },
+  { name: 'an invalid organization path ID', path: '/dashboard/organizations/other/projects/proj_default/api_keys' },
+  { name: 'an invalid project path ID', path: '/dashboard/organizations/org-one/projects/other/api_keys' },
+  { name: 'encoded scope separators', path: '/dashboard/organizations/org-one%2Fother/projects/proj_default/api_keys' },
+]) {
+  test(`key creation refuses scoped URL evidence with ${variant.name}`, async () => {
+    const page = pageFixture()
+    const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+    const saved = []
+    const setup = beginCapture(adapter, { onKey: (key) => saved.push(key) })
+    const response = jsonResponse(
+      variant.path || '/dashboard/organizations/org-one/projects/proj_default/api_keys',
+      { result: 'success', key: { sensitive_id: 'sk-proj-scoped-conflict-fixture-secret' } },
+      {
+        method: 'POST',
+        headers: { 'openai-organization': 'org-one', ...variant.headers },
+        body: {
+          action: 'create',
+          name: 'vm2api-account',
+          project_id: 'proj_default',
+          organization_id: 'org-one',
+          ...variant.body,
+        },
+      },
+    )
+    await observeCreation(adapter, response)
+    assert.equal(setup.request, null)
+    assert.equal(setup.responseConfirmed, false)
+    assert.equal(setup.domTainted, true)
+    assert.equal(saved.length, 0)
+    adapter.dispose()
+  })
+}
+
 test('inspect verifies the observed user and rejects a different signed-in account', async () => {
   const page = pageFixture()
   const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
