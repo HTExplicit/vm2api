@@ -4,7 +4,7 @@ import type { OpenaiApiView, Vm } from '@/types/panel-vm'
 import { Gift, KeyRound, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
-import { trimDecimalZeros } from '@/lib/decimal-display'
+import { formatBalanceAmount } from '@/lib/decimal-display'
 import { fmtExpiresAt } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -196,14 +196,14 @@ export function OpenaiApiDialog({
               <dl className='grid grid-cols-2 gap-x-4 gap-y-2 text-sm'>
                 <dt className='text-muted-foreground'>完整账期权益</dt>
                 <dd className='m-0 text-end tabular-nums'>
-                  ${trimDecimalZeros(benefit.period_credit_amount_usd)} /{' '}
+                  ${formatBalanceAmount(benefit.period_credit_amount_usd)} /{' '}
                   {benefit.cadence === 'annual' ? '年' : '月'}
                 </dd>
                 {offer?.claimable_credit_amount_usd != null ? (
                   <>
                     <dt className='text-muted-foreground'>本次可领取</dt>
                     <dd className='m-0 text-end tabular-nums'>
-                      ${trimDecimalZeros(offer.claimable_credit_amount_usd)}
+                      ${formatBalanceAmount(offer.claimable_credit_amount_usd)}
                     </dd>
                   </>
                 ) : null}

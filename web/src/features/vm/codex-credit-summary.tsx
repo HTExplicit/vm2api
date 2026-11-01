@@ -1,5 +1,5 @@
 import type { Vm } from '@/types/panel-vm'
-import { trimDecimalZeros } from '@/lib/decimal-display'
+import { formatBalanceAmount } from '@/lib/decimal-display'
 import { fmtExpiresAt } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { isCodexVm } from '@/lib/vm-kind'
@@ -35,7 +35,7 @@ export function CodexCreditSummary({
     ? credits.unlimited
       ? '不限额'
       : credits.balance != null
-        ? `${trimDecimalZeros(credits.balance)} 点`
+        ? `${formatBalanceAmount(credits.balance)} 点`
         : '未知'
     : '未知'
   const label = `${pending ? '历史余额' : '余额'} ${value}`
@@ -67,7 +67,7 @@ export function CodexCreditSummary({
     .filter(Boolean)
     .join('\n')
   const apiState = vm.openai_api
-  const apiLabel = `API ${apiState?.balance != null ? `$${trimDecimalZeros(apiState.balance)}` : '未知'}`
+  const apiLabel = `API ${apiState?.balance != null ? `$${formatBalanceAmount(apiState.balance)}` : '未知'}`
   const apiPending = isOpenaiApiBalancePending(apiState)
   const apiFacts = [
     apiLabel,
@@ -83,7 +83,7 @@ export function CodexCreditSummary({
       ? `待刷新${apiState?.balance_error ? `：${apiState.balance_error}` : ''}`
       : '',
     apiState?.benefit
-      ? `每${apiState.benefit.cadence === 'annual' ? '年' : '月'}权益：$${trimDecimalZeros(apiState.benefit.period_credit_amount_usd)}`
+      ? `每${apiState.benefit.cadence === 'annual' ? '年' : '月'}权益：$${formatBalanceAmount(apiState.benefit.period_credit_amount_usd)}`
       : '',
     apiState?.benefit?.expires_at
       ? `本期赠额到期：${fmtExpiresAt(apiState.benefit.expires_at)}`

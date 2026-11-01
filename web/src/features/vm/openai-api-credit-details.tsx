@@ -1,5 +1,5 @@
 import type { OpenaiApiView } from '@/types/panel-vm'
-import { trimDecimalZeros } from '@/lib/decimal-display'
+import { formatBalanceAmount } from '@/lib/decimal-display'
 import { fmtExpiresAt } from '@/lib/format'
 
 export function openaiApiCreditDetailRows(
@@ -9,11 +9,11 @@ export function openaiApiCreditDetailRows(
   if (state?.balance_refresh_interval_minutes === 0)
     rows.push(['余额刷新', '仅手动刷新'])
   if (state?.paid_balance != null)
-    rows.push(['购买余额', `$${trimDecimalZeros(state.paid_balance)}`])
+    rows.push(['购买余额', `$${formatBalanceAmount(state.paid_balance)}`])
   if (state?.next_expiring_amount != null && state.next_expiring_at) {
     rows.push([
       '最近到期额度',
-      `$${trimDecimalZeros(state.next_expiring_amount)}`,
+      `$${formatBalanceAmount(state.next_expiring_amount)}`,
     ])
     rows.push(['到期时间', fmtExpiresAt(state.next_expiring_at)])
   }

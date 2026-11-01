@@ -68,7 +68,7 @@ describe('Codex quota readings after a quota error', () => {
     expect(html).toContain(new Date('2026-10-31T12:34:00Z').toLocaleString())
   })
 
-  it('preserves the precise points balance and distinguishes available, unavailable and historical samples', () => {
+  it('truncates displayed points and distinguishes available, unavailable and historical samples', () => {
     const sample = {
       has_credits: true,
       unlimited: false,
@@ -78,7 +78,8 @@ describe('Codex quota readings after a quota error', () => {
       status: 'available' as const,
     }
     const available = render(100, 32, false, sample)
-    expect(available).toContain('余额 12.345678901 点')
+    expect(available).toContain('余额 12.34 点')
+    expect(available).not.toContain('12.345678901')
     expect(available).toContain('订阅额度已满，可使用点数')
     expect(available).toContain('100%')
     expect(available).not.toContain('$12')
@@ -86,7 +87,7 @@ describe('Codex quota readings after a quota error', () => {
       ...sample,
       status: 'pending',
     })
-    expect(historical).toContain('历史余额 12.345678901 点')
+    expect(historical).toContain('历史余额 12.34 点')
     expect(historical).toContain('待确认')
     expect(historical).not.toContain('订阅额度已满，可使用点数')
     const zero = render(2, 32, false, {
@@ -97,6 +98,12 @@ describe('Codex quota readings after a quota error', () => {
     })
     expect(zero).toContain('余额 0 点')
     expect(zero).toContain('点数不可用')
+    expect(render(2, 32, false, { ...sample, balance: '-1.239' })).toContain(
+      '余额 -1.23 点'
+    )
+    const tiny = render(2, 32, false, { ...sample, balance: '-0.009' })
+    expect(tiny).toContain('余额 0 点')
+    expect(tiny).not.toContain('余额 -0')
     expect(render(2, 32)).toContain('余额 未知')
     expect(render(2, 32, false, { ...sample, unlimited: true })).toContain(
       '余额 不限额'
@@ -124,7 +131,8 @@ describe('Codex quota readings after a quota error', () => {
         }}
       />
     )
-    expect(html).toContain('余额 123.000456 点')
+    expect(html).toContain('余额 123 点')
+    expect(html).not.toContain('123.000456')
     expect(html).toContain('最近余额采样：')
     expect(html).toContain('最近检查：')
     expect(html).toContain(new Date(checkedAt).toLocaleString())
@@ -181,7 +189,8 @@ describe('Codex quota readings after a quota error', () => {
       },
     }
     const html = renderToStaticMarkup(<CodexCreditSummary vm={base} />)
-    expect(html).toContain('API $12.345678901')
+    expect(html).toContain('API $12.34')
+    expect(html).not.toContain('12.345678901')
     expect(html).toContain('待刷新')
     expect(html).not.toContain('点数不可用')
     const unknown = renderToStaticMarkup(
@@ -191,5 +200,18 @@ describe('Codex quota readings after a quota error', () => {
     )
     expect(unknown).toContain('API 未知')
     expect(unknown).not.toContain('API $0')
+    const negative = renderToStaticMarkup(
+      <CodexCreditSummary
+        vm={{ ...base, openai_api: { ...base.openai_api!, balance: '-1.239' } }}
+      />
+    )
+    expect(negative).toContain('API $-1.23')
+    const tiny = renderToStaticMarkup(
+      <CodexCreditSummary
+        vm={{ ...base, openai_api: { ...base.openai_api!, balance: '-0.009' } }}
+      />
+    )
+    expect(tiny).toContain('API $0')
+    expect(tiny).not.toContain('API $-0')
   })
 })
