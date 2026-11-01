@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.4.2815 — 2026-11-01
+
+- 修复 `OpenAI(apikey)` 在统一推理入口被 OAuth 分组校验拒绝、GPT 模型被提前送入 Codex 的问题；请求使用所选账号的 API key、当前代理和限定模型目录。
+- 账号 API 模型不再套用 OAuth 模型映射，并支持官方目录中的 `o` 系列模型。
+- 修正 OpenAI API 非流式响应的协议转换及 Completions 流式输出，保留实际文本、用量和 API key 计费身份。
+
+使用正常面板升级，已保存的账号 key、余额、独立开关与 OAuth 调度意图保持不变。
+
 ## 1.4.2814 — 2026-11-01
 
 - 账号 API key 直接在当前组织已有的 Default project 内创建，删除新建 `vm2api` 项目的步骤；已有 key 继续复用。

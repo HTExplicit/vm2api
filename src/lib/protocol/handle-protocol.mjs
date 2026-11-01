@@ -538,6 +538,137 @@ export function createHandleProtocol(deps) {
     return acceptAssistantHop(workerResult)
   }
 
+  async function runApiBackend({
+    req,
+    res,
+    protocol,
+    inbound,
+    ctx,
+    logBag,
+    logCtx,
+    converted,
+    personaHideTokens = false,
+    requestContext = null,
+  }) {
+    // API 直连走平台端点，不经过槽位；门禁与 api-kernel hop 同位，勿提前于 credential/intercept 链
+    if (ownerScopeFromRequest(req, apiKeyStore?.users).type !== 'platform') {
+      stats.errors++
+      const errorResult = makeError({
+        type: ErrorType.PERMISSION,
+        code: ErrorCode.API_BACKEND_FORBIDDEN,
+        message: '租户密钥只能调用自己名下的槽位',
+        status: 403,
+      })
+      logBag.error_code = ErrorCode.API_BACKEND_FORBIDDEN
+      logBag.error_message = errorResult.body?.error?.message || null
+      return json(res, 403, errorResult.body)
+    }
+    const managedKey = req.apiKeyRecord || null
+    if (managedKey) {
+      const gate = apiKeyStore.acquire(managedKey)
+      if (!gate.ok) {
+        stats.errors++
+        return json(res, gate.status, keyGateErrorBody(gate))
+      }
+    }
+    const clientAbort = bindClientAbort(req, res)
+    const clientStream = isClientStream(inbound, req.headers)
+    const requestedDelivery = String(
+      req.headers['x-kin-delivery'] || getRouting()?.failover?.delivery_mode || 'realtime',
+    )
+    // Worker hop stays realtime unless the caller asked for verified.
+    // stream:false only changes the client response shape (assembled JSON).
+    const deliveryMode = requestedDelivery === 'verified' ? 'verified' : 'realtime'
+    logBag.via = 'api-kernel'
+    // This backend forwards caller cache controls unchanged. Billing must
+    // use the upstream 5m/1h split, not the TTL requested for template fills.
+    const cacheTtl = null
+    let result
+    try {
+      result = await runApiInference({
+        req,
+        res,
+        cfg,
+        scheduler: apiScheduler,
+        store: apiEndpointStore,
+        protocol,
+        inbound,
+        convertedBody: ctx.body,
+        clientStream,
+        deliveryMode,
+        signal: clientAbort.signal,
+        timeoutMs: cfg.limits.upstream_timeout_ms,
+        personaHideTokens,
+        cacheTtl,
+        requestContext,
+        converters: {
+          createClaudeMessageAssembler,
+          applyClaudeSSELineToMessage,
+          createOpenAIChatStreamState,
+          claudeSSELineToOpenAIChatChunks,
+          createOpenAICompletionStreamState,
+          claudeSSELineToOpenAICompletionChunks,
+          createResponsesStreamState,
+          claudeSSELineToResponsesEvents,
+          hidePersonaUsageInSseLine,
+          writeSSEHeaders,
+        },
+      })
+    } finally {
+      clientAbort.settle()
+      if (managedKey) {
+        try {
+          apiKeyStore.release(managedKey)
+        } catch {}
+      }
+    }
+    // The api backend forwards the converted body untouched: its session is the outbound one.
+    logBag.outbound_session_id = sessionIdForLog(sessionIdFromOutboundBody(ctx.body) || logBag.session_id)
+    logBag.account_id = result?.accountId || null
+    logBag.final_account_id = result?.accountId || null
+    logBag.upstream_status = result?.status ?? null
+    logBag.usage = usageForLog(result?.usage || result?.body?.usage || null, { cacheTtl })
+    logBag.upstream_model = result?.model || null
+    // TTFT is generated content; the upstream window also includes hidden reasoning.
+    logBag.first_token_ms = Number.isFinite(result?.firstTokenAt)
+      ? Math.max(0, result.firstTokenAt - logCtx.t0)
+      : (result?.ttftMs ?? null)
+    logBag.first_byte_ms = Number.isFinite(result?.firstByteAt)
+      ? Math.max(0, result.firstByteAt - logCtx.t0)
+      : (result?.firstByteMs ?? null)
+    logBag.generation_ms = result?.generationMs ?? null
+    logBag.final_state = result?.terminalState || null
+    attachPricing(logBag, {
+      managedKey,
+      rateMultiplier: deps.groupsRepo.rateMultiplier(managedKey?.group_id ?? 1),
+      bill: !!(result?.ok && managedKey),
+    })
+    if (clientStream) {
+      if (isClientCancelledResult(result)) return finishClientCancel(res, result, logBag)
+      if (!res.headersSent) {
+        const mapped = mapProtocolClientError(result, logBag, 'api_pool_exhausted')
+        if (!isClientCancelledResult(result)) stats.errors++
+        return sendMapped(res, mapped)
+      }
+      if (result?.ok && !result.downstreamDone && protocol !== 'anthropic.messages') res.write('data: [DONE]\n\n')
+      return res.end()
+    }
+    if (!result?.ok || isIncompleteAssistantMessage(result)) {
+      if (isClientCancelledResult(result)) return finishClientCancel(res, result, logBag)
+      const failed = isIncompleteAssistantMessage(result) ? incompleteAssistantClientError(result) : result
+      const mapped = mapProtocolClientError(failed, logBag, failed?.body?.error?.code || 'upstream_error')
+      stats.errors++
+      return sendMapped(res, mapped)
+    }
+    let output
+    const clientBody = hidePersonaUsageOnMessage(result.body, personaHideTokens)
+    if (protocol === 'anthropic.messages') output = clientBody
+    else if (protocol === 'openai.chat') output = fromClaudeToOpenAIChat(clientBody, inbound.model)
+    else if (protocol === 'openai.completions') output = fromClaudeToOpenAICompletions(clientBody, inbound.model)
+    else output = fromClaudeToResponses(clientBody, inbound.model, result.endpointId, converted.mode)
+    return json(res, 200, output)
+  }
+
   async function handleProtocol(req, res, protocol, pathName) {
     const logCtx = requestLog.start(req, { protocol, pathName })
     res._kinRequestId = logCtx.request_id
@@ -719,8 +850,10 @@ export function createHandleProtocol(deps) {
       return json(res, errorResult.status, errorResult.body)
     }
     const inferenceBackend = resolveInferenceBackend(req)
+    const keyScope = keyScopeFromRequest(req)
+    const accountApiBackend = inferenceBackend === 'api' && keyScope.group_type === 'openai_apikey'
     let want1m = hasClaudeCode1mSuffix(inbound?.model) || hasClaudeCode1mSuffix(ctx.body?.model)
-    const modelRewrite = applyCodexInboundModelRewrite(ctx.body, getRouting() || {})
+    const modelRewrite = accountApiBackend ? { ok: true } : applyCodexInboundModelRewrite(ctx.body, getRouting() || {})
     if (!modelRewrite.ok) {
       stats.errors++
       const errorResult = makeError({
@@ -738,7 +871,9 @@ export function createHandleProtocol(deps) {
       ctx = { ...ctx, body: modelRewrite.body }
       logBag.upstream_model = modelRewrite.upstreamModel || null
     }
-    const platform = detectInboundPlatform(ctx.body?.model)
+    // Account API models are validated by the selected accounts' API catalog,
+    // including official o-series models and aliases, rather than the OAuth names.
+    const platform = accountApiBackend ? { ok: true, platform: 'openai' } : detectInboundPlatform(ctx.body?.model)
     if (!platform.ok) {
       stats.errors++
       const errorResult = makeError({
@@ -752,7 +887,6 @@ export function createHandleProtocol(deps) {
       logBag.error_message = errorResult.body?.error?.message || null
       return json(res, errorResult.status, errorResult.body)
     }
-    const keyScope = keyScopeFromRequest(req)
     const poolDenial = vmPoolDenial(keyScope)
     if (poolDenial) {
       stats.errors++
@@ -766,7 +900,8 @@ export function createHandleProtocol(deps) {
       logBag.error_message = errorResult.body?.error?.message || null
       return json(res, 403, errorResult.body)
     }
-    if (keyScope.group_type !== 'all' && keyScope.group_type !== platform.platform) {
+    const platformGroup = accountApiBackend ? 'openai' : keyScope.group_type
+    if (platformGroup !== 'all' && platformGroup !== platform.platform) {
       stats.errors++
       const errorResult = makeError({
         type: ErrorType.PERMISSION,
@@ -806,7 +941,7 @@ export function createHandleProtocol(deps) {
     if (await applyProtocolIntercept({ req, inbound, body: ctx.body, fp, logBag, requestId: logCtx.request_id, res })) {
       return
     }
-    if (platform.platform === 'openai') {
+    if (platform.platform === 'openai' && !accountApiBackend) {
       const routing = getRouting() || {}
       const codexSticky = {
         cfg,
@@ -881,7 +1016,7 @@ export function createHandleProtocol(deps) {
         }),
       )
     }
-    if (protocol === 'openai.responses') {
+    if (protocol === 'openai.responses' && !accountApiBackend) {
       stats.errors++
       logBag.error_code = 'protocol_not_allowed'
       return json(
@@ -927,6 +1062,11 @@ export function createHandleProtocol(deps) {
     else stats.convert++
 
     ctx = applyIntercept(cfg.intercept.rules, 'before_upstream', { ...ctx, body: converted.claude })
+    if (accountApiBackend) {
+      if (await applyProtocolIntercept({ req, inbound, body: ctx.body, fp, logBag, requestId: logCtx.request_id, res }))
+        return
+      return runApiBackend({ req, res, protocol, inbound, ctx, logBag, logCtx, converted })
+    }
     const officialTraffic = officialInbound
     const requestContext = classifyClaudeRequestPurpose(inbound, { officialTraffic })
     if (requestContext) {
@@ -1124,123 +1264,18 @@ export function createHandleProtocol(deps) {
       })
     }
     if (inferenceBackend === 'api') {
-      // API 直连走平台端点，不经过槽位；门禁与 api-kernel hop 同位，勿提前于 credential/intercept 链
-      if (ownerScopeFromRequest(req, apiKeyStore?.users).type !== 'platform') {
-        stats.errors++
-        const errorResult = makeError({
-          type: ErrorType.PERMISSION,
-          code: ErrorCode.API_BACKEND_FORBIDDEN,
-          message: '租户密钥只能调用自己名下的槽位',
-          status: 403,
-        })
-        logBag.error_code = ErrorCode.API_BACKEND_FORBIDDEN
-        logBag.error_message = errorResult.body?.error?.message || null
-        return json(res, 403, errorResult.body)
-      }
-      const managedKey = req.apiKeyRecord || null
-      if (managedKey) {
-        const gate = apiKeyStore.acquire(managedKey)
-        if (!gate.ok) {
-          stats.errors++
-          return json(res, gate.status, keyGateErrorBody(gate))
-        }
-      }
-      const clientAbort = bindClientAbort(req, res)
-      const clientStream = isClientStream(inbound, req.headers)
-      const requestedDelivery = String(
-        req.headers['x-kin-delivery'] || getRouting()?.failover?.delivery_mode || 'realtime',
-      )
-      // Worker hop stays realtime unless the caller asked for verified.
-      // stream:false only changes the client response shape (assembled JSON).
-      const deliveryMode = requestedDelivery === 'verified' ? 'verified' : 'realtime'
-      logBag.via = 'api-kernel'
-      // This backend forwards caller cache controls unchanged. Billing must
-      // use the upstream 5m/1h split, not the TTL requested for template fills.
-      cacheTtl = null
-      let result
-      try {
-        result = await runApiInference({
-          req,
-          res,
-          cfg,
-          scheduler: apiScheduler,
-          store: apiEndpointStore,
-          protocol,
-          inbound,
-          convertedBody: ctx.body,
-          clientStream,
-          deliveryMode,
-          signal: clientAbort.signal,
-          timeoutMs: cfg.limits.upstream_timeout_ms,
-          personaHideTokens,
-          cacheTtl,
-          requestContext,
-          converters: {
-            createClaudeMessageAssembler,
-            applyClaudeSSELineToMessage,
-            createOpenAIChatStreamState,
-            claudeSSELineToOpenAIChatChunks,
-            createOpenAICompletionStreamState,
-            claudeSSELineToOpenAICompletionChunks,
-            createResponsesStreamState,
-            claudeSSELineToResponsesEvents,
-            hidePersonaUsageInSseLine,
-            writeSSEHeaders,
-          },
-        })
-      } finally {
-        clientAbort.settle()
-        if (managedKey) {
-          try {
-            apiKeyStore.release(managedKey)
-          } catch {}
-        }
-      }
-      // The api backend forwards the converted body untouched: its session is the outbound one.
-      logBag.outbound_session_id = sessionIdForLog(sessionIdFromOutboundBody(ctx.body) || logBag.session_id)
-      logBag.account_id = result?.accountId || null
-      logBag.final_account_id = result?.accountId || null
-      logBag.upstream_status = result?.status ?? null
-      logBag.usage = usageForLog(result?.usage || result?.body?.usage || null, { cacheTtl })
-      logBag.upstream_model = result?.model || null
-      // TTFT is generated content; the upstream window also includes hidden reasoning.
-      logBag.first_token_ms = Number.isFinite(result?.firstTokenAt)
-        ? Math.max(0, result.firstTokenAt - logCtx.t0)
-        : (result?.ttftMs ?? null)
-      logBag.first_byte_ms = Number.isFinite(result?.firstByteAt)
-        ? Math.max(0, result.firstByteAt - logCtx.t0)
-        : (result?.firstByteMs ?? null)
-      logBag.generation_ms = result?.generationMs ?? null
-      logBag.final_state = result?.terminalState || null
-      attachPricing(logBag, {
-        managedKey,
-        rateMultiplier: deps.groupsRepo.rateMultiplier(managedKey?.group_id ?? 1),
-        bill: !!(result?.ok && managedKey),
+      return runApiBackend({
+        req,
+        res,
+        protocol,
+        inbound,
+        ctx,
+        logBag,
+        logCtx,
+        converted,
+        personaHideTokens,
+        requestContext,
       })
-      if (clientStream) {
-        if (isClientCancelledResult(result)) return finishClientCancel(res, result, logBag)
-        if (!res.headersSent) {
-          const mapped = mapProtocolClientError(result, logBag, 'api_pool_exhausted')
-          if (!isClientCancelledResult(result)) stats.errors++
-          return sendMapped(res, mapped)
-        }
-        if (result?.ok && protocol !== 'anthropic.messages') res.write('data: [DONE]\n\n')
-        return res.end()
-      }
-      if (!result?.ok || isIncompleteAssistantMessage(result)) {
-        if (isClientCancelledResult(result)) return finishClientCancel(res, result, logBag)
-        const failed = isIncompleteAssistantMessage(result) ? incompleteAssistantClientError(result) : result
-        const mapped = mapProtocolClientError(failed, logBag, failed?.body?.error?.code || 'upstream_error')
-        stats.errors++
-        return sendMapped(res, mapped)
-      }
-      let output
-      const clientBody = hidePersonaUsageOnMessage(result.body, personaHideTokens)
-      if (protocol === 'anthropic.messages') output = clientBody
-      else if (protocol === 'openai.chat') output = fromClaudeToOpenAIChat(clientBody, inbound.model)
-      else if (protocol === 'openai.completions') output = fromClaudeToOpenAICompletions(clientBody, inbound.model)
-      else output = fromClaudeToResponses(clientBody, inbound.model, result.endpointId, converted.mode)
-      return json(res, 200, output)
     }
 
     const canonicalBody = officialMessagesBody(ctx.body)
