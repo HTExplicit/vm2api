@@ -32,7 +32,12 @@ import {
   resetOpenaiAuth,
 } from '../oauth/openai-auth-state.mjs'
 import { isModelEnabled, getModelParams, getCapabilities, listPolicyModels } from '../protocol/model-policy.mjs'
-import { listGptPolicyModels, isGptModelEnabled, syncGptIdsIntoPolicy } from '../protocol/gpt-model-policy.mjs'
+import {
+  listGptPolicyModels,
+  isGptModelEnabled,
+  resolveGptFastAlias,
+  syncGptIdsIntoPolicy,
+} from '../protocol/gpt-model-policy.mjs'
 import { modelsDevMeta } from './price-catalog.mjs'
 import { listOfficialModels, validateOfficialModel } from '../protocol/models.mjs'
 import {
@@ -999,6 +1004,7 @@ export async function runVmTestChat(opts = {}) {
   push('info', `代理 ${vm.proxy?.host || 'bound'}`)
 
   let model = String(opts.model || '').trim()
+  let serviceTier = null
   if (!model) {
     const models = listTestableModels(codex ? 'openai' : 'anthropic')
     model = models[0]?.id || (codex ? 'gpt-5.4' : 'claude-haiku-4-5-20251001')
@@ -1006,6 +1012,22 @@ export async function runVmTestChat(opts = {}) {
   push('info', `模型 ${model}`)
 
   if (codex) {
+    const fast = resolveGptFastAlias(model)
+    if (fast.kind === 'unavailable') {
+      push('error', `模型不可用: ${model}`)
+      return done({
+        ok: false,
+        vm_id: vmId,
+        model,
+        error: { code: 'model_fast_unavailable', message: 'Fast alias is unavailable' },
+        log,
+        duration_ms: Date.now() - started,
+      })
+    }
+    if (fast.kind === 'fast') {
+      model = fast.base
+      serviceTier = fast.service_tier
+    }
     if (!isGptSeriesId(model) || !isGptModelEnabled(model)) {
       push('error', `模型不可用: ${model}`)
       return done({
@@ -1086,6 +1108,7 @@ export async function runVmTestChat(opts = {}) {
       store: false,
     }
     if (effort) inbound.reasoning = { effort }
+    if (serviceTier) inbound.service_tier = serviceTier
     headers = {
       'user-agent': CODEX_USER_AGENT,
       'x-codex-installation-id': String(vm.device_id || vm.id),
