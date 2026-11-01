@@ -538,6 +538,64 @@ export class PlatformAdapter {
     await this.settled()
   }
 
+  isGeneralOrganizationPage() {
+    const url = new URL(this.page.url())
+    return url.origin === PLATFORM_ORIGIN && /^\/settings\/organization\/general\/?$/.test(url.pathname)
+  }
+
+  async readGeneralOrganization() {
+    if (this.identity.email !== this.email || !this.isGeneralOrganizationPage()) return null
+    const input = await visibleOne(this.page.getByRole('textbox', { name: /^Organization ID$/i }))
+    if (!input || !(await input.evaluate((element) => element.tagName === 'INPUT' && element.readOnly === true)))
+      return null
+    const id = text(await input.inputValue())
+    if (
+      this.identity.email !== this.email ||
+      !this.isGeneralOrganizationPage() ||
+      !ORGANIZATION_ID.test(id) ||
+      !this.identity.organizations.some((organization) => organization.id === id)
+    )
+      return null
+    return id
+  }
+
+  async waitForGeneralOrganization(id, { signal, timeout = 10_000 } = {}) {
+    signal?.throwIfAborted()
+    if (!this.isGeneralOrganizationPage()) return false
+    return new Promise((resolve, reject) => {
+      let finished = false
+      let poll
+      const finish = (matched, error) => {
+        if (finished) return
+        finished = true
+        clearTimeout(poll)
+        clearTimeout(deadline)
+        this.page.off('close', closed)
+        signal?.removeEventListener('abort', aborted)
+        error === undefined ? resolve(matched) : reject(error)
+      }
+      const closed = () => finish(false, problem('platform_browser_closed', '账号浏览器已关闭'))
+      const aborted = () => finish(false, signal.reason)
+      const check = async () => {
+        try {
+          const state = await this.inspect({ signal })
+          if (finished) return
+          if (!state.authenticated)
+            throw problem('platform_login_required', '请先在账号专用浏览器中完成 OpenAI Platform 登录。')
+          if (state.organizationId === id) return finish(true)
+          if (!this.isGeneralOrganizationPage()) return finish(false)
+          poll = setTimeout(check, 100)
+        } catch (error) {
+          finish(false, error)
+        }
+      }
+      const deadline = setTimeout(() => finish(false), timeout)
+      this.page.on('close', closed)
+      signal?.addEventListener('abort', aborted, { once: true })
+      void check()
+    })
+  }
+
   async inspect({ timeout = 0, signal } = {}) {
     signal?.throwIfAborted()
     if (timeout > 0) {
@@ -562,7 +620,7 @@ export class PlatformAdapter {
           while (changed && !finished) {
             changed = false
             try {
-              const state = await this.inspect()
+              const state = await this.inspect({ signal })
               const url = new URL(this.page.url())
               const login =
                 ['auth.openai.com', 'auth0.openai.com'].includes(url.hostname) ||
@@ -595,6 +653,7 @@ export class PlatformAdapter {
       })
     }
     await this.settled()
+    signal?.throwIfAborted()
     const url = new URL(this.page.url())
     if (url.hostname !== 'platform.openai.com' || /^\/(?:auth|login)(?:\/|$)/.test(url.pathname)) {
       return { authenticated: false, email: null, organizations: [] }
@@ -609,6 +668,9 @@ export class PlatformAdapter {
     if (this.identity.email && this.identity.email !== this.email) {
       throw problem('platform_account_mismatch', '当前 Platform 登录邮箱与这个账号不一致，请退出后使用对应账号登录。')
     }
+    const organizationId = await this.readGeneralOrganization()
+    signal?.throwIfAborted()
+    if (organizationId) this.identity.organizationId = organizationId
     return {
       authenticated: this.identity.email === this.email,
       email: this.identity.email,
@@ -617,18 +679,20 @@ export class PlatformAdapter {
     }
   }
 
-  async requireLogin() {
-    const state = await this.inspect()
+  async requireLogin({ signal } = {}) {
+    const state = await this.inspect({ signal })
     if (!state.authenticated) {
       throw problem('platform_login_required', '请先在账号专用浏览器中完成 OpenAI Platform 登录。')
     }
     return state
   }
 
-  async selectOrganization(id) {
-    await this.requireLogin()
+  async selectOrganization(id, { signal } = {}) {
+    await this.requireLogin({ signal })
     if (!ORGANIZATION_ID.test(text(id))) throw problem('platform_organization_required', '请选择接收额度的 API 组织。')
     if (this.identity.organizationId === id) return
+    if (await this.waitForGeneralOrganization(id, { signal })) return
+    signal?.throwIfAborted()
     const target = this.identity.organizations.find((row) => row.id === id)
     if (!target) throw problem('platform_organization_unavailable', '当前 Platform 登录未发现这个 API 组织。')
     const current = this.identity.organizations.find((row) => row.id === this.identity.organizationId)
@@ -751,8 +815,8 @@ export class PlatformAdapter {
   }) {
     signal?.throwIfAborted()
     assertCurrent?.()
-    await this.requireLogin()
-    await this.selectOrganization(organizationId)
+    await this.requireLogin({ signal })
+    await this.selectOrganization(organizationId, { signal })
     const organizationName =
       this.identity.organizations.find((row) => row.id === organizationId)?.name || organizationId
     await this.goto(KEYS_URL)
@@ -832,12 +896,12 @@ export class PlatformAdapter {
     }
   }
 
-  async readBalance({ organizationId = this.organizationId } = {}) {
-    await this.requireLogin()
+  async readBalance({ organizationId = this.organizationId, signal } = {}) {
+    await this.requireLogin({ signal })
     // Onboarding can identify the user before the selected organization is observed.
     // The Billing GET below must itself confirm the exact organization.
     if (this.identity.organizationId && this.identity.organizationId !== organizationId)
-      await this.selectOrganization(organizationId)
+      await this.selectOrganization(organizationId, { signal })
     this.creditSummaries.delete(organizationId)
     const observed = this.page.waitForResponse(
       (response) => {

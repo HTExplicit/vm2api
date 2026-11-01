@@ -235,6 +235,155 @@ test('inspect verifies the observed user and rejects a different signed-in accou
   assert.equal(page.listenerCount('response'), 0)
 })
 
+function generalOrganizationFixture(options = {}) {
+  const page = pageFixture()
+  const state = {
+    url: 'https://platform.openai.com/settings/organization/general',
+    email: 'owner@example.com',
+    value: 'org-one',
+    currentOrganization: null,
+    count: 1,
+    visible: true,
+    readOnly: true,
+    tagName: 'INPUT',
+    known: true,
+    ...options,
+  }
+  const calls = { menus: 0, reads: 0 }
+  const input = {
+    isVisible: async () => state.visible,
+    evaluate: async (fn) => fn({ tagName: state.tagName, readOnly: state.readOnly }),
+    inputValue: async () => {
+      calls.reads++
+      return state.value
+    },
+  }
+  page.url = () => state.url
+  page.getByRole = (role, { name } = {}) => {
+    if (role === 'textbox')
+      return {
+        count: async () => (name.test('Organization ID') ? state.count : 0),
+        nth: () => input,
+      }
+    calls.menus++
+    assert.fail('matching General organization must not open the organization/user menu')
+  }
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  adapter.identity = {
+    email: state.email,
+    organizationId: state.currentOrganization,
+    organizations: state.known
+      ? [
+          { id: 'org-one', name: 'Personal' },
+          { id: 'org-two', name: 'Other' },
+        ]
+      : [],
+    projects: [],
+  }
+  return { adapter, page, state, calls }
+}
+
+for (const currentOrganization of [null, 'org-two']) {
+  test(`General page uniquely labelled readonly Organization ID confirms current organization over ${currentOrganization || 'missing metadata'}`, async () => {
+    const f = generalOrganizationFixture({ currentOrganization })
+    assert.equal((await f.adapter.inspect()).organizationId, 'org-one')
+    await f.adapter.selectOrganization('org-one')
+    assert.equal(f.calls.menus, 0)
+    f.adapter.dispose()
+  })
+}
+
+for (const variant of [
+  { name: 'unverified email', email: null },
+  { name: 'editable field', readOnly: false },
+  { name: 'non-input field', tagName: 'DIV' },
+  { name: 'multiple visible fields', count: 2 },
+  { name: 'hidden field', visible: false },
+  { name: 'invalid organization value', value: 'not-an-org' },
+  { name: 'unknown organization', known: false },
+  { name: 'another route', url: 'https://platform.openai.com/settings/organization/members' },
+  { name: 'lookalike route', url: 'https://platform.openai.com/settings/organization/general/other' },
+  { name: 'insecure origin', url: 'http://platform.openai.com/settings/organization/general' },
+  { name: 'another origin', url: 'https://example.test/settings/organization/general' },
+]) {
+  test(`General organization evidence excludes ${variant.name}`, async () => {
+    const f = generalOrganizationFixture(variant)
+    assert.equal((await f.adapter.inspect()).organizationId ?? null, null)
+    f.adapter.dispose()
+  })
+}
+
+test('General organization evidence cannot authenticate a different signed-in email', async () => {
+  const f = generalOrganizationFixture({ email: 'other@example.com' })
+  await assert.rejects(f.adapter.inspect(), { code: 'platform_account_mismatch' })
+  assert.equal(f.calls.reads, 0)
+  assert.equal(f.adapter.identity.organizationId, null)
+  f.adapter.dispose()
+})
+
+test('organization selection waits for a delayed General field before touching any menu', async () => {
+  const f = generalOrganizationFixture({ count: 0 })
+  const ready = setTimeout(() => {
+    f.state.count = 1
+  }, 20)
+  try {
+    await f.adapter.selectOrganization('org-one')
+    assert.equal(f.adapter.identity.organizationId, 'org-one')
+    assert.equal(f.calls.menus, 0)
+    assert.equal(f.page.listenerCount('close'), 0)
+  } finally {
+    clearTimeout(ready)
+    f.adapter.dispose()
+  }
+})
+
+test('organization selection also accepts delayed network metadata before touching any menu', async () => {
+  const f = generalOrganizationFixture({ count: 0 })
+  const ready = setTimeout(() => {
+    void f.adapter.observe(jsonResponse('/dashboard/projects', [], { headers: { 'openai-organization': 'org-one' } }))
+  }, 20)
+  try {
+    await f.adapter.selectOrganization('org-one')
+    assert.equal(f.calls.menus, 0)
+    assert.equal(f.page.listenerCount('close'), 0)
+  } finally {
+    clearTimeout(ready)
+    f.adapter.dispose()
+  }
+})
+
+for (const stop of ['abort', 'close']) {
+  test(`${stop} ends General organization readiness polling without a menu action or listeners`, async () => {
+    const f = generalOrganizationFixture({ count: 0 })
+    const abort = new AbortController()
+    const waiting = f.adapter.selectOrganization('org-one', { signal: abort.signal })
+    const reason = new Error('fixture configuration cancelled')
+    const rejected =
+      stop === 'abort'
+        ? assert.rejects(waiting, (error) => error === reason)
+        : assert.rejects(waiting, { code: 'platform_browser_closed' })
+    await new Promise(setImmediate)
+    assert.equal(f.page.listenerCount('close'), 1)
+    if (stop === 'abort') abort.abort(reason)
+    else f.page.emit('close')
+    await rejected
+    assert.equal(f.calls.menus, 0)
+    assert.equal(f.page.listenerCount('close'), 0)
+    assert.equal(getEventListeners(abort.signal, 'abort').length, 0)
+    f.adapter.dispose()
+  })
+}
+
+test('General organization readiness has a bounded timeout and releases its listeners', async () => {
+  const f = generalOrganizationFixture({ count: 0 })
+  const abort = new AbortController()
+  assert.equal(await f.adapter.waitForGeneralOrganization('org-one', { signal: abort.signal, timeout: 15 }), false)
+  assert.equal(f.calls.menus, 0)
+  assert.equal(f.page.listenerCount('close'), 0)
+  assert.equal(getEventListeners(abort.signal, 'abort').length, 0)
+  f.adapter.dispose()
+})
+
 test('initial identity inspection waits for a response that arrives after DOMContentLoaded', async () => {
   const page = pageFixture()
   const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
