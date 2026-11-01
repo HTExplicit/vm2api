@@ -758,7 +758,12 @@ export function createHandleProtocol(deps) {
     logBag.model = inbound?.model || null
     logBag.requested_model = inbound?.model || null
     logBag.stream = isClientStream(inbound, req.headers)
-    logBag.has_tools = Array.isArray(inbound?.tools) && inbound.tools.length > 0
+    logBag.has_tools =
+      (Array.isArray(inbound?.tools) && inbound.tools.length > 0) ||
+      (Array.isArray(inbound?.input) &&
+        inbound.input.some(
+          (item) => item?.type === 'additional_tools' && Array.isArray(item.tools) && item.tools.length > 0,
+        ))
     logBag.session_id = sessionIdForLog(extractCallerSession({ inbound, headers: req.headers }))
     logBag.reasoning_effort = reasoningEffortOf(inbound)
 

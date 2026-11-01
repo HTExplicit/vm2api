@@ -288,6 +288,19 @@ export async function runApiInference({
         stream: true,
       }
     : { ...canonical, model: picked.upstream_model, stream: true }
+  if (nativeResponses) {
+    // Codex Lite's additional_tools items are public Responses input. Keep
+    // their position and remove only metadata from Codex's internal transport.
+    delete body.client_metadata
+    if (Array.isArray(body.input)) {
+      body.input = body.input.map((item) => {
+        if (!item || !Object.hasOwn(item, 'internal_chat_message_metadata_passthrough')) return item
+        const publicItem = { ...item }
+        delete publicItem.internal_chat_message_metadata_passthrough
+        return publicItem
+      })
+    }
+  }
   if (requestContext) Object.assign(body, prepareClassifierBody(body))
   const callerProtocolHeaders = forwardAnthropicProtocolHeaders(req?.headers, protocol, protocolKind)
   const headers = mergeCallerProtocolHeaders(

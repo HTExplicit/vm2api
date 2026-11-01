@@ -552,7 +552,7 @@ POST `/setup` 继续 Platform 登录并在当前组织已有的 Default project 
 
 生成密钥使用 `group_type: "openai_apikey"`、`category: "api"`、`allowed_vms: [...]`。新增候选须为已配置 key 且最后成功组织余额大于 0 的 OpenAI 账号，不要求 Pro；正余额待刷新仍可选，零、负数或未知余额隐藏。编辑时已有绑定保留回显、可移除，仅校验新加入的账号。API 独立开关不会因勾选自动开启，候选筛选不额外限制已有绑定的推理。模型列表和推理均限所选账号，普通 API 全局池不隐式使用账号 key；401、余额耗尽和临时限流保留官方错误码，API 请求不计入 OAuth 5H/7D 窗口估算。
 
-该分组的 `/v1/responses` 原生转发 OpenAI 工具协议，保留 namespace、function/custom 工具、工具选择及调用/结果历史，不做 Claude 工具名称映射。流式保留官方 SSE，非流式保留原生响应对象；工具由 Codex 等调用方执行并回传结果。原生请求仍执行现有拦截，发送前读取账号当前代理，并按 API key 归属计费。
+该分组的 `/v1/responses` 保留 OpenAI 原生工具协议，包括 Codex 桌面版 Responses-Lite 在 `input` 内的 `additional_tools` 声明及其位置；只移除桌面内部追踪元数据。保留 namespace、function/custom、工具选择及调用/结果历史，不做 Claude 名称映射。流式保留官方 SSE，非流式保留原生响应对象；工具由调用方执行并回传结果。请求仍执行现有拦截，发送前读取账号当前代理，并按 API key 归属计费。
 
 ## 集群（SSH 节点，仅 admin；super 只读 `GET /cluster/nodes`）
 
