@@ -191,14 +191,14 @@ export class OpenaiApiManager {
       }
     } finally {
       const live = this.sessions.get(job.vmId)
+      let terminal
       if (live?.job === job) {
         await this.persistSession(live)
         const status = this.repo.getAccount(job.accountId)?.setup_status || 'error'
-        this.browserManager.setStatus(
-          live,
-          status === 'ready' ? 'api_ready' : status,
-          this.repo.getAccount(job.accountId)?.last_error,
-        )
+        terminal = {
+          status: status === 'ready' ? 'api_ready' : status,
+          message: this.repo.getAccount(job.accountId)?.last_error,
+        }
         live.adapter?.dispose?.()
         live.inputLocked = false
         live.cancel = null
@@ -209,6 +209,8 @@ export class OpenaiApiManager {
       job.resolveReady(null)
       if (this.jobs.get(job.vmId) === job) this.jobs.delete(job.vmId)
       job.resolveFinished()
+      // A retry offered by this status must find the finished job removed.
+      if (terminal) this.browserManager.setStatus(live, terminal.status, terminal.message)
     }
     this.running = this.jobs.size > 0
   }
@@ -272,6 +274,11 @@ export class OpenaiApiManager {
     this.browserManager.bindAccount(live, job.accountId)
     this.assertCurrent(job)
     this.repo.upsertAccount(job.accountId, { setup_status: 'configuring', last_error: null })
+    this.browserManager.setStatus(
+      live,
+      'configuring',
+      job.kind === 'balance' ? '正在刷新 API 余额' : '正在配置账号 API，请保留此窗口…',
+    )
     await this.persistSession(live)
     let record = this.repo.getAccount(job.accountId)
     let organizationId = record.organization_id || identity.organizationId

@@ -123,6 +123,8 @@ jobs:
           pnpm exec vitest run src/features/vm/usage-windows.test.tsx src/features/vm/vm-rack-model.test.ts
           pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx
           pnpm build
+      - name: Platform configuration retry UI
+        run: node scripts/smoke-platform-retry-ui.mjs
 
   browser-image:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

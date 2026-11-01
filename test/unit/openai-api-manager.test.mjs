@@ -277,6 +277,71 @@ test('existing account keys are reused without reconfiguring or moving their pro
   assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
 })
 
+test('an error can retry immediately in the retained browser after the old job is removed', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  let attempts = 0
+  let retried = false
+  const states = []
+  const setStatus = f.manager.browserManager.setStatus.bind(f.manager.browserManager)
+  f.manager.browserManager.setStatus = (live, status, ...rest) => {
+    states.push(status)
+    setStatus(live, status, ...rest)
+    if (status === 'error' && !retried) {
+      assert.equal(f.manager.jobs.has(entry.vm.id), false, 'the retry must not find the finished setup job')
+      assert.equal(live.inputLocked, false)
+      assert.equal(live.checkLogin, null)
+      retried = true
+      f.manager.setup(entry.vm.id)
+    }
+  }
+  f.behavior.configure = async (options) => {
+    if (++attempts === 1)
+      throw Object.assign(new Error('等待官方创建 API key 入口超时，可在当前窗口重试配置'), {
+        code: 'platform_page_changed',
+      })
+    const result = { organizationId: 'org-test', projectId: 'proj-test', apiKey: 'sk-retry-fixture' }
+    await options.onKey(result)
+    return result
+  }
+  f.manager.setup(entry.vm.id)
+  await f.settle()
+  assert.equal(retried, true)
+  assert.equal(attempts, 2)
+  assert.equal(f.calls.sessions.length, 1, 'the same browser must survive the failed attempt')
+  assert.equal(f.calls.closed.length, 0)
+  assert.equal(f.calls.maxLiveBrowsers, 1)
+  assert.equal(states.filter((status) => status === 'configuring').length, 2)
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+  assert.equal(f.repo.getAccount(entry.accountId).last_error, null)
+  assert.deepEqual(f.profiles.get(entry.vm.id).fingerprint, { independentDevice: f.calls.sessions[0].proxyUrl })
+})
+
+test('same-window retry with an already saved key never creates or replaces it', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  let inspected = 0
+  f.behavior.inspect = () => {
+    if (++inspected === 1) throw new Error('temporary page failure')
+    return { authenticated: true, email: entry.account.email, organizationId: 'org-test', organizations: [] }
+  }
+  f.manager.setup(entry.vm.id)
+  await f.settle()
+  const browser = f.manager.browserManager.jobs.get(entry.vm.id)
+  const fingerprint = f.profiles.get(entry.vm.id).fingerprint
+  assert.equal(f.manager.browserManager.state(entry.vm.id).status, 'error')
+  f.manager.setup(entry.vm.id)
+  await f.settle()
+  assert.equal(f.manager.browserManager.jobs.get(entry.vm.id), browser)
+  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.calls.configured.length, 0)
+  assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
+  assert.equal(f.repo.getKey(key.id).api_key, key.api_key)
+  assert.deepEqual(f.profiles.get(entry.vm.id).fingerprint, fingerprint)
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+})
+
 test('saving a new key precedes balance work and a balance failure neither loses the key nor blocks model setup', async (t) => {
   const f = fixture(t)
   const entry = f.add()
