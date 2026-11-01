@@ -354,6 +354,86 @@ test('Billing observations require the exact official GET and organization heade
   adapter.dispose()
 })
 
+test('Billing credentials come only from the successful exact request and require the matching observed identity', async () => {
+  const page = pageFixture()
+  const adapter = new PlatformAdapter({
+    page,
+    email: 'owner@example.com',
+    now: () => Date.parse('2026-11-01T00:00:00Z'),
+  })
+  const headers = {
+    authorization: 'Bearer fixture-billing-only-secret',
+    'user-agent': 'fixture-fixed-desktop-ua',
+    'openai-organization': 'org-one',
+    accept: 'application/json',
+    cookie: 'must-remain-in-canonical-cookie-storage',
+    'content-length': 'not-a-billing-get-header',
+  }
+  await adapter.observe(jsonResponse('/dashboard/onboarding', { user: { email: 'owner@example.com' } }, { headers }))
+  assert.equal(adapter.billingSessionFor('org-one'), null, 'onboarding authentication is not Billing authentication')
+  adapter.identity.email = null
+  const response = jsonResponse('/v1/dashboard/billing/credit_grants', '{"total_available":1.000000000000000000009}', {
+    headers: { 'openai-organization': 'org-one' },
+  })
+  response.request = () => ({
+    method: () => 'GET',
+    headers: () => ({ 'openai-organization': 'org-one' }),
+    allHeaders: async () => headers,
+  })
+  await adapter.observe(response)
+  assert.equal(
+    adapter.billingSessionFor('org-one'),
+    null,
+    'credentials cannot be saved before account identity is known',
+  )
+  await adapter.observe(jsonResponse('/dashboard/onboarding', { user: { email: 'owner@example.com' } }))
+  const saved = adapter.billingSessionFor('org-one')
+  assert.deepEqual(saved, {
+    organization_id: 'org-one',
+    headers: {
+      authorization: headers.authorization,
+      'user-agent': headers['user-agent'],
+      'openai-organization': 'org-one',
+      accept: 'application/json',
+    },
+    captured_at: '2026-11-01T00:00:00.000Z',
+    recovery_attempted: false,
+  })
+  saved.headers.authorization = 'changed-copy'
+  assert.equal(adapter.billingSessionFor('org-one').headers.authorization, headers.authorization)
+  assert.equal(adapter.billingSessionFor('org-other'), null)
+  assert.equal(adapter.creditSummaries.get('org-one').balance, '1.000000000000000000009')
+  adapter.identity.email = 'different@example.com'
+  assert.equal(adapter.billingSessionFor('org-one'), null)
+  adapter.identity.email = 'owner@example.com'
+  adapter.dispose()
+  assert.equal(adapter.billingSessionFor('org-one'), null, 'dispose releases retained authentication headers')
+})
+
+test('an unsuccessful, unscoped or incomplete Billing response cannot supply saved authentication', async () => {
+  const adapter = new PlatformAdapter({ page: pageFixture(), email: 'owner@example.com' })
+  adapter.identity.email = 'owner@example.com'
+  const headers = { authorization: 'Bearer fixture-only', 'user-agent': 'fixture-ua', 'openai-organization': 'org-one' }
+  const failed = jsonResponse('/v1/dashboard/billing/credit_grants', { total_available: '3' }, { headers })
+  failed.ok = () => false
+  await adapter.observe(failed)
+  await adapter.observe(
+    jsonResponse('/v1/dashboard/billing/credit_grants', { total_available: '3' }, { method: 'POST', headers }),
+  )
+  await adapter.observe(jsonResponse('/v1/dashboard/billing/credit_grants', { total_available: null }, { headers }))
+  await adapter.observe(
+    jsonResponse(
+      '/v1/dashboard/billing/credit_grants',
+      { total_available: '3' },
+      {
+        headers: { authorization: headers.authorization, 'openai-organization': 'org-one' },
+      },
+    ),
+  )
+  assert.equal(adapter.billingSessionFor('org-one'), null)
+  adapter.dispose()
+})
+
 test('readBalance waits for this organization and cannot reuse an earlier cached sample', async () => {
   const page = pageFixture()
   const adapter = new PlatformAdapter({ page, email: 'owner@example.com', organizationId: 'org-one' })

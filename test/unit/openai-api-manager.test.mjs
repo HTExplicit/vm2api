@@ -32,6 +32,7 @@ function fixture(t) {
     models: [],
     closed: [],
     refreshed: [],
+    http: [],
     reloaded: 0,
     liveBrowsers: 0,
     maxLiveBrowsers: 0,
@@ -43,8 +44,10 @@ function fixture(t) {
     readBalance: null,
     configure: null,
     inspect: null,
+    http: null,
   }
   let time = Date.now()
+  const routing = { openai_api: { balance_refresh_interval_minutes: 10 } }
   const credits = {
     accountForVm(vmId) {
       const entry = identities.get(vmId)
@@ -91,9 +94,16 @@ function fixture(t) {
       if (behavior.balanceError) throw behavior.balanceError
       return { balance: behavior.balance }
     }
+    billingSessionFor(organizationId) {
+      return {
+        organization_id: organizationId,
+        headers: { authorization: 'Bearer fixture-billing', 'user-agent': 'fixture-browser' },
+        recovery_attempted: false,
+      }
+    }
     dispose() {}
   }
-  const manager = new OpenaiApiManager({
+  let manager = new OpenaiApiManager({
     cfg: {},
     repo,
     credits,
@@ -104,7 +114,13 @@ function fixture(t) {
       },
     },
     now: () => time,
+    getRouting: () => routing,
     Adapter,
+    async fetchBalance(options) {
+      calls.http.push(options)
+      if (behavior.http) return behavior.http(options)
+      return { summary: { balance: behavior.balance }, cookies: [{ name: 'session', value: 'updated' }] }
+    },
     async createSession(options) {
       calls.sessions.push(options)
       const fingerprint = options.fingerprint || { independentDevice: options.proxyUrl }
@@ -170,6 +186,30 @@ function fixture(t) {
     repo.upsertAccount(entry.accountId, { key_id: key.id, enabled: true, setup_status: 'ready' })
     return key
   }
+  const cacheBilling = (entry, patch = {}) => {
+    profiles.upsert(entry.vm.id, {
+      account_id: entry.accountId,
+      fingerprint: { independentDevice: entry.vm.id },
+      billing_session: {
+        organization_id: repo.getAccount(entry.accountId).organization_id,
+        headers: { authorization: 'Bearer saved-session', 'user-agent': 'saved-browser' },
+        recovery_attempted: false,
+      },
+      storage_state: {
+        cookies: [{ name: 'session', value: 'old' }],
+        origins: [
+          {
+            origin: 'https://platform.openai.com',
+            localStorage: [{ name: 'saved', value: 'web' }],
+            indexedDB: [{ name: 'db' }],
+          },
+        ],
+        sessionStorage: { 'https://platform.openai.com': { transient: 'preserve' } },
+      },
+      ...patch,
+    })
+    return profiles.get(entry.vm.id)
+  }
   t.after(async () => {
     await manager.stop()
     await until(() => !manager.running)
@@ -178,7 +218,9 @@ function fixture(t) {
     fs.rmSync(directory, { recursive: true, force: true })
   })
   return {
-    manager,
+    get manager() {
+      return manager
+    },
     repo,
     profiles,
     store,
@@ -186,8 +228,28 @@ function fixture(t) {
     credits,
     calls,
     behavior,
+    routing,
     add,
     installKey,
+    cacheBilling,
+    async restart() {
+      await manager.stop()
+      const previous = manager
+      manager = new OpenaiApiManager({
+        cfg: {},
+        repo,
+        credits,
+        apiEndpointStore: store,
+        apiScheduler: previous.apiScheduler,
+        Adapter,
+        now: () => time,
+        getRouting: () => routing,
+        fetchBalance: previous.fetchBalance,
+        fetchModels: previous.fetchModels,
+        createSession: previous.createSession,
+      })
+      return manager
+    },
     settle: () => until(() => !manager.running && manager.jobs.size === 0),
     setTime: (value) => {
       time = value
@@ -394,7 +456,7 @@ test('background refresh waits for identity before treating a restored session a
   assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
 })
 
-test('a failed balance refresh retries after ten minutes and recovers an earlier needs-login observation', async (t) => {
+test('an expired session is not reopened each period and manual refresh can restore it', async (t) => {
   const f = fixture(t)
   const entry = f.add()
   const key = f.installKey(entry)
@@ -413,6 +475,10 @@ test('a failed balance refresh retries after ten minutes and recovers an earlier
   f.behavior.balance = '12.499999999999999999'
   f.setTime(attemptedAt + 10 * 60_000)
   await f.manager.tick()
+  await f.settle()
+  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'needs_login')
+  await f.manager.refresh(entry.vm.id)
   await f.settle()
   assert.equal(f.calls.sessions.length, 2)
   assert.equal(f.repo.getOrg('org-test').balance, '12.499999999999999999')
@@ -436,11 +502,16 @@ test('missing identity remains a retryable observation error and Billing authent
   await f.settle()
   assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'error')
   f.setTime(attemptedAt + 10 * 60_000)
+  await f.manager.tick()
+  await f.settle()
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'error')
+  assert.match(f.repo.getAccount(entry.accountId).last_error, /官方账号信息尚未返回/)
+  assert.equal(f.calls.sessions.length, 1)
   f.behavior.inspect = null
   f.behavior.balanceError = Object.assign(new Error('Platform 会话已失效，请补充登录'), {
     code: 'platform_login_required',
   })
-  await f.manager.tick()
+  await f.manager.refresh(entry.vm.id)
   await f.settle()
   assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'needs_login')
   assert.equal(f.repo.getAccount(entry.accountId).enabled, true)
@@ -452,6 +523,7 @@ test('claim observations cannot postpone a failed balance retry and old needs-lo
   const f = fixture(t)
   const entry = f.add()
   f.installKey(entry)
+  f.cacheBilling(entry)
   f.repo.upsertOrg('org-test', { balance_checked_at: '2020-01-01T00:00:00Z' })
   f.repo.upsertAccount(entry.accountId, {
     setup_status: 'needs_login',
@@ -463,18 +535,21 @@ test('claim observations cannot postpone a failed balance retry and old needs-lo
   }
   const attemptedAt = Date.now()
   f.setTime(attemptedAt)
-  f.behavior.authenticated = false
+  f.behavior.http = () => {
+    throw Object.assign(new Error('network unavailable'), { code: 'billing_network_error' })
+  }
   await f.manager.tick()
   await f.settle()
-  assert.equal(f.calls.sessions.length, 1, 'a persisted login error is rechecked by the new manager')
+  assert.equal(f.calls.http.length, 1, 'a persisted login error is rechecked by the new manager')
   f.setTime(attemptedAt + 9 * 60_000)
   await f.manager.tick()
-  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.calls.http.length, 1)
   f.setTime(attemptedAt + 10 * 60_000)
-  f.behavior.authenticated = true
+  f.behavior.http = null
   await f.manager.tick()
   await f.settle()
-  assert.equal(f.calls.sessions.length, 2)
+  assert.equal(f.calls.http.length, 2)
+  assert.equal(f.calls.sessions.length, 0)
   assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
 })
 
@@ -783,7 +858,7 @@ test('manual Platform setup promotes a same-slot background refresh without wait
   f.manager.setup(a.vm.id)
   await f.manager.browserTicket(a.vm.id)
   await until(
-    () => f.repo.getAccount(a.accountId).setup_status === 'ready',
+    () => f.manager.browserManager.state(a.vm.id).status === 'api_ready',
     'manual setup waited for its own retained browser to close',
   )
   assert.equal(f.manager.browserManager.jobs.get(a.vm.id), manual)
@@ -838,4 +913,386 @@ test('cancelling before a pending promotion runs prevents the interactive follow
   assert.equal(f.calls.configured.length, 0)
   assert.equal(f.calls.models.length, 0)
   assert.equal(f.manager.browserManager.state(a.vm.id).active, false)
+})
+
+test('cached Billing HTTP survives manager restart and updates only the canonical cookie jar', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  const before = f.cacheBilling(entry)
+  f.behavior.balance = '-0.000000000000000001'
+  await f.manager.refresh(entry.vm.id)
+  await f.settle()
+  await f.restart()
+  await f.manager.refresh(entry.vm.id)
+  await f.settle()
+  assert.equal(f.calls.http.length, 2)
+  assert.equal(f.calls.sessions.length, 0)
+  assert.equal(f.calls.models.length, 0)
+  assert.equal(f.repo.getOrg('org-test').balance, '-0.000000000000000001')
+  const after = f.profiles.get(entry.vm.id)
+  assert.deepEqual(after.storage_state.cookies, [{ name: 'session', value: 'updated' }])
+  assert.deepEqual(after.storage_state.origins, before.storage_state.origins)
+  assert.deepEqual(after.storage_state.sessionStorage, before.storage_state.sessionStorage)
+  assert.deepEqual(after.fingerprint, before.fingerprint)
+  assert.deepEqual(after.billing_session, before.billing_session)
+  assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
+  assert.equal(JSON.stringify(f.manager.view(entry.vm)).includes('saved-session'), false)
+})
+
+test('a rejected cached session recovers once with the browser and later refreshes use the replacement HTTP session', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  f.cacheBilling(entry)
+  f.behavior.http = () => {
+    if (f.calls.http.length === 1)
+      throw Object.assign(new Error('session expired'), { code: 'platform_login_required' })
+    return { summary: { balance: '36.75' }, cookies: [] }
+  }
+  f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'balance', false)
+  await f.settle()
+  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.calls.closed.length, 1)
+  assert.equal(f.profiles.get(entry.vm.id).billing_session.headers.authorization, 'Bearer fixture-billing')
+  await f.manager.refresh(entry.vm.id)
+  await f.settle()
+  assert.equal(f.calls.http.length, 2)
+  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.calls.http[1].session.headers.authorization, 'Bearer fixture-billing')
+  assert.equal(f.repo.getOrg('org-test').balance, '36.75')
+  assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
+  assert.equal(f.calls.configured.length, 0)
+  assert.equal(f.calls.models.length, 0)
+})
+
+test('an unsuccessful automatic browser recovery remains attempted across restart until an administrator retries', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  f.repo.upsertOrg('org-test', { balance: '12.5', balance_checked_at: '2020-01-01T00:00:00Z' })
+  f.behavior.authenticated = false
+  f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'balance', false)
+  await f.settle()
+  await f.restart()
+  await f.manager.tick()
+  await f.settle()
+  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.profiles.get(entry.vm.id).billing_session.recovery_attempted, true)
+  assert.equal(f.repo.getOrg('org-test').balance, '12.5')
+  f.behavior.authenticated = true
+  await f.manager.refresh(entry.vm.id)
+  await f.settle()
+  assert.equal(f.calls.sessions.length, 2)
+  assert.equal(f.profiles.get(entry.vm.id).billing_session.recovery_attempted, false)
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+})
+
+test('network and ordinary HTTP errors retain the old balance and never start recovery or affect inference state', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  f.cacheBilling(entry)
+  const checkedAt = '2026-01-01T00:00:00Z'
+  f.repo.upsertOrg('org-test', { balance: '-0.5', balance_checked_at: checkedAt })
+  for (const code of ['billing_network_error', 'billing_http_error', 'billing_timeout']) {
+    f.behavior.http = () => {
+      throw Object.assign(new Error('safe Billing failure'), { code })
+    }
+    await f.manager.refresh(entry.vm.id)
+    await f.settle()
+    assert.equal(f.repo.getOrg('org-test').balance, '-0.5')
+    assert.equal(f.repo.getOrg('org-test').balance_checked_at, checkedAt)
+    assert.equal(f.repo.getKey(key.id).disabled, false)
+    assert.equal(f.repo.getKey(key.id).cooldown_until, null)
+    assert.equal(f.repo.getAccount(entry.accountId).enabled, true)
+  }
+  assert.equal(f.calls.sessions.length, 0)
+  assert.equal(f.profiles.get(entry.vm.id).billing_session.recovery_attempted, false)
+})
+
+test('balances of any sign do not release quota blocks and manual resume changes neither the API switch nor invalid-key state', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const block = '9999-12-31T23:59:59.999Z'
+  const key = f.installKey(entry, { cooldown_until: block, disabled: true })
+  f.store.setKeyCooldown(key.id, block)
+  f.cacheBilling(entry)
+  f.repo.upsertAccount(entry.accountId, { enabled: false })
+  for (const balance of ['0', '-0.00001', '37.5']) {
+    f.behavior.balance = balance
+    await f.manager.refresh(entry.vm.id)
+    await f.settle()
+    assert.equal(f.repo.getOrg('org-test').balance, balance)
+    assert.equal(f.repo.getKey(key.id).cooldown_until, block)
+    assert.equal(f.manager.view(entry.vm).quota_blocked, true)
+  }
+  const beforeHttp = f.calls.http.length
+  const resumed = f.manager.resume(entry.vm.id)
+  assert.equal(resumed.quota_blocked, false)
+  assert.equal(resumed.enabled, false)
+  assert.equal(f.repo.getKey(key.id).disabled, true)
+  assert.equal(f.repo.getKey(key.id).cooldown_until, null)
+  assert.equal(f.calls.http.length, beforeHttp)
+  assert.equal(f.calls.models.length, 0)
+  assert.equal(f.calls.configured.length, 0)
+  const temporary = '2099-01-01T00:00:00Z'
+  f.store.setKeyCooldown(key.id, temporary)
+  f.manager.resume(entry.vm.id)
+  assert.equal(f.repo.getKey(key.id).cooldown_until, temporary, 'resume only clears the upstream quota block')
+})
+
+test('refresh interval changes apply live and zero keeps manual HTTP refresh available', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  f.cacheBilling(entry)
+  const now = Date.now()
+  f.setTime(now)
+  f.repo.upsertOrg('org-test', { balance: '1', balance_checked_at: new Date(now).toISOString() })
+  f.routing.openai_api.balance_refresh_interval_minutes = 30
+  f.setTime(now + 29 * 60_000)
+  await f.manager.tick()
+  assert.equal(f.calls.http.length, 0)
+  f.setTime(now + 30 * 60_000)
+  await f.manager.tick()
+  await f.settle()
+  assert.equal(f.calls.http.length, 1)
+  f.routing.openai_api.balance_refresh_interval_minutes = 0
+  f.setTime(now + 24 * 60 * 60_000)
+  await f.manager.tick()
+  assert.equal(f.calls.http.length, 1)
+  assert.equal(f.manager.view(entry.vm).balance_refresh_interval_minutes, 0)
+  await f.manager.refresh(entry.vm.id)
+  await f.settle()
+  assert.equal(f.calls.http.length, 2)
+  assert.equal(f.calls.sessions.length, 0)
+})
+
+test('failed HTTP retries use the current interval rather than the value saved when the request failed', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  f.cacheBilling(entry)
+  const now = Date.now()
+  f.setTime(now)
+  f.repo.upsertOrg('org-test', { balance_checked_at: '2020-01-01T00:00:00Z' })
+  f.routing.openai_api.balance_refresh_interval_minutes = 30
+  f.behavior.http = () => {
+    throw Object.assign(new Error('network'), { code: 'billing_network_error' })
+  }
+  await f.manager.tick()
+  await f.settle()
+  f.setTime(now + 6 * 60_000)
+  await f.manager.tick()
+  assert.equal(f.calls.http.length, 1)
+  f.routing.openai_api.balance_refresh_interval_minutes = 5
+  f.behavior.http = null
+  await f.manager.tick()
+  await f.settle()
+  assert.equal(f.calls.http.length, 2)
+})
+
+test('waiting HTTP work uses the latest bound proxy after a manual browser closes', async (t) => {
+  const f = fixture(t)
+  const a = f.add()
+  const b = f.add('vm-b', 'account-b')
+  f.installKey(a)
+  f.cacheBilling(a)
+  await f.manager.browserManager.acquire(b.vm.id, { purpose: 'oauth', interactive: true })
+  f.manager.enqueue(f.credits.accountForVm(a.vm.id), 'balance', false)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(f.calls.http.length, 0)
+  a.vm.proxy = { url: 'socks5h://127.0.0.1:2080' }
+  await f.manager.browserManager.close(b.vm.id)
+  await f.settle()
+  assert.equal(f.calls.http[0].proxyUrl, 'socks5h://127.0.0.1:2080')
+  assert.equal(f.calls.sessions.length, 1, 'only the explicitly opened manual browser was launched')
+})
+
+test('a proxy change while HTTP is in flight cannot replace the balance or cookies', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  const before = f.cacheBilling(entry)
+  f.repo.upsertOrg('org-test', { balance: '12.5' })
+  let finish
+  f.behavior.http = () =>
+    new Promise((resolve) => {
+      finish = resolve
+    })
+  await f.manager.refresh(entry.vm.id)
+  await until(() => !!finish)
+  entry.vm.proxy = { url: 'socks5h://127.0.0.1:2080' }
+  finish({ summary: { balance: '999' }, cookies: [{ name: 'bad', value: 'late' }] })
+  await f.settle()
+  assert.equal(f.repo.getOrg('org-test').balance, '12.5')
+  assert.deepEqual(f.profiles.get(entry.vm.id).storage_state, before.storage_state)
+  assert.equal(f.calls.sessions.length, 0)
+})
+
+test('cancelled queued HTTP work cannot let a later request overlap its predecessor', async (t) => {
+  const f = fixture(t)
+  const entries = [f.add(), f.add('vm-b', 'account-b'), f.add('vm-c', 'account-c')]
+  for (const entry of entries) {
+    f.installKey(entry)
+    f.cacheBilling(entry)
+  }
+  let releaseFirst
+  let active = 0
+  let maximum = 0
+  f.behavior.http = async () => {
+    active++
+    maximum = Math.max(maximum, active)
+    try {
+      if (f.calls.http.length === 1)
+        await new Promise((resolve) => {
+          releaseFirst = resolve
+        })
+      return { summary: { balance: '2' }, cookies: [] }
+    } finally {
+      active--
+    }
+  }
+  for (const entry of entries) f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'balance', false)
+  await until(() => !!releaseFirst)
+  await f.manager.cancel(entries[1].vm.id)
+  assert.equal(f.calls.http.length, 1)
+  releaseFirst()
+  await f.settle()
+  assert.equal(f.calls.http.length, 2)
+  assert.equal(maximum, 1)
+  assert.equal(f.calls.sessions.length, 0)
+})
+
+test('deleting a slot during HTTP cancels the job and does not recreate its saved state', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  f.cacheBilling(entry)
+  f.repo.upsertOrg('org-test', { balance: '12.5' })
+  let finish
+  f.behavior.http = () =>
+    new Promise((resolve) => {
+      finish = resolve
+    })
+  await f.manager.refresh(entry.vm.id)
+  await until(() => !!finish)
+  f.identities.delete(entry.vm.id)
+  const cancelled = f.manager.cancel(entry.vm.id, { forget: true })
+  finish({ summary: { balance: '999' }, cookies: [] })
+  await cancelled
+  await f.settle()
+  assert.equal(f.repo.getOrg('org-test').balance, '12.5')
+  assert.equal(f.profiles.get(entry.vm.id), null)
+  assert.equal(f.manager.jobs.size, 0)
+})
+
+test('a manual browser opened during HTTP prevents the old response from overwriting its cookies', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  const before = f.cacheBilling(entry)
+  f.repo.upsertOrg('org-test', { balance: '12.5' })
+  let finish
+  f.behavior.http = () =>
+    new Promise((resolve) => {
+      finish = resolve
+    })
+  await f.manager.refresh(entry.vm.id)
+  await until(() => !!finish)
+  await f.manager.browserManager.acquire(entry.vm.id, { purpose: 'oauth', interactive: true })
+  finish({ summary: { balance: '999' }, cookies: [{ name: 'bad', value: 'late' }] })
+  await f.settle()
+  assert.equal(f.repo.getOrg('org-test').balance, '12.5')
+  assert.deepEqual(f.profiles.get(entry.vm.id).storage_state, before.storage_state)
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'error')
+})
+
+test('setting the interval to zero lets in-flight HTTP finish and drops queued background work without changing its state', async (t) => {
+  const f = fixture(t)
+  const a = f.add()
+  const b = f.add('vm-b', 'account-b')
+  f.installKey(a)
+  f.installKey(b)
+  f.repo.upsertAccount(b.accountId, {
+    organization_id: 'org-second',
+    setup_status: 'error',
+    last_error: 'previous Billing error',
+  })
+  f.repo.upsertOrg('org-test', { balance: '1' })
+  f.repo.upsertOrg('org-second', { balance: '7', balance_error: 'previous Billing error' })
+  f.cacheBilling(a)
+  f.cacheBilling(b)
+  let finish
+  f.behavior.http = () =>
+    new Promise((resolve) => {
+      finish = resolve
+    })
+  f.manager.enqueue(f.credits.accountForVm(a.vm.id), 'balance', false)
+  f.manager.enqueue(f.credits.accountForVm(b.vm.id), 'balance', false)
+  await until(() => !!finish)
+  assert.equal(f.repo.getAccount(b.accountId).setup_status, 'error')
+  f.routing.openai_api.balance_refresh_interval_minutes = 0
+  finish({ summary: { balance: '2' }, cookies: [] })
+  await f.settle()
+  assert.equal(f.calls.http.length, 1)
+  assert.equal(f.calls.sessions.length, 0)
+  assert.equal(f.repo.getOrg('org-test').balance, '2')
+  assert.equal(f.repo.getAccount(a.accountId).setup_status, 'ready')
+  assert.equal(f.repo.getAccount(b.accountId).setup_status, 'error')
+  assert.equal(f.repo.getAccount(b.accountId).last_error, 'previous Billing error')
+  assert.equal(f.repo.getOrg('org-second').balance, '7')
+  assert.equal(f.repo.getOrg('org-second').balance_error, 'previous Billing error')
+})
+
+test('setting the interval to zero during HTTP prevents a later 401 from starting browser recovery', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  const block = '9999-12-31T23:59:59.999Z'
+  f.store.setKeyCooldown(key.id, block)
+  f.repo.upsertAccount(entry.accountId, { last_error: 'upstream quota blocked' })
+  const checkedAt = '2026-01-01T00:00:00Z'
+  f.repo.upsertOrg('org-test', { balance: '-0.5', balance_checked_at: checkedAt })
+  const profile = f.cacheBilling(entry)
+  let rejectHttp
+  f.behavior.http = () =>
+    new Promise((_resolve, reject) => {
+      rejectHttp = reject
+    })
+  f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'balance', false)
+  await until(() => !!rejectHttp)
+  f.routing.openai_api.balance_refresh_interval_minutes = 0
+  rejectHttp(Object.assign(new Error('expired Billing session'), { code: 'platform_login_required' }))
+  await f.settle()
+  assert.equal(f.calls.http.length, 1)
+  assert.equal(f.calls.sessions.length, 0)
+  assert.equal(f.repo.getOrg('org-test').balance, '-0.5')
+  assert.equal(f.repo.getOrg('org-test').balance_checked_at, checkedAt)
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'needs_login')
+  assert.match(f.repo.getAccount(entry.accountId).last_error, /expired Billing session/)
+  assert.equal(f.repo.getAccount(entry.accountId).enabled, true)
+  assert.equal(f.repo.getKey(key.id).cooldown_until, block)
+  assert.equal(f.repo.getKey(key.id).disabled, false)
+  assert.deepEqual(f.profiles.get(entry.vm.id).billing_session, profile.billing_session)
+  assert.deepEqual(f.profiles.get(entry.vm.id).storage_state, profile.storage_state)
+})
+
+test('background work waiting for a manual browser does not request HTTP or recover a missing session after zero is saved', async (t) => {
+  const f = fixture(t)
+  const a = f.add()
+  const b = f.add('vm-b', 'account-b')
+  f.installKey(a)
+  await f.manager.browserManager.acquire(b.vm.id, { purpose: 'oauth', interactive: true })
+  f.manager.enqueue(f.credits.accountForVm(a.vm.id), 'balance', false)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(f.repo.getAccount(a.accountId).setup_status, 'ready')
+  f.routing.openai_api.balance_refresh_interval_minutes = 0
+  await f.manager.browserManager.close(b.vm.id)
+  await f.settle()
+  assert.equal(f.calls.http.length, 0)
+  assert.equal(f.calls.sessions.length, 1, 'only the administrator-opened browser ran')
+  assert.equal(f.profiles.get(a.vm.id), null)
+  assert.equal(f.repo.getAccount(a.accountId).setup_status, 'ready')
 })

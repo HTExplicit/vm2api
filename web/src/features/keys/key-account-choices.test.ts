@@ -17,30 +17,28 @@ const account = (id: string, balance: string | null): Vm => ({
 })
 
 describe('OpenAI API key account choices', () => {
-  it('shows only funded new choices and keeps selected old choices removable', () => {
+  it('shows configured keys at any balance and keeps selected accounts without a key removable', () => {
     const vms = [
       account('positive', '1.2'),
       account('zero', '0'),
       account('negative', '-0.1'),
       account('unknown', null),
+      {
+        ...account('missing', '10'),
+        openai_api: { ...account('missing', '10').openai_api!, has_key: false },
+      },
     ]
     expect(openaiApiAccountChoices(vms).map((vm) => vm.id)).toEqual([
       'positive',
+      'zero',
+      'negative',
+      'unknown',
     ])
     expect(
-      openaiApiAccountChoices(
-        vms,
-        ['zero', 'unknown'],
-        ['zero', 'unknown']
-      ).map((vm) => vm.id)
-    ).toEqual(['positive', 'zero', 'unknown'])
+      openaiApiAccountChoices(vms, ['missing'], ['missing']).map((vm) => vm.id)
+    ).toEqual(['positive', 'zero', 'negative', 'unknown', 'missing'])
     expect(
-      openaiApiAccountChoices(vms, ['zero', 'unknown'], ['unknown']).map(
-        (vm) => vm.id
-      )
-    ).toEqual(['positive', 'unknown'])
-    expect(
-      openaiApiAccountChoices(vms, [], ['zero']).map((vm) => vm.id)
-    ).toEqual(['positive'])
+      openaiApiAccountChoices(vms, ['missing'], []).map((vm) => vm.id)
+    ).toEqual(['positive', 'zero', 'negative', 'unknown'])
   })
 })

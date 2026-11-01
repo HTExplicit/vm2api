@@ -93,6 +93,7 @@ import {
 import { PERSONA_STANDING_MAX } from '../identity/crs-persona.mjs'
 import { MESSAGES_BREAKPOINT_MODES } from '../protocol/cache-ttl.mjs'
 import { normalizeCodexRouting, normalizeInferenceWebsocket } from '../protocol/codex-route.mjs'
+import { normalizeOpenaiApiConfig } from '../openai-api/config.mjs'
 import { effectiveOpenAIPolicy, normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import { openAIRuntimeSignals } from '../pool/openai-account-runtime.mjs'
 import { normalizeVmConfig, memoryMiB } from '../vm/machine-spec.mjs'
@@ -1494,6 +1495,7 @@ export function buildRouting({ routingConfig, stickyRouter }) {
     inference: presentInference(routingConfig?.inference),
     websocket: normalizeInferenceWebsocket(routingConfig?.websocket),
     codex: normalizeCodexRouting(routingConfig?.codex),
+    openai_api: normalizeOpenaiApiConfig(routingConfig?.openai_api),
     official_cc: normalizeOfficialCcConfig(routingConfig?.official_cc),
     health_probe: normalizeHealthProbeConfig(routingConfig?.health_probe),
     usage_probe: normalizeUsageProbeConfig(routingConfig?.usage_probe),

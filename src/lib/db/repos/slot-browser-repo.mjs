@@ -6,6 +6,7 @@ const FIELDS = {
   account_id: 'account_id',
   fingerprint: 'fingerprint_json',
   storage_state: 'storage_state_enc',
+  billing_session: 'billing_session_enc',
 }
 
 function profile(row) {
@@ -15,6 +16,7 @@ function profile(row) {
     account_id: row.account_id,
     fingerprint: row.fingerprint_json == null ? null : JSON.parse(row.fingerprint_json),
     storage_state: row.storage_state_enc == null ? null : JSON.parse(maybeDecrypt(row.storage_state_enc)),
+    billing_session: row.billing_session_enc == null ? null : JSON.parse(maybeDecrypt(row.billing_session_enc)),
     created_at: row.created_at,
     updated_at: row.updated_at,
   }
@@ -49,12 +51,18 @@ export class SlotBrowserRepo {
 
   upsert(vmId, patch = {}) {
     if (!vmId) throw new Error('vm_id is required')
+    if (Object.hasOwn(patch, 'account_id') && patch.account_id !== undefined) {
+      const previous = this._get.get(vmId)
+      if (previous?.account_id && previous.account_id !== patch.account_id)
+        patch = { ...patch, storage_state: null, billing_session: null }
+    }
     const entries = Object.keys(FIELDS)
       .filter((key) => Object.hasOwn(patch, key) && patch[key] !== undefined)
       .map((key) => {
         let value = patch[key]
         if (key === 'fingerprint') value = value == null ? null : JSON.stringify(value)
-        if (key === 'storage_state') value = value == null ? null : maybeEncrypt(JSON.stringify(value))
+        if (key === 'storage_state' || key === 'billing_session')
+          value = value == null ? null : maybeEncrypt(JSON.stringify(value))
         return [FIELDS[key], value]
       })
     const stamp = new Date().toISOString()

@@ -6,6 +6,8 @@ export function openaiApiCreditDetailRows(
   state?: OpenaiApiView | null
 ): Array<[string, string]> {
   const rows: Array<[string, string]> = []
+  if (state?.balance_refresh_interval_minutes === 0)
+    rows.push(['余额刷新', '仅手动刷新'])
   if (state?.paid_balance != null)
     rows.push(['购买余额', `$${trimDecimalZeros(state.paid_balance)}`])
   if (state?.next_expiring_amount != null && state.next_expiring_at) {

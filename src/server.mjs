@@ -350,6 +350,7 @@ openaiApiManager = new OpenaiApiManager({
   credits: openaiApiCredits,
   apiEndpointStore,
   apiScheduler,
+  getRouting: () => routingConfig,
 })
 const codexBrowserLogin = new CodexBrowserLoginService({
   browserManager: slotBrowserManager,

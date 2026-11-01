@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createDatabase } from '../../src/lib/db/database.mjs'
+import { createDatabase, vacuumInto } from '../../src/lib/db/database.mjs'
 import { SlotBrowserRepo } from '../../src/lib/db/repos/slot-browser-repo.mjs'
 import { OpenaiApiRepo } from '../../src/lib/db/repos/openai-api-repo.mjs'
 import { VmsRepo } from '../../src/lib/db/repos/vms-repo.mjs'
@@ -51,6 +51,92 @@ test('slot profiles retain independent fixed identities and encrypt shared web s
   assert.equal(restored.remove('slot-a'), false)
   assert.equal(restored.get('slot-a'), null)
   assert.deepEqual(restored.get('slot-b').fingerprint, fpB)
+})
+
+test('Billing session is encrypted and survives database restart and the existing snapshot path', (t) => {
+  const { directory, db } = fixture(t)
+  const repo = new SlotBrowserRepo(db)
+  const billing = {
+    organization_id: 'org-a',
+    headers: { authorization: 'Bearer billing-secret', 'user-agent': 'fixed-slot-ua' },
+    captured_at: '2026-11-01T00:00:00Z',
+    recovery_attempted: false,
+  }
+  repo.upsert('slot-a', { account_id: 'account-a', billing_session: billing })
+  const raw = db.prepare('SELECT billing_session_enc FROM slot_browser_profiles WHERE vm_id = ?').get('slot-a')
+  assert.match(raw.billing_session_enc, /^enc:v1:/)
+  assert.equal(raw.billing_session_enc.includes('billing-secret'), false)
+  assert.deepEqual(repo.get('slot-a').billing_session, billing)
+
+  const reopened = createDatabase({ dataDir: directory })
+  try {
+    assert.deepEqual(new SlotBrowserRepo(reopened).get('slot-a').billing_session, billing)
+  } finally {
+    reopened.close()
+  }
+  const snapshot = path.join(directory, 'snapshot', 'kin.db')
+  vacuumInto(db, snapshot)
+  const restored = createDatabase({ dbPath: snapshot })
+  try {
+    assert.deepEqual(new SlotBrowserRepo(restored).get('slot-a').billing_session, billing)
+  } finally {
+    restored.close()
+  }
+  assert.equal(repo.remove('slot-a'), true)
+  assert.equal(repo.get('slot-a'), null)
+})
+
+test('first account binding retains web and Billing sessions while replacing an account clears both', (t) => {
+  const { db } = fixture(t)
+  const repo = new SlotBrowserRepo(db)
+  const fingerprint = { identity: 'fixed-random-slot' }
+  const storage = { cookies: [{ name: 'session', value: 'web-secret' }], origins: [] }
+  const billing = { organization_id: 'org-a', headers: { authorization: 'Bearer billing-secret' } }
+  repo.upsert('slot-a', { fingerprint, storage_state: storage, billing_session: billing })
+  repo.upsert('slot-a', { account_id: 'account-a' })
+  assert.deepEqual(repo.get('slot-a').storage_state, storage)
+  assert.deepEqual(repo.get('slot-a').billing_session, billing)
+  repo.upsert('slot-a', { account_id: 'account-a', billing_session: undefined })
+  assert.deepEqual(repo.get('slot-a').billing_session, billing)
+  repo.upsert('slot-a', { account_id: 'account-b' })
+  assert.deepEqual(repo.get('slot-a').fingerprint, fingerprint)
+  assert.equal(repo.get('slot-a').storage_state, null)
+  assert.equal(repo.get('slot-a').billing_session, null)
+  assert.equal(repo.get('slot-a').account_id, 'account-b')
+  repo.upsert('slot-a', { billing_session: billing })
+  repo.upsert('slot-a', { billing_session: null })
+  assert.equal(repo.get('slot-a').billing_session, null)
+})
+
+test('Billing migration adds an empty credential field while preserving an existing slot profile', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-billing-migration-'))
+  const oldMigrations = path.join(directory, 'pre050')
+  fs.mkdirSync(oldMigrations)
+  for (const name of fs.readdirSync(migrations)) {
+    if (Number(name.split('_')[0]) <= 49) fs.copyFileSync(path.join(migrations, name), path.join(oldMigrations, name))
+  }
+  let db = createDatabase({ dataDir: directory, migrationsDir: oldMigrations })
+  t.after(() => {
+    db.close()
+    assert.ok(path.resolve(directory).startsWith(path.resolve(os.tmpdir()) + path.sep))
+    fs.rmSync(directory, { recursive: true, force: true })
+  })
+  db.prepare(`INSERT INTO slot_browser_profiles
+    (vm_id, account_id, fingerprint_json, storage_state_enc, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'created', 'updated')`).run(
+    'slot-a',
+    'account-a',
+    JSON.stringify({ identity: 'fixed-slot' }),
+    maybeEncrypt(JSON.stringify({ cookies: [] })),
+  )
+  db.close()
+  db = createDatabase({ dataDir: directory })
+  const profile = new SlotBrowserRepo(db).get('slot-a')
+  assert.equal(profile.account_id, 'account-a')
+  assert.deepEqual(profile.fingerprint, { identity: 'fixed-slot' })
+  assert.deepEqual(profile.storage_state, { cookies: [] })
+  assert.equal(profile.billing_session, null)
+  assert.equal(profile.created_at, 'created')
 })
 
 test('migration moves legacy encrypted storage only to its verified registered slot', (t) => {
