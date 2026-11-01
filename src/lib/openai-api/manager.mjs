@@ -251,7 +251,6 @@ export class OpenaiApiManager {
       context: browser.context,
       email: context.account.email,
       organizationId: context.record?.organization_id,
-      projectId: context.record?.organization_id ? this.repo.getOrg(context.record.organization_id)?.project_id : null,
     })
     live.adapter = adapter
     await browser.page.goto('https://platform.openai.com/settings/organization/general', {
@@ -283,7 +282,6 @@ export class OpenaiApiManager {
     if (existingKey && (existingKey.source_vm_id !== job.vmId || existingKey.source_account_id !== job.accountId))
       throw problem('api_key_account_mismatch', '已保存的 API key 与当前账号不匹配', 409)
     if (!existingKey) {
-      const org = this.repo.getOrg(organizationId)
       const keyName = 'vm2api-' + crypto.createHash('sha256').update(job.accountId).digest('hex').slice(0, 12)
       const saveKey = async (created) => {
         this.assertCurrent(job)
@@ -304,7 +302,7 @@ export class OpenaiApiManager {
         this.repo.upsertAccount(job.accountId, { organization_id: organizationId, key_id: key.id, enabled: true })
         this.reload()
       }
-      const created = await adapter.configure({ organizationId, projectId: org?.project_id, keyName, onKey: saveKey })
+      const created = await adapter.configure({ organizationId, keyName, onKey: saveKey })
       if (!this.repo.getAccount(job.accountId).key_id && created?.apiKey) await saveKey(created)
     }
     record = this.repo.getAccount(job.accountId)
