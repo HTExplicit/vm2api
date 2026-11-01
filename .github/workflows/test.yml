@@ -84,6 +84,13 @@ jobs:
             test/unit/key-scope.test.mjs \
             test/unit/api-backend.test.mjs \
             test/unit/codex-convert.test.mjs \
+            test/unit/codex-image-tool.test.mjs \
+            test/unit/codex-model-mapping.test.mjs \
+            test/unit/gpt-model-policy.test.mjs \
+            test/unit/image-tool-models.test.mjs \
+            test/unit/models.test.mjs \
+            test/unit/pricing.test.mjs \
+            test/unit/slot-model-gate.test.mjs \
             test/unit/api-completions-stream.test.mjs \
             test/unit/openai-subscription.test.mjs \
             test/unit/openai-quota.test.mjs \
@@ -102,6 +109,8 @@ jobs:
             test/unit/vm-package.test.mjs; do
             node --test "$file"
           done
+      - name: OAuth exchange uses the VM egress
+        run: node --test --test-name-pattern='^OAuth exchange reuses VM egress without a host-side proxy hop$' test/e2e/panel-api.e2e.test.mjs
       - name: synthetic billing benchmark
         shell: bash
         run: |
@@ -121,6 +130,7 @@ jobs:
           pnpm exec vitest run src/config/repo.test.ts src/features/settings/about-pane.test.ts
           pnpm exec vitest run src/lib/vm-status.test.ts -t 'GPT plan label follows OpenAI plan_type'
           pnpm exec vitest run src/features/vm/usage-windows.test.tsx src/features/vm/vm-rack-model.test.ts
+          pnpm exec vitest run src/features/models/model-mapping.test.ts src/features/models/policy.test.ts
           pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx
           pnpm build
       - name: Platform configuration retry UI

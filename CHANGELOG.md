@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.4.3201 — 2026-11-01
+
+- 合入官方 1.4.032（6ff6efd2）：GPT 模型支持按 priority 档位公开 `<model>-fast` 别名，默认关闭，普通模型调用不改变档位；保留账号 API 独立目录与 Responses/Lite 原生工具。
+- 新增默认启用的 `gpt-image-2` 及 `gpt-image-2-2026-04-21` 快照，覆盖目录、Images、Responses 图像工具、计费和槽位白名单。
+- OAuth 换票及 bootstrap 全程走目标 VM 绑定出口，不在控制面重复 bootstrap；保留 fork 认证、凭据与代理绑定行为。
+- Codex 内核更新至官方 `afdb433e` 构建，修复大图像 WebSocket 帧及 SSE 增量解码；Claude 内核和 CLI 固定值不变。
+
+使用正常面板升级，保存最新状态并核对实际运行 Codex 内核与 payload SHA256。无数据库迁移，不覆盖配置、凭据、身份、启停或调度意图；第三方应用计费拒绝仍不缓存提示词或封设备。
+
 ## 1.4.3105 — 2026-11-01
 
 - 修复密钥编辑时夹带已删除账号槽位 ID，导致重新勾选账号后保存报“所选 VM 不存在”的问题；提交时按当前槽位列表移除失效项。
@@ -150,6 +159,15 @@ Platform 首次连接需要管理员完成对应账号登录。领取通道已�
 - deploy/payload.json 的上游固定版本与校验值保持不变；许可证与上游归属保留。
 
 已部署机升级：更新控制面镜像并重启。保留 .env、routing.json、vms/、data/ 和槽位身份。首轮未发布 ARM64 控制面镜像。
+## 1.4.032 — 2026-11-01
+
+- OpenAI GPT 模型页支持按上游 `priority` 档位公开 `<model>-fast` 别名；调度前还原基模型并发送 `service_tier: "priority"`。
+- Codex Image 增加 `gpt-image-2` 及 `gpt-image-2-2026-04-21` 快照，覆盖模型目录、Images 端点、Responses 图像工具、计费和槽位白名单。
+- Codex kernel 对齐 `codex-proxy-rs`：支持大图像 WebSocket 帧，并用增量字节 SSE 解码器处理拆分 UTF-8、LF/CRLF 和大流。
+- OAuth 换票与 bootstrap 全程沿用目标 VM 绑定出口。
+
+已部署机升级：更新 Node 控制面与 `web/dist` 后重启；本版包含 Codex kernel payload 更新，不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
 ## 1.4.031 — 2026-11-01
 
 - #841：设置 → 配额直接显示并管理「请求体上限」（`failover.max_request_mib`，8–128 MiB）。账号池「重试与切号」不再包含这项。保存后的生效方式不变：各槽 kernel 在没有请求时重启。
