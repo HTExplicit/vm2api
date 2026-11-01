@@ -7,9 +7,17 @@
 - 合入官方 1.4.029–1.4.031（9ec89afb）：强制工具调用按模型能力明确报错；修复 OAuth 健康状态读取，调整 HTTP 长连接超时，并清理重复 auto mode 提醒。
 - 官方 Claude Code 家族仅在 `official_cc_passthrough=true` 时保留入站 system；关闭时统一按现有 persona 配置清洗。请求体上限入口移至设置 → 配额，已有数值不变。
 - 本 fork 对第三方应用计费拒绝保留独立处理：指定 HTTP 400/503 返回 400 `quota_error` / `entitlement_required`，停止本次换号与修复重试，不缓存提示词或封设备；内容政策拒答仍沿用官方缓存及错误码修复。
-- 新建 OpenAI API key 使用当前组织的官方 Default project，不再创建或优先使用 vm2api 项目；已有 key 不重建、不迁移项目。
+- 保留 1.4.2815 的 Default project 配置、账号 API 独立分流和四种协议输出；已有 key 不重建、不迁移项目，OpenAI API 账号不套用 Claude 专属工具或 persona 规则。
 
 升级使用正常面板流程。保留配置、数据、凭据、代理、启停与调度意图；无迁移，槽位 payload 与固定 CLI 不变，无需额外执行 `wrap-cli/sync`。下方 1.4.029–1.4.031 为上游原始记录，计费拒绝以本条 fork 行为为准。
+
+## 1.4.2815 — 2026-11-01
+
+- 修复 `OpenAI(apikey)` 在统一推理入口被 OAuth 分组校验拒绝、GPT 模型被提前送入 Codex 的问题；请求使用所选账号的 API key、当前代理和限定模型目录。
+- 账号 API 模型不再套用 OAuth 模型映射，并支持官方目录中的 `o` 系列模型。
+- 修正 OpenAI API 非流式响应的协议转换及 Completions 流式输出，保留实际文本、用量和 API key 计费身份。
+
+使用正常面板升级，已保存的账号 key、余额、独立开关与 OAuth 调度意图保持不变。
 
 ## 1.4.2814 — 2026-11-01
 
