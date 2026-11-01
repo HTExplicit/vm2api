@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type { ApiKeyItem, VmPool } from '@/types/panel-keys'
 import type { Vm } from '@/types/panel-vm'
-import { trimDecimalZeros } from '@/lib/decimal-display'
+import { formatBalanceAmount } from '@/lib/decimal-display'
 import { isCodexVm } from '@/lib/vm-kind'
 import { Button } from '@/components/ui/button'
 import {
@@ -377,7 +377,7 @@ export function KeyLimitsDialog({
                             </span>
                             <span className='block text-xs text-muted-foreground'>
                               {vm.openai_api?.balance != null
-                                ? `API $${trimDecimalZeros(vm.openai_api.balance)}`
+                                ? `API $${formatBalanceAmount(vm.openai_api.balance)}`
                                 : 'API 余额未知'}
                               {isOpenaiApiBalancePending(vm.openai_api)
                                 ? ' · 待刷新'

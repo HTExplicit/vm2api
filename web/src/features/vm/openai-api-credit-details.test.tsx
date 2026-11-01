@@ -16,7 +16,7 @@ const state: OpenaiApiView = {
 }
 
 describe('organization API balance details', () => {
-  it('keeps precise purchased and expiring balances without fabricating unknown values', () => {
+  it('truncates displayed purchased and expiring balances without fabricating unknown values', () => {
     expect(openaiApiCreditDetailRows(state)).toEqual([])
     const html = renderToStaticMarkup(
       <OpenaiApiCreditDetails
@@ -31,7 +31,8 @@ describe('organization API balance details', () => {
     expect(html).toContain('购买余额')
     expect(html).toContain('$0')
     expect(html).toContain('最近到期额度')
-    expect(html).toContain('$12.3400000000000000001')
+    expect(html).toContain('$12.34')
+    expect(html).not.toContain('12.3400000000000000001')
     expect(html).toContain(new Date('2026-11-12T03:36:08Z').toLocaleString())
     expect(html).not.toContain('0.000')
   })

@@ -558,7 +558,7 @@ Platform 自动配置推送 `configuring`，此时禁用重复操作；创建 ke
 
 POST `/setup` 继续 Platform 登录并在当前组织已有的 Default project 内创建账号 key，有效期选择官方 `Never`；已有 key 直接复用，不新建项目。POST `/refresh` 刷新发放或组织总余额；PATCH `/enabled` 接收 `{ enabled: boolean }`，独立于 OAuth 启停、调度及登录会话。POST `/resume` 仅解除当前账号 key 的上游额度／配额阻断，不打开 API 开关、不重新启用无效 key、不发送模型请求；`quota_blocked` 返回该阻断状态。账号行 `openai_api` 返回领取、配置、key 尾号、组织余额及更新时间，不返回 secret、指纹或登录会话。
 
-组织余额来自官方 Billing `credit_grants` JSON 的 `total_available`，购买余额来自 `total_paid_available`；不由逐笔额度推导总余额。`paid_balance/grants/next_expiring_amount/next_expiring_at` 补充购买余额及最近到期额度，金额以十进制字符串保存并去尾零，未知保持空值，负余额照实返回。`offer_checked_at/link_checked_at/balance_checked_at` 分别记录资格、关联和余额观测时间；`offer_stale` 提示资格待重查，余额刷新不更新领取资格。
+组织余额来自官方 Billing `credit_grants` JSON 的 `total_available`，购买余额来自 `total_paid_available`；不由逐笔额度推导总余额。`paid_balance/grants/next_expiring_amount/next_expiring_at` 补充购买余额及最近到期额度，金额以十进制字符串保存并去尾零，未知保持空值，负余额照实返回。面板中的点数余额及 API 金额最多显示两位小数，直接截断、不进位并去尾零，截断后的负零显示为 0；接口和后台原值精度不变。`offer_checked_at/link_checked_at/balance_checked_at` 分别记录资格、关联和余额观测时间；`offer_stale` 提示资格待重查，余额刷新不更新领取资格。
 
 已启用且配置 key 的账号按全局间隔经当前绑定代理刷新组织余额，同组织共用一次成功样本。`GET/PUT /api/panel/routing` 的 `openai_api.balance_refresh_interval_minutes` 默认为 10，支持整数 1–1440，0 表示仅手动；保存后下一次后台扫描热生效。失败重试使用当前间隔，手动刷新不受间隔限制；设置为 0 后未发送的后台任务停止，已发送的请求可完成。账号 view 返回有效 `balance_refresh_interval_minutes`，面板据此判断待刷新，0 显示“仅手动刷新”。
 
