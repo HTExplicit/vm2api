@@ -66,6 +66,7 @@ export function SlotBrowserDialog({
   } | null>(null)
   const lastMoveAt = useRef(0)
   const inputSeq = useRef(0)
+  const retrying = useRef(false)
   const callbacks = useRef({ onOpenChange, onComplete })
   callbacks.current = { onOpenChange, onComplete }
   const lifecycle = useRef({ vmId: '', epoch: 0 })
@@ -88,6 +89,17 @@ export function SlotBrowserDialog({
   const [quality, setQuality] = useState<BrowserQuality>('smooth')
   const [switching, setSwitching] = useState(false)
   const base = `/api/panel/vms/${encodeURIComponent(vmId)}/browser`
+  const platformBusy =
+    switching ||
+    ['queued', 'starting', 'opening', 'configuring'].includes(status)
+  const platformActionLabel =
+    status === 'api_ready'
+      ? 'API 配置已完成'
+      : platformBusy
+        ? '正在配置…'
+        : status === 'error'
+          ? '重试配置'
+          : '登录完成，继续配置'
 
   useEffect(() => {
     const element = viewport.current
@@ -119,6 +131,8 @@ export function SlotBrowserDialog({
   useEffect(() => {
     const epoch = lifecycle.current.epoch + 1
     lifecycle.current = { vmId: open ? vmId : '', epoch }
+    retrying.current = false
+    setSwitching(false)
     if (!open) {
       opened.current = ''
       opening.current = null
@@ -275,6 +289,38 @@ export function SlotBrowserDialog({
       socket.current.send(
         JSON.stringify({ ...payload, seq: ++inputSeq.current })
       )
+    }
+  }
+
+  const retryPlatformSetup = async () => {
+    if (retrying.current) return
+    retrying.current = true
+    const epoch = lifecycle.current.epoch
+    setSwitching(true)
+    setError('')
+    setStatus('opening')
+    setMessage('正在重新启动 API 配置…')
+    const request = {
+      vmId,
+      promise: api(`${base}/open`, {
+        method: 'POST',
+        body: JSON.stringify({ purpose: 'platform' }),
+      }),
+    }
+    opening.current = request
+    try {
+      await request.promise
+    } catch (reason) {
+      if (opening.current === request) opening.current = null
+      if (lifecycle.current.epoch !== epoch) return
+      setStatus('error')
+      setMessage('API 配置未能启动，可在当前窗口重试。')
+      setError((reason as Error).message)
+    } finally {
+      if (lifecycle.current.epoch === epoch) {
+        retrying.current = false
+        setSwitching(false)
+      }
     }
   }
 
@@ -528,10 +574,15 @@ export function SlotBrowserDialog({
           ) : (
             <Button
               size='sm'
-              disabled={!connected || status === 'api_ready'}
-              onClick={() => send({ type: 'continue' })}
+              aria-label={platformActionLabel}
+              disabled={!connected || platformBusy || status === 'api_ready'}
+              loading={platformBusy}
+              onClick={() => {
+                if (status === 'error') void retryPlatformSetup()
+                else send({ type: 'continue' })
+              }}
             >
-              {status === 'api_ready' ? 'API 配置已完成' : '登录完成，继续配置'}
+              {platformActionLabel}
             </Button>
           )}
         </div>

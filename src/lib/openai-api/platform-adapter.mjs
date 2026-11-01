@@ -210,15 +210,15 @@ async function visibleOne(locator) {
   return visible.length === 1 ? visible[0] : null
 }
 
-async function button(scope, name, message) {
-  const locator = scope.getByRole('button', { name })
+async function button(scope, name, message, timeout = 15_000) {
+  const locator = scope.getByRole('button', { name }).filter({ visible: true })
   try {
-    await locator.first().waitFor({ state: 'visible', timeout: 15_000 })
+    await locator.first().waitFor({ state: 'visible', timeout })
   } catch {
     throw problem('platform_page_changed', message)
   }
   const found = await visibleOne(locator)
-  if (!found) throw problem('platform_page_changed', message)
+  if (!found) throw problem('platform_page_changed', '官方页面的操作入口不唯一，请核对后重试配置')
   return found
 }
 
@@ -408,6 +408,12 @@ export class PlatformAdapter {
     await this.goto(KEYS_URL)
     const name = text(keyName)
     if (!name) throw problem('platform_key_name_required', '缺少账号专用 key 名称。')
+    const create = await button(
+      this.page,
+      /^(?:create (?:new )?secret key|create (?:new )?api key|创建(?:新的)?密钥)$/i,
+      '等待官方创建 API key 入口超时，可在当前窗口重试配置',
+      30_000,
+    )
     const existing = this.page.getByRole('row').filter({ hasText: new RegExp(escaped(name)) })
     if ((await existing.count()) > 0) {
       throw problem(
@@ -415,11 +421,6 @@ export class PlatformAdapter {
         '官方已存在这个账号的专用 key，但本地没有可用 secret；请核对原配置，不会重复创建或撤销 key。',
       )
     }
-    const create = await button(
-      this.page,
-      /^(?:create (?:new )?secret key|create (?:new )?api key|创建(?:新的)?密钥)$/i,
-      '未找到官方创建 API key 入口。',
-    )
     await create.click()
     const dialogs = this.page.getByRole('dialog')
     try {

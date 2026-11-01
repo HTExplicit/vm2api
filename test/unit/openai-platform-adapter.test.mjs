@@ -387,7 +387,7 @@ test('missing or ambiguous default projects cannot trigger project creation', as
   adapter.dispose()
 })
 
-test('key configuration waits for the required page, dialog and projects before targeting unlabelled fields', async () => {
+test('key configuration waits for a delayed entry, dialog and projects before targeting unlabelled fields', async () => {
   const page = pageFixture()
   const calls = []
   const one = (value) =>
@@ -395,8 +395,12 @@ test('key configuration waits for the required page, dialog and projects before 
       count: async () => 1,
       nth: () => value,
       first: () => value,
+      filter: (options) => {
+        assert.deepEqual(options, { visible: true })
+        return value
+      },
       isVisible: async () => true,
-      waitFor: async () => {},
+      waitFor: async (options) => assert.equal(options.timeout, 15_000),
     })
   const projectButton = one({
     evaluate: async () => false,
@@ -497,13 +501,24 @@ test('key configuration waits for the required page, dialog and projects before 
   createButton.count = async () => (createReady ? 1 : 0)
   createButton.waitFor = async (options) => {
     assert.equal(options.state, 'visible')
+    if (options.timeout < 20_000) throw new Error('the cold page is still loading')
+    assert.equal(options.timeout, 30_000)
     await Promise.resolve()
     createReady = true
     calls.push(['create-ready'])
   }
   page.getByRole = (role, options) => {
     if (role === 'textbox') return { count: async () => 0 }
-    if (role === 'row') return { filter: () => ({ count: async () => 0 }) }
+    if (role === 'row')
+      return {
+        filter: () => ({
+          count: async () => {
+            assert.equal(createReady, true, 'check the existing key only after the entry is ready')
+            calls.push(['existing-ready'])
+            return 0
+          },
+        }),
+      }
     if (role === 'dialog') return dialog
     if (role === 'button') return createButton
     if (role === 'option') {
@@ -524,6 +539,7 @@ test('key configuration waits for the required page, dialog and projects before 
   assert.deepEqual(calls, [
     ['goto', 'https://platform.openai.com/api-keys'],
     ['create-ready'],
+    ['existing-ready'],
     ['open-dialog'],
     ['dialog-ready'],
     ['projects-ready'],
@@ -533,4 +549,93 @@ test('key configuration waits for the required page, dialog and projects before 
     ['submit'],
   ])
   adapter.dispose()
+})
+
+function keyEntryFixture({ visible = [true], existing = false, timeout = false } = {}) {
+  const page = pageFixture()
+  const calls = []
+  let entryReady = false
+  const entries = visible.map((shown, index) => ({
+    shown,
+    isVisible: async () => shown,
+    waitFor: async (options) => {
+      assert.equal(options.timeout, 30_000)
+      if (timeout) throw new Error('entry wait timed out')
+      assert.equal(shown, true, 'a hidden matching entry must never be awaited')
+      calls.push(['ready', index])
+      entryReady = true
+    },
+    click: async () => calls.push(['click', index]),
+  }))
+  const buttons = {
+    first: () => assert.fail('filter out hidden entries before selecting the first match'),
+    filter: (options) => {
+      assert.deepEqual(options, { visible: true })
+      const shown = entries.filter((entry) => entry.shown)
+      return { count: async () => shown.length, nth: (index) => shown[index], first: () => shown[0] }
+    },
+  }
+  page.getByRole = (role, options) => {
+    if (role === 'textbox') return { count: async () => 0 }
+    if (role === 'button') {
+      assert.equal(options.name.test('Create new secret key'), true)
+      assert.equal(options.name.test('Other Create new secret key action'), false)
+      return buttons
+    }
+    if (role === 'row')
+      return {
+        filter: () => ({
+          count: async () => {
+            assert.equal(entryReady, true)
+            calls.push(['existing'])
+            return existing ? 1 : 0
+          },
+        }),
+      }
+    if (role === 'dialog') throw new Error('fixture reached the creation dialog')
+    assert.fail(`unexpected role ${role}`)
+  }
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com', organizationId: 'org-one' })
+  adapter.identity = {
+    email: 'owner@example.com',
+    organizations: [{ id: 'org-one', name: 'Personal' }],
+    organizationId: 'org-one',
+    projects: [],
+  }
+  adapter.goto = async () => {}
+  return { adapter, calls, configure: () => adapter.configure({ keyName: 'vm2api-account' }) }
+}
+
+test('key entry ignores a hidden first match and clicks the unique visible control', async () => {
+  const f = keyEntryFixture({ visible: [false, true] })
+  await assert.rejects(f.configure(), /fixture reached the creation dialog/)
+  assert.deepEqual(f.calls, [['ready', 1], ['existing'], ['click', 1]])
+  f.adapter.dispose()
+})
+
+test('key entry rejects multiple visible controls without choosing or creating a key', async () => {
+  const f = keyEntryFixture({ visible: [true, true] })
+  await assert.rejects(f.configure(), {
+    code: 'platform_page_changed',
+    message: '官方页面的操作入口不唯一，请核对后重试配置',
+  })
+  assert.deepEqual(f.calls, [['ready', 0]])
+  f.adapter.dispose()
+})
+
+test('a remote account key discovered after entry readiness stops another creation', async () => {
+  const f = keyEntryFixture({ existing: true })
+  await assert.rejects(f.configure(), { code: 'platform_key_already_exists' })
+  assert.deepEqual(f.calls, [['ready', 0], ['existing']])
+  f.adapter.dispose()
+})
+
+test('key entry timeout explains that configuration can be retried in the current window', async () => {
+  const f = keyEntryFixture({ timeout: true })
+  await assert.rejects(f.configure(), {
+    code: 'platform_page_changed',
+    message: '等待官方创建 API key 入口超时，可在当前窗口重试配置',
+  })
+  assert.deepEqual(f.calls, [])
+  f.adapter.dispose()
 })
