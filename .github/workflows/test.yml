@@ -83,6 +83,7 @@ jobs:
             test/unit/api-endpoints.test.mjs \
             test/unit/key-scope.test.mjs \
             test/unit/api-backend.test.mjs \
+            test/unit/codex-convert.test.mjs \
             test/unit/api-completions-stream.test.mjs \
             test/unit/openai-subscription.test.mjs \
             test/unit/openai-quota.test.mjs \

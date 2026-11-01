@@ -672,7 +672,8 @@ export function assembleCodexBodyFromSse(chunks = [], fallback = {}) {
         name: item.name,
       })
       slot.type = item.type
-      slot.itemId = item.id
+      slot.itemId = item.id || event.item_id || slot.itemId
+      if (item.namespace !== undefined) slot.namespace = item.namespace
       toolDoneDeltas(slot, item.arguments ?? item.input)
     } else if (
       event.type === 'response.function_call_arguments.delta' ||
@@ -694,6 +695,7 @@ export function assembleCodexBodyFromSse(chunks = [], fallback = {}) {
   const tools = [...new Set(state.tools.values())].map((slot) => ({
     type: slot.type,
     ...(slot.itemId ? { id: slot.itemId } : {}),
+    ...(slot.namespace !== undefined ? { namespace: slot.namespace } : {}),
     call_id: slot.id,
     name: slot.name,
     [slot.type === 'custom_tool_call' ? 'input' : 'arguments']: slot.args,
