@@ -1645,28 +1645,30 @@ async function runAccountApiProtocol(inbound, protocol, options = {}) {
         status: 'completed',
         content: [{ type: 'output_text', text: 'OK' }],
       }
-      const events = [
-        {
-          type: 'response.created',
-          response: { id: 'resp_offline', model: body.model, status: 'in_progress', output: [] },
-        },
-        {
-          type: 'response.output_item.added',
-          output_index: 0,
-          item: { ...message, status: 'in_progress', content: [] },
-        },
-        { type: 'response.output_text.delta', item_id: message.id, output_index: 0, content_index: 0, delta: 'OK' },
-        {
-          type: 'response.completed',
-          response: {
-            id: 'resp_offline',
-            model: body.model,
-            status: 'completed',
-            output: [message],
-            usage: { input_tokens: 7, output_tokens: 1, total_tokens: 8 },
-          },
-        },
-      ]
+      const events = options.events
+        ? options.events(body)
+        : [
+            {
+              type: 'response.created',
+              response: { id: 'resp_offline', model: body.model, status: 'in_progress', output: [] },
+            },
+            {
+              type: 'response.output_item.added',
+              output_index: 0,
+              item: { ...message, status: 'in_progress', content: [] },
+            },
+            { type: 'response.output_text.delta', item_id: message.id, output_index: 0, content_index: 0, delta: 'OK' },
+            {
+              type: 'response.completed',
+              response: {
+                id: 'resp_offline',
+                model: body.model,
+                status: 'completed',
+                output: [message],
+                usage: { input_tokens: 7, output_tokens: 1, total_tokens: 8 },
+              },
+            },
+          ]
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       response.end(events.map((event) => 'data: ' + JSON.stringify(event) + '\n\n').join('') + 'data: [DONE]\n\n')
     })
@@ -1845,6 +1847,7 @@ for (const [protocol, route, inbound, answer] of [
       'OAuth/Claude minimum budgets must not inflate the API request',
     )
     assert.equal(JSON.stringify(run.sent[0].body).includes('MUST_NOT_BE_IN_ACCOUNT_API'), false)
+    if (protocol === 'openai.responses') assert.equal(Object.hasOwn(run.sent[0].body, 'store'), false)
     assert.equal(run.billed.length, 1)
     assert.equal(run.billed[0][0].id, 'managed-a')
     assert.equal(run.logs[0].via, 'api-kernel')
@@ -1966,3 +1969,336 @@ test('account API Completions stream reaches the same key and ends exactly once'
   assert.equal(run.logs[0].vm_id, null)
   assert.equal(run.billed.length, 1)
 })
+
+function nativeToolsRequest() {
+  return {
+    model: 'o3',
+    stream: false,
+    instructions: 'Use the supplied client tools.',
+    input: [
+      { role: 'user', content: [{ type: 'input_text', text: 'Read and patch a.txt.' }] },
+      { type: 'reasoning', id: 'rs_previous', summary: [], encrypted_content: 'opaque-reasoning' },
+      {
+        type: 'function_call',
+        id: 'fc_previous',
+        call_id: 'call_previous',
+        namespace: 'functions',
+        name: 'read_file',
+        arguments: '{"path":"a.txt"}',
+      },
+      { type: 'function_call_output', call_id: 'call_previous', output: 'file contents' },
+      {
+        type: 'custom_tool_call',
+        id: 'ct_previous',
+        call_id: 'call_patch_previous',
+        name: 'apply_patch',
+        input: '*** Begin Patch\n*** End Patch',
+      },
+      { type: 'custom_tool_call_output', call_id: 'call_patch_previous', output: 'patch applied' },
+    ],
+    tools: [
+      {
+        type: 'namespace',
+        name: 'functions',
+        description: 'Workspace tools',
+        tools: [
+          {
+            type: 'function',
+            name: 'read_file',
+            description: 'Read a file',
+            strict: true,
+            parameters: {
+              type: 'object',
+              properties: { path: { type: 'string' } },
+              required: ['path'],
+              additionalProperties: false,
+            },
+          },
+        ],
+      },
+      {
+        type: 'custom',
+        name: 'apply_patch',
+        format: { type: 'grammar', syntax: 'lark', definition: 'start: /[a-z]+/' },
+      },
+      { type: 'function', name: 'lookup', strict: false, parameters: { type: 'object', properties: {} } },
+    ],
+    tool_choice: { type: 'function', namespace: 'functions', name: 'read_file' },
+    parallel_tool_calls: false,
+    reasoning: { effort: 'high', summary: 'auto' },
+    include: ['reasoning.encrypted_content'],
+    text: { verbosity: 'low' },
+    max_output_tokens: 17,
+    temperature: 0.2,
+    top_p: 0.9,
+    store: false,
+  }
+}
+
+function nativeToolResponse() {
+  return {
+    id: 'resp_native',
+    object: 'response',
+    model: 'o3',
+    status: 'completed',
+    output: [
+      { type: 'reasoning', id: 'rs_native', summary: [], encrypted_content: 'opaque-result' },
+      {
+        type: 'function_call',
+        id: 'fc_native',
+        call_id: 'call_native',
+        namespace: 'functions',
+        name: 'read_file',
+        arguments: '{"path":"a.txt"}',
+        status: 'completed',
+      },
+      {
+        type: 'custom_tool_call',
+        id: 'ct_native',
+        call_id: 'call_patch',
+        name: 'apply_patch',
+        input: '*** Begin Patch\n*** End Patch',
+        status: 'completed',
+      },
+    ],
+    usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+    error: null,
+    incomplete_details: null,
+  }
+}
+
+test('account API native Responses preserves Codex tools, history, parameters, and before-upstream changes', async () => {
+  const inbound = nativeToolsRequest()
+  const officialResponse = nativeToolResponse()
+  const run = await runAccountApiProtocol(inbound, 'openai.responses', {
+    path: '/v1/responses',
+    events: () => [{ type: 'response.completed', response: officialResponse }],
+    intercept: [
+      {
+        phase: 'before_upstream',
+        match: { protocol: 'openai.responses' },
+        action: { set_body_field: { instructions: 'Changed by configured intercept', max_output_tokens: 19 } },
+      },
+    ],
+  })
+  assert.equal(run.response.statusCode, 200, JSON.stringify(run.response.body))
+  assert.deepEqual(run.sent[0].body, {
+    ...inbound,
+    instructions: 'Changed by configured intercept',
+    max_output_tokens: 19,
+    stream: true,
+  })
+  assert.deepEqual(run.response.body, officialResponse)
+  assert.equal(run.sent[0].proxy_url, 'socks5h://bound-current:1080')
+  assert.equal(run.logs[0].account_id, 'api-key-a')
+  assert.equal(run.logs[0].vm_id, null)
+  assert.equal(run.billed.length, 1)
+})
+
+test('account API native Responses completes a two-round function and custom tool exchange', async () => {
+  const firstRequest = nativeToolsRequest()
+  const officialResponse = nativeToolResponse()
+  const first = await runAccountApiProtocol(firstRequest, 'openai.responses', {
+    events: () => [{ type: 'response.completed', response: officialResponse }],
+  })
+  assert.equal(first.response.statusCode, 200)
+  const secondRequest = {
+    ...firstRequest,
+    tool_choice: 'auto',
+    input: [
+      ...firstRequest.input,
+      ...first.response.body.output,
+      { type: 'function_call_output', call_id: 'call_native', output: 'next file contents' },
+      { type: 'custom_tool_call_output', call_id: 'call_patch', output: 'updated a.txt' },
+    ],
+  }
+  const second = await runAccountApiProtocol(secondRequest, 'openai.responses')
+  assert.equal(second.response.statusCode, 200)
+  assert.deepEqual(second.sent[0].body.input, secondRequest.input)
+  assert.deepEqual(second.sent[0].body.tools, firstRequest.tools)
+  assert.equal(second.sent[0].body.tool_choice, 'auto')
+  assert.equal(second.billed.length, 1)
+})
+
+test('account API native Responses streams original tool events and emits DONE once', async () => {
+  const officialResponse = nativeToolResponse()
+  const events = [
+    { type: 'response.created', response: { id: officialResponse.id, status: 'in_progress', output: [] } },
+    { type: 'response.output_item.added', output_index: 0, item: officialResponse.output[1] },
+    {
+      type: 'response.custom_tool_call_input.delta',
+      item_id: 'ct_native',
+      output_index: 1,
+      delta: '*** Begin Patch\n*** End Patch',
+    },
+    { type: 'response.output_item.done', output_index: 1, item: officialResponse.output[2] },
+    { type: 'response.completed', response: officialResponse },
+  ]
+  const run = await runAccountApiProtocol({ ...nativeToolsRequest(), stream: true }, 'openai.responses', {
+    events: () => events,
+  })
+  assert.equal(run.response.statusCode, 200)
+  assert.equal(
+    run.response.wire,
+    events.map((event) => 'data: ' + JSON.stringify(event) + '\n\n').join('') + 'data: [DONE]\n\n',
+  )
+  assert.equal(run.logs[0].final_state, 'verified')
+  assert.equal(run.billed.length, 1)
+})
+
+async function runNativeResponsesFixture(events, { clientStream = false, streamError = false } = {}) {
+  const nativeResponsesBody = nativeToolsRequest()
+  const sent = []
+  let wire = ''
+  const res = {
+    headersSent: false,
+    write(chunk) {
+      wire += chunk
+    },
+  }
+  const result = await runApiInference({
+    req: {
+      apiKeyKind: 'managed',
+      apiKeyRecord: { category: 'api', group_type: 'openai_apikey', allowed_vms: ['vm-a'] },
+    },
+    res,
+    cfg: {},
+    protocol: 'openai.responses',
+    inbound: nativeResponsesBody,
+    nativeResponsesBody,
+    clientStream,
+    deliveryMode: 'realtime',
+    converters: {
+      writeSSEHeaders() {
+        res.headersSent = true
+      },
+    },
+    scheduler: {
+      pick(model) {
+        assert.equal(model, nativeResponsesBody.model)
+        return {
+          ok: true,
+          endpoint: { id: 'ep-a', kind: 'openai', protocol: 'openai', base_url: 'https://fixture.invalid' },
+          key: {
+            id: 'api-key-a',
+            api_key: 'fixture-a',
+            source_vm_id: 'vm-a',
+            source_account_id: 'account-a',
+            proxy_url: 'socks5h://bound-current:1080',
+          },
+          upstream_model: 'official-upstream-model',
+        }
+      },
+    },
+    forwardImpl: async (request) => {
+      sent.push(request)
+      return {
+        statusCode: 200,
+        headers: {},
+        async *[Symbol.asyncIterator]() {
+          for (const event of events) yield Buffer.from('data: ' + JSON.stringify(event) + '\n\n')
+          if (streamError) throw new Error('fixture stream disconnected')
+          yield Buffer.from('data: [DONE]\n\n')
+        },
+      }
+    },
+  })
+  return { result, sent, wire, headersSent: res.headersSent, nativeResponsesBody }
+}
+
+test('native Responses API replaces only endpoint model and transport stream mode', async () => {
+  const response = nativeToolResponse()
+  const run = await runNativeResponsesFixture([{ type: 'response.completed', response }])
+  assert.equal(run.result.ok, true)
+  assert.deepEqual(run.sent[0].body, { ...run.nativeResponsesBody, model: 'official-upstream-model', stream: true })
+  assert.equal(run.nativeResponsesBody.stream, false)
+  assert.equal(run.sent[0].proxyUrl, 'socks5h://bound-current:1080')
+  assert.deepEqual(run.result.nativeResponse, response)
+  assert.equal(run.result.accountId, 'api-key-a')
+})
+
+test('native Responses API repairs a missing completed-output tool with its namespace and freeform input', async () => {
+  const response = nativeToolResponse()
+  const run = await runNativeResponsesFixture([
+    { type: 'response.output_item.done', output_index: 0, item: response.output[1] },
+    { type: 'response.output_item.done', output_index: 1, item: response.output[2] },
+    { type: 'response.completed', response: { ...response, output: response.output.slice(0, 1) } },
+  ])
+  assert.equal(run.result.ok, true)
+  assert.deepEqual(
+    run.result.nativeResponse.output.map(({ status, ...item }) => item),
+    response.output.map(({ status, ...item }) => item),
+  )
+})
+
+for (const clientStream of [false, true]) {
+  test(`native Responses API requires an official completed terminal for ${clientStream ? 'streaming' : 'JSON'} clients`, async () => {
+    const response = nativeToolResponse()
+    for (const terminal of [
+      null,
+      {
+        type: 'response.incomplete',
+        response: { ...response, status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } },
+      },
+    ]) {
+      const run = await runNativeResponsesFixture(
+        [
+          { type: 'response.output_item.done', output_index: 0, item: response.output[1] },
+          ...(terminal ? [terminal] : []),
+        ],
+        { clientStream },
+      )
+      assert.equal(run.result.ok, false)
+      assert.equal(run.result.terminalState, 'incomplete')
+    }
+    const failed = await runNativeResponsesFixture(
+      [
+        {
+          type: 'response.failed',
+          response: {
+            id: response.id,
+            status: 'failed',
+            error: { code: 'server_is_overloaded', type: 'server_error', status: 503, message: 'busy' },
+          },
+        },
+      ],
+      { clientStream },
+    )
+    assert.equal(failed.result.ok, false)
+    assert.equal(failed.result.status, 503)
+    assert.equal(failed.result.body.error.upstream_code, 'server_is_overloaded')
+    assert.equal(failed.headersSent, false)
+    const lateFailure = await runNativeResponsesFixture(
+      [
+        { type: 'response.output_text.delta', delta: 'partial' },
+        {
+          type: 'response.failed',
+          response: { status: 'failed', error: { code: 'server_is_overloaded', status: 503, message: 'busy' } },
+        },
+      ],
+      { clientStream },
+    )
+    assert.equal(lateFailure.result.ok, false)
+    assert.equal(lateFailure.result.status, 503)
+    assert.equal(lateFailure.result.terminalState, 'incomplete')
+  })
+
+  test(`native Responses API reports interrupted ${clientStream ? 'streaming' : 'JSON'} output without success`, async () => {
+    const run = await runNativeResponsesFixture([{ type: 'response.output_text.delta', delta: 'partial' }], {
+      clientStream,
+      streamError: true,
+    })
+    assert.equal(run.result.ok, false)
+    assert.equal(run.result.status, 502)
+    assert.equal(run.result.body.error.code, 'upstream_stream_interrupted')
+    assert.equal(run.result.terminalState, 'incomplete')
+    const beforeOutput = await runNativeResponsesFixture(
+      [{ type: 'response.created', response: { id: 'resp_interrupted', status: 'in_progress', output: [] } }],
+      { clientStream, streamError: true },
+    )
+    assert.equal(beforeOutput.result.ok, false)
+    assert.equal(beforeOutput.result.status, 502)
+    assert.equal(beforeOutput.result.committed, false)
+    assert.equal(beforeOutput.headersSent, false)
+  })
+}

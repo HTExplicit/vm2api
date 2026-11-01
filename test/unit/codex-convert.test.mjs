@@ -454,3 +454,86 @@ test('completed snapshots recover unregistered function and custom calls in ever
   }
   assert.equal(frames.find((frame) => frame.type === 'message_delta').delta.stop_reason, 'tool_use')
 })
+
+test('Responses assembly preserves parallel namespaced function and custom calls from incremental events', () => {
+  const output = [
+    {
+      type: 'function_call',
+      id: 'fc_exec',
+      call_id: 'call_exec',
+      namespace: 'functions',
+      name: 'exec_command',
+      arguments: '{"cmd":"echo 你好"}',
+    },
+    {
+      type: 'custom_tool_call',
+      id: 'ct_patch',
+      call_id: 'call_patch',
+      namespace: 'functions',
+      name: 'apply_patch',
+      input: '*** Begin Patch\n*** End Patch',
+    },
+  ]
+  const events = [
+    ...output.map((item, output_index) => ({
+      type: 'response.output_item.added',
+      output_index,
+      item: { ...item, [item.type === 'custom_tool_call' ? 'input' : 'arguments']: '' },
+    })),
+    {
+      type: 'response.function_call_arguments.delta',
+      output_index: 0,
+      item_id: 'fc_exec',
+      delta: '{"cmd":',
+    },
+    {
+      type: 'response.custom_tool_call_input.delta',
+      output_index: 1,
+      item_id: 'ct_patch',
+      delta: '*** Begin Patch\n',
+    },
+    {
+      type: 'response.function_call_arguments.done',
+      output_index: 0,
+      item_id: 'fc_exec',
+      arguments: output[0].arguments,
+    },
+    {
+      type: 'response.output_item.done',
+      output_index: 1,
+      item_id: 'ct_patch',
+      item: { type: 'custom_tool_call', call_id: 'call_patch', name: 'apply_patch', input: output[1].input },
+    },
+    { type: 'response.completed', response: { id: 'resp_tools', usage: { input_tokens: 11, output_tokens: 7 } } },
+  ]
+  const assembled = assembleCodexBodyFromSse(events.map((event) => `data: ${JSON.stringify(event)}`))
+  assert.deepEqual(assembled.output, output)
+  assert.deepEqual(assembled.usage, { input_tokens: 11, output_tokens: 7 })
+})
+
+test('Responses assembly keeps completed tool snapshots authoritative over incremental metadata', () => {
+  const item = {
+    type: 'custom_tool_call',
+    id: 'ct_final',
+    call_id: 'call_patch',
+    namespace: 'functions',
+    name: 'apply_patch',
+    input: '*** Begin Patch\n*** End Patch',
+    status: 'completed',
+  }
+  const events = [
+    {
+      type: 'response.output_item.added',
+      output_index: 0,
+      item: { ...item, id: 'ct_initial', namespace: 'initial', input: '', status: 'in_progress' },
+    },
+    {
+      type: 'response.custom_tool_call_input.delta',
+      item_id: 'ct_initial',
+      delta: '*** Begin Patch\n',
+    },
+    { type: 'response.completed', response: { id: 'resp_final', output: [item] } },
+  ]
+  const assembled = assembleCodexBodyFromSse(events.map((event) => `data: ${JSON.stringify(event)}`))
+  assert.deepEqual(assembled.output, [item])
+})

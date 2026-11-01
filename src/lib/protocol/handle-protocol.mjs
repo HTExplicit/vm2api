@@ -549,6 +549,7 @@ export function createHandleProtocol(deps) {
     logBag,
     logCtx,
     converted,
+    nativeResponsesBody = null,
     personaHideTokens = false,
     requestContext = null,
   }) {
@@ -596,6 +597,7 @@ export function createHandleProtocol(deps) {
         protocol,
         inbound,
         convertedBody: ctx.body,
+        nativeResponsesBody,
         clientStream,
         deliveryMode,
         signal: clientAbort.signal,
@@ -655,13 +657,15 @@ export function createHandleProtocol(deps) {
       if (result?.ok && !result.downstreamDone && protocol !== 'anthropic.messages') res.write('data: [DONE]\n\n')
       return res.end()
     }
-    if (!result?.ok || isIncompleteAssistantMessage(result)) {
+    const nativeResponse = protocol === 'openai.responses' ? result?.nativeResponse : null
+    if (!result?.ok || (!nativeResponse && isIncompleteAssistantMessage(result))) {
       if (isClientCancelledResult(result)) return finishClientCancel(res, result, logBag)
       const failed = isIncompleteAssistantMessage(result) ? incompleteAssistantClientError(result) : result
       const mapped = mapProtocolClientError(failed, logBag, failed?.body?.error?.code || 'upstream_error')
       stats.errors++
       return sendMapped(res, mapped)
     }
+    if (nativeResponse) return json(res, 200, nativeResponse)
     let output
     const clientBody = hidePersonaUsageOnMessage(result.body, personaHideTokens)
     if (protocol === 'anthropic.messages') output = clientBody
@@ -1044,6 +1048,28 @@ export function createHandleProtocol(deps) {
       }
       want1m = want1m || !!modelCheck.want1m
       ctx.body = { ...ctx.body, model: modelCheck.model }
+    }
+
+    if (accountApiBackend && protocol === 'openai.responses') {
+      // Codex tools and their call history are native Responses structures.
+      // A Messages round trip loses namespaces, custom tools, and call IDs.
+      stats.requests++
+      stats.by_route[protocol] = (stats.by_route[protocol] || 0) + 1
+      stats.passthrough++
+      ctx = applyIntercept(cfg.intercept.rules, 'before_upstream', ctx)
+      if (await applyProtocolIntercept({ req, inbound, body: ctx.body, fp, logBag, requestId: logCtx.request_id, res }))
+        return
+      return runApiBackend({
+        req,
+        res,
+        protocol,
+        inbound,
+        ctx,
+        logBag,
+        logCtx,
+        converted: { mode: 'passthrough' },
+        nativeResponsesBody: ctx.body,
+      })
     }
 
     const hdrRewrite = String(req.headers['x-kin-rewrite'] || '') === '1'

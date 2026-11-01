@@ -236,6 +236,7 @@ export async function runApiInference({
   protocol,
   inbound,
   convertedBody,
+  nativeResponsesBody = null,
   clientStream,
   deliveryMode,
   signal,
@@ -246,8 +247,7 @@ export async function runApiInference({
   requestContext = null,
   forwardImpl = forwardApi,
 } = {}) {
-  const canonical = officialMessagesBody(convertedBody)
-  const model = canonical.model
+  const model = (nativeResponsesBody || convertedBody)?.model
   const scope = keyScopeFromRequest(req)
   const picked = scheduler.pick(model, Date.now(), scope)
   if (!picked.ok) {
@@ -264,6 +264,8 @@ export async function runApiInference({
   const protocolKind = normalizeProtocol(picked.endpoint.protocol || preset.protocol, preset.kind)
   const extraHeaders = joinHeaderMap(picked.endpoint.headers)
   const isOpenAI = protocolKind === 'openai'
+  const nativeResponses = !!nativeResponsesBody && isOpenAI
+  const canonical = nativeResponses ? nativeResponsesBody : officialMessagesBody(convertedBody)
   if (requestContext && (isOpenAI || picked.upstream_model !== canonical.model)) {
     return {
       ok: false,
@@ -280,7 +282,11 @@ export async function runApiInference({
     }
   }
   const body = isOpenAI
-    ? { ...claudeToOpenAIResponsesRequest({ ...canonical, model: picked.upstream_model }), stream: true }
+    ? {
+        ...(nativeResponses ? nativeResponsesBody : claudeToOpenAIResponsesRequest(canonical)),
+        model: picked.upstream_model,
+        stream: true,
+      }
     : { ...canonical, model: picked.upstream_model, stream: true }
   if (requestContext) Object.assign(body, prepareClassifierBody(body))
   const callerProtocolHeaders = forwardAnthropicProtocolHeaders(req?.headers, protocol, protocolKind)
@@ -392,6 +398,7 @@ export async function runApiInference({
       converters,
       body,
       timing,
+      nativeResponses,
     })
     if (!result.ok) {
       recordApiKeyFailure(
@@ -591,6 +598,7 @@ async function runOpenAIResponsesUpstream({
   converters,
   body,
   timing,
+  nativeResponses = false,
 }) {
   const chunks = []
   const anthropicSse = protocol === 'anthropic.messages' ? createAnthropicSseState() : null
@@ -602,6 +610,7 @@ async function runOpenAIResponsesUpstream({
   let sawTerminal = false
   let streamedUsage = null
   let terminalFailure = null
+  let nativeCompleted = false
   const pendingLines = []
 
   const writeStreamLine = (raw) => {
@@ -609,6 +618,7 @@ async function runOpenAIResponsesUpstream({
     if (protocol === 'openai.responses') {
       res.write(raw.endsWith('\n') ? raw : raw + '\n')
       if (/response\.(completed|done)/.test(raw)) completed = true
+      if (raw.trim() === 'data: [DONE]') downstreamDone = true
       return
     }
     try {
@@ -650,32 +660,48 @@ async function runOpenAIResponsesUpstream({
     }
   }
 
-  await readLines(upstream, async (line, receivedAt) => {
-    if (conversionError) return
-    const raw = String(line || '')
-    const event = openAIResponsesSseEvent(raw)
-    timing.observe(event, receivedAt)
-    const failure = openAIResponsesFailure(event)
-    if (failure) terminalFailure = failure
-    const seen = usageFromSseLine(raw)
-    if (seen) streamedUsage = mergeUsage(streamedUsage, seen)
-    const startsOutput = isOpenAIResponsesCommitEvent(event)
-    const completes = event?.type === 'response.completed' || event?.type === 'response.done'
-    const wasCommitted = committed
-    if (!committed && (startsOutput || completes)) committed = true
-    if (!clientStream) {
-      chunks.push(raw)
-      if (/response\.(completed|done)/.test(raw) || raw.trim() === 'data: [DONE]') sawTerminal = true
-      return
+  try {
+    await readLines(upstream, async (line, receivedAt) => {
+      if (conversionError) return
+      const raw = String(line || '')
+      const event = openAIResponsesSseEvent(raw)
+      timing.observe(event, receivedAt)
+      const failure = openAIResponsesFailure(event)
+      if (failure) terminalFailure = failure
+      const seen = usageFromSseLine(raw)
+      if (seen) streamedUsage = mergeUsage(streamedUsage, seen)
+      const startsOutput = isOpenAIResponsesCommitEvent(event)
+      const completes = event?.type === 'response.completed' || event?.type === 'response.done'
+      if (completes || event?.type === 'response.incomplete')
+        nativeCompleted = completes && event.response?.status === 'completed'
+      const wasCommitted = committed
+      if (!committed && (startsOutput || completes)) committed = true
+      if (!clientStream) {
+        chunks.push(raw)
+        if (/response\.(completed|done)/.test(raw) || raw.trim() === 'data: [DONE]') sawTerminal = true
+        return
+      }
+      if (!wasCommitted) {
+        pendingLines.push(raw)
+        if (!committed) return
+        for (const pending of pendingLines.splice(0)) writeStreamLine(pending)
+        return
+      }
+      writeStreamLine(raw)
+    })
+  } catch (error) {
+    if (!nativeResponses) throw error
+    return {
+      ...resultBase,
+      ...timing.snapshot(),
+      ok: false,
+      status: 502,
+      body: { error: { type: 'api_error', code: 'upstream_stream_interrupted', message: String(error.message) } },
+      terminalState: committed ? 'incomplete' : 'rejected',
+      committed,
+      usage: streamedUsage,
     }
-    if (!wasCommitted) {
-      pendingLines.push(raw)
-      if (!committed) return
-      for (const pending of pendingLines.splice(0)) writeStreamLine(pending)
-      return
-    }
-    writeStreamLine(raw)
-  })
+  }
 
   if (!clientStream) {
     if (terminalFailure)
@@ -687,9 +713,9 @@ async function runOpenAIResponsesUpstream({
     let outBody
     try {
       assembled = assembleCodexBodyFromSse(chunks, {})
-      // The protocol handler converts this canonical message to each client's
-      // JSON shape, just as it does for Anthropic API upstreams.
-      outBody = codexBodyToAnthropicMessage(assembled, inbound?.model || body?.model)
+      // Native Responses retain their output items. Compatibility clients use
+      // the canonical message consumed by the protocol handler.
+      outBody = nativeResponses ? assembled : codexBodyToAnthropicMessage(assembled, inbound?.model || body?.model)
     } catch (error) {
       if (!isToolArgumentsError(error)) throw error
       return {
@@ -704,12 +730,13 @@ async function runOpenAIResponsesUpstream({
       }
     }
     const hasBody = !!(assembled && (assembled.output || assembled.id || outBody))
-    const complete = resultBase.ok && sawTerminal && hasBody
+    const complete = resultBase.ok && (nativeResponses ? nativeCompleted : sawTerminal) && hasBody
     return {
       ...resultBase,
       ...timing.snapshot(),
       ok: complete,
       body: outBody,
+      ...(nativeResponses ? { nativeResponse: outBody } : {}),
       usage: mergeUsage(streamedUsage, assembled?.usage || outBody?.usage),
       terminalState: complete ? 'verified' : hasBody ? 'incomplete' : 'rejected',
       committed,
@@ -734,9 +761,9 @@ async function runOpenAIResponsesUpstream({
 
   return {
     ...resultBase,
-    ok: resultBase.ok && (deliveryMode !== 'verified' || completed || committed),
+    ok: resultBase.ok && (nativeResponses ? nativeCompleted : deliveryMode !== 'verified' || completed || committed),
     usage: streamedUsage,
-    terminalState: completed ? 'verified' : committed ? 'incomplete' : 'rejected',
+    terminalState: (nativeResponses ? nativeCompleted : completed) ? 'verified' : committed ? 'incomplete' : 'rejected',
     committed,
     downstreamDone,
     ...timing.snapshot(),
