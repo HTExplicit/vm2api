@@ -59,6 +59,7 @@ export class BrowserStream {
     if (this.closed) return ws.close()
     const client = {
       mode: 'smooth',
+      pressedButtons: new Set(),
       message: (raw) => this.receive(ws, raw),
       close: () => this.detach(ws),
       error: () => this.detach(ws),
@@ -77,6 +78,14 @@ export class BrowserStream {
     ws.off('close', client.close)
     ws.off('error', client.error)
     this.clients.delete(ws)
+    this.enqueue(async () => {
+      if (this.closed) return
+      for (const button of client.pressedButtons) {
+        await this.page.mouse.up({ button })
+        client.pressedButtons.delete(button)
+        this.requestFrame()
+      }
+    })
     if (!this.clients.size) this.clearSchedule()
   }
 
@@ -215,7 +224,8 @@ export class BrowserStream {
   }
 
   async input(ws, input) {
-    if (this.closed || !this.clients.has(ws) || ws.readyState !== 1) return
+    const client = this.clients.get(ws)
+    if (this.closed || !client || ws.readyState !== 1) return
     try {
       try {
         await this.assertCurrent()
@@ -232,7 +242,17 @@ export class BrowserStream {
       if (input.type === 'continue') await this.onContinue(input, ws)
       else if (input.type === 'click')
         await this.page.mouse.click(Number(input.x), Number(input.y), { button: input.button || 'left' })
-      else if (input.type === 'move') await this.page.mouse.move(Number(input.x), Number(input.y))
+      else if (input.type === 'mouse_down' || input.type === 'mouse_up') {
+        await this.page.mouse.move(Number(input.x), Number(input.y))
+        const button = input.button || 'left'
+        if (input.type === 'mouse_down') {
+          await this.page.mouse.down({ button })
+          client.pressedButtons.add(button)
+        } else {
+          await this.page.mouse.up({ button })
+          client.pressedButtons.delete(button)
+        }
+      } else if (input.type === 'move') await this.page.mouse.move(Number(input.x), Number(input.y))
       else if (input.type === 'scroll')
         await this.page.mouse.wheel(Number(input.deltaX) || 0, Number(input.deltaY) || 0)
       else if (input.type === 'key') await this.page.keyboard.press(String(input.key))
