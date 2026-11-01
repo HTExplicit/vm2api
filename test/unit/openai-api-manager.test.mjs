@@ -27,6 +27,7 @@ function fixture(t) {
   const identities = new Map()
   const calls = {
     sessions: [],
+    inspections: [],
     configured: [],
     models: [],
     closed: [],
@@ -63,8 +64,9 @@ function fixture(t) {
     constructor(options) {
       this.options = options
     }
-    async inspect() {
-      if (behavior.inspect) return behavior.inspect(this.options)
+    async inspect(options) {
+      calls.inspections.push(options)
+      if (behavior.inspect) return behavior.inspect(this.options, options)
       return {
         authenticated: behavior.authenticated,
         email: this.options.email,
@@ -378,6 +380,128 @@ test('expired background Platform sessions finish promptly and preserve enabled 
   assert.equal(f.repo.getOrg('org-test').balance, '12.5')
   assert.ok(f.manager.resolveAccountKey(key))
   assert.equal(f.manager.sessions.size, 0)
+})
+
+test('background refresh waits for identity before treating a restored session as expired', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  f.repo.upsertOrg('org-test', { balance_checked_at: '2020-01-01T00:00:00Z' })
+  await f.manager.tick()
+  await f.settle()
+  assert.equal(f.calls.inspections[0].timeout, 30_000)
+  assert.ok(f.calls.inspections[0].signal instanceof AbortSignal)
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+})
+
+test('a failed balance refresh retries after ten minutes and recovers an earlier needs-login observation', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  f.repo.upsertOrg('org-test', { balance: '12.5', balance_checked_at: '2020-01-01T00:00:00Z' })
+  const attemptedAt = Date.now()
+  f.setTime(attemptedAt)
+  f.behavior.authenticated = false
+  await f.manager.tick()
+  await f.settle()
+  const failed = f.repo.getAccount(entry.accountId)
+  assert.equal(failed.setup_status, 'needs_login')
+  f.setTime(attemptedAt + 9 * 60_000)
+  await f.manager.tick()
+  assert.equal(f.calls.sessions.length, 1)
+  f.behavior.authenticated = true
+  f.behavior.balance = '12.499999999999999999'
+  f.setTime(attemptedAt + 10 * 60_000)
+  await f.manager.tick()
+  await f.settle()
+  assert.equal(f.calls.sessions.length, 2)
+  assert.equal(f.repo.getOrg('org-test').balance, '12.499999999999999999')
+  assert.equal(f.repo.getOrg('org-test').balance_error, null)
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+  assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
+  assert.equal(f.calls.configured.length, 0)
+})
+
+test('missing identity remains a retryable observation error and Billing authentication failures request login', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  const attemptedAt = Date.now()
+  f.setTime(attemptedAt)
+  f.repo.upsertOrg('org-test', { balance: '12.5', balance_checked_at: '2020-01-01T00:00:00Z' })
+  f.behavior.inspect = () => {
+    throw Object.assign(new Error('官方账号信息尚未返回'), { code: 'platform_identity_unavailable' })
+  }
+  await f.manager.tick()
+  await f.settle()
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'error')
+  f.setTime(attemptedAt + 10 * 60_000)
+  f.behavior.inspect = null
+  f.behavior.balanceError = Object.assign(new Error('Platform 会话已失效，请补充登录'), {
+    code: 'platform_login_required',
+  })
+  await f.manager.tick()
+  await f.settle()
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'needs_login')
+  assert.equal(f.repo.getAccount(entry.accountId).enabled, true)
+  assert.equal(f.repo.getKey(key.id).disabled, false)
+  assert.equal(f.repo.getOrg('org-test').balance, '12.5')
+})
+
+test('claim observations cannot postpone a failed balance retry and old needs-login records retry after restart', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  f.repo.upsertOrg('org-test', { balance_checked_at: '2020-01-01T00:00:00Z' })
+  f.repo.upsertAccount(entry.accountId, {
+    setup_status: 'needs_login',
+    claim_status: 'pending',
+    operation_id: 'op-test',
+  })
+  f.credits.refreshClaim = async () => {
+    f.repo.upsertAccount(entry.accountId, { link_checked_at: new Date().toISOString() })
+  }
+  const attemptedAt = Date.now()
+  f.setTime(attemptedAt)
+  f.behavior.authenticated = false
+  await f.manager.tick()
+  await f.settle()
+  assert.equal(f.calls.sessions.length, 1, 'a persisted login error is rechecked by the new manager')
+  f.setTime(attemptedAt + 9 * 60_000)
+  await f.manager.tick()
+  assert.equal(f.calls.sessions.length, 1)
+  f.setTime(attemptedAt + 10 * 60_000)
+  f.behavior.authenticated = true
+  await f.manager.tick()
+  await f.settle()
+  assert.equal(f.calls.sessions.length, 2)
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+})
+
+test('manual configuration cancels the old identity wait while retaining the same browser', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  let inspecting = false
+  let first = true
+  f.behavior.inspect = (_options, { signal }) => {
+    if (!first)
+      return { authenticated: true, email: entry.account.email, organizationId: 'org-test', organizations: [] }
+    first = false
+    inspecting = true
+    return new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    })
+  }
+  f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'balance', false)
+  await until(() => inspecting)
+  f.manager.setup(entry.vm.id)
+  await until(() => f.repo.getAccount(entry.accountId).setup_status === 'ready')
+  await f.settle()
+  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.calls.closed.length, 0)
+  assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
+  assert.equal(f.calls.configured.length, 0)
 })
 
 test('a different logged-in email cannot create a project key or contaminate account session state', async (t) => {
