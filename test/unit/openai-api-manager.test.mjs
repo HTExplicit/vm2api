@@ -231,7 +231,8 @@ test('two accounts get separate saved fingerprints, sessions and keys while shar
   assert.equal(f.repo.getKey(second.key_id).source_account_id, b.accountId)
   assert.equal(first.enabled, true)
   assert.equal(second.setup_status, 'ready')
-  assert.equal(f.calls.configured[1].projectId, 'proj-test')
+  assert.equal(f.calls.configured[1].projectId, undefined)
+  assert.equal(f.repo.getOrg('org-test').project_id, 'proj-test')
   assert.equal(f.store.listRaw().length, 2, 'account endpoints keep model catalogs and display names separate')
   f.manager.enqueue(f.credits.accountForVm(a.vm.id), 'setup', false)
   await f.settle()
@@ -239,6 +240,41 @@ test('two accounts get separate saved fingerprints, sessions and keys while shar
   assert.deepEqual(f.calls.sessions[2].fingerprint, firstProfile.fingerprint)
   assert.deepEqual(f.calls.sessions[2].storageState, firstProfile.storage_state)
   assert.equal(f.calls.closed.length, 3)
+})
+
+test('new account keys resolve the default project instead of inheriting a legacy organization project', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.repo.upsertOrg('org-test', { project_id: 'proj-legacy-vm2api' })
+  f.behavior.configure = async (options, adapterOptions) => {
+    assert.equal(Object.hasOwn(options, 'projectId'), false)
+    assert.equal(Object.hasOwn(adapterOptions, 'projectId'), false)
+    const created = { organizationId: 'org-test', projectId: 'proj-default', apiKey: 'sk-default-project-fixture' }
+    await options.onKey(created)
+    return created
+  }
+  f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'setup', false)
+  await f.settle()
+  assert.equal(f.repo.getOrg('org-test').project_id, 'proj-default')
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+  assert.ok(f.repo.getAccount(entry.accountId).key_id)
+})
+
+test('existing account keys are reused without reconfiguring or moving their project', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  f.repo.upsertOrg('org-test', { project_id: 'proj-legacy-vm2api' })
+  f.behavior.configure = async () => {
+    throw new Error('an existing key must not be recreated')
+  }
+  f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'setup', false)
+  await f.settle()
+  assert.equal(f.calls.configured.length, 0)
+  assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
+  assert.equal(f.repo.getKey(key.id).api_key, key.api_key)
+  assert.equal(f.repo.getOrg('org-test').project_id, 'proj-legacy-vm2api')
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
 })
 
 test('saving a new key precedes balance work and a balance failure neither loses the key nor blocks model setup', async (t) => {

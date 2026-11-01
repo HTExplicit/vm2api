@@ -24,6 +24,11 @@ function entity(value, pattern) {
   return { id: value.id, name: text(value.name || value.title || value.display_name) || value.id }
 }
 
+function projectEntity(value) {
+  const project = entity(value, PROJECT_ID)
+  return project && value.is_default === true ? { ...project, is_default: true } : project
+}
+
 /** Keep identity metadata only; session tokens and response bodies are never retained. */
 export function platformIdentityObservation(url, payload, organizationHeader = '') {
   const path = new URL(url).pathname
@@ -45,8 +50,8 @@ export function platformIdentityObservation(url, payload, organizationHeader = '
     }
   }
   if (/\/projects(?:\/|$)/i.test(path)) {
-    for (const row of items(payload?.projects || payload)) add(projects, entity(row, PROJECT_ID))
-    add(projects, entity(payload?.project || payload, PROJECT_ID))
+    for (const row of items(payload?.projects || payload)) add(projects, projectEntity(row))
+    add(projects, projectEntity(payload?.project || payload))
   }
   const pathOrganization = path.match(/\/organizations\/(org[-_][a-z\d_-]+)(?:\/|$)/i)?.[1]
   const currentOrganization =
@@ -186,12 +191,11 @@ async function button(scope, name, message) {
 }
 
 export class PlatformAdapter {
-  constructor({ page, context, email, organizationId = '', projectId = '', onKey = null, now = Date.now }) {
+  constructor({ page, context, email, organizationId = '', onKey = null, now = Date.now }) {
     this.page = page
     this.context = context
     this.email = text(email).toLowerCase()
     this.organizationId = organizationId
-    this.projectId = projectId
     this.onKey = onKey
     this.now = now
     this.identity = { email: null, organizations: [], projects: [], organizationId: null }
@@ -328,49 +332,30 @@ export class PlatformAdapter {
     }
   }
 
-  async ensureProject(id) {
+  async ensureProject() {
     await this.goto(PROJECTS_URL)
     await this.settled()
     if (!this.projectLists.has(this.identity.organizationId)) {
       throw problem('platform_projects_unavailable', '尚未取得当前组织的官方项目列表，请在登录窗口核对项目页面。')
     }
-    if (id) {
-      const saved = this.identity.projects.find(
-        (row) => row.id === id && row.organizationId === this.identity.organizationId,
+    const projects = this.identity.projects.filter((row) => row.organizationId === this.identity.organizationId)
+    const marked = projects.filter((row) => row.is_default === true)
+    const defaults = marked.length ? marked : projects.filter((row) => /^default project$/i.test(row.name))
+    if (!defaults.length) {
+      throw problem(
+        'platform_default_project_unavailable',
+        '未找到当前组织的 Default project，请在登录窗口核对项目权限。',
       )
-      if (!saved) throw problem('platform_project_unavailable', '已配置的 vm2api 项目不在当前组织中，请核对项目权限。')
-      return saved
     }
-    const existing = this.identity.projects.filter(
-      (row) => row.name === 'vm2api' && row.organizationId === this.identity.organizationId,
-    )
-    if (existing.length > 1) {
-      throw problem('platform_project_ambiguous', '该组织存在多个同名 vm2api 项目，请在登录窗口确认要使用的项目。')
+    if (defaults.length > 1) {
+      throw problem('platform_project_ambiguous', '当前组织的默认项目标识不唯一，请在登录窗口核对。')
     }
-    if (existing.length === 1) return existing[0]
-    const create = await button(this.page, /^(?:create (?:a |new )?project|创建项目)$/i, '未找到官方创建项目入口。')
-    await create.click()
-    const dialog = await visibleOne(this.page.getByRole('dialog'))
-    if (!dialog) throw problem('platform_page_changed', '未找到官方创建项目对话框。')
-    const name = await visibleOne(dialog.getByRole('textbox', { name: /name|名称/i }))
-    if (!name) throw problem('platform_page_changed', '未找到官方项目名称输入框。')
-    await name.fill('vm2api')
-    const submit = await button(dialog, /^(?:create(?: project)?|创建(?:项目)?)$/i, '未找到官方创建项目按钮。')
-    await submit.click()
-    await this.page.getByRole('dialog').waitFor({ state: 'hidden', timeout: 20_000 })
-    await this.settled()
-    const created = this.identity.projects.filter(
-      (row) => row.name === 'vm2api' && row.organizationId === this.identity.organizationId,
-    )
-    if (created.length !== 1) {
-      throw problem('platform_project_unconfirmed', '创建项目后尚未取得官方项目标识，请核对后继续。')
-    }
-    return created[0]
+    return defaults[0]
   }
 
   async selectProject(dialog, project) {
     const select = await visibleOne(dialog.getByLabel(/^project$/i))
-    if (!select) throw problem('platform_project_selection_required', '请在官方创建 key 对话框中选择 vm2api 项目。')
+    if (!select) throw problem('platform_project_selection_required', '请在官方创建 key 对话框中选择 Default project。')
     const native = await select.evaluate((element) => element.tagName === 'SELECT')
     if (native) {
       await select.selectOption({ label: project.name })
@@ -379,14 +364,14 @@ export class PlatformAdapter {
     await select.click()
     const option = await visibleOne(this.page.getByRole('option', { name: project.name, exact: true }))
     if (!option)
-      throw problem('platform_project_selection_required', '未找到 vm2api 项目选项，请在登录窗口选择后继续。')
+      throw problem('platform_project_selection_required', '未找到 Default project 选项，请在登录窗口选择后继续。')
     await option.click()
   }
 
-  async configure({ organizationId = this.organizationId, projectId = this.projectId, keyName, onKey = this.onKey }) {
+  async configure({ organizationId = this.organizationId, keyName, onKey = this.onKey }) {
     await this.requireLogin()
     await this.selectOrganization(organizationId)
-    const project = await this.ensureProject(projectId)
+    const project = await this.ensureProject()
     const organizationName =
       this.identity.organizations.find((row) => row.id === organizationId)?.name || organizationId
     await this.goto(KEYS_URL)

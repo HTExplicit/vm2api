@@ -44,6 +44,17 @@ test('observed project identities retain the organization of the real request', 
   )
 })
 
+test('project observation retains the official default marker without retaining unrelated fields', () => {
+  assert.deepEqual(
+    platformIdentityObservation(
+      'https://api.openai.com/dashboard/organizations/org-one/projects',
+      { data: [{ id: 'proj_default', name: 'Renamed default', is_default: true, secret: 'not-retained' }] },
+      'org-one',
+    ).projects,
+    [{ id: 'proj_default', name: 'Renamed default', is_default: true, organizationId: 'org-one' }],
+  )
+})
+
 test('Billing JSON preserves decimal tokens, signed balances and unknown values without inferring totals', () => {
   const summary = parsePlatformCreditSummary(
     '{"total_available":37.12345678901234567890100,"total_paid_available":0.000}',
@@ -272,19 +283,50 @@ test('an unobserved project list cannot be mistaken for an empty organization', 
   adapter.dispose()
 })
 
-test('project reuse checks both the persisted project ID and the current organization', async () => {
+test('default project selection is scoped to the current organization and never picks the vm2api project', async () => {
   const adapter = new PlatformAdapter({ page: pageFixture(), email: 'owner@example.com' })
   adapter.identity.organizationId = 'org-one'
   adapter.projectLists.add('org-one')
   adapter.identity.projects = [
-    { id: 'proj_one', name: 'vm2api', organizationId: 'org-one' },
-    { id: 'proj_other', name: 'vm2api', organizationId: 'org-other' },
+    { id: 'proj_vm2api', name: 'vm2api', organizationId: 'org-one' },
+    { id: 'proj_one', name: 'Default project', organizationId: 'org-one' },
+    { id: 'proj_other', name: 'Default project', organizationId: 'org-other' },
   ]
   adapter.goto = async () => {}
-  assert.equal((await adapter.ensureProject('')).id, 'proj_one')
-  assert.equal((await adapter.ensureProject('proj_one')).id, 'proj_one')
-  await assert.rejects(adapter.ensureProject('proj_other'), { code: 'platform_project_unavailable' })
-  adapter.identity.projects.push({ id: 'proj_duplicate', name: 'vm2api', organizationId: 'org-one' })
-  await assert.rejects(adapter.ensureProject(''), { code: 'platform_project_ambiguous' })
+  assert.equal((await adapter.ensureProject()).id, 'proj_one')
+  adapter.identity.organizationId = 'org-other'
+  adapter.projectLists.add('org-other')
+  assert.equal((await adapter.ensureProject()).id, 'proj_other')
+  adapter.dispose()
+})
+
+test('the official default marker takes precedence over the display name', async () => {
+  const adapter = new PlatformAdapter({ page: pageFixture(), email: 'owner@example.com' })
+  adapter.identity.organizationId = 'org-one'
+  adapter.projectLists.add('org-one')
+  adapter.identity.projects = [
+    { id: 'proj_named', name: 'Default project', organizationId: 'org-one' },
+    { id: 'proj_default', name: 'Renamed default', is_default: true, organizationId: 'org-one' },
+  ]
+  adapter.goto = async () => {}
+  assert.equal((await adapter.ensureProject()).id, 'proj_default')
+  adapter.dispose()
+})
+
+test('missing or ambiguous default projects cannot trigger project creation', async () => {
+  const page = pageFixture()
+  page.getByRole = () => {
+    throw new Error('project creation controls must never be queried')
+  }
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  adapter.identity.organizationId = 'org-one'
+  adapter.projectLists.add('org-one')
+  adapter.identity.projects = [{ id: 'proj_vm2api', name: 'vm2api', organizationId: 'org-one' }]
+  adapter.goto = async () => {}
+  await assert.rejects(adapter.ensureProject(), { code: 'platform_default_project_unavailable' })
+  adapter.identity.projects.push({ id: 'proj_first', name: 'DEFAULT PROJECT', organizationId: 'org-one' })
+  assert.equal((await adapter.ensureProject()).id, 'proj_first')
+  adapter.identity.projects.push({ id: 'proj_duplicate', name: 'Default project', organizationId: 'org-one' })
+  await assert.rejects(adapter.ensureProject(), { code: 'platform_project_ambiguous' })
   adapter.dispose()
 })
