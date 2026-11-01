@@ -185,15 +185,42 @@ function pageFixture() {
   return page
 }
 
-function jsonResponse(path, payload, { method = 'GET', headers = {} } = {}) {
+function jsonResponse(path, payload, { method = 'GET', headers = {}, body } = {}) {
+  const request = {
+    url: () => `https://api.openai.com${path}`,
+    method: () => method,
+    headers: () => headers,
+    postDataJSON: () => body,
+  }
   return {
     url: () => `https://api.openai.com${path}`,
     ok: () => true,
     headers: () => ({ 'content-type': 'application/json' }),
-    request: () => ({ method: () => method, headers: () => headers }),
+    request: () => request,
     json: async () => payload,
     text: async () => (typeof payload === 'string' ? payload : JSON.stringify(payload)),
   }
+}
+
+function beginCapture(adapter, options = {}) {
+  adapter.identity = { ...adapter.identity, email: 'owner@example.com', organizationId: 'org-one' }
+  return adapter.beginKeySetup({
+    organizationId: 'org-one',
+    projectId: 'proj_default',
+    keyName: 'vm2api-account',
+    ...options,
+  })
+}
+
+const keyRequestOptions = {
+  method: 'POST',
+  headers: { 'openai-organization': 'org-one' },
+  body: { name: 'vm2api-account', project_id: 'proj_default' },
+}
+
+function observeCreation(adapter, response) {
+  adapter.page.emit('request', response.request())
+  return adapter.observe(response)
 }
 
 test('inspect verifies the observed user and rejects a different signed-in account', async () => {
@@ -534,13 +561,13 @@ test('key capture awaits the save callback before reporting the new key and does
   const page = pageFixture()
   const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
   const saved = []
-  adapter.keyCallback = async (key) => saved.push(key)
+  beginCapture(adapter, { onKey: async (key) => saved.push(key) })
   const response = jsonResponse(
     '/dashboard/api_keys',
     { api_key: { id: 'key_one', secret: 'sk-proj-test-only-long-secret' } },
-    { method: 'POST' },
+    keyRequestOptions,
   )
-  await adapter.observe(response)
+  await observeCreation(adapter, response)
   await adapter.observe(response)
   assert.equal(saved.length, 1)
   assert.equal(saved[0].remoteKeyId, 'key_one')
@@ -551,12 +578,15 @@ test('key capture awaits the save callback before reporting the new key and does
 test('a failed local secret save remains a task failure instead of silently succeeding', async () => {
   const page = pageFixture()
   const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
-  adapter.keyCallback = async () => {
-    throw new Error('fixture storage failure')
-  }
+  beginCapture(adapter, {
+    onKey: async () => {
+      throw new Error('fixture storage failure')
+    },
+  })
   await assert.rejects(
-    adapter.observe(
-      jsonResponse('/dashboard/api_keys', { secret: 'sk-proj-test-only-long-secret' }, { method: 'POST' }),
+    observeCreation(
+      adapter,
+      jsonResponse('/dashboard/api_keys', { secret: 'sk-proj-test-only-long-secret' }, keyRequestOptions),
     ),
     /fixture storage failure/,
   )
@@ -633,7 +663,7 @@ test('key configuration waits for a delayed entry, dialog and projects before ta
         return value
       },
       isVisible: async () => true,
-      waitFor: async (options) => assert.equal(options.timeout, 15_000),
+      waitFor: async (options) => assert.ok([3_000, 15_000].includes(options.timeout)),
     })
   const projectButton = one({
     evaluate: async () => false,
@@ -699,22 +729,30 @@ test('key configuration waits for a delayed entry, dialog and projects before ta
         filter: ({ hasText }) => {
           if (hasText.test('NameOptional')) return fieldLabel(nameInput, 'input[type="text"]')
           if (hasText.test('Project')) return fieldLabel(projectButton, 'select, [role="button"]')
+          if (hasText.test('Expiration')) return { filter: () => ({ count: async () => 0 }) }
           assert.fail('unexpected field label')
         },
       }
     },
     getByRole: (role, { name }) => {
+      if (role === 'combobox') return { filter: () => ({ count: async () => 0 }) }
       assert.equal(role, 'button', 'Name must not be confused with the Expiration textbox')
-      if (name.test('Expiration')) return one({ click: async () => calls.push(['open-expiration']) })
+      if (name.test('Expiration'))
+        return one({
+          click: async () => calls.push(['open-expiration']),
+          evaluate: async () => false,
+          innerText: async () => (neverSelected ? 'Never' : 'Expiration'),
+        })
       return one({
         click: async () => {
           assert.equal(neverSelected, true, 'the required expiration must be selected before submitting')
           calls.push(['submit'])
-          await adapter.observe(
+          await observeCreation(
+            adapter,
             jsonResponse(
               '/dashboard/api_keys',
               { api_key: { secret: 'sk-proj-default-fixture-secret' } },
-              { method: 'POST' },
+              keyRequestOptions,
             ),
           )
         },
@@ -742,21 +780,13 @@ test('key configuration waits for a delayed entry, dialog and projects before ta
   }
   page.getByRole = (role, options) => {
     if (role === 'textbox') return { count: async () => 0 }
-    if (role === 'row')
-      return {
-        filter: () => ({
-          count: async () => {
-            assert.equal(createReady, true, 'check the existing key only after the entry is ready')
-            calls.push(['existing-ready'])
-            return 0
-          },
-        }),
-      }
+    if (role === 'row') assert.fail('remote key records must not decide whether a new local key can be configured')
     if (role === 'dialog') return dialog
     if (role === 'button') return createButton
     if (role === 'option') {
-      assert.deepEqual(options, { name: 'Never', exact: true })
+      assert.equal(options.name.test('Never'), true)
       return one({
+        waitFor: async (options) => assert.equal(options.timeout, 3_000),
         click: async () => {
           neverSelected = true
           calls.push(['expiration', 'Never'])
@@ -772,7 +802,6 @@ test('key configuration waits for a delayed entry, dialog and projects before ta
   assert.deepEqual(calls, [
     ['goto', 'https://platform.openai.com/api-keys'],
     ['create-ready'],
-    ['existing-ready'],
     ['open-dialog'],
     ['dialog-ready'],
     ['projects-ready'],
@@ -784,10 +813,9 @@ test('key configuration waits for a delayed entry, dialog and projects before ta
   adapter.dispose()
 })
 
-function keyEntryFixture({ visible = [true], existing = false, timeout = false } = {}) {
+function keyEntryFixture({ visible = [true], remoteKeys = [], timeout = false } = {}) {
   const page = pageFixture()
   const calls = []
-  let entryReady = false
   const entries = visible.map((shown, index) => ({
     shown,
     isVisible: async () => shown,
@@ -796,7 +824,6 @@ function keyEntryFixture({ visible = [true], existing = false, timeout = false }
       if (timeout) throw new Error('entry wait timed out')
       assert.equal(shown, true, 'a hidden matching entry must never be awaited')
       calls.push(['ready', index])
-      entryReady = true
     },
     click: async () => calls.push(['click', index]),
   }))
@@ -816,15 +843,7 @@ function keyEntryFixture({ visible = [true], existing = false, timeout = false }
       return buttons
     }
     if (role === 'row')
-      return {
-        filter: () => ({
-          count: async () => {
-            assert.equal(entryReady, true)
-            calls.push(['existing'])
-            return existing ? 1 : 0
-          },
-        }),
-      }
+      assert.fail(`remote key records must be retained without gating creation: ${remoteKeys.join(', ')}`)
     if (role === 'dialog') throw new Error('fixture reached the creation dialog')
     assert.fail(`unexpected role ${role}`)
   }
@@ -842,7 +861,10 @@ function keyEntryFixture({ visible = [true], existing = false, timeout = false }
 test('key entry ignores a hidden first match and clicks the unique visible control', async () => {
   const f = keyEntryFixture({ visible: [false, true] })
   await assert.rejects(f.configure(), /fixture reached the creation dialog/)
-  assert.deepEqual(f.calls, [['ready', 1], ['existing'], ['click', 1]])
+  assert.deepEqual(f.calls, [
+    ['ready', 1],
+    ['click', 1],
+  ])
   f.adapter.dispose()
 })
 
@@ -856,12 +878,17 @@ test('key entry rejects multiple visible controls without choosing or creating a
   f.adapter.dispose()
 })
 
-test('a remote account key discovered after entry readiness stops another creation', async () => {
-  const f = keyEntryFixture({ existing: true })
-  await assert.rejects(f.configure(), { code: 'platform_key_already_exists' })
-  assert.deepEqual(f.calls, [['ready', 0], ['existing']])
-  f.adapter.dispose()
-})
+for (const remoteKeys of [['Active'], ['Revoked'], ['Active', 'Revoked'], ['Unknown'], ['', 'Revoked']]) {
+  test(`remote account key records (${remoteKeys.join(', ')}) do not block a new key when local secret is missing`, async () => {
+    const f = keyEntryFixture({ remoteKeys })
+    await assert.rejects(f.configure(), /fixture reached the creation dialog/)
+    assert.deepEqual(f.calls, [
+      ['ready', 0],
+      ['click', 0],
+    ])
+    f.adapter.dispose()
+  })
+}
 
 test('key entry timeout explains that configuration can be retried in the current window', async () => {
   const f = keyEntryFixture({ timeout: true })
@@ -871,4 +898,162 @@ test('key entry timeout explains that configuration can be retried in the curren
   })
   assert.deepEqual(f.calls, [])
   f.adapter.dispose()
+})
+
+function expirationFixture({
+  native = false,
+  combo = false,
+  label = 'Expiration',
+  linked = true,
+  initial = '30 days',
+  duplicate = false,
+  confirm = true,
+  choices = ['30 days', 'Never'],
+} = {}) {
+  let selected = initial
+  let opened = false
+  const calls = []
+  const matches = (pattern, value) => (typeof pattern === 'string' ? pattern === value : pattern.test(value))
+  const options = choices.map((value) => ({ textContent: value, visible: true }))
+  const control = {
+    tagName: native ? 'SELECT' : combo ? 'DIV' : 'BUTTON',
+    visible: true,
+    getAttribute: () => (combo ? 'combobox' : null),
+    get selectedOptions() {
+      return [{ textContent: selected }]
+    },
+    get textContent() {
+      return selected
+    },
+    click: () => {
+      opened = true
+      calls.push('open')
+    },
+    selectOption: ({ label: value }) => {
+      calls.push(value)
+      if (confirm) selected = value
+    },
+  }
+  const field = { textContent: label, visible: true, control }
+  function locator(rows) {
+    return {
+      count: async () => rows.length,
+      nth: (index) => locator(rows.slice(index, index + 1)),
+      first: () => locator(rows.slice(0, 1)),
+      filter: ({ visible, hasText }) =>
+        locator(rows.filter((row) => (!visible || row.visible) && (!hasText || matches(hasText, row.textContent)))),
+      evaluate: async (fn) => fn(rows[0]),
+      innerText: async () => rows[0].textContent,
+      locator: (selector) =>
+        selector === '..' ? locator(rows) : locator(rows.map((row) => row.control).filter(Boolean)),
+      getByRole: (role, { name }) =>
+        locator(role === 'option' ? options.filter((option) => matches(name, option.textContent)) : []),
+      waitFor: async () => {
+        if (!rows.length) throw new Error('fixture option absent')
+      },
+      selectOption: async (value) => rows[0].selectOption(value),
+      click: async () => {
+        if (rows[0] === control) control.click()
+        else {
+          calls.push(rows[0].textContent)
+          if (confirm) selected = rows[0].textContent
+        }
+      },
+    }
+  }
+  const dialog = {
+    getByLabel: (name) => locator(linked && matches(name, label) ? (duplicate ? [control, control] : [control]) : []),
+    locator: () => locator([field]),
+    getByRole: () => locator([]),
+  }
+  const page = pageFixture()
+  page.getByRole = (role, { name }) =>
+    locator(role === 'option' && opened ? options.filter((option) => matches(name, option.textContent)) : [])
+  return { adapter: new PlatformAdapter({ page, email: 'owner@example.com' }), dialog, calls, selected: () => selected }
+}
+
+for (const variant of [
+  { name: 'native select', native: true },
+  { name: 'labelled combobox', combo: true },
+  { name: 'label sibling value button', linked: false },
+  { name: 'Chinese expiration field', native: true, label: '有效期限', choices: ['30 天', '永不过期'] },
+  { name: 'Japanese expiration field', label: '有効期限', choices: ['30日', '期限なし'] },
+]) {
+  test(`expiration selection supports the ${variant.name} and verifies the result`, async () => {
+    const f = expirationFixture(variant)
+    await f.adapter.selectExpiration(f.dialog)
+    assert.equal(f.selected(), variant.choices?.[1] || 'Never')
+    assert.equal(f.calls.filter((value) => value !== 'open').length, 1)
+    f.adapter.dispose()
+  })
+}
+
+test('an already selected Never expiration is left in place', async () => {
+  const f = expirationFixture({ initial: 'Never' })
+  await f.adapter.selectExpiration(f.dialog)
+  assert.deepEqual(f.calls, [])
+  f.adapter.dispose()
+})
+
+for (const variant of [
+  { name: 'ambiguous controls', duplicate: true },
+  { name: 'unconfirmed selection', confirm: false },
+  { name: 'organization policy without Never', native: true, choices: ['30 days', '90 days'] },
+]) {
+  test(`expiration selection yields to manual input for ${variant.name}`, async () => {
+    const f = expirationFixture(variant)
+    await assert.rejects(f.adapter.selectExpiration(f.dialog), { code: 'platform_expiration_required' })
+    f.adapter.dispose()
+  })
+}
+
+test('an unrelated complete secret in a dialog cannot be saved without a matching successful creation response', async () => {
+  const page = pageFixture()
+  page.getByRole = () => ({ evaluateAll: async () => ['sk-proj-unrelated-fixture-secret'] })
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  const saved = []
+  beginCapture(adapter, { onKey: (key) => saved.push(key) })
+  await adapter.continueKeySetup()
+  assert.deepEqual(saved, [])
+  adapter.dispose()
+})
+
+test('a delayed creation response from an ended setup cannot contaminate a newer setup', async () => {
+  const page = pageFixture()
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  const saved = []
+  const previous = beginCapture(adapter, { onKey: (key) => saved.push(key) })
+  let finish
+  const response = jsonResponse('/dashboard/api_keys', null, keyRequestOptions)
+  response.json = () =>
+    new Promise((resolve) => {
+      finish = resolve
+    })
+  page.emit('request', response.request())
+  const observing = adapter.observe(response)
+  adapter.endKeySetup(previous)
+  const next = beginCapture(adapter, { onKey: (key) => saved.push(key) })
+  finish({ secret: 'sk-proj-previous-setup-fixture-secret' })
+  await observing
+  assert.equal(next.responseConfirmed, false)
+  assert.deepEqual(saved, [])
+  adapter.dispose()
+})
+
+test('a response cannot claim an old request which predates the current setup', async () => {
+  const page = pageFixture()
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  const response = jsonResponse(
+    '/dashboard/api_keys',
+    { secret: 'sk-proj-old-request-fixture-secret' },
+    keyRequestOptions,
+  )
+  page.emit('request', response.request())
+  const saved = []
+  const setup = beginCapture(adapter, { onKey: (key) => saved.push(key) })
+  await adapter.observe(response)
+  assert.equal(setup.request, null)
+  assert.equal(setup.responseConfirmed, false)
+  assert.deepEqual(saved, [])
+  adapter.dispose()
 })

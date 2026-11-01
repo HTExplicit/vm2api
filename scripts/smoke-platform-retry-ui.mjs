@@ -182,6 +182,35 @@ try {
   await retry.click()
   await until(() => opens.length === 4, 'the next retry starts without reopening the browser')
   sendStatus('configuring')
+  for (const [status, label] of [
+    ['awaiting_key_input', '检查创建结果'],
+    ['key_save_failed', '重试保存'],
+  ]) {
+    sendStatus('error', 'Old error before ' + status)
+    await retry.waitFor({ state: 'visible' })
+    assert.equal(await page.getByRole('alert').innerText(), 'Old error before ' + status)
+    sendStatus(status)
+    const action = page.getByRole('button', { name: label, exact: true })
+    await action.waitFor({ state: 'visible' })
+    assert.equal(await action.isEnabled(), true, status + ' permits checking the retained task')
+    assert.equal(await page.getByRole('alert').count(), 0, status + ' clears the old terminal error')
+    const continuesBefore = wire.filter((input) => input.type === 'continue').length
+    await action.evaluate((button) => {
+      button.click()
+      button.click()
+    })
+    await until(
+      () => wire.filter((input) => input.type === 'continue').length === continuesBefore + 2,
+      status + ' sends checks only through the existing continue transport',
+    )
+    assert.equal(opens.length, 4, status + ' never POSTs another setup request')
+    assert.equal(connections, 1, status + ' reuses the existing WebSocket')
+    assert.equal(tickets, 1, status + ' reuses the existing browser ticket')
+    assert.equal(closes, 0, status + ' preserves the current browser')
+  }
+  sendStatus('configuring')
+  await busy.waitFor({ state: 'visible' })
+  assert.equal(await busy.isDisabled(), true, 'a successful save relocks the automatic configuration')
   sendStatus('api_ready')
   const ready = page.getByRole('button', { name: 'API 配置已完成', exact: true })
   await ready.waitFor({ state: 'visible' })
@@ -219,6 +248,9 @@ try {
       retry_double_click_single_request: true,
       configuring_disabled: true,
       retry_error_preserves_window: true,
+      manual_key_checks_reuse_task: true,
+      secret_save_retry_reuses_task: true,
+      recovery_clears_stale_errors: true,
       completed_and_closed: true,
       close_waits_for_retry: true,
       external_requests: externalRequests.length,

@@ -12,7 +12,7 @@ const PROJECT_ID = 'proj_fixture'
 const KEY_NAME = 'vm2api-offline-fixture'
 const FAKE_KEY = 'sk-proj-offline-abcdefghijklmnopqrstuvwxyz0123456789'
 
-function fixturePage({ delay = 0, duplicate = false, existing = false } = {}) {
+function fixturePage({ delay = 0, duplicate = false, existing = [] } = {}) {
   return `<!doctype html><html><head><meta charset="utf-8"><title>Offline Platform fixture</title>
   <style>
     body { margin: 0; font: 16px sans-serif; }
@@ -25,7 +25,7 @@ function fixturePage({ delay = 0, duplicate = false, existing = false } = {}) {
   <button class="zero-size" onclick="document.body.dataset.hiddenClicks=String(Number(document.body.dataset.hiddenClicks)+1)">Create new secret key</button>
   <button id="create" style="display:none" onclick="openKeyDialog()">Create new secret key</button>
   ${duplicate ? '<button onclick="openKeyDialog()">Create new secret key</button>' : ''}
-  <table><tbody>${existing ? `<tr><td>${KEY_NAME}</td></tr>` : ''}</tbody></table>
+  <table><tbody>${existing.map((status) => `<tr data-existing-key><td>${KEY_NAME}</td><td>${status}</td></tr>`).join('')}</tbody></table>
   <dialog id="key-dialog">
     <div><label>Name (Optional)</label><input type="text"></div>
     <div><label>Project</label><select><option value="${PROJECT_ID}">Default project</option></select></div>
@@ -50,7 +50,9 @@ function fixturePage({ delay = 0, duplicate = false, existing = false } = {}) {
     async function submitKey() {
       document.body.dataset.submitted = String(Number(document.body.dataset.submitted) + 1);
       const dialog = document.getElementById('key-dialog');
-      await fetch('/dashboard/api_keys', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+      await fetch('/dashboard/api_keys', { method: 'POST', headers: {
+        'content-type': 'application/json', 'openai-organization': '${ORGANIZATION_ID}',
+      }, body: JSON.stringify({
         name: dialog.querySelector('input').value,
         project_id: dialog.querySelector('select').value,
         expiration: document.body.dataset.expiration,
@@ -174,13 +176,25 @@ try {
     adapter.dispose()
   }
 
-  adapter = await adapterFor({ existing: true })
-  try {
-    await assert.rejects(adapter.configure({ keyName: KEY_NAME }), { code: 'platform_key_already_exists' })
-    assert.equal(await page.locator('body').getAttribute('data-opened'), '0')
-    assert.equal(submissions.length, 1, 'a pre-existing remote key must not be created again')
-  } finally {
-    adapter.dispose()
+  for (const existing of [['Active'], ['Revoked'], ['Unknown'], ['Active', 'Revoked']]) {
+    adapter = await adapterFor({ existing })
+    try {
+      const before = submissions.length
+      const savedExisting = []
+      const configured = await adapter.configure({ keyName: KEY_NAME, onKey: (key) => savedExisting.push(key) })
+      assert.equal(configured.apiKey, FAKE_KEY)
+      assert.equal(savedExisting.length, 1, 'the new complete secret must be saved exactly once')
+      assert.equal(await page.locator('body').getAttribute('data-opened'), '1')
+      assert.equal(await page.locator('body').getAttribute('data-submitted'), '1')
+      assert.equal(submissions.length, before + 1, 'existing remote records must not block one new creation')
+      assert.deepEqual(
+        await page.locator('[data-existing-key] td:nth-child(2)').allTextContents(),
+        existing,
+        'the original remote records remain untouched',
+      )
+    } finally {
+      adapter.dispose()
+    }
   }
 
   const dimensions = await page.evaluate(() => ({ outerWidth, innerWidth }))
@@ -195,7 +209,8 @@ try {
       delayedSetupElapsedMs,
       hiddenEntryIgnored: true,
       ambiguousEntryStopped: true,
-      existingKeyStopped: true,
+      existingKeysPermitNewCreation: true,
+      existingRemoteRecordsPreserved: true,
       fixtureKeySubmissions: submissions.length,
     }),
   )

@@ -129,6 +129,10 @@ export function browserStatusMessage(
       'OpenAI 授权成功，凭据已保存。可以继续进入 Platform，或关闭窗口。',
     needs_login: '请在此窗口完成官方登录或验证码，再点“登录完成，继续配置”。',
     configuring: '正在配置账号 API，请保留此窗口…',
+    awaiting_key_input:
+      '请手动选择期限并创建密钥，创建后会自动保存。可点“检查创建结果”查看进度。',
+    key_save_failed:
+      '密钥尚未保存，请保留当前窗口并点“重试保存”，无需重新创建密钥。',
     api_ready: '账号 API 配置完成，凭据已保存。',
     closed: '浏览器已关闭，可以重新连接。',
   }

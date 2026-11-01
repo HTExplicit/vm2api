@@ -78,6 +78,7 @@ jobs:
             test/unit/codex-browser-login.test.mjs \
             test/unit/slot-cleanup.test.mjs \
             test/unit/openai-platform-adapter.test.mjs \
+            test/unit/openai-key-handoff.test.mjs \
             test/unit/platform-browser.test.mjs \
             test/unit/panel-openai-api.test.mjs \
             test/unit/api-account-routing.test.mjs \
@@ -134,6 +135,7 @@ jobs:
           pnpm exec vitest run src/features/vm/usage-windows.test.tsx src/features/vm/vm-rack-model.test.ts
           pnpm exec vitest run src/features/models/model-mapping.test.ts src/features/models/policy.test.ts
           pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx src/features/vm/openai-api-actions.test.tsx src/features/settings/openai-api-balance-section.test.tsx
+          pnpm exec vitest run src/features/vm/openai-platform-browser-dialog.test.tsx
           pnpm build
       - name: Platform configuration retry UI
         run: node scripts/smoke-platform-retry-ui.mjs

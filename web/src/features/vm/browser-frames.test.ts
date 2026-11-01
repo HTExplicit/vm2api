@@ -162,4 +162,16 @@ describe('latest browser frame transport', () => {
       'API 配置完成'
     )
   })
+
+  it('explains manual key creation and local-save recovery as separate steps', () => {
+    expect(browserStatusMessage('awaiting_key_input', 'platform')).toContain(
+      '请手动选择期限并创建密钥，创建后会自动保存'
+    )
+    expect(browserStatusMessage('key_save_failed', 'platform')).toContain(
+      '保留当前窗口并点“重试保存”'
+    )
+    expect(browserStatusMessage('key_save_failed', 'platform')).toContain(
+      '无需重新创建密钥'
+    )
+  })
 })

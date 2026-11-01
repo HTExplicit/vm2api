@@ -99,7 +99,11 @@ export function SlotBrowserDialog({
         ? '正在配置…'
         : status === 'error'
           ? '重试配置'
-          : '登录完成，继续配置'
+          : status === 'awaiting_key_input'
+            ? '检查创建结果'
+            : status === 'key_save_failed'
+              ? '重试保存'
+              : '登录完成，继续配置'
 
   useEffect(() => {
     const element = viewport.current
@@ -250,6 +254,7 @@ export function SlotBrowserDialog({
           }
           if (payload.status === 'error')
             setError(payload.message || '浏览器任务失败，请重新连接。')
+          else setError('')
           if (
             payload.status === 'oauth_complete' ||
             payload.status === 'api_ready'
