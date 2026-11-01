@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.4.3101 — 2026-11-01
+
+- 合入官方 1.4.029–1.4.031（9ec89afb）：强制工具调用按模型能力明确报错；修复 OAuth 健康状态读取，调整 HTTP 长连接超时，并清理重复 auto mode 提醒。
+- 官方 Claude Code 家族仅在 `official_cc_passthrough=true` 时保留入站 system；关闭时统一按现有 persona 配置清洗。请求体上限入口移至设置 → 配额，已有数值不变。
+- 本 fork 对第三方应用计费拒绝保留独立处理：指定 HTTP 400/503 返回 400 `quota_error` / `entitlement_required`，停止本次换号与修复重试，不缓存提示词或封设备；内容政策拒答仍沿用官方缓存及错误码修复。
+- 新建 OpenAI API key 使用当前组织的官方 Default project，不再创建或优先使用 vm2api 项目；已有 key 不重建、不迁移项目。
+
+升级使用正常面板流程。保留配置、数据、凭据、代理、启停与调度意图；无迁移，槽位 payload 与固定 CLI 不变，无需额外执行 `wrap-cli/sync`。下方 1.4.029–1.4.031 为上游原始记录，计费拒绝以本条 fork 行为为准。
+
 ## 1.4.2813 — 2026-11-01
 
 - 修复账号浏览器在放大、滚动画面后点击坐标偏移：输入聚焦不再滚动图片，先按当前画面计算坐标。
@@ -102,6 +111,29 @@ Platform 首次连接需要管理员完成对应账号登录。领取通道已�
 - deploy/payload.json 的上游固定版本与校验值保持不变；许可证与上游归属保留。
 
 已部署机升级：更新控制面镜像并重启。保留 .env、routing.json、vms/、data/ 和槽位身份。首轮未发布 ARM64 控制面镜像。
+## 1.4.031 — 2026-11-01
+
+- #841：设置 → 配额直接显示并管理「请求体上限」（`failover.max_request_mib`，8–128 MiB）。账号池「重试与切号」不再包含这项。保存后的生效方式不变：各槽 kernel 在没有请求时重启。
+- #843：官方 Claude Code 家族不再仅凭识别放行。协议页「官方 Claude Code 家族透传」（`official_cc_passthrough`）关闭时，直连、中转、子跳以及任何看起来像官方的 Messages 都走 persona 清洗；只有该开关打开才保留入站 system。cli-hop 与 HTTP 同一条门。
+- #842：上游 HTTP 400/503「Third-party apps now draw from your extra usage…」和「no third-party apps allowed」不再当无效请求、过载或额度错误。不换号、不修复重试，客户端收到 400 `refusal_guard`，该 prompt 永久写入拒答缓存，近似正文按已有阈值拦截。这是计费限制，不封 device。内容策略错误码（含只写在 `upstream_code` 的）同样永久入库并带相似度签名。
+
+已部署机升级：须更新 Node 控制面与 `web/dist` 后重启；无迁移、不必 `fetch:payload` / `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.4.030 — 2026-10-31
+
+- #837：`prepareSlotOAuth` 正确读取 `startSlotReady` 嵌套的 kernel health（`boot.rust.rust.health`），兼容扁平 mock；修复非 native 槽 OAuth 上号必抛 `oauth_runtime_not_ready`。
+- #838：HTTP server `keepAliveTimeout=120000`、`headersTimeout=125000`、`timeout=0`，避免反向代理长连接被过早掐断。
+- auto mode 提示词对齐 Claude Code 2.1.310：cli-node 只在进入 auto mode 时发一次完整提醒，不再每几轮插入 `Auto mode still active…`。网关把 `Auto mode still active (reported by harness).`、旧的 sparse/六点全文折叠成这一次官方提醒；模型回声整段删掉。官方原文（Bias toward working…）不改。
+- 本机 `share/wrap-cli/cli-node` 换成 auto mode 提醒对齐后的构建。源码 `bbadf5d4`。plain 118306944 字节，SHA256 `724a94390a3cfa0a57bc590ac0c7bd4448979b6c6843753806bd32aa52426286`。UPX 5.0.2 `--best --lzma` 后 27932800 字节，SHA256 `ae120fa09a61d6ba7afa3bb57e8e389a0183c4d2026957607143d9b39562c421`。`upx -t` 通过，`--version` 为 `2.1.303 (Claude Code)`。payload 未更新，线上槽位未部署。
+
+已部署机升级：更新 Node 控制面后重启（本版不必更新 web/dist）。不要覆盖 routing.json、vms/、data/、.env。
+
+## 1.4.029 — 2026-10-30
+
+- #815：取消 Opus/Sonnet 5.5 将强制 `tool_choice` 静默改写为 `auto` 并强加 `strict:true` 的行为；入口 `validateToolChoice`，不兼容请求明确 400（`tool_choice_incompatible` / `invalid_tool_choice`），兼容模型保留调用方 `tool_choice` 与 `strict`。**行为破坏**：原先静默降级为 auto 的强制工具请求，现返回 400。
+- #832：对齐 #814/#807：官方 cache 断点单测保留 CLI `eager_input_streaming`；调度 admission 单测不再依赖 `accounts.schedulable`。
+
+已部署机升级：更新 Node 控制面后重启（本版不必更新 web/dist）。不要覆盖 routing.json、vms/、data/、.env。
 
 ## 1.4.028 — 2026-10-30
 

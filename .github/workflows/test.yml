@@ -43,6 +43,17 @@ jobs:
         run: |
           set -euo pipefail
           for file in \
+            test/unit/forced-tool-choice.test.mjs \
+            test/unit/sonnet-55-policy.test.mjs \
+            test/unit/auto-mode-reminder.test.mjs \
+            test/unit/claude-auth-login.test.mjs \
+            test/unit/crs-persona.test.mjs \
+            test/unit/persona-settings-switch.test.mjs \
+            test/unit/upstream-error-policy.test.mjs \
+            test/unit/zero-retry-contract.test.mjs \
+            test/unit/refusal-guard.test.mjs \
+            test/unit/errors-map.test.mjs \
+            test/unit/error-class.test.mjs \
             test/unit/release.test.mjs \
             test/unit/release-errors.test.mjs \
             test/unit/release-source.test.mjs \

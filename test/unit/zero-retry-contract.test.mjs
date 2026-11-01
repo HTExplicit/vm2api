@@ -84,7 +84,11 @@ const cases = [
   },
 ]
 
-async function runCase(t, fixture, { switchAfterRepair = false, repeatWithCachedSearchRepair = false } = {}) {
+async function runCase(
+  t,
+  fixture,
+  { switchAfterRepair = false, repeatWithCachedSearchRepair = false, repeatAfterEntitlement = false } = {},
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zero-retry-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const routing = {
@@ -102,12 +106,18 @@ async function runCase(t, fixture, { switchAfterRepair = false, repeatWithCached
       return { ok: true, vmId, accountId: vmId, vm, exec: { vmId, vm, homeDir: root }, release() {} }
     },
     markSuccess() {},
-    markCooldown() {},
+    markCooldown() {
+      if (repeatAfterEntitlement) assert.fail('billing failure must not cool the account')
+    },
     releaseAccountSessions() {},
   }
   const runner = new FailoverRunner({ scheduler, config: { signature_repair: true, max_same_account_retries: 0 } })
   const hops = []
+  let refusalWrites = 0
+  let deviceBlocks = 0
   const input = { model: 'claude-opus-5-5', max_tokens: 128, stream: false, system: rule, messages: fixture.messages }
+  if (repeatAfterEntitlement)
+    input.metadata = { user_id: { device_id: 'billing-device-12345678', session_id: 'billing-session' } }
   const response = { headersSent: false, on() {}, once() {}, off() {}, write() {}, end() {} }
   const handler = createHandleProtocol({
     json: (_res, status, body) => {
@@ -138,6 +148,23 @@ async function runCase(t, fixture, { switchAfterRepair = false, repeatWithCached
     routingConfigPath: routingFile,
     routingConfig: routing,
     groupsRepo: { rateMultiplier: () => 1 },
+    ...(repeatAfterEntitlement
+      ? {
+          refusalGuards: {
+            get: () => null,
+            nearest: () => null,
+            remember: () => {
+              refusalWrites++
+            },
+          },
+          refusalDevices: {
+            get: () => null,
+            block: () => {
+              deviceBlocks++
+            },
+          },
+        }
+      : {}),
     failoverRunner: {
       run(opts) {
         return runner.run({
@@ -149,7 +176,17 @@ async function runCase(t, fixture, { switchAfterRepair = false, repeatWithCached
               preset: candidate.vm.persona_preset,
             })
             if (hops.length === 1)
-              return { ok: false, status: 400, terminalState: 'rejected', body: { error: { message: fixture.error } } }
+              return {
+                ok: false,
+                status: fixture.status || 400,
+                terminalState: 'rejected',
+                body: {
+                  error: {
+                    message: fixture.error,
+                    ...(repeatAfterEntitlement ? { upstream_code: 'usage_policy' } : {}),
+                  },
+                },
+              }
             if (switchAfterRepair && hops.length === 2)
               return { ok: false, status: 529, terminalState: 'rejected', body: { error: { message: 'Overloaded' } } }
             return structuredClone(success)
@@ -168,6 +205,15 @@ async function runCase(t, fixture, { switchAfterRepair = false, repeatWithCached
     off() {},
   }
   await handler.handleProtocol(request, response, 'anthropic.messages', '/v1/messages')
+  if (repeatAfterEntitlement) {
+    assert.equal(response.status, 400)
+    assert.equal(response.body.error.code, 'entitlement_required')
+    assert.equal(response.body.error.message, fixture.error)
+    assert.equal(hops.length, 1, 'billing failure must not retry or switch accounts')
+    assert.equal(refusalWrites, 0, 'billing failure must not enter exact or similar refusal memory')
+    assert.equal(deviceBlocks, 0, 'billing failure must not ban the device')
+    await handler.handleProtocol(request, response, 'anthropic.messages', '/v1/messages')
+  }
   if (repeatWithCachedSearchRepair) {
     assert.equal(hops.length, 2)
     await handler.handleProtocol(request, response, 'anthropic.messages', '/v1/messages')
@@ -176,7 +222,7 @@ async function runCase(t, fixture, { switchAfterRepair = false, repeatWithCached
   assert.equal(hops.length, switchAfterRepair || repeatWithCachedSearchRepair ? 3 : 2)
   for (const [index, hop] of hops.entries()) {
     assert.equal(JSON.stringify(hop.body).split(rule).length - 1, 1)
-    assert.equal(hop.repaired, index > 0 && !(repeatWithCachedSearchRepair && index === 2))
+    assert.equal(hop.repaired, !repeatAfterEntitlement && index > 0 && !(repeatWithCachedSearchRepair && index === 2))
     assert.equal(hop.body.system[0].text.includes('prompt_version=<'), hop.preset === 'zero')
     if (hop.preset === 'zero') assert.ok(hop.body.system.some((block) => block.text === rule))
     if (index > 0) fixture.check(hop.body)
@@ -192,3 +238,15 @@ test('a repaired request uses the next slot preset when failover switches accoun
   runCase(t, cases[0], { switchAfterRepair: true }))
 test('a cached search repair survives slot rendering on the next request without another retry', (t) =>
   runCase(t, cases[2], { repeatWithCachedSearchRepair: true }))
+
+test('a third-party billing failure leaves the same prompt free to succeed on the next request', (t) =>
+  runCase(
+    t,
+    {
+      error: 'Third-party apps now draw from your extra usage, not your plan limits.',
+      status: 503,
+      messages: [{ role: 'user', content: 'Return OK.' }],
+      check() {},
+    },
+    { repeatAfterEntitlement: true },
+  ))

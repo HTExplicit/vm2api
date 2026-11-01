@@ -1,3 +1,4 @@
+import { repairAutoModeReminders } from './auto-mode-reminder.mjs'
 import { defaultMaxTokensForModel } from './model-policy.mjs'
 
 /**
@@ -223,7 +224,6 @@ export function sanitizeAnthropicBody(body, { strictPassthrough = false, preserv
   if (Array.isArray(out.tools) && out.tools.length === 0) delete out.tools
   // Do not overwrite caller max_tokens (thinking budget). Only fill if missing.
   if (!out.max_tokens) out.max_tokens = defaultMaxTokensForModel(out.model)
-  if (out.tool_choice && !out.tools) delete out.tool_choice
   normalizeStop(out)
   return canonicalizeClaudeMessagesShape(out, { preserveContentShape })
 }
@@ -249,6 +249,7 @@ export function sanitizeAnthropicBody(body, { strictPassthrough = false, preserv
  */
 export function normalizeAnthropicMessages(body, { keepMidConversationSystem = true } = {}) {
   if (!body || !Array.isArray(body.messages)) return body
+  repairAutoModeReminders(body)
 
   const keepMessageEffort = modelSupportsPerMessageEffort(body.model)
   const systemParts = []
@@ -297,6 +298,7 @@ export function normalizeAnthropicMessages(body, { keepMidConversationSystem = t
   }
 
   body.messages = merged
+  repairAutoModeReminders(body)
   if (systemParts.length) body.system = appendSystemParts(body.system, systemParts)
   if (!keepMessageEffort && (trailingEmptyEffort || liftedContentEffort)) {
     applyLiftedEffort(body, trailingEmptyEffort || liftedContentEffort)

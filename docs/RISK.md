@@ -57,7 +57,7 @@
 
 只记上游真正拒过的正文。硬正则和决策模型自己打回的拦截不进这张缓存，下次仍重新过闸。
 
-内核把 Usage Policy 拒答报成 HTTP 400 `upstream_invalid_request` 时，日志仍按拒答归类，风险审计的「上游拒答」能看到这条 400。指纹列表显示当时的用户原文，不显示 `<system-reminder>`。近似比较去掉提醒、`# Environment` 和工具回传后的用户正文；短于 512 字没有近似签名，只拦完全一致的提示词。
+内核把 Usage Policy 拒答报成 HTTP 400 `upstream_invalid_request` 时，日志仍按拒答归类，风险审计的「上游拒答」能看到这条 400。本 fork 将 HTTP 400/503 的 `Third-party apps now draw from your extra usage` 和 `no third-party apps allowed` 单独作为计费拒绝：返回 400 `quota_error` / `entitlement_required` 并保留上游说明和请求标识，停止本次换号与修复重试；不写精确或近似拒答缓存，不封 device，不改变账号调度状态。计费条件修复后，同一提示词仍可重新发送。`content_policy`、`cyber_policy` 等错误码，包括只写在 `upstream_code` 里的，同样永久入库并带相似度签名；device 封禁开着时仍封 device。指纹列表显示当时的用户原文，不显示 `<system-reminder>`。近似比较去掉提醒、`# Environment` 和工具回传后的用户正文；短于 512 字没有近似签名，只拦完全一致的提示词。
 
 三种命中都是不可自动重试的 400 `policy_blocked`，`code` 仍是 `refusal_guard`，避免 Claude Code 误提示 `/login`。原文后面追加原因，`details.reason` 为：
 

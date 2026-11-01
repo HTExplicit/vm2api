@@ -43,7 +43,7 @@
 
 ## 本 fork 的发布来源
 
-本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，维护分支为 `maint`，当前版本见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随 main 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始。
+本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，维护分支为 `maint`，当前版本见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随 main 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始，合入 031 后从 3101 开始。
 
 上游归属、[LICENSE](LICENSE)、鸣谢与历史文档保留；下方旧版说明和评测为上游历史内容，具体版本以对应记录为准。
 
@@ -93,7 +93,7 @@
 - **模型**页改为卡片矩阵。`claude-haiku-5-5` 的默认上下文、`max_tokens` 和输出上限是 100K；已经改过的管理员值不会被重置。
 - **托管密钥**可以限定平台（全部 / Anthropic / OpenAI）和勾选的槽。打到范围外返回 403。
 - **流空闲**默认 180 秒，在「重试与切号」里改。长工具参数可打开流式下发，避免静默超时。
-- **cli-node** 本机交付文件已换成 2.1.303：`share/wrap-cli/cli-node`，UPX 后 27,788,488 字节，SHA256 `efa72baab605c4ecee19a9e130b52ca2e1d6ef317880f5eaa5d90e867cc96aa4`。构建基线 `e30047ed` 加当前工作区。payload 尚未更新，线上槽位未部署。
+- **cli-node** 本机交付文件已换成 2.1.303：`share/wrap-cli/cli-node`，UPX 后 27,932,800 字节，SHA256 `ae120fa09a61d6ba7afa3bb57e8e389a0183c4d2026957607143d9b39562c421`。构建基线 `bbadf5d4`。payload 尚未更新，线上槽位未部署。
 
 ---
 
@@ -312,7 +312,7 @@ Since 1.3.122, the caller-visible changes are:
 - **Models** are a card matrix. Haiku 5.5 defaults to a 100K context and output cap; an admin override is kept.
 - **Keys** can be limited to Anthropic or OpenAI and to selected slots. A call outside that scope returns 403.
 - **Stream idle** defaults to 180 seconds under retry settings. Long tool arguments can be streamed.
-- **cli-node** local delivery is now 2.1.303: `share/wrap-cli/cli-node`, 27,788,488 bytes after UPX, SHA256 `efa72baab605c4ecee19a9e130b52ca2e1d6ef317880f5eaa5d90e867cc96aa4`. Built from `e30047ed` plus the current working tree. The payload and live slots are unchanged.
+- **cli-node** local delivery is now 2.1.303: `share/wrap-cli/cli-node`, 27,932,800 bytes after UPX, SHA256 `ae120fa09a61d6ba7afa3bb57e8e389a0183c4d2026957607143d9b39562c421`. Built from `bbadf5d4`. The payload and live slots are unchanged.
 
 Details: [CHANGELOG.md](CHANGELOG.md). Guide: [vm2api.fkcodex.com/zh](https://vm2api.fkcodex.com/zh/).
 
