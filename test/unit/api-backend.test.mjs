@@ -567,7 +567,7 @@ async function runManagedKeyHop(root, result) {
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
     accountQuota: { ingestHeaders() {} },
     apiKeyStore: {
-      acquire: () => options.keyGate || { ok: true },
+      acquire: () => ({ ok: true }),
       release() {},
       recordUsage: (key, usage, opts) => charges.push({ key, usage, opts }),
     },
@@ -1764,7 +1764,7 @@ async function runAccountApiProtocol(inbound, protocol, options = {}) {
       },
     ),
     apiKeyStore: {
-      acquire: () => ({ ok: true }),
+      acquire: () => options.keyGate || { ok: true },
       release() {},
       recordUsage: (...args) => billed.push(args),
       users: { getById: () => ({ role: options.ownerRole || 'admin' }) },
@@ -1908,4 +1908,44 @@ test('tenant account API keys retain the existing platform API permission gate',
   assert.equal(run.response.body.error.code, 'api_backend_forbidden')
   assert.equal(run.sent.length, 0)
   assert.equal(run.billed.length, 0)
+})
+
+test('account API retains the managed-key quota gate before any upstream request', async () => {
+  const run = await runAccountApiProtocol(
+    { model: 'o3', messages: [{ role: 'user', content: 'hello' }] },
+    'openai.chat',
+    { keyGate: { ok: false, status: 429, code: 'api_key_quota_exhausted', message: 'quota exhausted' } },
+  )
+  assert.equal(run.response.statusCode, 429)
+  assert.equal(run.response.body.error.code, 'api_key_quota_exhausted')
+  assert.equal(run.sent.length, 0)
+  assert.equal(run.billed.length, 0)
+})
+
+test('account API Completions stream reaches the same key and ends exactly once', async () => {
+  const run = await runAccountApiProtocol(
+    { model: 'o3', prompt: 'hello', max_tokens: 16, stream: true },
+    'openai.completions',
+    { path: '/v1/completions' },
+  )
+  assert.equal(run.response.statusCode, 200)
+  assert.equal(run.sent.length, 1)
+  const data = run.response.wire
+    .split('\n')
+    .filter((line) => line.startsWith('data: '))
+    .map((line) => line.slice(6))
+  assert.equal(data.filter((value) => value === '[DONE]').length, 1)
+  const chunks = data.filter((value) => value !== '[DONE]').map((value) => JSON.parse(value))
+  assert.ok(chunks.length)
+  assert.ok(chunks.every((chunk) => chunk.object === 'text_completion'))
+  assert.equal(
+    chunks
+      .flatMap((chunk) => chunk.choices || [])
+      .map((choice) => choice.text || '')
+      .join(''),
+    'OK',
+  )
+  assert.equal(run.logs[0].account_id, 'api-key-a')
+  assert.equal(run.logs[0].vm_id, null)
+  assert.equal(run.billed.length, 1)
 })
