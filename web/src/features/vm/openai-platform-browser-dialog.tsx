@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type PointerEvent } from 'react'
 import { ExternalLink, RefreshCw } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiBase } from '@/lib/session'
@@ -59,6 +59,11 @@ export function SlotBrowserDialog({
   const socket = useRef<WebSocket | null>(null)
   const keyboard = useRef<HTMLTextAreaElement | null>(null)
   const viewport = useRef<HTMLDivElement | null>(null)
+  const pressedPointer = useRef<{
+    id: number
+    button: 'left' | 'middle' | 'right'
+    point: { x: number; y: number }
+  } | null>(null)
   const lastMoveAt = useRef(0)
   const inputSeq = useRef(0)
   const callbacks = useRef({ onOpenChange, onComplete })
@@ -258,6 +263,7 @@ export function SlotBrowserDialog({
     })
     return () => {
       cancelled = true
+      pressedPointer.current = null
       frames.close()
       ws?.close()
       if (socket.current === ws) socket.current = null
@@ -270,6 +276,27 @@ export function SlotBrowserDialog({
         JSON.stringify({ ...payload, seq: ++inputSeq.current })
       )
     }
+  }
+
+  const releasePointer = (
+    event: PointerEvent<HTMLImageElement>,
+    cancelled = false
+  ) => {
+    const pressed = pressedPointer.current
+    if (!pressed || pressed.id !== event.pointerId || !frame) return
+    event.preventDefault()
+    const point = cancelled
+      ? pressed.point
+      : browserInputPoint(
+          event.clientX,
+          event.clientY,
+          event.currentTarget.getBoundingClientRect(),
+          frame
+        )
+    pressedPointer.current = null
+    send({ type: 'mouse_up', button: pressed.button, ...point })
+    if (event.currentTarget.hasPointerCapture(event.pointerId))
+      event.currentTarget.releasePointerCapture(event.pointerId)
   }
 
   return (
@@ -301,7 +328,8 @@ export function SlotBrowserDialog({
           tabIndex={0}
           className='relative min-h-48 min-w-0 flex-1 overflow-auto rounded-md border bg-muted/30 outline-none focus-within:ring-2 focus-within:ring-ring focus-visible:ring-2 focus-visible:ring-ring'
           onFocus={(event) => {
-            if (event.target === event.currentTarget) keyboard.current?.focus()
+            if (event.target === event.currentTarget)
+              keyboard.current?.focus({ preventScroll: true })
           }}
           onKeyDown={(event) => {
             if (event.nativeEvent.isComposing) return
@@ -367,33 +395,54 @@ export function SlotBrowserDialog({
               draggable={false}
               className={
                 originalSize
-                  ? 'block h-auto max-w-none select-none'
-                  : 'mx-auto block h-auto max-w-full select-none'
+                  ? 'block h-auto max-w-none touch-none select-none'
+                  : 'mx-auto block h-auto max-w-full touch-none select-none'
               }
               style={originalSize ? { width: frame.width } : undefined}
-              onClick={(event) => {
-                keyboard.current?.focus()
+              onPointerDown={(event) => {
+                const button = (['left', 'middle', 'right'] as const)[
+                  event.button
+                ]
+                if (!button || pressedPointer.current) return
+                event.preventDefault()
+                const point = browserInputPoint(
+                  event.clientX,
+                  event.clientY,
+                  event.currentTarget.getBoundingClientRect(),
+                  frame
+                )
+                pressedPointer.current = {
+                  id: event.pointerId,
+                  button,
+                  point,
+                }
+                event.currentTarget.setPointerCapture(event.pointerId)
+                keyboard.current?.focus({ preventScroll: true })
                 send({
-                  type: 'click',
-                  ...browserInputPoint(
-                    event.clientX,
-                    event.clientY,
-                    event.currentTarget.getBoundingClientRect(),
-                    frame
-                  ),
+                  type: 'mouse_down',
+                  button,
+                  ...point,
                 })
               }}
-              onMouseMove={(event) => {
+              onPointerUp={(event) => releasePointer(event)}
+              onPointerCancel={(event) => releasePointer(event, true)}
+              onLostPointerCapture={(event) => releasePointer(event, true)}
+              onContextMenu={(event) => event.preventDefault()}
+              onPointerMove={(event) => {
+                const pressed = pressedPointer.current
+                if (pressed && pressed.id !== event.pointerId) return
+                const point = browserInputPoint(
+                  event.clientX,
+                  event.clientY,
+                  event.currentTarget.getBoundingClientRect(),
+                  frame
+                )
+                if (pressed) pressed.point = point
                 if (Date.now() - lastMoveAt.current < 40) return
                 lastMoveAt.current = Date.now()
                 send({
                   type: 'move',
-                  ...browserInputPoint(
-                    event.clientX,
-                    event.clientY,
-                    event.currentTarget.getBoundingClientRect(),
-                    frame
-                  ),
+                  ...point,
                 })
               }}
             />

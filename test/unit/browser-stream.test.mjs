@@ -38,6 +38,8 @@ function fixture(t, options = {}) {
   }
   page.mouse = {
     click: async (x, y) => calls.input.push(['click', x, y]),
+    down: async ({ button }) => calls.input.push(['down', button]),
+    up: async ({ button }) => calls.input.push(['up', button]),
     move: async (x, y) => calls.input.push(['move', x, y]),
     wheel: async (x, y) => calls.input.push(['scroll', x, y]),
   }
@@ -163,6 +165,100 @@ test('mouse moves coalesce within a sequence but keep their order around click e
     ['click', 3, 3],
     ['move', 5, 5],
   ])
+})
+
+test('mouse press, drag and release keep their order and request a fresh frame', async (t) => {
+  const f = fixture(t)
+  const ws = new Socket()
+  f.stream.attach(ws)
+  await f.fire()
+  f.setTime(500)
+  ws.input({ type: 'mouse_down', x: 10, y: 20, seq: 1 })
+  ws.input({ type: 'move', x: 14, y: 24, seq: 2 })
+  ws.input({ type: 'move', x: 18, y: 28, seq: 3 })
+  ws.input({ type: 'mouse_up', x: 20, y: 30, seq: 4 })
+  await f.stream.inputTail
+  assert.deepEqual(f.calls.input, [
+    ['move', 10, 20],
+    ['down', 'left'],
+    ['move', 18, 28],
+    ['move', 20, 30],
+    ['up', 'left'],
+  ])
+  assert.deepEqual(
+    ws
+      .json()
+      .filter((x) => x.type === 'input_ack')
+      .map((x) => x.seq),
+    [1, 3, 4],
+  )
+  assert.equal(f.nextAt(), 500, 'press and release should advance the next frame')
+})
+
+test('mouse press and release preserve the requested button', async (t) => {
+  const f = fixture(t)
+  const ws = new Socket()
+  f.stream.attach(ws)
+  for (const button of ['left', 'middle', 'right']) {
+    ws.input({ type: 'mouse_down', x: 12, y: 34, button })
+    ws.input({ type: 'mouse_up', x: 12, y: 34, button })
+  }
+  await f.stream.inputTail
+  assert.deepEqual(
+    f.calls.input.filter(([type]) => type !== 'move'),
+    [
+      ['down', 'left'],
+      ['up', 'left'],
+      ['down', 'middle'],
+      ['up', 'middle'],
+      ['down', 'right'],
+      ['up', 'right'],
+    ],
+  )
+})
+
+test('disconnect releases a held button after its in-flight press has finished', async (t) => {
+  const f = fixture(t)
+  const ws = new Socket()
+  let finishPress
+  const pressed = new Promise((resolve) => {
+    f.page.mouse.down = async ({ button }) => {
+      f.calls.input.push(['down', button])
+      await new Promise((finish) => {
+        finishPress = finish
+        resolve()
+      })
+    }
+  })
+  f.stream.attach(ws)
+  ws.input({ type: 'mouse_down', x: 12, y: 34, button: 'right' })
+  await pressed
+  ws.close()
+  const reconnect = new Socket()
+  f.stream.attach(reconnect)
+  finishPress()
+  await f.stream.inputTail
+  assert.deepEqual(f.calls.input, [
+    ['move', 12, 34],
+    ['down', 'right'],
+    ['up', 'right'],
+  ])
+  assert.equal(f.stream.closed, false, 'disconnect should retain the browser for a reconnect')
+})
+
+test('disconnect does not release a button that was already released', async (t) => {
+  const f = fixture(t)
+  const ws = new Socket()
+  f.stream.attach(ws)
+  ws.input({ type: 'mouse_down', x: 12, y: 34 })
+  ws.input({ type: 'mouse_up', x: 12, y: 34 })
+  await f.stream.inputTail
+  ws.close()
+  await f.stream.inputTail
+  assert.deepEqual(
+    f.calls.input.filter(([type]) => type === 'up'),
+    [['up', 'left']],
+  )
 })
 
 test('backpressured clients do not accumulate old frames and resume with the latest capture', async (t) => {

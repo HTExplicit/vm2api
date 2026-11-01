@@ -540,7 +540,7 @@ sessionKey / 授权码导入必须走该槽 SOCKS5。
 
 一个槽位固定一套首次随机生成的 Camoufox 身份，OAuth 与 Platform 共用加密网页会话，所有网页及换票请求使用当前绑定代理；改绑后须重新打开。同账号 OAuth 回调自动换票、保存并推送 `oauth_complete`，窗口保留，可继续进入 Platform；API 配置完成为 `api_ready`，`ready` 仅表示浏览器已就绪。未关联赠额的账号打开 Platform 只导航，不自动领取。
 
-画面先发送 JSON `frame` 元数据 `{ seq, mime, width, height, imageWidth, imageHeight, quality }`，紧接二进制 JPEG；`width/height` 是网页逻辑视口，图片尺寸为 `imageWidth/imageHeight`。客户端发送 `click/move/scroll/key/text/continue/close`，输入可带 `seq`，服务端返回 `input_ack`；`{ type: "quality", mode: "smooth" | "native" }` 切换流畅或原图。默认流畅最长边 1280 像素，网页视口和指纹不变；输入后请求新帧，活动最高 5 FPS、静置 1 FPS，慢连接跳过旧帧。反代须保留通用和旧路径的 WebSocket Upgrade，见[部署反代](DEPLOY.md#反代)。
+画面先发送 JSON `frame` 元数据 `{ seq, mime, width, height, imageWidth, imageHeight, quality }`，紧接二进制 JPEG；`width/height` 是网页逻辑视口，图片尺寸为 `imageWidth/imageHeight`。客户端发送 `mouse_down/mouse_up/move/scroll/key/text/continue/close`，兼容旧 `click`；鼠标消息带逻辑坐标 `x/y`，按下与松开可带 `button: left | middle | right`（默认 left），保留实际按压过程，连接断开释放按住按钮。输入可带 `seq`，服务端返回 `input_ack`；`{ type: "quality", mode: "smooth" | "native" }` 切换流畅或原图。默认流畅最长边 1280 像素，网页视口和指纹不变；输入后请求新帧，活动最高 5 FPS、静置 1 FPS，慢连接跳过旧帧。反代须保留通用和旧路径的 WebSocket Upgrade，见[部署反代](DEPLOY.md#反代)。
 
 ## OpenAI 账号 API（仅 admin）
 
