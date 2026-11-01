@@ -424,6 +424,7 @@ test('key configuration waits for the required page, dialog and projects before 
     projects: [],
   }
   adapter.goto = async (url) => calls.push(['goto', url])
+  let neverSelected = false
   const dialog = one({
     getByText: (name) => {
       if (name.test('Loading projects...'))
@@ -465,10 +466,12 @@ test('key configuration waits for the required page, dialog and projects before 
         },
       }
     },
-    getByRole: (role) => {
+    getByRole: (role, { name }) => {
       assert.equal(role, 'button', 'Name must not be confused with the Expiration textbox')
+      if (name.test('Expiration')) return one({ click: async () => calls.push(['open-expiration']) })
       return one({
         click: async () => {
+          assert.equal(neverSelected, true, 'the required expiration must be selected before submitting')
           calls.push(['submit'])
           await adapter.observe(
             jsonResponse(
@@ -498,11 +501,20 @@ test('key configuration waits for the required page, dialog and projects before 
     createReady = true
     calls.push(['create-ready'])
   }
-  page.getByRole = (role) => {
+  page.getByRole = (role, options) => {
     if (role === 'textbox') return { count: async () => 0 }
     if (role === 'row') return { filter: () => ({ count: async () => 0 }) }
     if (role === 'dialog') return dialog
     if (role === 'button') return createButton
+    if (role === 'option') {
+      assert.deepEqual(options, { name: 'Never', exact: true })
+      return one({
+        click: async () => {
+          neverSelected = true
+          calls.push(['expiration', 'Never'])
+        },
+      })
+    }
     assert.fail('unexpected page role')
   }
   const saved = []
@@ -516,6 +528,8 @@ test('key configuration waits for the required page, dialog and projects before 
     ['dialog-ready'],
     ['projects-ready'],
     ['name', 'vm2api-account'],
+    ['open-expiration'],
+    ['expiration', 'Never'],
     ['submit'],
   ])
   adapter.dispose()

@@ -394,6 +394,12 @@ export class PlatformAdapter {
     await option.click()
   }
 
+  async selectExpiration(dialog) {
+    const expiration = await button(dialog, /^Expiration/i, '未找到官方 key 到期时间选择框。')
+    await expiration.click()
+    await this.page.getByRole('option', { name: 'Never', exact: true }).click()
+  }
+
   async configure({ organizationId = this.organizationId, keyName, onKey = this.onKey }) {
     await this.requireLogin()
     await this.selectOrganization(organizationId)
@@ -431,6 +437,7 @@ export class PlatformAdapter {
     if (!nameInput) throw problem('platform_page_changed', '未找到官方 key 名称输入框。')
     await nameInput.fill(name)
     await this.selectProject(dialog, project)
+    await this.selectExpiration(dialog)
     this.createdKey = null
     this.keySave = null
     this.keyCallback = (created) => onKey?.({ ...created, organizationId, organizationName, projectId: project.id })
