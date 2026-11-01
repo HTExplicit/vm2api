@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import { SlotBrowserManager } from '../browser/slot-browser-manager.mjs'
 import { SlotBrowserRepo } from '../db/repos/slot-browser-repo.mjs'
+import { withTransaction } from '../db/database.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
 import { hasBoundExit } from '../vm/egress.mjs'
 import { fetchUpstreamModels } from '../admin/api-endpoints.mjs'
@@ -422,28 +423,93 @@ export class OpenaiApiManager {
       throw problem('api_key_account_mismatch', '已保存的 API key 与当前账号不匹配', 409)
     if (!existingKey && job.kind === 'balance') throw problem('api_key_required', '账号 API key 已移除', 409)
     if (!existingKey) {
-      const keyName = 'vm2api-' + crypto.createHash('sha256').update(job.accountId).digest('hex').slice(0, 12)
+      const keyName = (job.keyName ||=
+        'vm2api-' +
+        crypto.createHash('sha256').update(job.accountId).digest('hex').slice(0, 12) +
+        '-' +
+        crypto.randomBytes(4).toString('hex'))
       const saveKey = async (created) => {
-        this.assertCurrent(job)
+        assertSetupCurrent()
         if (!created.apiKey || !created.projectId) throw problem('platform_key_missing', 'Platform 未返回完整项目 key')
-        organizationId = created.organizationId || organizationId
+        const selectedOrganizationId = created.organizationId || organizationId
+        if (selectedOrganizationId !== organizationId)
+          throw problem('platform_key_save_conflict', '新 key 的组织与当前配置不一致，请核对当前账号配置', 409)
         const organizationName =
           created.organizationName || identity.organizations?.find((x) => x.id === organizationId)?.name || 'OpenAI'
-        const endpoint = this.apiEndpointStore.create({ kind: 'openai', name: `OpenAI API · ${context.account.email}` })
-        this.repo.upsertOrg(organizationId, {
-          display_name: organizationName,
-          project_id: created.projectId,
+        withTransaction(this.repo.db, () => {
+          assertSetupCurrent()
+          const current = this.repo.getAccount(job.accountId)
+          if (current.organization_id && current.organization_id !== organizationId)
+            throw problem('platform_key_save_conflict', '账号的 API 组织已改变，请核对当前配置', 409)
+          const keyIds = current.key_id
+            ? [current.key_id]
+            : this.repo.db
+                .prepare('SELECT id FROM api_endpoint_keys WHERE source_vm_id = ? AND source_account_id = ?')
+                .all(job.vmId, job.accountId)
+                .map((row) => row.id)
+          const keys = keyIds.map((id) => this.repo.getKey(id))
+          if (
+            keys.length > 1 ||
+            keys.some(
+              (key) =>
+                !key ||
+                key.source_vm_id !== job.vmId ||
+                key.source_account_id !== job.accountId ||
+                key.api_key !== created.apiKey,
+            )
+          )
+            throw problem('platform_key_save_conflict', '账号已保存其他 API key，请核对当前配置，不会覆盖已有密钥', 409)
+          let key = keys[0]
+          if (!key) {
+            const endpoint = this.apiEndpointStore.create({
+              kind: 'openai',
+              name: `OpenAI API · ${context.account.email}`,
+            })
+            key = this.apiEndpointStore.addKey(endpoint.id, {
+              api_key: created.apiKey,
+              source_vm_id: job.vmId,
+              source_account_id: job.accountId,
+            })
+          }
+          this.repo.upsertOrg(organizationId, {
+            display_name: organizationName,
+            project_id: created.projectId,
+          })
+          this.repo.upsertAccount(job.accountId, { organization_id: organizationId, key_id: key.id, enabled: true })
         })
-        const key = this.apiEndpointStore.addKey(endpoint.id, {
-          api_key: created.apiKey,
-          source_vm_id: job.vmId,
-          source_account_id: job.accountId,
-        })
-        this.repo.upsertAccount(job.accountId, { organization_id: organizationId, key_id: key.id, enabled: true })
         this.reload()
       }
-      const created = await adapter.configure({ organizationId, keyName, onKey: saveKey })
-      if (!this.repo.getAccount(job.accountId).key_id && created?.apiKey) await saveKey(created)
+      const previousCheckLogin = live.checkLogin
+      const setupSignal = AbortSignal.any([job.abort.signal, live.closeSignal])
+      const assertSetupCurrent = () => {
+        setupSignal.throwIfAborted()
+        return this.assertCurrent(job)
+      }
+      live.checkLogin = () => {
+        assertSetupCurrent()
+        return adapter.continueKeySetup?.()
+      }
+      try {
+        const created = await adapter.configure({
+          organizationId,
+          keyName,
+          onKey: saveKey,
+          signal: setupSignal,
+          assertCurrent: assertSetupCurrent,
+          onState: (status, message) => {
+            assertSetupCurrent()
+            const waiting = status === 'awaiting_key_input' || status === 'key_save_failed'
+            live.waiting = waiting
+            live.inputLocked = !waiting
+            this.browserManager.setStatus(live, status, message)
+          },
+        })
+        if (!this.repo.getAccount(job.accountId).key_id && created?.apiKey) await saveKey(created)
+      } finally {
+        live.checkLogin = previousCheckLogin
+        live.waiting = false
+        live.inputLocked = true
+      }
     }
     record = this.repo.getAccount(job.accountId)
     if (!record.key_id) throw problem('platform_key_missing', '项目 key 尚未完成保存')

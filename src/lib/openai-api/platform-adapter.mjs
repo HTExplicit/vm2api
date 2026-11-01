@@ -18,6 +18,9 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const ORGANIZATION_ID = /^org[-_][a-z\d_-]+$/i
 const PROJECT_ID = /^proj[-_][a-z\d_-]+$/i
 const SECRET_KEY = /^sk-[a-z\d_-]{16,}$/i
+const EXPIRATION_LABEL = /^(?:expiration|expiry|有效期(?:限)?|到期时间|过期时间|有効期限)\s*[:：]?/i
+const NEVER = /^(?:never|no expiration|永不过期|永不|无期限|無期限|期限なし|なし)$/i
+const KEY_INPUT_MESSAGE = '请手动选择期限并创建密钥，创建后会自动保存；不要关闭完整密钥弹窗。'
 
 function problem(code, message, status = 409) {
   return Object.assign(new Error(message), { code, status })
@@ -252,6 +255,7 @@ export class PlatformAdapter {
     this.createdKey = null
     this.keySave = null
     this.keyCallback = null
+    this.keySetup = null
     this.pending = new Set()
     this.responseHandler = (response) => {
       const pending = this.observe(response).catch(() => {})
@@ -259,10 +263,23 @@ export class PlatformAdapter {
       pending.finally(() => this.pending.delete(pending))
     }
     page.on('response', this.responseHandler)
+    this.requestHandler = (request) => {
+      try {
+        this.observeKeyRequest(request)
+      } catch (error) {
+        this.keySetup?.reject(error)
+      }
+    }
+    page.on('request', this.requestHandler)
   }
 
   dispose() {
+    if (this.keySetup) {
+      this.keySetup.reject(problem('platform_browser_closed', '账号浏览器已关闭'))
+      this.endKeySetup(this.keySetup)
+    }
     this.page.off('response', this.responseHandler)
+    this.page.off('request', this.requestHandler)
     this.billingSessions.clear()
   }
 
@@ -278,6 +295,8 @@ export class PlatformAdapter {
     if (!(response.headers()['content-type'] || '').includes('json')) return
     const request = response.request()
     const headers = request.headers()
+    const keySetup = this.keySetup
+    const matchingKey = !!keySetup && keySetup.request === request
     if (url.origin === 'https://api.openai.com' && url.pathname === '/v1/dashboard/billing/credit_grants') {
       const organizationId = headers['openai-organization']
       if (request.method() !== 'GET' || !ORGANIZATION_ID.test(text(organizationId))) return
@@ -298,7 +317,13 @@ export class PlatformAdapter {
       }
       return
     }
-    const payload = await response.json()
+    let payload
+    try {
+      payload = await response.json()
+    } catch (error) {
+      if (!matchingKey) throw error
+    }
+    if (matchingKey && keySetup && this.keySetup === keySetup) keySetup.responseConfirmed = true
     const observed = platformIdentityObservation(url.href, payload, headers['openai-organization'])
     if (observed.email) this.identity.email = observed.email.toLowerCase()
     if (observed.organizationId) this.identity.organizationId = observed.organizationId
@@ -311,12 +336,195 @@ export class PlatformAdapter {
       }
     }
     const created = createdPlatformKey(url.href, request.method(), payload)
-    if (created && !this.createdKey && this.keyCallback) {
-      this.createdKey = created
-      this.keySave = Promise.resolve().then(() => this.keyCallback(created))
-      // The task awaits this same promise; avoid a temporary unhandled rejection.
-      this.keySave.catch(() => {})
-      await this.keySave
+    if (created && matchingKey && !this.createdKey && keySetup && this.keySetup === keySetup) {
+      await this.saveCreatedKey(created, keySetup)
+    }
+  }
+
+  assertKeySetup(setup) {
+    setup.signal?.throwIfAborted()
+    setup.assertCurrent?.()
+    if (this.keySetup !== setup) throw problem('api_task_replaced', 'API 配置任务已结束')
+    if (this.identity.email !== this.email)
+      throw problem('platform_account_mismatch', '当前 Platform 登录邮箱与这个账号不一致，请退出后使用对应账号登录。')
+    if (this.identity.organizationId !== setup.organizationId)
+      throw problem('platform_organization_unconfirmed', '当前 Platform 组织已变化，请核对后重新配置。')
+  }
+
+  observeKeyRequest(request) {
+    const setup = this.keySetup
+    if (!setup || request.method() !== 'POST') return false
+    const url = new URL(request.url())
+    if (
+      url.protocol !== 'https:' ||
+      !['platform.openai.com', 'api.openai.com'].includes(url.hostname) ||
+      !/(?:api[-_]?keys|\/keys)\/?$/i.test(url.pathname)
+    )
+      return false
+    if (setup.request) {
+      if (setup.request !== request) {
+        setup.domTainted = true
+        setup.allowDom = false
+      }
+      return setup.request === request
+    }
+    let body
+    try {
+      body = request.postDataJSON()
+    } catch {
+      setup.domTainted = true
+      return false
+    }
+    const headers = request.headers()
+    const name = text(body?.name)
+    const projects = [
+      body?.project_id,
+      body?.project?.id,
+      typeof body?.project === 'string' ? body.project : undefined,
+      headers['openai-project'],
+    ].filter((value) => value != null)
+    const organizations = [
+      headers['openai-organization'],
+      body?.organization_id,
+      body?.organization?.id,
+      typeof body?.organization === 'string' ? body.organization : undefined,
+    ].filter((value) => value != null)
+    if (
+      name !== setup.keyName ||
+      !projects.length ||
+      !organizations.length ||
+      projects.some((value) => value !== setup.projectId) ||
+      organizations.some((value) => value !== setup.organizationId)
+    ) {
+      setup.domTainted = true
+      return false
+    }
+    this.assertKeySetup(setup)
+    setup.request = request
+    setup.allowDom = !setup.domTainted
+    return true
+  }
+
+  beginKeySetup(options) {
+    const setup = { ...options, request: null, responseConfirmed: false, allowDom: false, saving: false }
+    setup.result = new Promise((resolve, reject) => {
+      setup.resolve = resolve
+      setup.reject = reject
+    })
+    setup.result.catch(() => {})
+    this.keySetup = setup
+    this.createdKey = null
+    this.keySave = null
+    this.keyCallback = (created) =>
+      options.onKey?.({
+        ...created,
+        organizationId: setup.organizationId,
+        organizationName: setup.organizationName,
+        projectId: setup.projectId,
+      })
+    setup.aborted = () => setup.reject(setup.signal.reason)
+    setup.closed = () => setup.reject(problem('platform_browser_closed', '账号浏览器已关闭'))
+    setup.signal?.addEventListener('abort', setup.aborted, { once: true })
+    this.page.on('close', setup.closed)
+    setup.poll = setInterval(() => {
+      void this.checkKeySetup().catch(setup.reject)
+    }, 300)
+    return setup
+  }
+
+  setKeyState(setup, status, message) {
+    this.assertKeySetup(setup)
+    if (setup.status === status) return
+    setup.status = status
+    setup.onState?.(status, message)
+  }
+
+  saveCreatedKey(created, setup) {
+    this.assertKeySetup(setup)
+    if (setup.saving) return this.keySave
+    this.createdKey ||= created
+    setup.saving = true
+    setup.saveFailed = false
+    this.keySave = Promise.resolve()
+      .then(async () => {
+        this.assertKeySetup(setup)
+        await this.keyCallback(this.createdKey)
+        this.assertKeySetup(setup)
+        setup.saved = true
+        this.setKeyState(setup, 'configuring', '密钥已保存，正在继续配置账号 API…')
+        setup.resolve({
+          ...this.createdKey,
+          organizationId: setup.organizationId,
+          organizationName: setup.organizationName,
+          projectId: setup.projectId,
+        })
+      })
+      .catch((error) => {
+        try {
+          this.assertKeySetup(setup)
+          setup.saveFailed = true
+          this.setKeyState(setup, 'key_save_failed', '完整密钥尚未完成本地保存，请保留当前窗口并点击“重试保存”。')
+          if (!setup.onState) setup.reject(error)
+        } catch (invalid) {
+          setup.reject(invalid)
+        }
+        throw error
+      })
+      .finally(() => {
+        setup.saving = false
+      })
+    this.keySave.catch(() => {})
+    return this.keySave
+  }
+
+  async checkKeySetup({ retrySave = false } = {}) {
+    const setup = this.keySetup
+    if (!setup || setup.saved) return
+    this.assertKeySetup(setup)
+    if (setup.checking) return setup.checking
+    setup.checking = (async () => {
+      if (this.createdKey) {
+        if (retrySave && setup.saveFailed && !setup.saving) {
+          await this.saveCreatedKey(this.createdKey, setup).catch(() => {})
+        }
+        return
+      }
+      if (!setup.responseConfirmed || !setup.allowDom) return
+      const revealed = await this.page.getByRole('dialog').evaluateAll((dialogs) => {
+        const secrets = []
+        for (const dialog of dialogs) {
+          if (!dialog.getClientRects().length || getComputedStyle(dialog).visibility === 'hidden') continue
+          for (const element of dialog.querySelectorAll('input, textarea, code, pre')) {
+            const value = String(element.value || element.textContent || '').trim()
+            if (/^sk-[a-z\d_-]{16,}$/i.test(value)) secrets.push(value)
+          }
+        }
+        return [...new Set(secrets)]
+      })
+      this.assertKeySetup(setup)
+      if (revealed.length === 1 && !this.createdKey && setup.allowDom) {
+        await this.saveCreatedKey({ apiKey: revealed[0], remoteKeyId: null }, setup).catch(() => {})
+      }
+    })().finally(() => {
+      setup.checking = null
+    })
+    return setup.checking
+  }
+
+  continueKeySetup() {
+    return this.checkKeySetup({ retrySave: true })
+  }
+
+  endKeySetup(setup) {
+    clearInterval(setup.poll)
+    clearTimeout(setup.timeout)
+    setup.signal?.removeEventListener('abort', setup.aborted)
+    this.page.off('close', setup.closed)
+    if (this.keySetup === setup) {
+      this.keySetup = null
+      this.keyCallback = null
+      this.createdKey = null
+      this.keySave = null
     }
   }
 
@@ -480,12 +688,69 @@ export class PlatformAdapter {
   }
 
   async selectExpiration(dialog) {
-    const expiration = await button(dialog, /^Expiration/i, '未找到官方 key 到期时间选择框。')
-    await expiration.click()
-    await this.page.getByRole('option', { name: 'Never', exact: true }).click()
+    const unique = async (locator) => {
+      const visible = locator.filter({ visible: true })
+      const count = await visible.count()
+      if (count > 1)
+        throw problem('platform_expiration_required', '官方 key 期限控件不唯一，请手动选择期限并创建密钥。')
+      return count === 1 ? visible.nth(0) : null
+    }
+    let expiration = dialog.getByLabel ? await unique(dialog.getByLabel(EXPIRATION_LABEL)) : null
+    if (
+      expiration &&
+      !(await expiration.evaluate(
+        (element) =>
+          ['SELECT', 'BUTTON'].includes(element.tagName) ||
+          ['combobox', 'button'].includes(element.getAttribute('role')),
+      ))
+    )
+      expiration = null
+    if (!expiration) {
+      const label = await unique(dialog.locator('label').filter({ hasText: EXPIRATION_LABEL }))
+      if (label)
+        expiration = await unique(label.locator('..').locator('select, [role="combobox"], button, [role="button"]'))
+    }
+    if (!expiration) expiration = await unique(dialog.getByRole('combobox', { name: EXPIRATION_LABEL }))
+    if (!expiration) expiration = await unique(dialog.getByRole('button', { name: EXPIRATION_LABEL }))
+    if (!expiration)
+      throw problem('platform_expiration_required', '未找到官方 key 到期时间选择框，请手动选择期限并创建密钥。')
+    const native = await expiration.evaluate((element) => element.tagName === 'SELECT')
+    const selected = async () =>
+      text(
+        native
+          ? await expiration.evaluate((element) => element.selectedOptions[0]?.textContent || '')
+          : await expiration.innerText(),
+      )
+        .replace(EXPIRATION_LABEL, '')
+        .trim()
+    if (NEVER.test(await selected())) return
+    if (native) {
+      const option = expiration.getByRole('option', { name: NEVER })
+      if ((await option.count()) !== 1)
+        throw problem('platform_expiration_required', '官方页面未提供唯一的 Never 期限，请手动选择期限并创建密钥。')
+      await expiration.selectOption({ label: text(await option.innerText()) })
+    } else {
+      await expiration.click()
+      const options = this.page.getByRole('option', { name: NEVER }).filter({ visible: true })
+      await options.first().waitFor({ state: 'visible', timeout: 3_000 })
+      const option = await unique(options)
+      if (!option) throw problem('platform_expiration_required', '未找到官方 Never 期限，请手动选择期限并创建密钥。')
+      await option.click()
+    }
+    if (!NEVER.test(await selected()))
+      throw problem('platform_expiration_required', '尚未确认官方 key 的期限，请手动选择期限并创建密钥。')
   }
 
-  async configure({ organizationId = this.organizationId, keyName, onKey = this.onKey }) {
+  async configure({
+    organizationId = this.organizationId,
+    keyName,
+    onKey = this.onKey,
+    signal,
+    assertCurrent,
+    onState,
+  }) {
+    signal?.throwIfAborted()
+    assertCurrent?.()
     await this.requireLogin()
     await this.selectOrganization(organizationId)
     const organizationName =
@@ -499,13 +764,6 @@ export class PlatformAdapter {
       '等待官方创建 API key 入口超时，可在当前窗口重试配置',
       30_000,
     )
-    const existing = this.page.getByRole('row').filter({ hasText: new RegExp(escaped(name)) })
-    if ((await existing.count()) > 0) {
-      throw problem(
-        'platform_key_already_exists',
-        '官方已存在这个账号的专用 key，但本地没有可用 secret；请核对原配置，不会重复创建或撤销 key。',
-      )
-    }
     await create.click()
     const dialogs = this.page.getByRole('dialog')
     try {
@@ -523,42 +781,55 @@ export class PlatformAdapter {
     if (!nameInput) throw problem('platform_page_changed', '未找到官方 key 名称输入框。')
     await nameInput.fill(name)
     await this.selectProject(dialog, project)
-    await this.selectExpiration(dialog)
-    this.createdKey = null
-    this.keySave = null
-    this.keyCallback = (created) => onKey?.({ ...created, organizationId, organizationName, projectId: project.id })
-    const submit = await button(dialog, /^(?:create secret key|create key|创建密钥)$/i, '未找到官方创建 key 提交按钮。')
-    await submit.click()
-    for (let attempt = 0; attempt < 60 && !this.createdKey; attempt++) {
-      await this.settled()
-      if (this.createdKey) break
-      const revealed = await this.page.getByRole('dialog').evaluateAll((dialogs) => {
-        const secrets = []
-        for (const dialog of dialogs) {
-          for (const element of dialog.querySelectorAll('input, textarea, code, pre')) {
-            const value = String(element.value || element.textContent || '').trim()
-            if (/^sk-[a-z\d_-]{16,}$/i.test(value)) secrets.push(value)
-          }
-        }
-        return [...new Set(secrets)]
-      })
-      if (revealed.length === 1) {
-        this.createdKey = { apiKey: revealed[0], remoteKeyId: null }
-        this.keySave = Promise.resolve().then(() => this.keyCallback(this.createdKey))
-        this.keySave.catch(() => {})
-        break
+    const setup = this.beginKeySetup({
+      organizationId,
+      organizationName,
+      projectId: project.id,
+      keyName: name,
+      onKey,
+      signal,
+      assertCurrent,
+      onState,
+    })
+    try {
+      try {
+        await this.selectExpiration(dialog)
+        this.assertKeySetup(setup)
+        const submit = await button(
+          dialog,
+          /^(?:create secret key|create key|创建密钥)$/i,
+          '未找到官方创建 key 提交按钮。',
+        )
+        if (!setup.request && !this.createdKey) await submit.click()
+      } catch (error) {
+        this.assertKeySetup(setup)
+        if (!onState) throw error
+        if (!this.createdKey) this.setKeyState(setup, 'awaiting_key_input', KEY_INPUT_MESSAGE)
       }
-      await this.page.waitForTimeout(150)
+      setup.timeout = setTimeout(() => {
+        if (setup.saved || setup.saveFailed) return
+        try {
+          if (onState)
+            this.setKeyState(
+              setup,
+              'awaiting_key_input',
+              '尚未取得完整密钥，请核对官方创建结果；不要重复创建，保留完整密钥弹窗后点击“检查创建结果”。',
+            )
+          else
+            setup.reject(
+              problem(
+                'platform_key_unconfirmed',
+                '尚未取得官方新 key 的完整 secret，请核对创建结果后继续，不会自动重复创建。',
+              ),
+            )
+        } catch (error) {
+          setup.reject(error)
+        }
+      }, 9_000)
+      return await setup.result
+    } finally {
+      this.endKeySetup(setup)
     }
-    if (!this.createdKey) {
-      throw problem(
-        'platform_key_unconfirmed',
-        '尚未取得官方新 key 的完整 secret，请核对创建结果后继续，不会自动重复创建。',
-      )
-    }
-    await this.keySave
-    this.keyCallback = null
-    return { organizationId, organizationName, projectId: project.id, ...this.createdKey }
   }
 
   async readBalance({ organizationId = this.organizationId } = {}) {

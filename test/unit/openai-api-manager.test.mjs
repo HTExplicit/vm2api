@@ -1,14 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { EventEmitter } from 'node:events'
 import { createDatabase } from '../../src/lib/db/database.mjs'
 import { SlotBrowserRepo } from '../../src/lib/db/repos/slot-browser-repo.mjs'
 import { OpenaiApiRepo } from '../../src/lib/db/repos/openai-api-repo.mjs'
 import { ApiEndpointStore } from '../../src/lib/admin/api-endpoints.mjs'
 import { OpenaiApiManager } from '../../src/lib/openai-api/manager.mjs'
+import { PlatformAdapter } from '../../src/lib/openai-api/platform-adapter.mjs'
 
 async function until(predicate, message = 'manager did not settle') {
   const deadline = Date.now() + 1500
@@ -372,6 +375,10 @@ test('an error can retry immediately in the retained browser after the old job i
   await f.settle()
   assert.equal(retried, true)
   assert.equal(attempts, 2)
+  const accountPrefix = 'vm2api-' + crypto.createHash('sha256').update(entry.accountId).digest('hex').slice(0, 12)
+  for (const configured of f.calls.configured)
+    assert.match(configured.keyName, new RegExp(`^${accountPrefix}-[a-f0-9]{8}$`))
+  assert.notEqual(f.calls.configured[0].keyName, f.calls.configured[1].keyName, 'a new job gets its own creation name')
   assert.equal(f.calls.sessions.length, 1, 'the same browser must survive the failed attempt')
   assert.equal(f.calls.closed.length, 0)
   assert.equal(f.calls.maxLiveBrowsers, 1)
@@ -1209,6 +1216,179 @@ test('a manual browser opened during HTTP prevents the old response from overwri
   assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'error')
 })
 
+for (const failurePoint of ['addKey', 'account', 'reload']) {
+  test(`new key saving retries ${failurePoint} failures without duplicate or partial local records`, async (t) => {
+    const f = fixture(t)
+    const entry = f.add()
+    const created = { organizationId: 'org-test', projectId: 'proj-test', apiKey: 'sk-atomic-fixture-secret' }
+    if (failurePoint === 'addKey') {
+      const addKey = f.store.addKey.bind(f.store)
+      let first = true
+      f.store.addKey = (...args) => {
+        if (first) {
+          first = false
+          throw new Error('fixture key insertion failure')
+        }
+        return addKey(...args)
+      }
+    } else if (failurePoint === 'account') {
+      const upsertAccount = f.repo.upsertAccount.bind(f.repo)
+      let first = true
+      f.repo.upsertAccount = (accountId, patch) => {
+        if (first && patch.key_id) {
+          first = false
+          throw new Error('fixture account association failure')
+        }
+        return upsertAccount(accountId, patch)
+      }
+    } else {
+      const reload = f.manager.reload.bind(f.manager)
+      let first = true
+      f.manager.reload = () => {
+        if (first) {
+          first = false
+          assert.equal(f.repo.db.isTransaction, false, 'scheduler reload must follow the database commit')
+          throw new Error('fixture scheduler reload failure')
+        }
+        return reload()
+      }
+    }
+    f.behavior.configure = async (options) => {
+      await assert.rejects(options.onKey(created), /fixture .* failure/)
+      const persisted = failurePoint === 'reload'
+      assert.equal(f.store.listRaw().length, persisted ? 1 : 0)
+      assert.equal(!!f.repo.getAccount(entry.accountId).key_id, persisted)
+      assert.equal(!!f.repo.getOrg('org-test'), persisted)
+      assert.equal(f.repo.db.prepare('SELECT count(*) AS count FROM api_endpoint_keys').get().count, persisted ? 1 : 0)
+      await options.onKey(created)
+      const keyId = f.repo.getAccount(entry.accountId).key_id
+      await options.onKey(created)
+      assert.equal(f.repo.getAccount(entry.accountId).key_id, keyId, 'a repeated save reuses the committed key')
+      return created
+    }
+    f.manager.setup(entry.vm.id)
+    await f.settle()
+    assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+    assert.equal(f.store.listRaw().length, 1)
+    assert.equal(f.store.listRaw()[0].api_key_entries.length, 1)
+    assert.equal(f.repo.getKey(f.repo.getAccount(entry.accountId).key_id).api_key, created.apiKey)
+  })
+}
+
+test('a key save reuses an unassociated matching source key and rejects another secret', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const endpoint = f.store.create({ kind: 'openai', name: 'Interrupted local save' })
+  const created = { organizationId: 'org-test', projectId: 'proj-test', apiKey: 'sk-existing-unassociated-fixture' }
+  const key = f.store.addKey(endpoint.id, {
+    api_key: created.apiKey,
+    source_vm_id: entry.vm.id,
+    source_account_id: entry.accountId,
+  })
+  f.behavior.configure = async (options) => {
+    await options.onKey(created)
+    assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
+    await assert.rejects(options.onKey({ ...created, apiKey: 'sk-conflicting-fixture' }), {
+      code: 'platform_key_save_conflict',
+    })
+    assert.equal(f.repo.getKey(key.id).api_key, created.apiKey)
+    return created
+  }
+  f.manager.setup(entry.vm.id)
+  await f.settle()
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+  assert.equal(f.store.listRaw().length, 1)
+  assert.equal(f.store.listRaw()[0].api_key_entries.length, 1)
+})
+
+test('manual key input keeps one configuring job and wires continue to the active adapter', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  let options, complete
+  f.behavior.configure = (value) => {
+    options = value
+    options.onState('awaiting_key_input', '请选择期限并完成创建')
+    return new Promise((resolve) => {
+      complete = resolve
+    })
+  }
+  f.manager.setup(entry.vm.id)
+  await until(() => !!complete)
+  const live = f.manager.sessions.get(entry.vm.id)
+  const job = f.manager.jobs.get(entry.vm.id)
+  assert.equal(job.keyName, options.keyName)
+  assert.match(job.keyName, /^vm2api-[a-f0-9]{12}-[a-f0-9]{8}$/)
+  f.manager.setup(entry.vm.id)
+  assert.equal(f.manager.jobs.get(entry.vm.id), job, 'repeated setup during handoff retains the same job')
+  assert.equal(job.keyName, options.keyName)
+  assert.equal(f.calls.configured.length, 1, 'an active handoff does not start another creation')
+  assert.equal(options.signal.aborted, false)
+  assert.equal(options.assertCurrent().accountId, entry.accountId)
+  assert.equal(live.inputLocked, false)
+  assert.equal(live.waiting, true)
+  assert.equal(f.manager.browserManager.state(entry.vm.id).status, 'awaiting_key_input')
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'configuring')
+  let continued = 0,
+    disposed = false
+  live.adapter.dispose = () => {
+    disposed = true
+  }
+  live.adapter.continueKeySetup = async () => {
+    continued++
+    options.onState('key_save_failed', '本地保存失败，请重试保存')
+  }
+  await live.checkLogin()
+  assert.equal(continued, 1)
+  assert.equal(live.inputLocked, false)
+  assert.equal(live.waiting, true)
+  assert.equal(disposed, false)
+  assert.equal(f.manager.jobs.get(entry.vm.id), job)
+  assert.equal(f.manager.browserManager.state(entry.vm.id).status, 'key_save_failed')
+  live.adapter.continueKeySetup = async () => {
+    continued++
+    options.onState('configuring', '正在保存并继续配置')
+    assert.equal(live.inputLocked, true)
+    assert.equal(live.waiting, false)
+    const created = { organizationId: 'org-test', projectId: 'proj-test', apiKey: 'sk-manual-input-fixture' }
+    await options.onKey(created)
+    complete(created)
+  }
+  await live.checkLogin()
+  await f.settle()
+  assert.equal(continued, 2)
+  assert.equal(disposed, true)
+  assert.equal(live.checkLogin, null)
+  assert.equal(live.waiting, false)
+  assert.equal(f.calls.sessions.length, 1)
+  assert.equal(f.calls.configured.length, 1)
+  assert.equal(f.calls.models.length, 1)
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+})
+
+test('closing a browser aborts manual key input and prevents a late key save', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  let options
+  f.behavior.configure = (value) => {
+    options = value
+    options.onState('awaiting_key_input', '请完成创建')
+    return new Promise((resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true })
+    })
+  }
+  f.manager.setup(entry.vm.id)
+  await until(() => !!options)
+  const live = f.manager.sessions.get(entry.vm.id)
+  await f.manager.browserManager.close(entry.vm.id)
+  await f.settle()
+  assert.equal(options.signal.aborted, true)
+  assert.throws(options.assertCurrent)
+  await assert.rejects(options.onKey({ organizationId: 'org-test', projectId: 'proj-test', apiKey: 'sk-late-fixture' }))
+  assert.equal(live.checkLogin, null)
+  assert.equal(f.store.listRaw().length, 0)
+  assert.equal(f.repo.getAccount(entry.accountId).key_id, '')
+})
+
 test('setting the interval to zero lets in-flight HTTP finish and drops queued background work without changing its state', async (t) => {
   const f = fixture(t)
   const a = f.add()
@@ -1295,4 +1475,56 @@ test('background work waiting for a manual browser does not request HTTP or reco
   assert.equal(f.calls.sessions.length, 1, 'only the administrator-opened browser ran')
   assert.equal(f.profiles.get(a.vm.id), null)
   assert.equal(f.repo.getAccount(a.accountId).setup_status, 'ready')
+})
+
+test('a read-only local database preserves the active task and captured secret until saving is retried', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const created = { apiKey: 'sk-readonly-local-save-fixture', remoteKeyId: 'key-readonly-fixture' }
+  let adapter,
+    setup,
+    failed = false
+  f.behavior.configure = async (options) => {
+    adapter = new PlatformAdapter({ page: new EventEmitter(), email: entry.account.email })
+    adapter.identity.email = entry.account.email
+    adapter.identity.organizationId = 'org-test'
+    setup = adapter.beginKeySetup({ ...options, organizationName: 'Personal', projectId: 'proj-test' })
+    const live = f.manager.sessions.get(entry.vm.id)
+    live.adapter.continueKeySetup = () => adapter.continueKeySetup()
+    live.adapter.dispose = () => adapter.dispose()
+    f.repo.db.exec('PRAGMA query_only = ON')
+    try {
+      await assert.rejects(adapter.saveCreatedKey(created, setup), /readonly|read-only/i)
+      failed = true
+      return await setup.result
+    } finally {
+      adapter.endKeySetup(setup)
+    }
+  }
+  f.manager.setup(entry.vm.id)
+  try {
+    await until(() => failed)
+    const live = f.manager.sessions.get(entry.vm.id)
+    const job = f.manager.jobs.get(entry.vm.id)
+    assert.ok(job, 'a broad database write failure must not finish the setup task')
+    assert.equal(live.job, job)
+    assert.equal(live.inputLocked, false)
+    assert.equal(f.manager.browserManager.state(entry.vm.id).status, 'key_save_failed')
+    assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'configuring')
+    assert.equal(adapter.keySetup, setup)
+    assert.equal(adapter.createdKey.apiKey, created.apiKey)
+    assert.equal(f.store.listRaw().length, 0)
+    assert.equal(f.repo.db.isTransaction, false)
+    f.repo.db.exec('PRAGMA query_only = OFF')
+    await live.checkLogin()
+    await f.settle()
+    assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+    assert.equal(f.repo.getKey(f.repo.getAccount(entry.accountId).key_id).api_key, created.apiKey)
+    assert.equal(f.store.listRaw().length, 1)
+    assert.equal(f.store.listRaw()[0].api_key_entries.length, 1)
+    assert.equal(f.calls.sessions.length, 1)
+    assert.equal(f.calls.configured.length, 1)
+  } finally {
+    f.repo.db.exec('PRAGMA query_only = OFF')
+  }
 })

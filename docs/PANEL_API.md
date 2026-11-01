@@ -542,7 +542,9 @@ sessionKey / 授权码导入必须走该槽 SOCKS5。
 
 一个槽位固定一套首次随机生成的 Camoufox 身份，OAuth 与 Platform 共用加密网页会话，所有网页及换票请求使用当前绑定代理；改绑后须重新打开。同账号 OAuth 回调自动换票、保存并推送 `oauth_complete`，窗口保留，可继续进入 Platform；API 配置完成为 `api_ready`，`ready` 仅表示浏览器已就绪。未关联赠额的账号打开 Platform 只导航，不自动领取。
 
-Platform 自动配置推送 `configuring`，此时禁用重复操作；创建 key 入口最多等待 30 秒，排除隐藏的同名控件。失败后主操作为“重试配置”，再次 POST `/browser/open`、`{ purpose: "platform" }`，复用当前浏览器与 WebSocket；登录等待仍发送 `continue`。已有有效 key 不重新创建，重试不会重新随机指纹或修改窗口尺寸。
+Platform 自动配置推送 `configuring`，此时禁用重复操作；创建 key 入口最多等待 30 秒，排除隐藏的同名控件。期限字段按标签关联识别原生选择框、组合框或按钮，支持中英日文，自动选择并确认 `Never`。期限操作无法确认时推送 `awaiting_key_input`，保留同一任务并恢复窗口输入；用户手动选择期限、在官方页面创建后，自动捕获并保存完整密钥。“检查创建结果”发送 `continue`，只检查结果，不再次提交。捕获仅认可当前任务期间发出的、名称/组织/默认项目均匹配的创建请求；已有成功请求才可从可见弹窗补取完整值。保存失败推送 `key_save_failed`，保留内存密钥，“重试保存”沿用 `continue`，仅重试事务保存；账号 `setup_status` 在等待期间仍为 `configuring`。取消、关窗、账号或代理改变会结束任务，沿用 15 分钟空闲退出，迟到结果不落库。
+
+其他终态失败后主操作为“重试配置”，再次 POST `/browser/open`、`{ purpose: "platform" }`，复用当前浏览器与 WebSocket；登录等待仍发送 `continue`。本地已有对应有效 key 时复用；本地尚未绑定完整密钥时直接创建新 key，不受远端有效、已撤销或同名记录阻挡，保留全部远端旧记录。每个配置任务只生成一次 `vm2api-<账号哈希前12位>-<随机8位十六进制>` 名称；同一任务内只检查创建结果或重试保存，不再次提交。重试不会重新随机指纹或修改窗口尺寸。
 
 画面先发送 JSON `frame` 元数据 `{ seq, mime, width, height, imageWidth, imageHeight, quality }`，紧接二进制 JPEG；`width/height` 是网页逻辑视口，图片尺寸为 `imageWidth/imageHeight`。客户端发送 `mouse_down/mouse_up/move/scroll/key/text/continue/close`，兼容旧 `click`；鼠标消息带逻辑坐标 `x/y`，按下与松开可带 `button: left | middle | right`（默认 left），保留实际按压过程，连接断开释放按住按钮。输入可带 `seq`，服务端返回 `input_ack`；`{ type: "quality", mode: "smooth" | "native" }` 切换流畅或原图。默认流畅最长边 1280 像素，网页视口和指纹不变；输入后请求新帧，活动最高 5 FPS、静置 1 FPS，慢连接跳过旧帧。反代须保留通用和旧路径的 WebSocket Upgrade，见[部署反代](DEPLOY.md#反代)。
 
