@@ -24,6 +24,7 @@ test('profile observation does not accept another member email as the logged-in 
     email: 'owner@example.com',
     organizations: [{ id: 'org-one', name: 'Personal' }],
     projects: [],
+    projectOrganizationIds: [],
     organizationId: null,
   })
 })
@@ -42,6 +43,72 @@ test('observed project identities retain the organization of the real request', 
     ).projects,
     [{ id: 'proj_one', name: 'vm2api', organizationId: 'org-one' }],
   )
+})
+
+test('project observation retains the official default marker without retaining unrelated fields', () => {
+  assert.deepEqual(
+    platformIdentityObservation(
+      'https://api.openai.com/dashboard/organizations/org-one/projects',
+      { data: [{ id: 'proj_default', name: 'Renamed default', is_default: true, secret: 'not-retained' }] },
+      'org-one',
+    ).projects,
+    [{ id: 'proj_default', name: 'Renamed default', is_default: true, organizationId: 'org-one' }],
+  )
+})
+
+test('the real POST onboarding organization projects preserve their owner, display title and initial marker', async () => {
+  const adapter = new PlatformAdapter({ page: pageFixture(), email: 'owner@example.com' })
+  const payload = {
+    user: {
+      email: 'owner@example.com',
+      orgs: {
+        data: [
+          {
+            id: 'org-one',
+            name: 'internal-user-name',
+            title: 'Personal',
+            projects: { object: 'list', data: [], has_more: false },
+          },
+          {
+            id: 'org-other',
+            title: 'Other organization',
+            projects: { data: [{ id: 'proj_other', title: 'Default project', is_initial: true }] },
+          },
+        ],
+      },
+    },
+  }
+  await adapter.observe(jsonResponse('/v1/dashboard/onboarding/login', payload, { method: 'POST' }))
+  assert.equal(adapter.identity.organizations[0].name, 'Personal')
+  assert.equal(adapter.identity.organizationId, null, 'organization membership does not select the active organization')
+  assert.ok(adapter.projectLists.has('org-one'))
+  payload.user.orgs.data[0].projects.data.push({
+    id: 'proj_default',
+    title: 'Default project',
+    organization_id: 'org-one',
+    is_initial: true,
+  })
+  await adapter.observe(jsonResponse('/v1/dashboard/onboarding/login', payload, { method: 'POST' }))
+  adapter.identity.organizationId = 'org-one'
+  assert.deepEqual(await adapter.ensureProject(), {
+    id: 'proj_default',
+    name: 'Default project',
+    is_initial: true,
+    organizationId: 'org-one',
+  })
+  adapter.dispose()
+})
+
+test('project permission arrays are not treated as an organization project list', async () => {
+  const adapter = new PlatformAdapter({ page: pageFixture(), email: 'owner@example.com' })
+  await adapter.observe(
+    jsonResponse('/v1/dashboard/projects/proj_default/permissions', ['api.keys.read', 'api.keys.write'], {
+      headers: { 'openai-organization': 'org-one' },
+    }),
+  )
+  assert.equal(adapter.projectLists.has('org-one'), false)
+  assert.deepEqual(adapter.identity.projects, [])
+  adapter.dispose()
 })
 
 test('Billing JSON preserves decimal tokens, signed balances and unknown values without inferring totals', () => {
@@ -272,19 +339,198 @@ test('an unobserved project list cannot be mistaken for an empty organization', 
   adapter.dispose()
 })
 
-test('project reuse checks both the persisted project ID and the current organization', async () => {
+test('default project selection is scoped to the current organization and never picks the vm2api project', async () => {
   const adapter = new PlatformAdapter({ page: pageFixture(), email: 'owner@example.com' })
   adapter.identity.organizationId = 'org-one'
   adapter.projectLists.add('org-one')
   adapter.identity.projects = [
-    { id: 'proj_one', name: 'vm2api', organizationId: 'org-one' },
-    { id: 'proj_other', name: 'vm2api', organizationId: 'org-other' },
+    { id: 'proj_vm2api', name: 'vm2api', organizationId: 'org-one' },
+    { id: 'proj_one', name: 'Default project', organizationId: 'org-one' },
+    { id: 'proj_other', name: 'Default project', organizationId: 'org-other' },
   ]
   adapter.goto = async () => {}
-  assert.equal((await adapter.ensureProject('')).id, 'proj_one')
-  assert.equal((await adapter.ensureProject('proj_one')).id, 'proj_one')
-  await assert.rejects(adapter.ensureProject('proj_other'), { code: 'platform_project_unavailable' })
-  adapter.identity.projects.push({ id: 'proj_duplicate', name: 'vm2api', organizationId: 'org-one' })
-  await assert.rejects(adapter.ensureProject(''), { code: 'platform_project_ambiguous' })
+  assert.equal((await adapter.ensureProject()).id, 'proj_one')
+  adapter.identity.organizationId = 'org-other'
+  adapter.projectLists.add('org-other')
+  assert.equal((await adapter.ensureProject()).id, 'proj_other')
+  adapter.dispose()
+})
+
+test('the official default marker takes precedence over the display name', async () => {
+  const adapter = new PlatformAdapter({ page: pageFixture(), email: 'owner@example.com' })
+  adapter.identity.organizationId = 'org-one'
+  adapter.projectLists.add('org-one')
+  adapter.identity.projects = [
+    { id: 'proj_named', name: 'Default project', organizationId: 'org-one' },
+    { id: 'proj_default', name: 'Renamed default', is_default: true, organizationId: 'org-one' },
+  ]
+  adapter.goto = async () => {}
+  assert.equal((await adapter.ensureProject()).id, 'proj_default')
+  adapter.dispose()
+})
+
+test('missing or ambiguous default projects cannot trigger project creation', async () => {
+  const page = pageFixture()
+  page.getByRole = () => {
+    throw new Error('project creation controls must never be queried')
+  }
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  adapter.identity.organizationId = 'org-one'
+  adapter.projectLists.add('org-one')
+  adapter.identity.projects = [{ id: 'proj_vm2api', name: 'vm2api', organizationId: 'org-one' }]
+  adapter.goto = async () => {}
+  await assert.rejects(adapter.ensureProject(), { code: 'platform_default_project_unavailable' })
+  adapter.identity.projects.push({ id: 'proj_first', name: 'DEFAULT PROJECT', organizationId: 'org-one' })
+  assert.equal((await adapter.ensureProject()).id, 'proj_first')
+  adapter.identity.projects.push({ id: 'proj_duplicate', name: 'Default project', organizationId: 'org-one' })
+  await assert.rejects(adapter.ensureProject(), { code: 'platform_project_ambiguous' })
+  adapter.dispose()
+})
+
+test('key configuration waits for the required page, dialog and projects before targeting unlabelled fields', async () => {
+  const page = pageFixture()
+  const calls = []
+  const one = (value) =>
+    Object.assign(value, {
+      count: async () => 1,
+      nth: () => value,
+      first: () => value,
+      isVisible: async () => true,
+      waitFor: async () => {},
+    })
+  const projectButton = one({
+    evaluate: async () => false,
+    innerText: async () => 'Default project',
+    click: async () => assert.fail('the already selected default project should not be reopened'),
+  })
+  const nameInput = one({ fill: async (value) => calls.push(['name', value]) })
+  const fieldLabel = (control, selector) =>
+    one({
+      locator: (parent) => {
+        assert.equal(parent, '..')
+        return {
+          locator: (actual) => {
+            assert.equal(actual, selector)
+            return control
+          },
+        }
+      },
+    })
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com', organizationId: 'org-one' })
+  adapter.identity = {
+    email: 'owner@example.com',
+    organizations: [{ id: 'org-one', name: 'Personal' }],
+    organizationId: 'org-one',
+    projects: [],
+  }
+  adapter.goto = async (url) => calls.push(['goto', url])
+  let neverSelected = false
+  const dialog = one({
+    getByText: (name) => {
+      if (name.test('Loading projects...'))
+        return {
+          waitFor: async (options) => {
+            assert.equal(options.state, 'hidden')
+            calls.push(['projects-ready'])
+            await adapter.observe(
+              jsonResponse('/v1/dashboard/onboarding/login', {
+                user: {
+                  email: 'owner@example.com',
+                  orgs: {
+                    data: [
+                      {
+                        id: 'org-one',
+                        title: 'Personal',
+                        projects: { data: [{ id: 'proj_default', title: 'Default project', is_initial: true }] },
+                      },
+                    ],
+                  },
+                },
+              }),
+            )
+          },
+        }
+      // Text lookup resolves the inner Name/Project div. Its immediate parent
+      // is a label row, not the field container containing the control.
+      if (name.test('Name') || name.test('Project'))
+        return one({ locator: () => ({ locator: () => ({ count: async () => 0 }) }) })
+      assert.fail('unexpected dialog label')
+    },
+    locator: (selector) => {
+      assert.equal(selector, 'label')
+      return {
+        filter: ({ hasText }) => {
+          if (hasText.test('NameOptional')) return fieldLabel(nameInput, 'input[type="text"]')
+          if (hasText.test('Project')) return fieldLabel(projectButton, 'select, [role="button"]')
+          assert.fail('unexpected field label')
+        },
+      }
+    },
+    getByRole: (role, { name }) => {
+      assert.equal(role, 'button', 'Name must not be confused with the Expiration textbox')
+      if (name.test('Expiration')) return one({ click: async () => calls.push(['open-expiration']) })
+      return one({
+        click: async () => {
+          assert.equal(neverSelected, true, 'the required expiration must be selected before submitting')
+          calls.push(['submit'])
+          await adapter.observe(
+            jsonResponse(
+              '/dashboard/api_keys',
+              { api_key: { secret: 'sk-proj-default-fixture-secret' } },
+              { method: 'POST' },
+            ),
+          )
+        },
+      })
+    },
+  })
+  let dialogReady = false
+  dialog.count = async () => (dialogReady ? 1 : 0)
+  dialog.waitFor = async (options) => {
+    assert.equal(options.state, 'visible')
+    await Promise.resolve()
+    dialogReady = true
+    calls.push(['dialog-ready'])
+  }
+  let createReady = false
+  const createButton = one({ click: async () => calls.push(['open-dialog']) })
+  createButton.count = async () => (createReady ? 1 : 0)
+  createButton.waitFor = async (options) => {
+    assert.equal(options.state, 'visible')
+    await Promise.resolve()
+    createReady = true
+    calls.push(['create-ready'])
+  }
+  page.getByRole = (role, options) => {
+    if (role === 'textbox') return { count: async () => 0 }
+    if (role === 'row') return { filter: () => ({ count: async () => 0 }) }
+    if (role === 'dialog') return dialog
+    if (role === 'button') return createButton
+    if (role === 'option') {
+      assert.deepEqual(options, { name: 'Never', exact: true })
+      return one({
+        click: async () => {
+          neverSelected = true
+          calls.push(['expiration', 'Never'])
+        },
+      })
+    }
+    assert.fail('unexpected page role')
+  }
+  const saved = []
+  const result = await adapter.configure({ keyName: 'vm2api-account', onKey: async (value) => saved.push(value) })
+  assert.equal(result.projectId, 'proj_default')
+  assert.equal(saved[0].projectId, 'proj_default')
+  assert.deepEqual(calls, [
+    ['goto', 'https://platform.openai.com/api-keys'],
+    ['create-ready'],
+    ['open-dialog'],
+    ['dialog-ready'],
+    ['projects-ready'],
+    ['name', 'vm2api-account'],
+    ['open-expiration'],
+    ['expiration', 'Never'],
+    ['submit'],
+  ])
   adapter.dispose()
 })

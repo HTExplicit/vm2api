@@ -546,7 +546,7 @@ sessionKey / 授权码导入必须走该槽 SOCKS5。
 
 基址 `/vms/:id/openai-api`。GET 返回公开状态；POST `/preview` 查询 Pro 三档赠额资格与接收组织，POST `/claim` 接收 `{ destination_account_id? }`，唯一组织可省略。资格样本超过 5 分钟后，首次领取前重新查询；关联后的 `pending/claimed` 状态锁定领取，复查沿用原操作编号。外部已领取账号也可继续配置。
 
-POST `/setup` 继续 Platform 登录、专用项目和账号 key 配置；POST `/refresh` 刷新发放或组织总余额；PATCH `/enabled` 接收 `{ enabled: boolean }`，独立于 OAuth 启停、调度及登录会话。账号行 `openai_api` 返回领取、配置、key 尾号、组织余额及更新时间，不返回 secret、指纹或登录会话。
+POST `/setup` 继续 Platform 登录并在当前组织已有的 Default project 内创建账号 key，有效期选择官方 `Never`；已有 key 直接复用，不新建项目。POST `/refresh` 刷新发放或组织总余额；PATCH `/enabled` 接收 `{ enabled: boolean }`，独立于 OAuth 启停、调度及登录会话。账号行 `openai_api` 返回领取、配置、key 尾号、组织余额及更新时间，不返回 secret、指纹或登录会话。
 
 组织余额来自官方 Billing `credit_grants` JSON 的 `total_available`，购买余额来自 `total_paid_available`；不由逐笔额度推导总余额。`paid_balance/grants/next_expiring_amount/next_expiring_at` 补充购买余额及最近到期额度，金额以十进制字符串保存并去尾零，未知保持空值，负余额照实返回。`offer_checked_at/link_checked_at/balance_checked_at` 分别记录资格、关联和余额观测时间；`offer_stale` 提示资格待重查，余额刷新不更新领取资格。
 
