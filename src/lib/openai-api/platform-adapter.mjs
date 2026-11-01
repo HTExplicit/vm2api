@@ -300,10 +300,65 @@ export class PlatformAdapter {
     await this.settled()
   }
 
-  async inspect() {
+  async inspect({ timeout = 0, signal } = {}) {
+    signal?.throwIfAborted()
+    if (timeout > 0) {
+      return new Promise((resolve, reject) => {
+        let finished = false
+        let inspecting = false
+        let changed = false
+        const finish = (state, error) => {
+          if (finished) return
+          finished = true
+          clearTimeout(timer)
+          this.page.off('response', check)
+          this.page.off('framenavigated', check)
+          this.page.off('close', closed)
+          signal?.removeEventListener('abort', aborted)
+          error === undefined ? resolve(state) : reject(error)
+        }
+        const check = async () => {
+          changed = true
+          if (inspecting) return
+          inspecting = true
+          while (changed && !finished) {
+            changed = false
+            try {
+              const state = await this.inspect()
+              const url = new URL(this.page.url())
+              const login =
+                ['auth.openai.com', 'auth0.openai.com'].includes(url.hostname) ||
+                (url.hostname === 'platform.openai.com' && /^\/(?:auth|login)(?:\/|$)/.test(url.pathname))
+              if (state.authenticated || login) finish(state)
+            } catch (error) {
+              finish(null, error)
+            }
+          }
+          inspecting = false
+        }
+        const closed = () => finish(null, problem('platform_browser_closed', '账号浏览器已关闭'))
+        const aborted = () => finish(null, signal.reason)
+        const timer = setTimeout(
+          () =>
+            finish(
+              null,
+              problem(
+                'platform_identity_unavailable',
+                '等待官方账号信息超时，请稍后重试余额刷新或在账号浏览器核对页面。',
+              ),
+            ),
+          timeout,
+        )
+        this.page.on('response', check)
+        this.page.on('framenavigated', check)
+        this.page.on('close', closed)
+        signal?.addEventListener('abort', aborted, { once: true })
+        void check()
+      })
+    }
     await this.settled()
     const url = new URL(this.page.url())
-    if (url.hostname !== 'platform.openai.com' || /\/auth(?:\/|$)/.test(url.pathname)) {
+    if (url.hostname !== 'platform.openai.com' || /^\/(?:auth|login)(?:\/|$)/.test(url.pathname)) {
       return { authenticated: false, email: null, organizations: [] }
     }
     // Profile pages expose an explicitly labelled email input. Never infer the
@@ -478,7 +533,10 @@ export class PlatformAdapter {
 
   async readBalance({ organizationId = this.organizationId } = {}) {
     await this.requireLogin()
-    await this.selectOrganization(organizationId)
+    // Onboarding can identify the user before the selected organization is observed.
+    // The Billing GET below must itself confirm the exact organization.
+    if (this.identity.organizationId && this.identity.organizationId !== organizationId)
+      await this.selectOrganization(organizationId)
     this.creditSummaries.delete(organizationId)
     const observed = this.page.waitForResponse(
       (response) => {
