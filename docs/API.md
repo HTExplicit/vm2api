@@ -74,7 +74,7 @@ x-api-key: sk-vm-…
 | 钉槽（仅 master） | 虚拟机测试 loopback |
 | `X-Request-ID` | 原样回写响应头 |
 
-体大小上限由设置里的「请求体上限」决定（`failover.max_request_mib`，未设置时入口与槽内 kernel 均为 32 MiB）。网关进程天花板是 `KIN_MAX_BODY`（默认 128MB），面板值不能超过它。超限在选号之前返回 `413 body_too_large`；Codex 转发还会按包含 headers/session/request_id 的实际序列化 envelope 检查槽内限额；封装后超限或内核返回的纯文本 413 均报告 `413 body_too_large`。改完保存后，各槽 kernel 在没有请求时重启一次才生效。
+体大小上限由设置 → 配额的「请求体上限」决定（`failover.max_request_mib`，未设置时入口与槽内 kernel 均为 32 MiB）。网关进程天花板是 `KIN_MAX_BODY`（默认 128MB），面板值不能超过它。超限在选号之前返回 `413 body_too_large`；Codex 转发还会按包含 headers/session/request_id 的实际序列化 envelope 检查槽内限额；封装后超限或内核返回的纯文本 413 均报告 `413 body_too_large`。改完保存后，各槽 kernel 在没有请求时重启一次才生效。
 
 ## Messages
 
@@ -94,7 +94,7 @@ curl -sS http://127.0.0.1:8787/v1/messages \
 
 流式：`"stream": true`，响应 `text/event-stream`，事件与 Anthropic 相同（`message_start` … `message_stop`）。
 
-非官方入站会被改写成配置选定的 persona system 再发给上游；**回包不带改写后的 system**。`persona_preset=official` 保留 billing、identity、调用方 agent prompt（若有）和调用方 system；`persona_preset=official_full` 才固定追加完整 Claude Code agent prompt。非官方 `usage` 按「没有 persona system、没有注入 tools」估算。官方 Claude Code 四闸全过则体不改、usage 不藏。
+Claude 推理路径按配置选定的 persona system 清洗入站；**回包不带改写后的 system**。`persona_preset=official` 保留 billing、identity、调用方 agent prompt（若有）和调用方 system；`persona_preset=official_full` 才固定追加完整 Claude Code agent prompt。只有 `official_cc_passthrough=true` 才让官方 Claude Code 家族保留入站 system 和内容形状，关闭时同样按 persona 清洗。清洗后的 `usage` 按「没有 persona system、没有注入 tools」估算。OpenAI(apikey) 账号继续独立分流，不应用 Claude 专属 persona 或工具能力限制。
 
 支持的 Messages 字段原样进入清洗层：`system`、`tools`、`tool_choice`、`thinking`、`output_config`、`metadata`、`stop_sequences`、图片块、`cache_control`。非法 `role` 会洗掉。OpenAI 形态 tools 出现在本口时先转成 Anthropic tools，但仍判非官方。
 
@@ -102,7 +102,7 @@ native cli-hop 开启官方家族透传时，调用方 `cache_control` 的位置
 
 ### Sonnet 5.5 兼容边界
 
-`claude-sonnet-5-5` 不支持原生强制工具调用。Node 沿用 Opus 5.5 策略：`tool_choice=any/tool/required` 转成 `{type:auto}`；指定名称的客户端工具设置 `strict:true`，服务端工具不加该字段。不注入提示词，也不把普通文本伪造成工具调用。**strict 只约束实际工具调用的参数，不保证一定调用或只调用指定工具。** 需要原生强制调用时继续使用支持该能力的模型，例如 `claude-sonnet-5`；其行为不变。
+`claude-sonnet-5-5` 与 Opus 5.5 要求 adaptive thinking，不支持强制工具调用。Claude 入口遇到不兼容的 `tool_choice=any/tool` 返回 `400 tool_choice_incompatible`，格式、工具列表或名称不合法时返回 `400 invalid_tool_choice`；不再静默改成 `auto` 或补 `strict:true`。兼容模型保留调用方的 `tool_choice` 与 `strict`；强制选择不能与 enabled/adaptive thinking 同时使用。OpenAI(apikey) 账号沿用所选 API 模型的工具与推理参数。
 
 规则覆盖 Messages、Chat Completions、Responses 的出站清洗。`auto` / `none` 保持；不支持的 disabled/enabled thinking 转为 adaptive，保留 display。结构化输出转换保留 `output_config.effort`，已有 `output_config.format` 优先，否则从 `response_format` / `text.format` 合并，cli-hop 与普通出站路径均补齐对象 schema 的 `additionalProperties:false`（不覆盖显式值）。
 
@@ -268,7 +268,7 @@ curl -sS http://127.0.0.1:8787/health
 | `upstream_error` | 401/403/502 |
 | `api_error` | 500 |
 
-上游 429 失败转移用尽后原样返回 429 `upstream_rate_limit`，有上游 `retry-after` 时透传；529 一定带 `retry-after`（号池估计，上游 529 取上游值，都没有时为 1）。恢复备份期间协议口 `503 restore_in_progress`。健康探测短请求在无缓存且 fail-closed 时 `503`。Claude Code Usage Policy `API Error`（含内核报成 400 的）不换号、不修复重试，客户端收到 400 `policy_blocked` / `refusal_guard`，避免 Claude Code 误提示 `/login` 或按一般 400 做修复重试；并把该 prompt 永久写入拒答缓存；再次相同请求，或用户正文与已缓存正文的估计 Jaccard 达到面板阈值（默认 0.90，可选 0.80/0.85/0.90/0.95），都在 hop 前被拦。`content_policy`、`cyber_policy`、`moderation_blocked` 等内容错误码同样入库。协议硬正则，或面板所选的 Jev / Laya / ModernBERT（`/v1/systemone`，`noul ≥ 0.5`）判为 NSFW、蒸馏、破解、破限时返回 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device。模型不可用且 `fail_open` 为 false 时同样 403，文案写明决策模型不可用，不封设备。近似和 device 封禁可在面板关闭。拒答命中在 device 封禁开启时还会永久封禁该入站 device id。400 的原文后追加原因，`details.reason` 为 `device` / `exact` / `similar`。
+上游 429 失败转移用尽后原样返回 429 `upstream_rate_limit`，有上游 `retry-after` 时透传；529 一定带 `retry-after`（号池估计，上游 529 取上游值，都没有时为 1）。恢复备份期间协议口 `503 restore_in_progress`。健康探测短请求在无缓存且 fail-closed 时 `503`。Claude Code Usage Policy `API Error`（含内核报成 400 的）不换号、不修复重试，客户端收到 400 `policy_blocked` / `refusal_guard`，避免 Claude Code 误提示 `/login` 或按一般 400 做修复重试；并把该 prompt 永久写入拒答缓存；再次相同请求，或用户正文与已缓存正文的估计 Jaccard 达到面板阈值（默认 0.90，可选 0.80/0.85/0.90/0.95），都在 hop 前被拦。本 fork 对 HTTP 400/503「Third-party apps now draw from your extra usage」和「no third-party apps allowed」返回 400 `quota_error` / `entitlement_required`，保留上游说明和请求标识，停止本次换号与修复重试；不写提示词或近似拒答缓存，不封 device，不改变账号调度状态。`content_policy`、`cyber_policy`、`moderation_blocked` 等内容错误码（含 `upstream_code`）同样入库。协议硬正则，或面板所选的 Jev / Laya / ModernBERT（`/v1/systemone`，`noul ≥ 0.5`）判为 NSFW、蒸馏、破解、破限时返回 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device。模型不可用且 `fail_open` 为 false 时同样 403，文案写明决策模型不可用，不封设备。近似和 device 封禁可在面板关闭。拒答命中在 device 封禁开启时还会永久封禁该入站 device id。400 的原文后追加原因，`details.reason` 为 `device` / `exact` / `similar`。
 
 号池结果分开返回，不互相伪装：
 

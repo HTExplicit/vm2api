@@ -106,7 +106,7 @@ for (const ttl of [undefined, '5m', '1h']) {
     const before = structuredClone(input)
     const out = prepareCliHopBody(input)
     assert.equal(out.tools[0].cache_control, undefined)
-    assert.equal(out.tools[0].eager_input_streaming, undefined)
+    assert.equal(out.tools[0].eager_input_streaming, true)
     assert.deepEqual(out.system, input.system)
     assert.deepEqual(
       messageMarkers(out).map((m) => m.ttl),

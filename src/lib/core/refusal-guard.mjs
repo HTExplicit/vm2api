@@ -7,7 +7,12 @@
  * that and later turns of normal sessions collided.
  */
 import { createHash } from 'node:crypto'
-import { isUsagePolicyErrorMessage, makeRefusalGuardError, REFUSAL_GUARD_MESSAGE } from './errors.mjs'
+import {
+  isUsagePolicyErrorMessage,
+  isThirdPartyEntitlementError,
+  makeRefusalGuardError,
+  REFUSAL_GUARD_MESSAGE,
+} from './errors.mjs'
 import { extractPrompt, normalizeText } from './distill-detect.mjs'
 import { resolveInboundIdentity } from '../identity/identity-rewrite.mjs'
 import { encodeSignature, refusalAskTurns, refusalSignature, refusalUserDocument } from './refusal-similarity.mjs'
@@ -99,6 +104,10 @@ export function isContentPolicyErrorCode(code) {
 }
 
 export function isUpstreamRefusal(result = {}, extra = {}) {
+  const message = [result?.body?.error?.message, result?.body?.message, extra?.error_message, extra?.message]
+    .filter(Boolean)
+    .join('\n')
+  if (isThirdPartyEntitlementError(result.status, message)) return false
   if (result?.finalState === 'content_filter') return true
   const stop = String(result?.stopReason || result?.body?.stop_reason || extra.stop_reason || '')
   if (stop === 'refusal') return true
@@ -108,17 +117,16 @@ export function isUpstreamRefusal(result = {}, extra = {}) {
       if (block?.type === 'refusal' && String(block.refusal || block.text || '').trim()) return true
     }
   }
-  const message = [result?.body?.error?.message, result?.body?.message, extra?.error_message, extra?.message]
-    .filter(Boolean)
-    .join('\n')
   if (isUsagePolicyErrorMessage(message)) return true
   const codes = [
     result?.body?.error?.code,
+    result?.body?.error?.upstream_code,
     result?.body?.code,
     result?.code,
     result?.error_code,
     extra?.error_code,
     extra?.code,
+    extra?.upstream_code,
   ]
   return codes.some(isContentPolicyErrorCode)
 }

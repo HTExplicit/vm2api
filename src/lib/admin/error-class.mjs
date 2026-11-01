@@ -3,7 +3,7 @@
  * Derived from status / error_code / message so historical rows classify without a migration.
  */
 
-import { isUsagePolicyErrorMessage } from '../core/errors.mjs'
+import { isThirdPartyEntitlementError, isUsagePolicyErrorMessage } from '../core/errors.mjs'
 
 export const ERROR_CLASSES = {
   auth: { id: 'auth', owner: 'client', label: '认证' },
@@ -51,6 +51,7 @@ const CODE_MAP = {
   quota_5h_safety: 'quota',
   quota_7d_safety: 'quota',
   quota_guard_request_too_large: 'quota',
+  entitlement_required: 'quota',
   api_key_quota_exhausted: 'quota',
   concurrency_limit: 'quota',
   api_key_concurrency_limit: 'quota',
@@ -241,7 +242,9 @@ export function classifyRequestError(row = {}) {
   // Kernel labels an AUP refusal HTTP 400 upstream_invalid_request. The audit
   // feed only reads the refusal class, so the sentence wins over that code.
   // Auth stays credential even when the body quotes the Usage Policy.
-  if (
+  if (id !== 'auth' && id !== 'credential' && isThirdPartyEntitlementError(status, row?.error_message)) {
+    id = 'quota'
+  } else if (
     id !== 'auth' &&
     id !== 'credential' &&
     isUsagePolicyErrorMessage(row?.error_message) &&

@@ -1869,6 +1869,23 @@ test('account API does not turn a caller classifier contract into the Claude cla
   assert.equal(run.logs[0].classifier, undefined)
 })
 
+test('account API forced tools with reasoning bypass Claude-only tool-choice restrictions', async () => {
+  const run = await runAccountApiProtocol(
+    {
+      model: 'o3',
+      messages: [{ role: 'user', content: 'Use the tool.' }],
+      tools: [{ type: 'function', function: { name: 'chosen', parameters: { type: 'object', properties: {} } } }],
+      tool_choice: { type: 'function', function: { name: 'chosen' } },
+      reasoning_effort: 'high',
+      stream: false,
+    },
+    'openai.chat',
+  )
+  assert.equal(run.response.statusCode, 200, JSON.stringify(run.response.body))
+  assert.equal(run.sent.length, 1)
+  assert.deepEqual(run.sent[0].body.tool_choice, { type: 'function', name: 'chosen' })
+})
+
 test('an unknown account API model is rejected by its scoped API catalog without an OAuth hop', async () => {
   const run = await runAccountApiProtocol(
     { model: 'not-in-selected-api-catalog', messages: [{ role: 'user', content: 'hello' }] },

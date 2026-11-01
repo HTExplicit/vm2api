@@ -119,6 +119,26 @@ test('stop_reason=refusal and Usage Policy API Error are cacheable; distill is n
     true,
   )
   assert.equal(isUpstreamRefusal({ body: { error: { code: 'distill_blocked', message: '不允许蒸馏' } } }), false)
+  assert.equal(
+    isUpstreamRefusal({
+      body: {
+        error: {
+          code: 'upstream_invalid_request',
+          upstream_code: 'cyber_policy',
+          message: 'blocked',
+        },
+      },
+    }),
+    true,
+  )
+  for (const status of [400, 503]) {
+    for (const message of [
+      'HTTP 400: Third-party apps now draw from your extra usage, not your plan limits.',
+      'no third-party apps allowed on this subscription',
+    ]) {
+      assert.equal(isUpstreamRefusal({ status, body: { error: { message, upstream_code: 'usage_policy' } } }), false)
+    }
+  }
 })
 
 test('zero inject still allows distill skip while refusal fingerprint is independent', () => {

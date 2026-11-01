@@ -48,6 +48,7 @@ export const ErrorCode = {
   QUOTA_5H_SAFETY: 'quota_5h_safety',
   QUOTA_7D_SAFETY: 'quota_7d_safety',
   QUOTA_GUARD_REQUEST_TOO_LARGE: 'quota_guard_request_too_large',
+  ENTITLEMENT_REQUIRED: 'entitlement_required',
   CONCURRENCY_LIMIT: 'concurrency_limit',
   API_KEY_DISABLED: 'api_key_disabled',
   API_KEY_EXPIRED: 'api_key_expired',
@@ -139,6 +140,8 @@ const POOL_CAPACITY_MESSAGE = /no eligible|no ready api|account pool|号池没�
 const WRAP_CONNECTION_MESSAGE = /provider error:.*connection error/i
 const USAGE_POLICY_MESSAGE =
   /usage policy|legal\/aup|unable to respond to this request|violate our usage|content_filter_refusal/i
+const THIRD_PARTY_ENTITLEMENT_MESSAGE =
+  /third[-\s]?party apps now draw from|no third[-\s]?party apps(?:\s+are)?\s+allowed/i
 
 export function isWrapConnectionError(message = '') {
   return WRAP_CONNECTION_MESSAGE.test(String(message || ''))
@@ -146,6 +149,11 @@ export function isWrapConnectionError(message = '') {
 
 export function isUsagePolicyErrorMessage(message = '') {
   return USAGE_POLICY_MESSAGE.test(String(message || ''))
+}
+
+/** These 400/503 responses concern account billing, not the prompt. */
+export function isThirdPartyEntitlementError(status, message = '') {
+  return [400, 503].includes(Number(status)) && THIRD_PARTY_ENTITLEMENT_MESSAGE.test(String(message || ''))
 }
 
 export const REFUSAL_GUARD_MESSAGE =
@@ -511,6 +519,16 @@ export function mapUpstreamError(status, body, headers = {}) {
         upstream_status: status,
         ...(body?.error?.upstream_code ? { upstream_code: body.error.upstream_code } : {}),
       },
+      request_id,
+    })
+  }
+  if (isThirdPartyEntitlementError(status, msg)) {
+    return makeError({
+      type: ErrorType.QUOTA,
+      code: ErrorCode.ENTITLEMENT_REQUIRED,
+      message: String(msg),
+      status: 400,
+      details: { upstream_type: upType, upstream_status: status },
       request_id,
     })
   }

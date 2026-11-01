@@ -38,14 +38,14 @@ const requests = [
 ]
 
 for (const [protocol, request] of requests) {
-  test(`${protocol} Sonnet 5.5 adapts named tools on the API path without changing Sonnet 5`, () => {
+  test(`${protocol} Sonnet 5.5 preserves named tools and caller strictness on the API path`, () => {
     const input = { ...structuredClone(request), model, output_config: { effort: 'low' } }
     const before = structuredClone(input)
     const { claude } = toClaudeMessages(protocol, input)
     const out = prepareAnthropicRequest(claude)
-    assert.deepEqual(out.tool_choice, { type: 'auto' })
+    assert.deepEqual(out.tool_choice, { type: 'tool', name: out.tools[0].name })
     assert.equal(out.tools[0].name, '_todo')
-    assert.equal(out.tools[0].strict, true)
+    assert.equal(out.tools[0].strict, undefined)
     assert.deepEqual(out.tools[0].input_schema, schema)
     assert.equal(out.tools[1].strict, undefined)
     assert.equal(out.output_config.effort, 'low')
@@ -67,10 +67,10 @@ for (const [protocol, request] of requests) {
   })
 }
 
-test('Sonnet 5.5 adapts required tools but preserves auto and none choices', () => {
+test('Sonnet 5.5 preserves supplied tool choices before ingress validation', () => {
   for (const choice of [{ type: 'any' }, 'required', { type: 'auto' }, { type: 'none' }]) {
     const out = prepareAnthropicRequest({ model, messages, tools, tool_choice: choice })
-    assert.deepEqual(out.tool_choice, { type: choice.type === 'none' ? 'none' : 'auto' })
+    assert.deepEqual(out.tool_choice, choice)
     assert.deepEqual(out.tools, tools)
   }
 })
@@ -86,7 +86,7 @@ test('Sonnet 5.5 does not add strict to server tools or migrate Opus computer to
     tools: serverTools,
     tool_choice: { type: 'tool', name: 'web_search' },
   })
-  assert.deepEqual(out.tool_choice, { type: 'auto' })
+  assert.deepEqual(out.tool_choice, { type: 'tool', name: out.tools[0].name })
   assert.equal(out.tools[0].strict, undefined)
   assert.equal(out.tools[1].type, 'computer_20251124')
 })
@@ -102,8 +102,8 @@ test('Sonnet 5.5 API path normalizes rejected legacy thinking; repaired cli-hop 
     }
     const api = prepareAnthropicRequest(structuredClone(body))
     assert.deepEqual(api.thinking, { type: 'adaptive', display: 'summarized' })
-    assert.deepEqual(api.tool_choice, { type: 'auto' })
-    assert.equal(api.tools[0].strict, true)
+    assert.deepEqual(api.tool_choice, body.tool_choice)
+    assert.equal(api.tools[0].strict, undefined)
     const hop = prepareCliHopBody(structuredClone(body), { repaired: true })
     assert.equal(hop.thinking.type, type)
     assert.deepEqual(hop.tool_choice, { type: 'tool', name: '_todo' })
