@@ -5,7 +5,7 @@
 ## 1.4.3101 — 2026-11-01
 
 - 合入官方 1.4.029–1.4.031（9ec89afb）：强制工具调用按模型能力明确报错；修复 OAuth 健康状态读取，调整 HTTP 长连接超时，并清理重复 auto mode 提醒。
-- 官方 Claude Code 家族仅在 `official_cc_passthrough=true` 时保留入站 system；关闭时统一按现有 persona 配置清洗。请求体上限入口移至设置 → 配额，已有数值不变。
+- Claude 推理路径中的官方 Claude Code 家族仅在 `official_cc_passthrough=true` 时保留入站 system；关闭时统一按现有 persona 配置清洗。请求体上限入口移至设置 → 配额，已有数值不变。
 - 本 fork 对第三方应用计费拒绝保留独立处理：指定 HTTP 400/503 返回 400 `quota_error` / `entitlement_required`，停止本次换号与修复重试，不缓存提示词或封设备；内容政策拒答仍沿用官方缓存及错误码修复。
 - 保留 1.4.2815 的 Default project 配置、账号 API 独立分流和四种协议输出；已有 key 不重建、不迁移项目，OpenAI API 账号不套用 Claude 专属工具或 persona 规则。
 

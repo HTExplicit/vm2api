@@ -94,7 +94,7 @@ curl -sS http://127.0.0.1:8787/v1/messages \
 
 流式：`"stream": true`，响应 `text/event-stream`，事件与 Anthropic 相同（`message_start` … `message_stop`）。
 
-非官方入站会被改写成配置选定的 persona system 再发给上游；**回包不带改写后的 system**。`persona_preset=official` 保留 billing、identity、调用方 agent prompt（若有）和调用方 system；`persona_preset=official_full` 才固定追加完整 Claude Code agent prompt。非官方 `usage` 按「没有 persona system、没有注入 tools」估算。官方 Claude Code 四闸全过则体不改、usage 不藏。
+Claude 推理路径按配置选定的 persona system 清洗入站；**回包不带改写后的 system**。`persona_preset=official` 保留 billing、identity、调用方 agent prompt（若有）和调用方 system；`persona_preset=official_full` 才固定追加完整 Claude Code agent prompt。只有 `official_cc_passthrough=true` 才让官方 Claude Code 家族保留入站 system 和内容形状，关闭时同样按 persona 清洗。清洗后的 `usage` 按「没有 persona system、没有注入 tools」估算。OpenAI(apikey) 账号继续独立分流，不应用 Claude 专属 persona 或工具能力限制。
 
 支持的 Messages 字段原样进入清洗层：`system`、`tools`、`tool_choice`、`thinking`、`output_config`、`metadata`、`stop_sequences`、图片块、`cache_control`。非法 `role` 会洗掉。OpenAI 形态 tools 出现在本口时先转成 Anthropic tools，但仍判非官方。
 
@@ -102,7 +102,7 @@ native cli-hop 开启官方家族透传时，调用方 `cache_control` 的位置
 
 ### Sonnet 5.5 兼容边界
 
-`claude-sonnet-5-5` 不支持原生强制工具调用。Node 沿用 Opus 5.5 策略：`tool_choice=any/tool/required` 转成 `{type:auto}`；指定名称的客户端工具设置 `strict:true`，服务端工具不加该字段。不注入提示词，也不把普通文本伪造成工具调用。**strict 只约束实际工具调用的参数，不保证一定调用或只调用指定工具。** 需要原生强制调用时继续使用支持该能力的模型，例如 `claude-sonnet-5`；其行为不变。
+`claude-sonnet-5-5` 与 Opus 5.5 要求 adaptive thinking，不支持强制工具调用。Claude 入口遇到不兼容的 `tool_choice=any/tool` 返回 `400 tool_choice_incompatible`，格式、工具列表或名称不合法时返回 `400 invalid_tool_choice`；不再静默改成 `auto` 或补 `strict:true`。兼容模型保留调用方的 `tool_choice` 与 `strict`；强制选择不能与 enabled/adaptive thinking 同时使用。OpenAI(apikey) 账号沿用所选 API 模型的工具与推理参数。
 
 规则覆盖 Messages、Chat Completions、Responses 的出站清洗。`auto` / `none` 保持；不支持的 disabled/enabled thinking 转为 adaptive，保留 display。结构化输出转换保留 `output_config.effort`，已有 `output_config.format` 优先，否则从 `response_format` / `text.format` 合并，cli-hop 与普通出站路径均补齐对象 schema 的 `additionalProperties:false`（不覆盖显式值）。
 
