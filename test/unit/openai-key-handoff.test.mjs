@@ -176,21 +176,33 @@ function fixture(t, { balanceError = null, automaticExpiration = false } = {}) {
     organizationId = 'org-test',
     projectId = 'proj-test',
     secret = SECRET,
+    scopedPath = false,
+    urlOrganizationId = organizationId,
+    urlProjectId = projectId,
     extraHeaders = {},
     extraBody = {},
   } = {}) {
     const request = {
-      url: () => 'https://api.openai.com/dashboard/user/api_keys',
+      url: () =>
+        scopedPath
+          ? `https://api.openai.com/dashboard/organizations/${urlOrganizationId}/projects/${urlProjectId}/api_keys`
+          : 'https://api.openai.com/dashboard/user/api_keys',
       method: () => 'POST',
       headers: () => ({ 'openai-organization': organizationId, ...extraHeaders }),
-      postDataJSON: () => ({ name, project_id: projectId, ...extraBody }),
+      postDataJSON: () =>
+        scopedPath
+          ? { action: 'create', name, scopes: ['api.all'], admin_key: false, creation_source: 'platform', ...extraBody }
+          : { name, project_id: projectId, ...extraBody },
     }
     const response = {
       url: request.url,
       request: () => request,
       ok: () => true,
       headers: () => ({ 'content-type': 'application/json' }),
-      json: async () => ({ api_key: { id: 'key-fixture', secret } }),
+      json: async () =>
+        scopedPath
+          ? { result: 'success', key: { sensitive_id: secret, name, organization: organizationId, project: projectId } }
+          : { api_key: { id: 'key-fixture', secret } },
     }
     return { request, response }
   }
@@ -255,6 +267,46 @@ test('real adapter handoff keeps its manager job alive and saves manual creation
   assert.equal(f.page.listenerCount('response'), 0)
   assert.equal(JSON.stringify(f.statuses).includes(SECRET), false)
 })
+
+test('the official URL-scoped creation request without project body or header saves its sensitive_id once', async (t) => {
+  const f = fixture(t)
+  const live = await f.start()
+  const created = f.emitCreation({ scopedPath: true })
+  assert.equal(Object.hasOwn(created.request.postDataJSON(), 'project_id'), false)
+  assert.equal(Object.hasOwn(created.request.headers(), 'openai-project'), false)
+  f.page.emit('response', created.response)
+  await f.settle()
+  assert.equal(live.adapter.keySetup, null)
+  const account = f.repo.getAccount(f.entry.accountId)
+  assert.equal(account.setup_status, 'ready')
+  assert.equal(f.repo.getKey(account.key_id).api_key, SECRET)
+  assert.deepEqual(f.counts(), { endpoints: 1, keys: 1 })
+  assert.equal(f.calls.opens, 1)
+  assert.equal(f.calls.submits, 0)
+})
+
+for (const variant of [
+  { name: 'URL organization', options: { urlOrganizationId: 'org-other' } },
+  { name: 'URL project', options: { urlProjectId: 'proj-other' } },
+  { name: 'body organization', options: { extraBody: { organization_id: 'org-other' } } },
+  { name: 'body project', options: { extraBody: { project_id: 'proj-other' } } },
+  { name: 'organization header', options: { extraHeaders: { 'openai-organization': 'org-other' } } },
+  { name: 'project header', options: { extraHeaders: { 'openai-project': 'proj-other' } } },
+]) {
+  test(`URL-scoped manual creation rejects a conflicting ${variant.name} without saving a key`, async (t) => {
+    const f = fixture(t)
+    const live = await f.start()
+    f.emitCreation({ scopedPath: true, ...variant.options })
+    await live.adapter.settled()
+    assert.equal(live.adapter.keySetup.request, null)
+    assert.equal(live.adapter.keySetup.domTainted, true)
+    assert.deepEqual(f.counts(), { endpoints: 0, keys: 0 })
+    await f.manager.cancel(f.entry.vm.id)
+    await f.settle()
+    assert.deepEqual(f.counts(), { endpoints: 0, keys: 0 })
+    assert.equal(f.calls.opens, 1)
+  })
+}
 
 test('repeated continue checks keep the same form and never submit a second creation', async (t) => {
   const f = fixture(t)
