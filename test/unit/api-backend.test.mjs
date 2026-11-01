@@ -2120,6 +2120,60 @@ test('account API native Responses completes a two-round function and custom too
   assert.equal(second.billed.length, 1)
 })
 
+for (const stream of [false, true]) {
+  test(`account API Responses Lite preserves ordered tool declarations and strips only internal metadata for ${stream ? 'streaming' : 'JSON'} clients`, async () => {
+    const standard = nativeToolsRequest()
+    const { tools, instructions, ...request } = standard
+    const internalMetadata = { content_item_metadata: [{ provenance: { type: 'harness', hook: false } }] }
+    const input = [
+      { type: 'additional_tools', role: 'developer', id: 'at_functions', tools: [tools[0]] },
+      {
+        type: 'message',
+        role: 'developer',
+        id: 'msg_instructions',
+        content: [{ type: 'input_text', text: instructions }],
+        internal_chat_message_metadata_passthrough: internalMetadata,
+      },
+      { ...standard.input[0], internal_chat_message_metadata_passthrough: internalMetadata },
+      ...standard.input.slice(1, 4),
+      { type: 'additional_tools', role: 'developer', id: 'at_patch', tools: [tools[1]] },
+      ...standard.input.slice(4),
+    ]
+    const inbound = {
+      ...request,
+      stream,
+      input,
+      tool_choice: 'auto',
+      reasoning: { ...standard.reasoning, context: 'all_turns' },
+      metadata: { integration: 'codex-lite' },
+      client_metadata: { 'x-openai-internal-codex-responses-lite': 'true' },
+    }
+    const original = structuredClone(inbound)
+    const expectedInput = input.map((item) => {
+      const { internal_chat_message_metadata_passthrough, ...publicItem } = item
+      return publicItem
+    })
+    const officialResponse = nativeToolResponse()
+    const run = await runAccountApiProtocol(inbound, 'openai.responses', {
+      events: () => [{ type: 'response.completed', response: officialResponse }],
+    })
+    assert.equal(run.response.statusCode, 200, JSON.stringify(run.response.body))
+    const { client_metadata, ...publicRequest } = inbound
+    assert.deepEqual(run.sent[0].body, { ...publicRequest, input: expectedInput, stream: true })
+    assert.equal(run.sent[0].body.tools, undefined)
+    assert.deepEqual(
+      run.sent[0].body.input.filter((item) => item.type === 'additional_tools'),
+      [input[0], input[6]],
+    )
+    assert.deepEqual(inbound, original)
+    assert.equal(run.logs[0].has_tools, true)
+    assert.equal(run.logs[0].account_id, 'api-key-a')
+    assert.equal(run.logs[0].vm_id, null)
+    assert.equal(run.sent[0].proxy_url, 'socks5h://bound-current:1080')
+    assert.equal(run.billed.length, 1)
+  })
+}
+
 test('account API native Responses streams original tool events and emits DONE once', async () => {
   const officialResponse = nativeToolResponse()
   const events = [
