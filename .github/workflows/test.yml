@@ -70,6 +70,8 @@ jobs:
             test/unit/openai-auth-state.test.mjs \
             test/unit/openai-api-credits.test.mjs \
             test/unit/openai-api-manager.test.mjs \
+            test/unit/openai-api-config.test.mjs \
+            test/unit/openai-billing-client.test.mjs \
             test/unit/slot-browser-repo.test.mjs \
             test/unit/slot-browser-manager.test.mjs \
             test/unit/browser-stream.test.mjs \
@@ -131,7 +133,7 @@ jobs:
           pnpm exec vitest run src/lib/vm-status.test.ts -t 'GPT plan label follows OpenAI plan_type'
           pnpm exec vitest run src/features/vm/usage-windows.test.tsx src/features/vm/vm-rack-model.test.ts
           pnpm exec vitest run src/features/models/model-mapping.test.ts src/features/models/policy.test.ts
-          pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx
+          pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx src/features/vm/openai-api-actions.test.tsx src/features/settings/openai-api-balance-section.test.tsx
           pnpm build
       - name: Platform configuration retry UI
         run: node scripts/smoke-platform-retry-ui.mjs

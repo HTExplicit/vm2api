@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
 import { VIEW_TITLES } from '@/config/nav'
 import type { Dashboard } from '@/types/panel-overview'
-import type { NotifyConfig } from '@/types/panel-routing'
+import type { NotifyConfig, OpenaiApiConfig } from '@/types/panel-routing'
 import type { QuotaTierPolicy } from '@/types/panel-vm'
 import { toast } from 'sonner'
 import { api, patchVm } from '@/lib/api'
@@ -372,6 +372,10 @@ export function SettingsPage() {
               ) : null}
               {tab === 'openai' ? (
                 <OpenaiPane
+                  openaiApi={
+                    (draft.openai_api as
+                      Partial<OpenaiApiConfig> | undefined) || {}
+                  }
                   websocket={
                     (draft.websocket as Record<string, unknown> | undefined) ||
                     {}
@@ -384,6 +388,9 @@ export function SettingsPage() {
                   }
                   onCodexChange={(next) =>
                     setDraft((current) => ({ ...current, codex: next }))
+                  }
+                  onOpenaiApiChange={(next) =>
+                    setDraft((current) => ({ ...current, openai_api: next }))
                   }
                   saving={save.isPending}
                   pending={dirty}

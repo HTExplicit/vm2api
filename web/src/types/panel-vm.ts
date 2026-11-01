@@ -64,7 +64,9 @@ export type OpenaiApiView = {
   link_checked_at?: string | null
   offer_stale?: boolean
   balance_checked_at?: string | null
+  balance_refresh_interval_minutes?: number
   balance_error?: string | null
+  quota_blocked?: boolean
   last_error?: string | null
   browser_active?: boolean
 }

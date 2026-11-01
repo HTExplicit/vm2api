@@ -80,9 +80,7 @@ export function keyLimitsPayload(
         mode === 'edit' ? options.currentAllowedVms || [] : []
       )
       if (allowed_vms.some((id) => !existing.has(id) && !candidates.has(id)))
-        throw new Error(
-          '新增账号需已配置 API key 且最后成功查询的 API 余额大于 0'
-        )
+        throw new Error('新增账号需已配置 API key')
     }
     body.group_type = group_type
     body.allowed_vms = allowed_vms

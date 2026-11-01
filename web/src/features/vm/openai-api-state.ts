@@ -1,18 +1,9 @@
 import type { OpenaiApiView, Vm } from '@/types/panel-vm'
 import { isCodexVm } from '@/lib/vm-kind'
 
-const API_BALANCE_MAX_AGE = 10 * 60_000
-
-/** The last successful sample decides selection; subscription tier and API switch do not. */
+/** Key ownership decides selection; balance and API switch remain independent. */
 export function isOpenaiApiKeyCandidate(vm: Vm): boolean {
-  const balance = vm.openai_api?.balance?.trim()
-  return (
-    isCodexVm(vm) &&
-    !!vm.openai_api?.has_key &&
-    !!balance &&
-    /^\+?\d+(?:\.\d+)?$/.test(balance) &&
-    /[1-9]/.test(balance)
-  )
+  return isCodexVm(vm) && !!vm.openai_api?.has_key
 }
 
 export function isOpenaiApiBalancePending(
@@ -20,12 +11,11 @@ export function isOpenaiApiBalancePending(
   now = Date.now()
 ): boolean {
   if (state?.balance == null) return false
+  if (state.balance_error) return true
+  const interval = state.balance_refresh_interval_minutes ?? 10
+  if (interval === 0) return false
   const checkedAt = Date.parse(state.balance_checked_at || '')
-  return (
-    !!state.balance_error ||
-    !Number.isFinite(checkedAt) ||
-    now - checkedAt >= API_BALANCE_MAX_AGE
-  )
+  return !Number.isFinite(checkedAt) || now - checkedAt >= interval * 60_000
 }
 
 const PRO_PLANS = new Set([

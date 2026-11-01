@@ -211,7 +211,7 @@ function recordApiKeyFailure(picked, { status, code, message, headers = {} }, st
   const exhausted = ['credit_balance_exhausted', 'insufficient_quota'].includes(code)
   const invalid = status === 401 || ['invalid_api_key', 'invalid_key'].includes(code)
   if (accountKey && (exhausted || invalid)) {
-    // Balance refresh releases exhaustion; invalid keys require reconnecting.
+      // An administrator releases exhaustion; invalid keys require reconnecting.
     if (invalid) store.updateKey(picked.key.id, { disabled: true })
     else store.setKeyCooldown(picked.key.id, '9999-12-31T23:59:59.999Z')
     scheduler.onAccountKeyError?.(picked.key, {

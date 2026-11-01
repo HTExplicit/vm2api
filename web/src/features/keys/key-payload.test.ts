@@ -222,7 +222,7 @@ describe('API key limit payload', () => {
     })
   })
 
-  it('retains old depleted selections on edit but validates every added account', () => {
+  it('accepts configured zero, negative and unknown balances while validating key presence', () => {
     const apiDraft: KeyLimitsDraft = {
       ...draft,
       group_type: 'openai_apikey',
@@ -255,17 +255,46 @@ describe('API key limit payload', () => {
         currentAllowedVms: ['old'],
       })
     ).toMatchObject({ allowed_vms: ['old', 'fresh'] })
-    expect(() =>
+    expect(
       keyLimitsPayload(apiDraft, 'create', {
         vms: [old],
         currentAllowedVms: ['old'],
       })
-    ).toThrow('余额大于 0')
-    expect(() =>
+    ).toMatchObject({ allowed_vms: ['old'] })
+    expect(
       keyLimitsPayload({ ...apiDraft, allowed_vms: ['old', 'other'] }, 'edit', {
-        vms: [old, { ...old, id: 'other' }],
+        vms: [
+          old,
+          {
+            ...old,
+            id: 'other',
+            openai_api: { ...old.openai_api!, balance: '-2' },
+          },
+        ],
         currentAllowedVms: ['old'],
       })
-    ).toThrow('余额大于 0')
+    ).toMatchObject({ allowed_vms: ['old', 'other'] })
+    expect(
+      keyLimitsPayload({ ...apiDraft, allowed_vms: ['unknown'] }, 'create', {
+        vms: [
+          {
+            ...old,
+            id: 'unknown',
+            openai_api: { ...old.openai_api!, balance: null },
+          },
+        ],
+      })
+    ).toMatchObject({ allowed_vms: ['unknown'] })
+    expect(() =>
+      keyLimitsPayload({ ...apiDraft, allowed_vms: ['missing'] }, 'create', {
+        vms: [
+          {
+            ...old,
+            id: 'missing',
+            openai_api: { ...old.openai_api!, has_key: false },
+          },
+        ],
+      })
+    ).toThrow('新增账号需已配置 API key')
   })
 })

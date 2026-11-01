@@ -99,8 +99,8 @@ describe('account API feature gates', () => {
     expect(hasOpenaiApiFeature({ ...vm, plan_type: 'free' })).toBe(false)
   })
 
-  it('offers funded account keys independently of subscription, freshness and API switch', () => {
-    for (const balance of ['37.000', '0001.00', '+0.00000000000000000000001']) {
+  it('offers configured account keys independently of balance, subscription and API state', () => {
+    for (const balance of ['37.000', '0', '-1.25', null, '', 'NaN']) {
       expect(
         isOpenaiApiKeyCandidate({
           ...vm,
@@ -109,19 +109,12 @@ describe('account API feature gates', () => {
             ...state,
             has_key: true,
             enabled: false,
+            quota_blocked: true,
             balance,
             balance_error: '待登录',
           },
         })
       ).toBe(true)
-    }
-    for (const balance of [null, '', '0', '0.000', '-0.000', '-1', 'NaN']) {
-      expect(
-        isOpenaiApiKeyCandidate({
-          ...vm,
-          openai_api: { ...state, has_key: true, balance },
-        })
-      ).toBe(false)
     }
     expect(
       isOpenaiApiKeyCandidate({
@@ -172,6 +165,31 @@ describe('account API feature gates', () => {
         offer_stale: true,
       })
     ).toBe('资格已过期，请重新查询')
+  })
+
+  it('uses the configured refresh interval and keeps manual-only samples independent of age', () => {
+    const now = Date.parse('2026-11-01T00:30:00Z')
+    const sample = {
+      ...state,
+      balance: '-0.01',
+      balance_checked_at: '2026-11-01T00:10:00Z',
+      balance_refresh_interval_minutes: 30,
+    }
+    expect(isOpenaiApiBalancePending(sample, now)).toBe(false)
+    expect(isOpenaiApiBalancePending(sample, now + 10 * 60_000)).toBe(true)
+    const manual = { ...sample, balance_refresh_interval_minutes: 0 }
+    expect(isOpenaiApiBalancePending(manual, now + 24 * 60 * 60_000)).toBe(
+      false
+    )
+    expect(
+      isOpenaiApiBalancePending(
+        { ...manual, balance_checked_at: undefined },
+        now
+      )
+    ).toBe(false)
+    expect(
+      isOpenaiApiBalancePending({ ...manual, balance_error: '查询失败' }, now)
+    ).toBe(true)
   })
 
   it('scales browser interaction coordinates into the actual remote viewport', () => {

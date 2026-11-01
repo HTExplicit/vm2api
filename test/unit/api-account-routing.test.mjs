@@ -107,7 +107,7 @@ test('proxy disappearance between pick and send does not dispatch a direct reque
   assert.equal(result.body.error.code, 'api_account_unavailable')
 })
 
-test('HTTP balance exhaustion remains blocked until an authoritative balance refresh', async () => {
+test('HTTP balance exhaustion remains blocked until administrator recovery', async () => {
   const f = fixture()
   const result = await runApiInference({
     ...f.options,

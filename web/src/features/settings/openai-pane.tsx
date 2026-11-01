@@ -1,3 +1,4 @@
+import type { OpenaiApiConfig } from '@/types/panel-routing'
 import type { OpenAIQuotaPolicy } from '@/types/panel-vm'
 import { Fingerprint, ShieldCheck, Waypoints } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -6,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { SettingRow } from '@/components/setting-row'
+import { OpenaiApiBalanceSection } from './openai-api-balance-section'
 import { OpenaiQuotaSection } from './openai-quota-section'
 import { ChipGroup, PaneSection } from './scheduler-controls'
 
@@ -32,15 +34,19 @@ function codexClient(codex: Block, key: string) {
 export function OpenaiPane({
   websocket,
   codex,
+  openaiApi,
   onWebsocketChange,
   onCodexChange,
+  onOpenaiApiChange,
   saving = false,
   pending = false,
 }: {
   websocket: Block
   codex: Block
+  openaiApi: Partial<OpenaiApiConfig>
   onWebsocketChange: (next: Block) => void
   onCodexChange: (next: Block) => void
+  onOpenaiApiChange: (next: OpenaiApiConfig) => void
   saving?: boolean
   pending?: boolean
 }) {
@@ -68,6 +74,11 @@ export function OpenaiPane({
 
   return (
     <div className='space-y-4'>
+      <OpenaiApiBalanceSection
+        value={openaiApi}
+        onChange={onOpenaiApiChange}
+        saving={saving}
+      />
       <PaneSection
         icon={Waypoints}
         title='传输'

@@ -285,6 +285,12 @@ export type RoutingWebsocketConfig = {
   enabled: boolean
 }
 
+/** `routing.openai_api`：账号 API Billing 查询，独立于 OAuth 路由。 */
+export type OpenaiApiConfig = {
+  /** 整数 0–1440；0 为仅手动，缺省 10 分钟。 */
+  balance_refresh_interval_minutes: number
+}
+
 /** `routing.codex.upstream_transport`。任一 WS 闸关闭时实际强制 HTTP。 */
 export type CodexUpstreamTransport = 'prefer_websocket' | 'http'
 

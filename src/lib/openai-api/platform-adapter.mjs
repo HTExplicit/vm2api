@@ -1,6 +1,19 @@
 const PLATFORM_ORIGIN = 'https://platform.openai.com'
 const KEYS_URL = `${PLATFORM_ORIGIN}/api-keys`
 const BILLING_URL = `${PLATFORM_ORIGIN}/settings/organization/billing/overview`
+export const BILLING_CREDIT_GRANTS_URL = 'https://api.openai.com/v1/dashboard/billing/credit_grants'
+const BILLING_HEADERS = new Set([
+  'accept',
+  'accept-language',
+  'authorization',
+  'openai-organization',
+  'origin',
+  'referer',
+  'sec-fetch-dest',
+  'sec-fetch-mode',
+  'sec-fetch-site',
+  'user-agent',
+])
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const ORGANIZATION_ID = /^org[-_][a-z\d_-]+$/i
 const PROJECT_ID = /^proj[-_][a-z\d_-]+$/i
@@ -233,6 +246,7 @@ export class PlatformAdapter {
     this.identity = { email: null, organizations: [], projects: [], organizationId: null }
     this.projectLists = new Set()
     this.creditSummaries = new Map()
+    this.billingSessions = new Map()
     this.creditSequences = new Map()
     this.creditSequence = 0
     this.createdKey = null
@@ -249,6 +263,13 @@ export class PlatformAdapter {
 
   dispose() {
     this.page.off('response', this.responseHandler)
+    this.billingSessions.clear()
+  }
+
+  billingSessionFor(organizationId) {
+    if (!this.email || this.identity.email !== this.email) return null
+    const session = this.billingSessions.get(organizationId)
+    return session ? structuredClone(session) : null
   }
 
   async observe(response) {
@@ -262,9 +283,18 @@ export class PlatformAdapter {
       if (request.method() !== 'GET' || !ORGANIZATION_ID.test(text(organizationId))) return
       const sequence = ++this.creditSequence
       const summary = parsePlatformCreditSummary(await response.text(), this.now())
+      const allHeaders = request.allHeaders ? await request.allHeaders() : headers
       if (sequence > (this.creditSequences.get(organizationId) || 0)) {
         this.creditSummaries.set(organizationId, summary)
         this.creditSequences.set(organizationId, sequence)
+        if (summary.balance != null && allHeaders.authorization && allHeaders['user-agent']) {
+          this.billingSessions.set(organizationId, {
+            organization_id: organizationId,
+            headers: Object.fromEntries(Object.entries(allHeaders).filter(([name]) => BILLING_HEADERS.has(name))),
+            captured_at: new Date(this.now()).toISOString(),
+            recovery_attempted: false,
+          })
+        }
       }
       return
     }
@@ -542,7 +572,7 @@ export class PlatformAdapter {
       (response) => {
         const request = response.request()
         return (
-          response.url().split('?')[0] === 'https://api.openai.com/v1/dashboard/billing/credit_grants' &&
+          response.url().split('?')[0] === BILLING_CREDIT_GRANTS_URL &&
           response.ok() &&
           request.method() === 'GET' &&
           request.headers()['openai-organization'] === organizationId

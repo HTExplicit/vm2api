@@ -35,4 +35,19 @@ describe('organization API balance details', () => {
     expect(html).toContain(new Date('2026-11-12T03:36:08Z').toLocaleString())
     expect(html).not.toContain('0.000')
   })
+
+  it('shows manual-only refresh in the same details used by balance tooltips', () => {
+    expect(
+      openaiApiCreditDetailRows({
+        ...state,
+        balance_refresh_interval_minutes: 0,
+      })
+    ).toEqual([['余额刷新', '仅手动刷新']])
+    const html = renderToStaticMarkup(
+      <OpenaiApiCreditDetails
+        state={{ ...state, balance_refresh_interval_minutes: 0 }}
+      />
+    )
+    expect(html).toContain('仅手动刷新')
+  })
 })

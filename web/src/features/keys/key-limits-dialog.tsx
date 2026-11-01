@@ -338,7 +338,7 @@ export function KeyLimitsDialog({
                   {listed.length === 0 ? (
                     <p className='text-xs text-muted-foreground'>
                       {apiAccounts
-                        ? '尚无已配置 key 且有 API 余额的账号'
+                        ? '尚无已配置 API key 的账号'
                         : '该分组下没有 VM'}
                     </p>
                   ) : (
@@ -382,9 +382,12 @@ export function KeyLimitsDialog({
                               {isOpenaiApiBalancePending(vm.openai_api)
                                 ? ' · 待刷新'
                                 : ''}
+                              {vm.openai_api?.quota_blocked
+                                ? ' · 上游额度阻断'
+                                : ''}
                               {' · '}
                               {vm.openai_api?.has_key
-                                ? `key 已就绪 · API ${vm.openai_api.enabled ? '已开启' : '已关闭'}`
+                                ? `key 已保存 · API ${vm.openai_api.enabled ? '已开启' : '已关闭'}`
                                 : '尚未配置 key'}
                             </span>
                           </span>
@@ -404,9 +407,9 @@ export function KeyLimitsDialog({
                 </div>
                 {apiAccounts ? (
                   <p className='text-xs text-muted-foreground'>
-                    新候选仅显示已配置 key 且有 API
-                    余额的账号；已有绑定可保留或移除。
-                    各账号请求沿用绑定代理，API 独立开关关闭时暂停调用。
+                    显示已配置 API key 的账号，余额不限制选择和调用。
+                    已有绑定可保留或移除。 各账号请求沿用绑定代理，API
+                    独立开关关闭时暂停调用。
                   </p>
                 ) : null}
               </Field>

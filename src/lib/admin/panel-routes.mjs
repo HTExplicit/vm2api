@@ -185,6 +185,7 @@ import { parseActiveHoursInput } from '../pool/active-hours.mjs'
 import { parseVmQuotaOverride } from '../pool/vm-quota-override.mjs'
 import { validateOpenAIQuotaPatch, normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import { validateInferenceWebsocketPatch } from '../protocol/codex-route.mjs'
+import { validateOpenaiApiPatch } from '../openai-api/config.mjs'
 import {
   normalizeInferenceConfig,
   normalizeSessionSlots,
@@ -948,10 +949,6 @@ export function createPanelHandler(ctx) {
       if (!state?.has_key) {
         throw Object.assign(new Error('所选账号尚未配置 API key'), { code: 'key_api_account_not_ready' })
       }
-      const balance = String(state.balance ?? '').trim()
-      if (!/^\+?\d+(?:\.\d+)?$/.test(balance) || !/[1-9]/.test(balance)) {
-        throw Object.assign(new Error('新增 API 账号需要已确认的正余额'), { code: 'key_api_positive_balance_required' })
-      }
     }
   }
 
@@ -959,7 +956,8 @@ export function createPanelHandler(ctx) {
     await codexBrowserLogin?.cancel(vmId)
     await openaiApiManager?.cancel(vmId)
     await slotBrowserManager?.close(vmId)
-    if (slotBrowserRepo?.get(vmId)) slotBrowserRepo.upsert(vmId, { account_id: accountId, storage_state: null })
+    if (slotBrowserRepo?.get(vmId))
+      slotBrowserRepo.upsert(vmId, { account_id: accountId, storage_state: null, billing_session: null })
     openaiApiRepo?.cleanupForVm(vmId)
   }
 
@@ -1566,8 +1564,9 @@ export function createPanelHandler(ctx) {
             await codexBrowserLogin?.cancel(vmId)
             result = await openaiApiManager.setup(vmId)
           } else if (req.method === 'POST' && action === 'refresh') {
-            await codexBrowserLogin?.cancel(vmId)
             result = await openaiApiManager.refresh(vmId)
+          } else if (req.method === 'POST' && action === 'resume') {
+            result = await openaiApiManager.resume(vmId)
           } else if (req.method === 'POST' && action === 'browser-ticket') {
             await codexBrowserLogin?.cancel(vmId)
             result = await openaiApiManager.browserTicket(vmId)
@@ -5607,6 +5606,7 @@ export function createPanelHandler(ctx) {
             validateOpenAIQuotaPatch(body.codex.quota)
           }
           validateInferenceWebsocketPatch(body)
+          validateOpenaiApiPatch(body?.openai_api)
         } catch (error) {
           if (error instanceof TypeError || error instanceof RangeError) {
             return json(res, 400, {

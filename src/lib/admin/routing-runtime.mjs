@@ -52,6 +52,7 @@ import { wakeOpenAIWaiter } from '../pool/openai-account-runtime.mjs'
 import { normalizeVmConfig } from '../vm/machine-spec.mjs'
 import { applyNativeTelemetry } from '../vm/fleet-update.mjs'
 import { telemetryUploadInterval } from '../vm/native-telemetry.mjs'
+import { normalizeOpenaiApiConfig, validateOpenaiApiPatch } from '../openai-api/config.mjs'
 
 export function createRoutingRuntime(ctx) {
   const getRouting = () => (typeof ctx.getRoutingConfig === 'function' ? ctx.getRoutingConfig() : ctx.routingConfig)
@@ -432,6 +433,7 @@ export function createRoutingRuntime(ctx) {
   }
 
   async function persistRoutingPatch(body = {}) {
+    validateOpenaiApiPatch(body.openai_api)
     const hasCodexQuota = body?.codex && Object.prototype.hasOwnProperty.call(body.codex, 'quota')
     if (hasCodexQuota) validateOpenAIQuotaPatch(body.codex.quota)
     validateInferenceWebsocketPatch(body)
@@ -482,6 +484,9 @@ export function createRoutingRuntime(ctx) {
         nextCodex.quota = mergeOpenAIQuotaPolicy(routingConfig.codex?.quota, body.codex.quota)
       }
       routingConfig.codex = normalizeCodexRouting(nextCodex)
+    }
+    if (body.openai_api) {
+      routingConfig.openai_api = normalizeOpenaiApiConfig({ ...routingConfig.openai_api, ...body.openai_api })
     }
     if (body.vm) {
       const prev = routingConfig.vm && typeof routingConfig.vm === 'object' ? routingConfig.vm : {}
@@ -591,6 +596,7 @@ export function createRoutingRuntime(ctx) {
       const hasOpenAIQuota = Object.prototype.hasOwnProperty.call(doc.codex || {}, 'quota')
       doc.websocket = normalizeInferenceWebsocket(doc.websocket)
       doc.codex = normalizeCodexRouting(doc.codex)
+      doc.openai_api = normalizeOpenaiApiConfig(doc.openai_api)
       doc.pool = normalizePoolRouting(doc.pool)
       doc.vm = normalizeVmConfig(doc.vm)
       if (!hasOpenAIQuota) migrateLegacyOpenAIPolicies(doc)

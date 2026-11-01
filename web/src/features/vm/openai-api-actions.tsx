@@ -37,7 +37,8 @@ import { OpenaiPlatformBrowserDialog } from '@/features/vm/openai-platform-brows
 import { vmQueryOptions, vmsListQueryOptions } from '@/features/vm/queries'
 import { useVmPerms } from '@/features/vm/vm-perms'
 
-type ApiAction = 'preview' | 'claim' | 'setup' | 'refresh' | 'enabled'
+type ApiAction =
+  'preview' | 'claim' | 'setup' | 'refresh' | 'enabled' | 'resume'
 
 export function OpenaiApiActions({
   vm,
@@ -135,6 +136,7 @@ export function OpenaiApiDialog({
         setup: '已开始配置 API',
         refresh: '已刷新 API 状态',
         enabled: data.enabled ? 'API 已开启' : 'API 已关闭',
+        resume: '已解除额度阻断，下次请求将重新尝试上游',
       }
       toast.success(labels[variables.name])
     },
@@ -326,7 +328,8 @@ export function OpenaiApiDialog({
               />
             </div>
             <p className='m-0 text-xs text-muted-foreground'>
-              独立于 GPT 内核启停与 OAuth 调度，使用组织可用余额。
+              独立于 GPT 内核启停与 OAuth
+              调度；余额仅作展示，由上游决定是否可用。
             </p>
             <CodexCreditSummary vm={currentVm} />
             <OpenaiApiCreditDetails state={state} />
@@ -339,6 +342,23 @@ export function OpenaiApiDialog({
                     ? '需要完成 API Platform 登录'
                     : '尚未配置项目 key'}
             </p>
+            {state?.quota_blocked ? (
+              <div className='grid gap-2 rounded-md border border-[color:var(--status-warn)] p-3'>
+                <p role='status' className='m-0 text-xs'>
+                  上游已返回额度或配额不足，此账号 API 暂停调度。
+                  余额刷新不会自动解除阻断，可手动解除后由下次请求重新尝试。
+                </p>
+                <Button
+                  size='sm'
+                  variant='outline'
+                  className='justify-self-start'
+                  disabled={busy}
+                  onClick={() => action.mutate({ name: 'resume' })}
+                >
+                  {showingAction === 'resume' ? '解除中…' : '解除额度阻断'}
+                </Button>
+              </div>
+            ) : null}
             <div className='flex flex-wrap items-center gap-2'>
               {locked || state?.has_key ? (
                 <Button
@@ -388,7 +408,9 @@ export function OpenaiApiDialog({
             {state?.has_key ? (
               <p className='m-0 text-xs text-muted-foreground'>
                 在生成密钥的分组中选择 OpenAI(apikey)，勾选此账号即可调用。API
-                余额每 10 分钟自动刷新。
+                {state.balance_refresh_interval_minutes === 0
+                  ? '余额仅手动刷新。'
+                  : `余额每 ${state.balance_refresh_interval_minutes ?? 10} 分钟自动刷新。`}
               </p>
             ) : null}
           </section>
