@@ -42,6 +42,7 @@ export class OpenaiApiManager {
     this.queue = []
     this.jobs = new Map()
     this.sessions = new Map()
+    this.balanceRetryAt = new Map()
     this.running = false
     this.stopped = false
     this.ownsBrowserManager = !browserManager
@@ -171,6 +172,7 @@ export class OpenaiApiManager {
   async runJob(job) {
     try {
       await this.run(job)
+      this.balanceRetryAt.delete(job.accountId)
     } catch (error) {
       let current
       try {
@@ -181,6 +183,7 @@ export class OpenaiApiManager {
         if (live) live.persistable = false
       }
       if (current?.accountId === job.accountId && !job.abort.signal.aborted && this.jobs.get(job.vmId) === job) {
+        this.balanceRetryAt.set(job.accountId, this.now() + BALANCE_INTERVAL)
         const login = error.code === 'platform_login_required'
         this.repo.upsertAccount(job.accountId, {
           setup_status: login ? 'needs_login' : 'error',
@@ -259,7 +262,7 @@ export class OpenaiApiManager {
       waitUntil: 'domcontentloaded',
       timeout: 45_000,
     })
-    let identity = await adapter.inspect()
+    let identity = await adapter.inspect({ timeout: 30_000, signal: job.abort.signal })
     if (!identity.authenticated) {
       if (!job.interactive) throw problem('platform_login_required', 'Platform 会话已失效，请补充登录')
       this.repo.upsertAccount(job.accountId, { setup_status: 'needs_login', last_error: null })
@@ -320,6 +323,7 @@ export class OpenaiApiManager {
       await this.updateBalance(live, organizationId)
     } catch (error) {
       this.assertCurrent(job)
+      if (job.kind === 'balance' || error.code === 'platform_login_required') throw error
       this.repo.upsertOrg(organizationId, { balance_error: safeMessage(error) })
     }
     const endpoint = this.apiEndpointStore.getRaw(this.repo.getKey(record.key_id).endpoint_id)
@@ -450,7 +454,10 @@ export class OpenaiApiManager {
     this.ticking = true
     try {
       const dueOrgs = new Set()
-      for (const account of this.repo.listAccounts()) {
+      const accounts = this.repo
+        .listAccounts()
+        .sort((a, b) => Number(a.setup_status === 'needs_login') - Number(b.setup_status === 'needs_login'))
+      for (const account of accounts) {
         let context
         try {
           context = this.credits.accountForVm(account.vm_id)
@@ -464,7 +471,7 @@ export class OpenaiApiManager {
           continue
         const org = this.repo.getOrg(account.organization_id)
         if (this.now() - Date.parse(org?.balance_checked_at || org?.updated_at || 0) < BALANCE_INTERVAL) continue
-        if (account.setup_status === 'needs_login') continue
+        if (this.now() < (this.balanceRetryAt.get(account.account_id) || 0)) continue
         try {
           this.enqueue(context, 'balance', false)
           dueOrgs.add(account.organization_id)

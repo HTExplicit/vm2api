@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, getEventListeners } from 'node:events'
 import {
   PlatformAdapter,
   createdPlatformKey,
@@ -208,6 +208,117 @@ test('inspect verifies the observed user and rejects a different signed-in accou
   assert.equal(page.listenerCount('response'), 0)
 })
 
+test('initial identity inspection waits for a response that arrives after DOMContentLoaded', async () => {
+  const page = pageFixture()
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  const abort = new AbortController()
+  let completed = false
+  const inspection = adapter.inspect({ timeout: 1000, signal: abort.signal }).then((state) => {
+    completed = true
+    return state
+  })
+  await new Promise(setImmediate)
+  assert.equal(completed, false)
+  page.emit('response', jsonResponse('/dashboard/organizations/org-one/members', { email: 'other@example.com' }))
+  await new Promise(setImmediate)
+  assert.equal(completed, false, 'unrelated member responses cannot complete identity verification')
+  page.emit(
+    'response',
+    jsonResponse('/v1/dashboard/onboarding/login', {
+      user: { email: 'owner@example.com', orgs: { data: [{ id: 'org-one', title: 'Personal' }] } },
+    }),
+  )
+  const state = await inspection
+  assert.equal(state.authenticated, true)
+  assert.equal(state.email, 'owner@example.com')
+  assert.deepEqual(state.organizations, [{ id: 'org-one', name: 'Personal' }])
+  assert.equal(page.listenerCount('response'), 1, 'only the normal observer should remain')
+  assert.equal(page.listenerCount('framenavigated'), 0)
+  assert.equal(page.listenerCount('close'), 0)
+  assert.equal(getEventListeners(abort.signal, 'abort').length, 0)
+  adapter.dispose()
+})
+
+test('identity waiting returns unauthenticated for an actual login redirect', async () => {
+  for (const target of ['https://auth.openai.com/log-in', 'https://platform.openai.com/auth/login']) {
+    const page = pageFixture()
+    const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+    const inspection = adapter.inspect({ timeout: 1000 })
+    await new Promise(setImmediate)
+    page.url = () => target
+    page.emit('framenavigated')
+    assert.deepEqual(await inspection, { authenticated: false, email: null, organizations: [] })
+    assert.equal(page.listenerCount('framenavigated'), 0)
+    adapter.dispose()
+  }
+})
+
+test('identity timeout is a missing observation rather than proof of an expired session', async () => {
+  const page = pageFixture()
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  await assert.rejects(adapter.inspect({ timeout: 15 }), { code: 'platform_identity_unavailable' })
+  assert.equal(page.listenerCount('response'), 1)
+  assert.equal(page.listenerCount('framenavigated'), 0)
+  adapter.dispose()
+})
+
+test('identity waiting still rejects a delayed response for a different account', async () => {
+  const page = pageFixture()
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  const inspection = adapter.inspect({ timeout: 1000 })
+  const rejected = assert.rejects(inspection, { code: 'platform_account_mismatch' })
+  await new Promise(setImmediate)
+  page.emit('response', jsonResponse('/dashboard/onboarding', { user: { email: 'different@example.com' } }))
+  await rejected
+  assert.equal(page.listenerCount('framenavigated'), 0)
+  adapter.dispose()
+})
+
+test('closing the browser ends identity waiting and releases its listeners', async () => {
+  const page = pageFixture()
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  const inspection = adapter.inspect({ timeout: 1000 })
+  const rejected = assert.rejects(inspection, { code: 'platform_browser_closed' })
+  page.emit('close')
+  await rejected
+  assert.equal(page.listenerCount('close'), 0)
+  assert.equal(page.listenerCount('framenavigated'), 0)
+  adapter.dispose()
+})
+
+test('aborting identity waiting releases the retained browser without waiting for its timeout', async () => {
+  const page = pageFixture()
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  const abort = new AbortController()
+  const reason = new Error('background balance task promoted')
+  const inspection = adapter.inspect({ timeout: 30_000, signal: abort.signal })
+  const rejected = assert.rejects(inspection, (error) => error === reason)
+  await new Promise(setImmediate)
+  assert.equal(getEventListeners(abort.signal, 'abort').length, 1)
+  abort.abort(reason)
+  await rejected
+  assert.equal(page.listenerCount('response'), 1)
+  assert.equal(page.listenerCount('framenavigated'), 0)
+  assert.equal(page.listenerCount('close'), 0)
+  assert.equal(getEventListeners(abort.signal, 'abort').length, 0)
+  assert.equal((await adapter.inspect()).authenticated, false, 'the same page remains available after cancellation')
+  adapter.dispose()
+})
+
+test('an already aborted task never begins waiting or attaches browser listeners', async () => {
+  const page = pageFixture()
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  const abort = new AbortController()
+  const reason = new Error('task already cancelled')
+  abort.abort(reason)
+  await assert.rejects(adapter.inspect({ timeout: 30_000, signal: abort.signal }), (error) => error === reason)
+  assert.equal(page.listenerCount('response'), 1)
+  assert.equal(page.listenerCount('framenavigated'), 0)
+  assert.equal(page.listenerCount('close'), 0)
+  assert.equal(getEventListeners(abort.signal, 'abort').length, 0)
+  adapter.dispose()
+})
+
 test('Billing observations require the exact official GET and organization header', async () => {
   const adapter = new PlatformAdapter({ page: pageFixture(), email: 'owner@example.com' })
   const path = '/v1/dashboard/billing/credit_grants'
@@ -276,6 +387,48 @@ test('readBalance waits for this organization and cannot reuse an earlier cached
   assert.equal(result.balance, '37')
   assert.equal(result.paid_balance, '2')
   assert.equal(result.displayName, 'Personal')
+  adapter.dispose()
+})
+
+test('Billing can confirm the bound organization before a selected organization has been observed', async () => {
+  const page = pageFixture()
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com', organizationId: 'org-one' })
+  await adapter.observe(
+    jsonResponse('/dashboard/onboarding', {
+      user: { email: 'owner@example.com' },
+      orgs: { data: [{ id: 'org-one', name: 'Personal' }] },
+    }),
+  )
+  assert.equal(adapter.identity.organizationId, null)
+  const response = jsonResponse('/v1/dashboard/billing/credit_grants', '{"total_available":36.999999999999999999}', {
+    headers: { 'openai-organization': 'org-one' },
+  })
+  let resolveObserved
+  page.waitForResponse = (predicate) => {
+    assert.equal(
+      predicate(
+        jsonResponse(
+          '/v1/dashboard/billing/credit_grants',
+          { total_available: '99' },
+          {
+            headers: { 'openai-organization': 'org-other' },
+          },
+        ),
+      ),
+      false,
+    )
+    assert.equal(predicate(response), true)
+    return new Promise((resolve) => {
+      resolveObserved = resolve
+    })
+  }
+  adapter.selectOrganization = async () => assert.fail('an unobserved selected organization cannot require a UI switch')
+  adapter.goto = async (url) => {
+    assert.equal(url, 'https://platform.openai.com/settings/organization/billing/overview')
+    await adapter.observe(response)
+    resolveObserved(response)
+  }
+  assert.equal((await adapter.readBalance()).balance, '36.999999999999999999')
   adapter.dispose()
 })
 
