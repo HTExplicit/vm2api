@@ -62,6 +62,21 @@ function fixturePage({ delay = 0, duplicate = false, existing = [] } = {}) {
   </script></body></html>`
 }
 
+function generalFixturePage(delay) {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Offline organization General</title></head>
+  <body><h1>Organization settings</h1><main id="general-fields"></main>
+  <button onclick="void fetch('/fixture/menu-click')">Personal Organization</button>
+  <script>
+    void fetch('/dashboard/onboarding').then(() => setTimeout(() => {
+      const input = document.createElement('input');
+      input.setAttribute('aria-label', 'Organization ID');
+      input.readOnly = true;
+      input.value = '${ORGANIZATION_ID}';
+      document.getElementById('general-fields').append(input);
+    }, ${delay}));
+  </script></body></html>`
+}
+
 // Every page request is fulfilled below. A dead loopback proxy is retained as
 // the transport boundary, so this smoke cannot contact a real account or site.
 const directory = camoufox.findInstalledVersion(PLATFORM_BROWSER_BUILD)
@@ -93,6 +108,7 @@ const page = browser.page
 let scenario = {}
 const submissions = []
 const unhandled = []
+let organizationMenuClicks = 0
 try {
   await browser.context.route('**/*', async (route) => {
     const request = route.request()
@@ -103,12 +119,22 @@ try {
     }
     if (url.pathname === '/fixture' || url.pathname === '/api-keys')
       return route.fulfill({ status: 200, contentType: 'text/html', body: fixturePage(scenario) })
+    if (url.pathname === '/settings/organization/general')
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: generalFixturePage(scenario.generalOrganizationDelay),
+      })
+    if (url.pathname === '/fixture/menu-click') {
+      organizationMenuClicks++
+      return route.fulfill({ status: 204 })
+    }
     if (url.pathname === '/favicon.ico') return route.fulfill({ status: 204 })
     if (url.pathname === '/dashboard/onboarding')
       return route.fulfill({
         status: 200,
         json: {
-          organization_id: ORGANIZATION_ID,
+          ...(scenario.currentOrganization === false ? {} : { organization_id: ORGANIZATION_ID }),
           user: {
             email: EMAIL,
             orgs: {
@@ -140,7 +166,11 @@ try {
       organizationId: ORGANIZATION_ID,
     })
     const observed = page.waitForResponse((response) => new URL(response.url()).pathname === '/dashboard/onboarding')
-    await page.goto('https://platform.openai.com/fixture', { waitUntil: 'domcontentloaded' })
+    await page.goto(
+      'https://platform.openai.com' +
+        (options.generalOrganizationDelay ? '/settings/organization/general' : '/fixture'),
+      { waitUntil: 'domcontentloaded' },
+    )
     await observed
     await adapter.settled()
     assert.equal((await adapter.inspect()).authenticated, true)
@@ -197,6 +227,33 @@ try {
     }
   }
 
+  adapter = await adapterFor({ generalOrganizationDelay: 500, currentOrganization: false })
+  let delayedOrganizationElapsedMs
+  try {
+    assert.equal(adapter.identity.organizationId, null, 'profile identity precedes the current organization field')
+    assert.equal(
+      adapter.identity.organizations.some((organization) => organization.id === ORGANIZATION_ID),
+      true,
+    )
+    const before = submissions.length
+    const savedGeneral = []
+    const startedAt = Date.now()
+    const configured = await adapter.configure({
+      keyName: KEY_NAME,
+      signal: new AbortController().signal,
+      onKey: (key) => savedGeneral.push(key),
+    })
+    delayedOrganizationElapsedMs = Date.now() - startedAt
+    assert.ok(delayedOrganizationElapsedMs >= 250, 'configuration waits for the General page to hydrate')
+    assert.equal(configured.organizationId, ORGANIZATION_ID)
+    assert.equal(configured.apiKey, FAKE_KEY)
+    assert.equal(savedGeneral.length, 1)
+    assert.equal(submissions.length, before + 1, 'the hydrated organization permits one real fixture creation')
+    assert.equal(organizationMenuClicks, 0, 'the Personal menu is never mistaken for an organization switcher')
+  } finally {
+    adapter.dispose()
+  }
+
   const dimensions = await page.evaluate(() => ({ outerWidth, innerWidth }))
   assert.equal(dimensions.outerWidth, 781)
   assert.ok(dimensions.innerWidth > 0 && dimensions.innerWidth <= 781)
@@ -211,6 +268,9 @@ try {
       ambiguousEntryStopped: true,
       existingKeysPermitNewCreation: true,
       existingRemoteRecordsPreserved: true,
+      delayedOrganizationElapsedMs,
+      generalOrganizationHydrationObserved: true,
+      organizationMenuClicks,
       fixtureKeySubmissions: submissions.length,
     }),
   )
