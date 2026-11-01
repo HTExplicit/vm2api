@@ -155,6 +155,73 @@ describe('API key limit payload', () => {
       keyLimitsPayload(apiDraft, 'create', { isAdmin: false })
     ).toThrow('仅管理员')
   })
+
+  it.each(['anthropic', 'openai', 'openai_apikey'] as const)(
+    'removes deleted selections when editing a %s key',
+    (group_type) => {
+      const family = group_type === 'anthropic' ? 'claude' : 'codex'
+      const old = {
+        id: 'old',
+        family,
+        openai_api: { has_key: true, balance: '0.000' },
+      } as Vm
+      const fresh = {
+        id: 'fresh',
+        family,
+        openai_api: { has_key: true, balance: '37.000' },
+      } as Vm
+      const options = {
+        vms: [old, fresh],
+        currentAllowedVms: ['deleted', 'old'],
+      }
+
+      expect(
+        keyLimitsPayload(
+          { ...draft, group_type, allowed_vms: ['deleted', 'fresh'] },
+          'edit',
+          options
+        )
+      ).toMatchObject({ group_type, allowed_vms: ['fresh'] })
+      expect(
+        keyLimitsPayload(
+          { ...draft, group_type, allowed_vms: ['deleted', 'old', 'fresh'] },
+          'edit',
+          options
+        )
+      ).toMatchObject({ group_type, allowed_vms: ['old', 'fresh'] })
+    }
+  )
+
+  it.each(['anthropic', 'openai', 'openai_apikey'] as const)(
+    'requires a selection when all bound %s slots have been deleted',
+    (group_type) => {
+      expect(() =>
+        keyLimitsPayload(
+          { ...draft, group_type, allowed_vms: ['deleted'] },
+          'edit',
+          { vms: [], currentAllowedVms: ['deleted'] }
+        )
+      ).toThrow(
+        group_type === 'openai_apikey'
+          ? '至少选择一个 API 账号'
+          : '至少选择一台 VM'
+      )
+    }
+  )
+
+  it('preserves create scopes and edits without a supplied VM list', () => {
+    const scopedDraft = {
+      ...draft,
+      allowed_vms: ['deleted', 'vm-01'],
+    }
+    expect(
+      keyLimitsPayload(scopedDraft, 'create', { vms: [{ id: 'vm-01' } as Vm] })
+    ).toMatchObject({ allowed_vms: ['deleted', 'vm-01'] })
+    expect(keyLimitsPayload(scopedDraft, 'edit')).toMatchObject({
+      allowed_vms: ['deleted', 'vm-01'],
+    })
+  })
+
   it('retains old depleted selections on edit but validates every added account', () => {
     const apiDraft: KeyLimitsDraft = {
       ...draft,

@@ -57,10 +57,14 @@ export function keyLimitsPayload(
     body.vm_pool_id = vm_pool_id
   } else {
     const group_type = groupTypeOf(draft.group_type)
-    const allowed_vms =
+    let allowed_vms =
       group_type === 'all'
         ? []
         : [...new Set(draft.allowed_vms.map((id) => id.trim()).filter(Boolean))]
+    if (mode === 'edit' && options.vms) {
+      const liveIds = new Set(options.vms.map((vm) => vm.id))
+      allowed_vms = allowed_vms.filter((id) => liveIds.has(id))
+    }
     if (group_type !== 'all' && allowed_vms.length === 0) {
       throw new Error(
         group_type === 'openai_apikey'
