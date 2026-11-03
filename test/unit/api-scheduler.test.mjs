@@ -76,7 +76,13 @@ test('account API-key picker and catalog use the same explicit account scope', (
     ['vm-a', { accountId: 'acct-a', enabled: true, proxyUrl: 'socks5h://proxy-a:1080' }],
     ['vm-b', { accountId: 'acct-b', enabled: true, proxyUrl: 'socks5h://proxy-b:1080' }],
   ])
-  const s = new ApiScheduler({ resolveAccountKey: (key) => runtime.get(key.source_vm_id) })
+  const s = new ApiScheduler({
+    resolveAccountKey: (key) => runtime.get(key.source_vm_id),
+    getAccountModels: () => [
+      { name: 'gpt-a', alias: 'a' },
+      { name: 'gpt-b', alias: 'b' },
+    ],
+  })
   s.reload([
     ep({ kind: 'openai', id: 'a', prefix: '', models: [{ name: 'gpt-a', alias: 'a' }], api_key_entries: [a] }),
     ep({ kind: 'openai', id: 'b', prefix: '', models: [{ name: 'gpt-b', alias: 'b' }], api_key_entries: [b] }),
@@ -85,10 +91,10 @@ test('account API-key picker and catalog use the same explicit account scope', (
   const scope = { group_type: 'openai_apikey', allowed_vms: ['vm-a'] }
   assert.deepEqual(
     s.catalog(scope).data.map((model) => model.id),
-    ['a'],
+    ['a', 'b'],
   )
   assert.equal(s.pick('a', Date.now(), scope).key.id, 'a')
-  assert.equal(s.pick('b', Date.now(), scope).ok, false)
+  assert.equal(s.pick('b', Date.now(), scope).key.id, 'a')
   assert.equal(s.pick('plain', Date.now(), scope).ok, false)
   assert.deepEqual(
     s.catalog().data.map((model) => model.id),
@@ -112,7 +118,10 @@ test('API readiness is independent of OAuth lifecycle and requires a live bound 
     platform_session: null,
     plan: 'free',
   }
-  const s = new ApiScheduler({ resolveAccountKey: () => source })
+  const s = new ApiScheduler({
+    resolveAccountKey: () => source,
+    getAccountModels: () => [{ name: 'gpt-test', alias: 'gpt-test' }],
+  })
   s.reload([
     ep({
       kind: 'openai',
@@ -120,18 +129,19 @@ test('API readiness is independent of OAuth lifecycle and requires a live bound 
     }),
   ])
   const scope = { group_type: 'openai_apikey', allowed_vms: ['vm-a'] }
-  assert.equal(s.pick('sonnet', Date.now(), scope).ok, true)
+  assert.equal(s.pick('gpt-test', Date.now(), scope).ok, true)
   source = { ...source, enabled: false }
-  assert.equal(s.pick('sonnet', Date.now(), scope).ok, false)
+  assert.equal(s.pick('gpt-test', Date.now(), scope).ok, false)
   source = { ...source, enabled: true, proxyUrl: '' }
-  assert.equal(s.pick('sonnet', Date.now(), scope).ok, false)
+  assert.equal(s.pick('gpt-test', Date.now(), scope).ok, false)
   source = null
-  assert.equal(s.pick('sonnet', Date.now(), scope).ok, false)
+  assert.equal(s.pick('gpt-test', Date.now(), scope).ok, false)
 })
 
 test('balance exhaustion is not bypassed by endpoint disable_cooling', () => {
   const s = new ApiScheduler({
     resolveAccountKey: () => ({ accountId: 'acct-a', enabled: true, proxyUrl: 'socks5h://proxy:1080' }),
+    getAccountModels: () => [{ name: 'gpt-test', alias: 'gpt-test' }],
   })
   s.reload([
     ep({
@@ -149,6 +159,6 @@ test('balance exhaustion is not bypassed by endpoint disable_cooling', () => {
     }),
   ])
   const scope = { group_type: 'openai_apikey', allowed_vms: ['vm-a'] }
-  assert.equal(s.pick('sonnet', Date.now(), scope).ok, false)
+  assert.equal(s.pick('gpt-test', Date.now(), scope).ok, false)
   assert.deepEqual(s.catalog(scope).data, [])
 })

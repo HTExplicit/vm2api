@@ -18,6 +18,7 @@ export const PANEL_VIEWS = [
   'system',
   'keys',
   'api',
+  'openai-apikey',
   'anthropic',
   'logs',
   'statistics',
@@ -247,7 +248,7 @@ export function authorizePanelRoute(method, path, role) {
   const m = String(method || 'GET').toUpperCase()
   const p = String(path || '')
 
-  if (/^\/api\/panel\/vms\/[^/]+\/openai-api(?:\/|$)/.test(p)) {
+  if (/^\/api\/panel\/vms\/[^/]+\/openai-api(?:\/|$)/.test(p) || /^\/api\/panel\/openai-apikey(?:\/|$)/.test(p)) {
     return { ok: false, role: r, code: 'forbidden', message: '只有管理员可以管理账号 API' }
   }
 

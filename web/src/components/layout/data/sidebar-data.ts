@@ -46,6 +46,7 @@ const ALL_GROUPS: NavGroup[] = [
       { title: '风险审计', url: '/risk', icon: ShieldAlert },
       { title: 'system提示词', url: '/system', icon: MessageSquareText },
       { title: 'Anthropic', url: '/anthropic', icon: Send },
+      { title: 'OpenAiAPIKEY', url: '/openai-apikey', icon: KeyRound },
       { title: '密钥', url: '/keys', icon: KeyRound },
     ],
   },

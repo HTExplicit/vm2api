@@ -20,12 +20,18 @@ export type ProviderChainItem = {
   accountId: string | null
   /** 账号展示名：email → name → accountId。 */
   providerName: string | null
+  /** 账号 API 请求实际发送时的来源快照；不会替代计费 accountId。 */
+  sourceAccountId?: string | null
+  sourceVmId?: string | null
+  sourceEmail?: string | null
   model: string | null
   /** 调度原因：sticky / roundrobin / failover / … 原样透传。 */
   selectionReason: string | null
   upstreamStatus: number | null
   /** 错误归属域：client / provider / platform。 */
   errorScope: string | null
+  errorCode?: string | null
+  errorMessage?: string | null
   /** 本次尝试的终态（success / exhausted / cooldown / …）。 */
   terminalState: string | null
   action: string | null
@@ -104,6 +110,9 @@ export type UsageLogRow = {
   /** 最终服务的账号展示名（`final_account_id` 优先）。 */
   providerName: string | null
   accountId: string | null
+  sourceAccountId?: string | null
+  sourceVmId?: string | null
+  sourceEmail?: string | null
   vmId: string | null
   vmName: string | null
   /** 计费/生效模型。 */
@@ -217,6 +226,8 @@ export type UsageLogFilters = {
   vmId?: string
   /** (`account_id`) */
   accountId?: string
+  /** (`source_account_id`) 账号 API 的稳定来源身份，包含其参与的重试链。 */
+  sourceAccountId?: string
   /** (`session_id`) 精确匹配出站或客户端会话 id 任一。 */
   sessionId?: string
   /** (`model`) 匹配 model 或 requested_model。 */
@@ -277,6 +288,7 @@ export type UsageLogFilterOptions = {
   keys: { id: string; name: string; userId: string | null }[]
   vms: { id: string; name: string }[]
   accounts: { id: string; name: string }[]
+  sourceAccounts?: { id: string; name: string }[]
   models: string[]
   protocols: string[]
   endpoints: string[]

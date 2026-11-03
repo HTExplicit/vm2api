@@ -611,6 +611,9 @@ export function createHandleProtocol(deps) {
         requestContext,
         passthrough,
         toolNames,
+        getRouting,
+        attemptsRepo: deps.getAttemptsRepo?.(),
+        requestId: logCtx.request_id,
         converters: {
           createClaudeMessageAssembler,
           applyClaudeSSELineToMessage,
@@ -636,6 +639,10 @@ export function createHandleProtocol(deps) {
     logBag.outbound_session_id = sessionIdForLog(sessionIdFromOutboundBody(ctx.body) || logBag.session_id)
     logBag.account_id = result?.accountId || null
     logBag.final_account_id = result?.accountId || null
+    logBag.source_account_id = result?.sourceAccountId || null
+    logBag.source_vm_id = result?.sourceVmId || null
+    logBag.source_email = result?.sourceEmail || null
+    logBag.attempt_count = result?.attemptCount ?? null
     logBag.upstream_status = result?.status ?? null
     logBag.usage = usageForLog(result?.usage || result?.body?.usage || null, { cacheTtl })
     logBag.upstream_model = result?.model || null

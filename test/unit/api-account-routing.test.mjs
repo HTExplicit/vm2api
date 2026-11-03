@@ -19,6 +19,7 @@ function fixture({ resolver, onError } = {}) {
   }
   const errors = []
   const scheduler = new ApiScheduler({
+    getAccountModels: () => endpoint.models,
     resolveAccountKey:
       resolver || (() => ({ accountId: 'acct-a', enabled: true, proxyUrl: 'socks5h://current-proxy:1080' })),
     onAccountKeyError: onError || ((_key, error) => errors.push(error)),
@@ -151,7 +152,8 @@ test('temporary rate limits use Retry-After without changing account API state',
   assert.ok(Date.parse(f.key.cooldown_until) >= start + 2000)
   assert.ok(Date.parse(f.key.cooldown_until) < start + 5000)
   assert.equal(f.key.disabled, undefined)
-  assert.deepEqual(f.errors, [])
+  assert.equal(f.errors.length, 1)
+  assert.equal(f.errors[0].code, 'rate_limit_exceeded')
 })
 
 test('SSE response.failed preserves credit exhaustion and cools the account entry', async () => {
@@ -170,4 +172,19 @@ test('SSE response.failed preserves credit exhaustion and cools the account entr
   assert.equal(result.body.error.upstream_code, 'credit_balance_exhausted')
   assert.equal(f.key.cooldown_until, '9999-12-31T23:59:59.999Z')
   assert.equal(f.errors[0].code, 'credit_balance_exhausted')
+})
+
+test('model rejection records its official error without disabling or blocking the account key', async () => {
+  const f = fixture()
+  const result = await runApiInference({
+    ...f.options,
+    forwardImpl: async () =>
+      upstream(400, JSON.stringify({ error: { code: 'model_not_found', message: 'Model unavailable' } })),
+  })
+  assert.equal(result.body.error.code, 'model_not_found')
+  assert.equal(f.errors.length, 1)
+  assert.equal(f.errors[0].code, 'model_not_found')
+  assert.equal(f.key.disabled, undefined)
+  assert.equal(f.key.cooldown_until, undefined)
+  assert.equal(f.scheduler.pick('gpt-fixture', Date.now(), f.options.req.apiKeyRecord).ok, true)
 })

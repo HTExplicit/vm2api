@@ -270,6 +270,8 @@ test('API resolver follows current identity and proxy, independently of OAuth li
     enabled: true,
     proxyUrl: 'socks5h://127.0.0.1:1080',
     email: entry.account.email,
+    call_status: 'ready',
+    key: f.repo.getKey(key.id),
   })
   entry.vm.proxy = { url: 'socks5h://127.0.0.1:2080' }
   assert.equal(f.manager.resolveAccountKey(key).proxyUrl, 'socks5h://127.0.0.1:2080')
@@ -413,7 +415,7 @@ test('same-window retry with an already saved key never creates or replaces it',
   assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
 })
 
-test('saving a new key precedes balance work and a balance failure neither loses the key nor blocks model setup', async (t) => {
+test('saving a new key precedes balance work and a balance failure neither loses the key nor starts a model query', async (t) => {
   const f = fixture(t)
   const entry = f.add()
   f.behavior.balanceError = Object.assign(new Error('Billing temporarily unavailable'), { code: 'balance_unavailable' })
@@ -423,7 +425,7 @@ test('saving a new key precedes balance work and a balance failure neither loses
   assert.ok(saved.key_id)
   assert.equal(saved.enabled, true)
   assert.equal(saved.setup_status, 'ready')
-  assert.equal(f.calls.models.length, 1)
+  assert.equal(f.calls.models.length, 0)
   assert.match(f.repo.getOrg('org-test').balance_error, /Billing temporarily unavailable/)
   assert.equal(f.repo.getOrg('org-test').balance, null)
   f.behavior.balanceError = null
@@ -874,8 +876,8 @@ test('manual Platform setup promotes a same-slot background refresh without wait
   assert.equal(f.calls.maxLiveBrowsers, 1)
   assert.equal(
     f.calls.models.length,
-    1,
-    'manual setup keeps the setup model refresh rather than the old balance-only task',
+    0,
+    'manual setup uses the shared gateway catalog without querying official models',
   )
 })
 
@@ -1361,7 +1363,7 @@ test('manual key input keeps one configuring job and wires continue to the activ
   assert.equal(live.waiting, false)
   assert.equal(f.calls.sessions.length, 1)
   assert.equal(f.calls.configured.length, 1)
-  assert.equal(f.calls.models.length, 1)
+  assert.equal(f.calls.models.length, 0)
   assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
 })
 
@@ -1527,4 +1529,176 @@ test('a read-only local database preserves the active task and captured secret u
   } finally {
     f.repo.db.exec('PRAGMA query_only = OFF')
   }
+})
+
+test('manual first binding is local, claimed-only, and keeps one encrypted upstream secret', async (t) => {
+  const f = fixture(t)
+  const previousSecret = process.env.VM2API_DB_SECRET
+  process.env.VM2API_DB_SECRET = 'fixture-account-key-encryption'
+  t.after(() => {
+    if (previousSecret == null) delete process.env.VM2API_DB_SECRET
+    else process.env.VM2API_DB_SECRET = previousSecret
+  })
+  const entry = f.add()
+  const saved = f.manager.bindKey(entry.vm.id, { account_id: entry.accountId, api_key: 'sk-manual-first' })
+  assert.equal(saved.has_key, true)
+  assert.equal(saved.enabled, true)
+  assert.equal(saved.call_status, 'ready')
+  assert.equal(saved.account_id, entry.accountId)
+  assert.equal(saved.vm_id, entry.vm.id)
+  assert.equal(f.repo.getKey(saved.key_id).api_key, 'sk-manual-first')
+  assert.match(
+    f.repo.db.prepare('SELECT api_key FROM api_endpoint_keys WHERE id = ?').get(saved.key_id).api_key,
+    /^enc:v1:/,
+  )
+  assert.equal(f.store.listRaw().length, 1)
+  assert.deepEqual(f.manager.revealKey(entry.vm.id, { account_id: entry.accountId }), { api_key: 'sk-manual-first' })
+  assert.equal(f.calls.models.length + f.calls.http.length + f.calls.sessions.length, 0)
+  const other = f.add('vm-b', 'account-b', { claim_status: 'unknown' })
+  assert.throws(
+    () =>
+      f.manager.bindKey(other.vm.id, {
+        account_id: other.accountId,
+        api_key: 'sk-unclaimed',
+      }),
+    { code: 'api_promo_link_required' },
+  )
+  assert.throws(
+    () =>
+      f.manager.bindKey(entry.vm.id, {
+        account_id: 'stale-account',
+        api_key: 'sk-wrong-owner',
+      }),
+    { code: 'api_account_changed' },
+  )
+  assert.equal(f.repo.getKey(saved.key_id).api_key, 'sk-manual-first')
+})
+
+test('manual replacement preserves local key identity and switch but clears prior call constraints only when changed', (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  f.repo.upsertAccount(entry.accountId, {
+    enabled: false,
+    call_error: { code: 'insufficient_quota', message: 'quota exhausted', at: '2026-01-01T00:00:00Z' },
+  })
+  f.store.updateKey(key.id, { disabled: true, cooldown_until: '9999-12-31T23:59:59.999Z' })
+  f.manager.bindKey(entry.vm.id, { account_id: entry.accountId, api_key: key.api_key })
+  assert.equal(f.repo.getKey(key.id).disabled, true)
+  assert.equal(f.repo.getKey(key.id).cooldown_until, '9999-12-31T23:59:59.999Z')
+  assert.equal(f.repo.getAccount(entry.accountId).call_error.code, 'insufficient_quota')
+  const changed = f.manager.bindKey(entry.vm.id, { account_id: entry.accountId, api_key: 'sk-replacement' })
+  assert.equal(changed.key_id, key.id)
+  assert.equal(changed.enabled, false)
+  assert.equal(changed.call_status, 'disabled')
+  assert.equal(f.repo.getKey(key.id).api_key, 'sk-replacement')
+  assert.equal(f.repo.getKey(key.id).disabled, false)
+  assert.equal(f.repo.getKey(key.id).cooldown_until, null)
+  assert.equal(changed.call_error, null)
+  assert.equal(f.calls.models.length + f.calls.http.length + f.calls.sessions.length, 0)
+})
+
+test('local unbinding clears account references and its unused endpoint without removing claim, organization, or another account', async (t) => {
+  const f = fixture(t)
+  const a = f.add()
+  const b = f.add('vm-b', 'account-b')
+  const first = f.installKey(a)
+  const second = f.installKey(b)
+  f.repo.upsertOrg('org-test', { balance: '42.123456' })
+  f.repo.upsertAccount(a.accountId, { operation_id: 'operation-original', call_error: { code: 'invalid_api_key' } })
+  const removed = await f.manager.removeKey(a.vm.id, { account_id: a.accountId })
+  assert.equal(removed.has_key, false)
+  assert.equal(removed.enabled, false)
+  assert.equal(f.repo.getAccount(a.accountId).key_id, '')
+  assert.equal(removed.setup_status, 'idle')
+  assert.equal(removed.call_error, null)
+  assert.equal(f.repo.getAccount(a.accountId).claim_status, 'claimed')
+  assert.equal(f.repo.getAccount(a.accountId).operation_id, 'operation-original')
+  assert.equal(f.repo.getOrg('org-test').balance, '42.123456')
+  assert.equal(f.repo.getKey(first.id), null)
+  assert.ok(f.repo.getKey(second.id))
+  assert.ok(f.store.getRaw(second.endpoint_id), 'shared endpoint still has another key')
+  await f.manager.removeKey(b.vm.id, { account_id: b.accountId })
+  assert.equal(f.store.getRaw(second.endpoint_id), null)
+  assert.equal(f.calls.http.length + f.calls.sessions.length + f.calls.models.length, 0)
+  assert.throws(() => f.manager.revealKey(a.vm.id, { account_id: a.accountId }), { code: 'api_key_required' })
+  const rebound = f.manager.bindKey(a.vm.id, { account_id: a.accountId, api_key: 'sk-rebound' })
+  assert.notEqual(rebound.key_id, first.id)
+  assert.equal(rebound.enabled, true)
+})
+
+test('manual account operations reject stale identities and a key belonging to a different slot', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  for (const action of [
+    () => f.manager.revealKey(entry.vm.id, { account_id: 'old' }),
+    () => f.manager.setEnabled(entry.vm.id, false, { account_id: 'old' }),
+    () => f.manager.resume(entry.vm.id, { account_id: 'old' }),
+  ])
+    assert.throws(action, { code: 'api_account_changed' })
+  await assert.rejects(f.manager.removeKey(entry.vm.id, { account_id: 'old' }), { code: 'api_account_changed' })
+  f.store.updateKey(key.id, { source_vm_id: 'vm-other' })
+  assert.equal(f.manager.view(entry.vm).call_status, 'binding_error')
+  assert.throws(() => f.manager.setEnabled(entry.vm.id, false, { account_id: entry.accountId }), {
+    code: 'api_key_required',
+  })
+  assert.throws(
+    () =>
+      f.manager.bindKey(entry.vm.id, {
+        account_id: entry.accountId,
+        api_key: 'sk-conflicting',
+      }),
+    { code: 'platform_key_save_conflict' },
+  )
+  assert.equal(f.repo.getKey(key.id).api_key, key.api_key)
+})
+
+test('Billing success cannot erase an upstream call error and resolver rereads key and effective constraints', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  f.cacheBilling(entry)
+  f.store.setKeyCooldown(key.id, '9999-12-31T23:59:59.999Z')
+  f.manager.recordKeyError(key, { code: 'insufficient_quota', message: 'upstream quota exhausted' })
+  const error = f.repo.getAccount(entry.accountId).call_error
+  assert.equal(error.code, 'insufficient_quota')
+  f.manager.refresh(entry.vm.id)
+  await f.settle()
+  assert.deepEqual(f.repo.getAccount(entry.accountId).call_error, error)
+  assert.equal(f.manager.view(entry.vm).call_status, 'quota_blocked')
+  assert.equal(f.manager.resolveAccountKey(key).enabled, false)
+  f.manager.resume(entry.vm.id, { account_id: entry.accountId })
+  assert.equal(f.manager.view(entry.vm).call_error, null)
+  f.manager.bindKey(entry.vm.id, { account_id: entry.accountId, api_key: 'sk-current-secret' })
+  assert.equal(f.manager.resolveAccountKey(key).key.api_key, 'sk-current-secret')
+  f.store.update(key.endpoint_id, { disabled: true })
+  assert.equal(f.manager.view(entry.vm).call_status, 'upstream_disabled')
+  assert.equal(f.manager.resolveAccountKey(key).enabled, false)
+})
+
+test('an old in-flight key failure cannot rewrite a replacement key error state', (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const previous = f.installKey(entry)
+  f.manager.bindKey(entry.vm.id, { account_id: entry.accountId, api_key: 'sk-new-dispatch-secret' })
+  f.manager.recordKeyError(previous, { code: 'invalid_api_key', message: 'late rejection for previous secret' })
+  assert.equal(f.repo.getAccount(entry.accountId).call_error, null)
+  assert.equal(f.repo.getKey(previous.id).api_key, 'sk-new-dispatch-secret')
+  f.manager.recordKeyError(f.repo.getKey(previous.id), { code: 'insufficient_quota', message: 'new secret rejected' })
+  assert.equal(f.repo.getAccount(entry.accountId).call_error.code, 'insufficient_quota')
+})
+
+test('local unbinding does not close an unrelated retained OAuth login browser', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  const browser = await f.manager.browserManager.acquire(entry.vm.id, {
+    purpose: 'oauth',
+    interactive: true,
+    retain: true,
+  })
+  await f.manager.removeKey(entry.vm.id, { account_id: entry.accountId })
+  assert.equal(f.manager.browserManager.jobs.get(entry.vm.id), browser)
+  assert.equal(f.calls.closed.length, 0)
 })

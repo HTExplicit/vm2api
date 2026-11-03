@@ -48,11 +48,21 @@ function Field({ label, value }: { label: string; value: string | null }) {
 function AttemptDetails({ item }: { item: ProviderChainItem }) {
   return (
     <div className='space-y-2 text-xs'>
-      <Field label='槽位' value={item.vmName || item.vmId} />
+      <Field
+        label='槽位'
+        value={item.vmName || item.vmId || item.sourceVmId || null}
+      />
       {item.vmName && item.vmId ? (
         <Field label='槽位 ID' value={item.vmId} />
       ) : null}
-      <Field label='账号' value={item.providerName || item.accountId} />
+      <Field
+        label='账号'
+        value={item.sourceEmail || item.providerName || item.accountId}
+      />
+      <Field label='来源账号 ID' value={item.sourceAccountId || null} />
+      {item.sourceAccountId ? (
+        <Field label='上游 key ID' value={item.accountId} />
+      ) : null}
       <Field label='模型' value={item.model} />
       <Field
         label='选择方式'
@@ -64,6 +74,8 @@ function AttemptDetails({ item }: { item: ProviderChainItem }) {
       />
       <Field label='终态' value={terminalStateLabel(item.terminalState)} />
       <Field label='错误域' value={item.errorScope} />
+      <Field label='官方错误码' value={item.errorCode || null} />
+      <Field label='错误说明' value={item.errorMessage || null} />
       <Field label='动作' value={item.action} />
       <Field
         label='已提交下游'
@@ -139,6 +151,8 @@ function formatTimeline(row: UsageLogRow): string {
         item.upstreamStatus != null ? `status=${item.upstreamStatus}` : '',
         item.terminalState ? `state=${item.terminalState}` : '',
         item.errorScope ? `scope=${item.errorScope}` : '',
+        item.errorCode ? `error=${item.errorCode}` : '',
+        item.errorMessage ? `message=${item.errorMessage}` : '',
         item.action ? `action=${item.action}` : '',
         item.waitMs != null ? `wait=${item.waitMs}ms` : '',
         item.ttftMs != null ? `ttft=${item.ttftMs}ms` : '',
@@ -208,7 +222,11 @@ export function LogicTraceTab({
   const chain = row.providerChain
   const base = Date.parse(chain[0]?.startedAt ?? '')
   const sticky = chain[0]?.selectionReason === 'sticky'
-  const vmCount = new Set(chain.map((item) => item.vmId).filter(Boolean)).size
+  const vmCount = new Set(
+    chain
+      .map((item) => item.sourceAccountId || item.vmId || item.accountId)
+      .filter(Boolean)
+  ).size
 
   return (
     <div className='space-y-6'>

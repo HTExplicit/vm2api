@@ -18,12 +18,17 @@ function rowToAttempt(row) {
     attempt_no: row.attempt_no,
     vm_id: row.vm_id,
     account_id: row.account_id,
+    source_account_id: row.source_account_id,
+    source_vm_id: row.source_vm_id,
+    source_email: row.source_email,
     model: row.model,
     selection_reason: row.selection_reason,
     started_at: row.started_at,
     completed_at: row.completed_at,
     upstream_status: row.upstream_status,
     error_scope: row.error_scope,
+    error_code: row.error_code,
+    error_message: row.error_message,
     action: row.action,
     cooldown_until: row.cooldown_until,
     downstream_committed: !!row.downstream_committed,
@@ -45,14 +50,15 @@ export class RequestAttemptsRepo {
         request_id, attempt_no, vm_id, account_id, model, selection_reason,
         started_at, completed_at, upstream_status, error_scope, action,
         cooldown_until, downstream_committed, terminal_state, usage_json,
-        wait_ms, ttft_ms, latency_ms, queue_wait_ms, scheduling_ms
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        wait_ms, ttft_ms, latency_ms, queue_wait_ms, scheduling_ms,
+        source_account_id, source_vm_id, source_email
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     this._complete = db.prepare(`
       UPDATE request_attempts SET
         completed_at = ?, upstream_status = ?, error_scope = ?, action = ?,
         cooldown_until = ?, downstream_committed = ?, terminal_state = ?,
-        usage_json = ?, ttft_ms = ?, latency_ms = ?
+        usage_json = ?, ttft_ms = ?, latency_ms = ?, error_code = ?, error_message = ?
       WHERE request_id = ? AND attempt_no = ?
     `)
     this._list = db.prepare(`
@@ -68,6 +74,9 @@ export class RequestAttemptsRepo {
     attemptNo,
     vmId,
     accountId,
+    sourceAccountId = null,
+    sourceVmId = null,
+    sourceEmail = null,
     model,
     selectionReason,
     waitMs = 0,
@@ -97,6 +106,9 @@ export class RequestAttemptsRepo {
         null,
         queueWaitMs,
         schedulingMs,
+        sourceAccountId,
+        sourceVmId,
+        sourceEmail,
       )
     }
     if (writeBehindArmed()) {
@@ -121,6 +133,8 @@ export class RequestAttemptsRepo {
         result.usage != null ? JSON.stringify(result.usage) : null,
         result.ttftMs ?? null,
         result.latencyMs ?? null,
+        result.errorCode ?? null,
+        result.errorMessage ? String(result.errorMessage).slice(0, 300) : null,
         requestId,
         attemptNo,
       )

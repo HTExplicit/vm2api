@@ -189,8 +189,11 @@ export function toUsageLogRow(row, names, chain = []) {
     sessionId: row.outbound_session_id ?? null,
     /** What the caller sent; differs from sessionId whenever the gateway rebuilt it. */
     clientSessionId: row.session_id ?? null,
-    providerName: accountId ? (names.accounts.get(accountId) ?? accountId) : null,
+    providerName: row.source_email || (accountId ? (names.accounts.get(accountId) ?? accountId) : null),
     accountId,
+    sourceAccountId: row.source_account_id || null,
+    sourceVmId: row.source_vm_id || null,
+    sourceEmail: row.source_email || null,
     vmId: row.vm_id ?? null,
     vmName: row.vm_id ? (names.vms.get(row.vm_id) ?? row.vm_id) : null,
     model: row.model ?? null,
@@ -271,11 +274,16 @@ function toProviderChainItem(r, names) {
     vmId: r.vm_id ?? null,
     vmName: r.vm_id ? (names.vms.get(r.vm_id) ?? r.vm_id) : null,
     accountId: r.account_id ?? null,
-    providerName: r.account_id ? (names.accounts.get(r.account_id) ?? r.account_id) : null,
+    providerName: r.source_email || (r.account_id ? (names.accounts.get(r.account_id) ?? r.account_id) : null),
+    sourceAccountId: r.source_account_id || null,
+    sourceVmId: r.source_vm_id || null,
+    sourceEmail: r.source_email || null,
     model: r.model ?? null,
     selectionReason: r.selection_reason ?? null,
     upstreamStatus: nullableNum(r.upstream_status),
     errorScope: r.error_scope ?? null,
+    errorCode: r.error_code || null,
+    errorMessage: r.error_message || null,
     terminalState: r.terminal_state ?? null,
     action: r.action ?? null,
     downstreamCommitted: !!r.downstream_committed,
@@ -338,6 +346,16 @@ function buildFilter(filters, defaultMuted) {
   if (filters.account_id) {
     where.push('(account_id = ? OR final_account_id = ?)')
     params.push(filters.account_id, filters.account_id)
+  }
+  if (filters.source_account_id) {
+    where.push(`(source_account_id = ? OR EXISTS (
+      SELECT 1 FROM request_attempts source_attempt
+      WHERE source_attempt.request_id = usage_logs.request_id AND source_attempt.source_account_id = ?
+        AND julianday(source_attempt.started_at) <= julianday(usage_logs.created_at) + 1000 / 86400000.0
+        AND (usage_logs.duration_ms IS NULL OR
+          julianday(source_attempt.started_at) >= julianday(usage_logs.created_at) - (usage_logs.duration_ms + 1000) / 86400000.0)
+    ))`)
+    params.push(filters.source_account_id, filters.source_account_id)
   }
   if (filters.model) {
     where.push('(model = ? OR requested_model = ?)')
@@ -671,11 +689,26 @@ export class UsageLogsView {
         .map((r) => r.id)
     }
     const names = lookupNames(this.db, { vmIds, accountIds })
+    const sourceAccounts = this.db.prepare(`
+      WITH recent AS ${recent}, sources AS (
+        SELECT source_account_id, source_email, created_at FROM recent
+        UNION ALL
+        SELECT a.source_account_id, a.source_email, a.started_at AS created_at
+        FROM request_attempts a JOIN recent l ON l.request_id = a.request_id
+        WHERE julianday(a.started_at) <= julianday(l.created_at) + 1000 / 86400000.0
+          AND (l.duration_ms IS NULL OR
+            julianday(a.started_at) >= julianday(l.created_at) - (l.duration_ms + 1000) / 86400000.0)
+      )
+      SELECT source_account_id AS id, COALESCE(MAX(NULLIF(source_email, '')), source_account_id) AS name
+      FROM sources WHERE source_account_id IS NOT NULL AND source_account_id <> ''
+      GROUP BY source_account_id ORDER BY MAX(created_at) DESC LIMIT ${OPTION_LIMIT}
+    `).all(...own.params)
     return {
       users: users.map((u) => ({ id: String(u.id), name: u.username || u.email || String(u.id) })),
       keys: keys.map((k) => ({ id: String(k.id), name: k.name || String(k.id), userId: k.user_id ?? null })),
       vms: named(vmIds, names.vms),
       accounts: named(accountIds, names.accounts),
+      sourceAccounts,
       models: uniq([...distinct('model'), ...distinct('requested_model')]).sort(),
       protocols: distinct('protocol').sort(),
       endpoints: distinct('path').sort(),

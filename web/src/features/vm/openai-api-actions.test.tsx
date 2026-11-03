@@ -31,7 +31,7 @@ vi.mock('@tanstack/react-query', () => ({
     onSettled: () => Promise<unknown>
   }) => ({
     isPending: controls.pending,
-    variables: controls.pending ? { name: 'resume' } : undefined,
+    variables: controls.pending ? { name: 'refresh' } : undefined,
     mutate: async (variables: { name: string }) => {
       const data = await options.mutationFn(variables)
       options.onSuccess(data, variables)
@@ -77,9 +77,9 @@ function render() {
   )
 }
 
-function resumeButton() {
+function refreshButton() {
   return controls.buttons.find((props) =>
-    renderToStaticMarkup(<>{props.children}</>).includes('额度阻断')
+    renderToStaticMarkup(<>{props.children}</>).includes('刷新 API 状态')
   )
 }
 
@@ -102,48 +102,63 @@ beforeEach(() => {
   controls.success.mockReset()
 })
 
-describe('account API quota recovery', () => {
-  it('shows the upstream block separately from balance and sends only the resume action', async () => {
+describe('account API configuration entry', () => {
+  it('links existing keys to the dedicated page and keeps quota recovery there', () => {
     const html = render()
     expect(html).toContain('上游已返回额度或配额不足')
     expect(html).toContain('余额刷新不会自动解除阻断')
+    expect(html).toContain('请在 OpenAiAPIKEY 页面处理')
     expect(html).toContain('仅手动刷新')
-    const button = resumeButton()
-    expect(button?.disabled).toBe(false)
-    const next = { ...controls.state, quota_blocked: false }
-    controls.api.mockResolvedValue(next)
-    await button!.onClick!({} as never)
-    expect(controls.api).toHaveBeenCalledExactlyOnceWith(
-      '/api/panel/vms/slot%20%2F%20one/openai-api/resume',
-      { method: 'POST', body: '{}' }
-    )
-    expect(controls.cached).toHaveBeenCalledWith(
-      ['panel', 'vm', 'slot / one', 'openai-api'],
-      expect.objectContaining({ quota_blocked: false, enabled: false })
-    )
-    expect(controls.invalidate).toHaveBeenCalledTimes(4)
+    expect(html).toContain('#/openai-apikey?vm_id=slot%20%2F%20one')
+    expect(html).toContain('管理 API key')
+    expect(html).not.toContain('API 独立开关')
+    expect(html).not.toContain('解除额度阻断')
+    expect(controls.api).not.toHaveBeenCalled()
   })
 
-  it('does not offer quota recovery for an account without an upstream block', () => {
+  it('retains the configured balance interval and hides the key link before configuration', () => {
     controls.state = {
       ...controls.state,
+      has_key: false,
       quota_blocked: false,
+      claim_status: 'claimed',
       balance_refresh_interval_minutes: 30,
     }
     const html = render()
     expect(html).not.toContain('解除额度阻断')
-    expect(html).toContain('余额每 30 分钟自动刷新')
-    expect(resumeButton()).toBeUndefined()
+    expect(html).not.toContain('管理 API key')
+    expect(html).toContain('继续配置 API')
     expect(controls.api).not.toHaveBeenCalled()
   })
 
-  it('disables the recovery button while its action is pending', () => {
+  it('refreshes existing balance state and invalidates both account and key management views', async () => {
+    render()
+    const next = { ...controls.state, balance: '4.25' }
+    controls.api.mockResolvedValue(next)
+    await refreshButton()!.onClick!({} as never)
+    expect(controls.api).toHaveBeenCalledExactlyOnceWith(
+      '/api/panel/vms/slot%20%2F%20one/openai-api/refresh',
+      { method: 'POST', body: '{}' }
+    )
+    expect(controls.cached).toHaveBeenCalledWith(
+      ['panel', 'vm', 'slot / one', 'openai-api'],
+      expect.objectContaining({ balance: '4.25', enabled: false })
+    )
+    expect(controls.invalidate).toHaveBeenCalledWith({
+      queryKey: ['panel', 'openai-apikey'],
+    })
+    expect(controls.invalidate).toHaveBeenCalledTimes(5)
+  })
+
+  it('disables refresh while an account operation is pending', () => {
     controls.pending = true
     const html = render()
-    expect(html).toContain('解除中…')
+    expect(html).toContain('刷新中…')
     expect(
       controls.buttons.some(
-        (props) => props.disabled && props.children === '解除中…'
+        (props) =>
+          props.disabled &&
+          renderToStaticMarkup(<>{props.children}</>).includes('刷新中…')
       )
     ).toBe(true)
   })

@@ -1712,6 +1712,7 @@ async function runAccountApiProtocol(inbound, protocol, options = {}) {
     setHeader() {},
   })
   const scheduler = new ApiScheduler({
+    getAccountModels: () => ['o3', 'gpt-4.1-nano'].map((id) => ({ name: id, alias: id })),
     resolveAccountKey: (key) => ({
       accountId: key.source_account_id,
       enabled: true,

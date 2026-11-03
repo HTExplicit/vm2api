@@ -20,6 +20,7 @@ const ACCOUNT_FIELDS = {
   fingerprint: 'fingerprint_json',
   storage_state: 'storage_state_enc',
   last_error: 'last_error',
+  call_error: 'call_error_json',
 }
 const ORG_FIELDS = {
   display_name: 'display_name',
@@ -33,7 +34,7 @@ const ORG_FIELDS = {
   balance_checked_at: 'balance_checked_at',
   balance_error: 'balance_error',
 }
-const JSON_FIELDS = new Set(['offer', 'benefit', 'destinations', 'delivery', 'fingerprint', 'grants'])
+const JSON_FIELDS = new Set(['offer', 'benefit', 'destinations', 'delivery', 'fingerprint', 'grants', 'call_error'])
 const MONEY_FIELDS = new Set(['balance', 'paid_balance', 'next_expiring_amount'])
 
 function encode(key, value) {
@@ -110,6 +111,29 @@ export class OpenaiApiRepo {
     return row ? { ...row, api_key: maybeDecrypt(row.api_key), disabled: !!row.disabled } : null
   }
 
+  /** Detach one local credential, keeping the account's claim and organization history. */
+  detachKey(accountId, keyId) {
+    return withTransaction(this.db, () => {
+      const key = this.getKey(keyId)
+      this.upsertAccount(accountId, {
+        key_id: '',
+        enabled: false,
+        setup_status: 'idle',
+        last_error: null,
+        call_error: null,
+      })
+      if (!key) return { keys: 0, endpoints: 0 }
+      const keys = this.db.prepare('DELETE FROM api_endpoint_keys WHERE id = ?').run(key.id).changes
+      let endpoints = 0
+      if (!this.db.prepare('SELECT 1 FROM api_endpoint_keys WHERE endpoint_id = ? LIMIT 1').get(key.endpoint_id)) {
+        this.db.prepare('DELETE FROM api_endpoint_models WHERE endpoint_id = ?').run(key.endpoint_id)
+        endpoints = this.db.prepare('DELETE FROM api_endpoints WHERE id = ?').run(key.endpoint_id).changes
+        this.db.prepare("UPDATE openai_api_orgs SET endpoint_id = '' WHERE endpoint_id = ?").run(key.endpoint_id)
+      }
+      return { keys, endpoints }
+    })
+  }
+
   /** Remove only this slot's live API material. Claim receipts and shared
    * organization balances remain available for future account synchronization. */
   cleanupForVm(vmId) {
@@ -118,7 +142,7 @@ export class OpenaiApiRepo {
       const keys = this.db.prepare('SELECT id, endpoint_id FROM api_endpoint_keys WHERE source_vm_id = ?').all(vmId)
       const stamp = new Date().toISOString()
       const detachKey = this.db.prepare(
-        "UPDATE openai_api_accounts SET key_id = '', enabled = 0, setup_status = 'idle', updated_at = ? WHERE key_id = ?",
+        "UPDATE openai_api_accounts SET key_id = '', enabled = 0, setup_status = 'idle', call_error_json = NULL, updated_at = ? WHERE key_id = ?",
       )
       const deleteKey = this.db.prepare('DELETE FROM api_endpoint_keys WHERE id = ?')
       for (const key of keys) {
@@ -127,7 +151,7 @@ export class OpenaiApiRepo {
       }
       const accounts = this.db
         .prepare(`UPDATE openai_api_accounts SET vm_id = '', key_id = '', enabled = 0,
-          fingerprint_json = NULL, storage_state_enc = NULL, setup_status = 'idle', last_error = NULL,
+          fingerprint_json = NULL, storage_state_enc = NULL, setup_status = 'idle', last_error = NULL, call_error_json = NULL,
           updated_at = ? WHERE vm_id = ?`)
         .run(stamp, vmId).changes
       let endpoints = 0

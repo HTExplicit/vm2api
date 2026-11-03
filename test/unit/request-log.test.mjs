@@ -74,6 +74,35 @@ test('normal mode writes jsonl without body', () => {
   assert.equal(store.listDebug({ limit: 5 }).length, 0)
 })
 
+test('account API summaries preserve sending identity without adding an OAuth VM identity', (t) => {
+  const store = tmpStore('normal')
+  t.after(() => {
+    store.db.close()
+    fs.rmSync(store.dataDir, { recursive: true, force: true })
+  })
+  const ctx = store.start(
+    { method: 'POST', headers: {}, socket: {} },
+    { protocol: 'openai.responses', pathName: '/v1/responses' },
+  )
+  store.finish(ctx, {
+    status: 200,
+    model: 'gpt-5.4',
+    via: 'api-kernel',
+    account_id: 'ek-original',
+    final_account_id: 'ek-original',
+    source_account_id: 'chatgpt-original',
+    source_vm_id: 'slot-original',
+    source_email: 'original@example.test',
+    usage: { input_tokens: 10, output_tokens: 1 },
+  })
+  const row = store.repo.getByRequestId(ctx.request_id)
+  assert.equal(row.account_id, 'ek-original')
+  assert.equal(row.vm_id, null)
+  assert.equal(row.source_account_id, 'chatgpt-original')
+  assert.equal(row.source_vm_id, 'slot-original')
+  assert.equal(row.source_email, 'original@example.test')
+})
+
 test('summary persists protocol usage detail (cache/model/ttft/stop_reason)', () => {
   const store = tmpStore('normal')
   const ctx = store.start(
