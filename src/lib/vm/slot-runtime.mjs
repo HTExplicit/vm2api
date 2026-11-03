@@ -190,7 +190,9 @@ export async function ensureSlotInferenceRuntime(vm, projectRoot, opts = {}) {
   const routing = opts.routing || {}
   const eager = routing?.inference?.eager_start !== false
   if (isCodexVm(vm)) {
-    if (!eager) return { ok: true, skipped: true, reason: 'eager_start_off', engine: 'codex' }
+    // An explicit login completion can await this boot without changing the global lazy-start policy.
+    if (!eager && opts.ensureKernel !== true)
+      return { ok: true, skipped: true, reason: 'eager_start_off', engine: 'codex' }
     const write = opts.ops?.writeCodexKernelConfig || writeCodexKernelConfig
     const start = opts.ops?.ensureCodexKernel || ensureCodexKernel
     const localExit = isLocalEgressProxy(vm?.proxy)

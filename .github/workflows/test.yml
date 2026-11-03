@@ -66,6 +66,11 @@ jobs:
             test/unit/panel-update.test.mjs \
             test/unit/kernel-health-thread.test.mjs \
             test/unit/panel-vm-health.test.mjs \
+            test/unit/panel-vm-start.test.mjs \
+            test/unit/codex-start-ready.test.mjs \
+            test/unit/runtime-state.test.mjs \
+            test/unit/slot-engine-runtime.test.mjs \
+            test/unit/slot-recovery.test.mjs \
             test/unit/rust-kernel-health.test.mjs \
             test/unit/panel-upgrade-script.test.mjs \
             test/unit/fleet-services.test.mjs \
@@ -149,6 +154,7 @@ jobs:
           pnpm exec vitest run src/features/models/model-mapping.test.ts src/features/models/policy.test.ts
           pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx src/features/vm/openai-api-actions.test.tsx src/features/settings/openai-api-balance-section.test.tsx
           pnpm exec vitest run src/features/vm/openai-platform-browser-dialog.test.tsx
+          pnpm exec vitest run src/features/vm/codex-browser-finish.test.ts src/features/vm/codex-credential-browser-completion.test.tsx
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx
           pnpm build
       - name: Platform configuration retry UI

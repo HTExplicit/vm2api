@@ -93,6 +93,33 @@ test('failed power-on never publishes successful runtime metadata', async (t) =>
   assert.equal(saved.runtime.stopped, true)
 })
 
+test('power-on passes explicit kernel readiness per boot without persisting or changing routing', async (t) => {
+  const { file, options } = fixture(t, true)
+  const routing = Object.freeze({ inference: Object.freeze({ eager_start: false }) })
+  const seen = []
+  for (const ensureKernel of [undefined, false, true]) {
+    const result = await powerOnSlot({
+      ...options,
+      routing,
+      ...(ensureKernel === undefined ? {} : { ensureKernel }),
+      ops: {
+        startSlotReady: async (_vm, root, bootOptions) => {
+          assert.equal(root, options.projectRoot)
+          assert.equal(bootOptions.routing, routing)
+          seen.push(bootOptions.ensureKernel)
+          return { ok: true }
+        },
+      },
+    })
+    assert.equal(result.ok, true)
+  }
+  assert.deepEqual(seen, [false, false, true])
+  assert.equal(routing.inference.eager_start, false)
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(Object.hasOwn(saved, 'ensureKernel'), false)
+  assert.equal(Object.hasOwn(saved, 'ensure_kernel'), false)
+})
+
 test('successful boot without runtime metadata preserves existing runtime', async (t) => {
   const { file, options } = fixture(t)
   const result = await powerOnSlot({ ...options, ops: { startSlotReady: async () => ({ ok: true }) } })

@@ -99,8 +99,6 @@ export function CodexCredentialPanel({
 }) {
   const qc = useQueryClient()
   const perms = useVmPerms()
-  const browserNotified = useRef(false)
-  const browserCommit = useRef<CommitResult | null>(null)
   const [browserOpen, setBrowserOpen] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
   const [mode, setMode] = useState<CodexImportMode>('oauth')
@@ -236,8 +234,6 @@ export function CodexCredentialPanel({
             variant='outline'
             disabled={busy}
             onClick={() => {
-              browserNotified.current = false
-              browserCommit.current = null
               setBrowserOpen(true)
             }}
           >
@@ -245,7 +241,7 @@ export function CodexCredentialPanel({
             浏览器登录
           </Button>
           <span className='text-xs text-muted-foreground'>
-            使用本槽固定身份与绑定代理，授权成功后自动保存
+            使用本槽固定身份与绑定代理，授权保存后开机完成配置
           </span>
         </div>
       ) : null}
@@ -428,21 +424,16 @@ export function CodexCredentialPanel({
           email={vm.email}
           purpose='oauth'
           open={browserOpen}
-          onOpenChange={(value) => {
-            setBrowserOpen(value)
-            if (!value && browserCommit.current) {
-              const data = browserCommit.current
-              browserCommit.current = null
-              onCommitted?.(data, vm.id, '已完成 OpenAI 浏览器授权')
-            }
+          onOpenChange={setBrowserOpen}
+          onCredentialsSaved={() => {
+            void invalidate()
+            toast.info('GPT 登录凭据已保存，请开机完成配置')
           }}
           onComplete={(data) => {
             void invalidate()
-            if (!browserNotified.current) {
-              browserNotified.current = true
-              toast.success('已完成 OpenAI 浏览器授权')
-            }
-            if (data) browserCommit.current = data
+            const message = 'GPT 登录完成，已开机并开启调度'
+            if (onCommitted) onCommitted(data || {}, vm.id, message)
+            else toast.success(message)
           }}
         />
       ) : null}

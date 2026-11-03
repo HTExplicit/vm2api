@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   ensureSlotInferenceRuntime,
+  startSlotReady,
   switchInheritedInferenceEngines,
   switchSlotInferenceEngine,
 } from '../../src/lib/vm/slot-runtime.mjs'
@@ -150,6 +151,72 @@ test('ensureSlotInferenceRuntime starts Codex kernel for GPT slots and skips wra
   assert.equal(writes, 1)
   assert.equal(rustStarts, 0)
   assert.equal(wrapCalls, 0)
+})
+
+test('GPT explicit kernel readiness overrides lazy startup only for the current boot', async () => {
+  const vm = { id: 'vm-codex-explicit', platform: 'openai', proxy: { url: 'socks5h://127.0.0.1:1080' } }
+  const routing = Object.freeze({ inference: Object.freeze({ eager_start: false }) })
+  const calls = []
+  const healthy = { ok: true, reused: true, health: { ok: true, status: 200, vm_id: vm.id } }
+  const ops = {
+    startSlot: async () => {
+      calls.push('container')
+      return { ok: true, action: 'already-running' }
+    },
+    writeCodexKernelConfig: (_root, current, options) => {
+      assert.equal(current, vm)
+      assert.equal(options.routing, routing)
+      calls.push('config')
+    },
+    ensureCodexKernel: async (exec) => {
+      assert.equal(exec.vmId, vm.id)
+      calls.push('kernel')
+      return healthy
+    },
+  }
+  for (const ensureKernel of [undefined, false]) {
+    const result = await startSlotReady(vm, '/tmp/kin-project', { routing, ensureKernel, ops })
+    assert.equal(result.ok, true)
+    assert.equal(result.kernel.skipped, true)
+    assert.equal(result.kernel.reason, 'eager_start_off')
+  }
+  assert.deepEqual(calls, ['container', 'container'])
+  calls.length = 0
+  const ready = await startSlotReady(vm, '/tmp/kin-project', { routing, ensureKernel: true, ops })
+  assert.equal(ready.ok, true)
+  assert.equal(ready.kernel.kernel, healthy)
+  assert.equal(ready.kernel.kernel.reused, true)
+  assert.deepEqual(calls, ['container', 'config', 'kernel'])
+  assert.equal(routing.inference.eager_start, false)
+  const lazyAgain = await ensureSlotInferenceRuntime(vm, '/tmp/kin-project', { routing, ops })
+  assert.equal(lazyAgain.skipped, true)
+  assert.deepEqual(calls, ['container', 'config', 'kernel'])
+})
+
+test('explicit GPT kernel readiness reports a startup failure and leaves other engines lazy', async () => {
+  const routing = { inference: { eager_start: false } }
+  const failed = await startSlotReady({ id: 'vm-codex-not-ready', platform: 'openai' }, '/tmp/kin-project', {
+    routing,
+    ensureKernel: true,
+    ops: {
+      startSlot: async () => ({ ok: true }),
+      writeCodexKernelConfig: () => {},
+      ensureCodexKernel: async () => ({ ok: false, reason: 'health_timeout' }),
+    },
+  })
+  assert.equal(failed.ok, false)
+  assert.equal(failed.code, 'health_timeout')
+  const claude = await ensureSlotInferenceRuntime(
+    { id: 'vm-claude-lazy', inference_engine: 'rust', has_token: true },
+    '/tmp/kin-project',
+    {
+      routing,
+      ensureKernel: true,
+      ops: { ensureRustKernel: async () => assert.fail('GPT option must not override Claude lazy startup') },
+    },
+  )
+  assert.equal(claude.skipped, true)
+  assert.equal(claude.reason, 'eager_start_off')
 })
 
 test('rust switch recreates a slot missing the kernel mount before health commit', async () => {

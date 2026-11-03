@@ -4650,13 +4650,21 @@ export function createPanelHandler(ctx) {
       // POST /api/panel/vms/:id/start
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/start$/.test(p)) {
         const id = p.split('/')[4]
-        const started = await powerOnSlot({
+        const body = await readBody(req, 4096)
+        if (body?.ensure_kernel !== undefined && typeof body.ensure_kernel !== 'boolean') {
+          return json(res, 400, {
+            ok: false,
+            error: { code: 'invalid_ensure_kernel', message: 'ensure_kernel must be a boolean' },
+          })
+        }
+        const started = await (ctx.powerOnSlot || powerOnSlot)({
           projectRoot: cfg.paths.project,
           id,
           proxyPool,
           routing: ctx.routingConfig,
           fillTimezone: fillTimezoneFromExit,
           by: 'start',
+          ensureKernel: body?.ensure_kernel === true,
         })
         if (!started.ok) {
           return json(res, started.status, { ok: false, error: { code: started.code, message: started.error } })
