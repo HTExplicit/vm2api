@@ -94,6 +94,7 @@ jobs:
             test/unit/codex-browser-login.test.mjs \
             test/unit/slot-cleanup.test.mjs \
             test/unit/openai-platform-adapter.test.mjs \
+            test/unit/openai-platform-navigation.test.mjs \
             test/unit/openai-key-handoff.test.mjs \
             test/unit/platform-browser.test.mjs \
             test/unit/panel-openai-api.test.mjs \

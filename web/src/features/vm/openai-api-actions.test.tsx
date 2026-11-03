@@ -88,6 +88,8 @@ beforeEach(() => {
     pro_eligible: false,
     claim_status: 'unknown',
     has_key: true,
+    key_prefix: 'sk-proj-abcd',
+    key_suffix: 'wxyz',
     enabled: false,
     setup_status: 'ready',
     balance: '-0.01',
@@ -107,10 +109,12 @@ describe('account API configuration entry', () => {
     const html = render()
     expect(html).toContain('上游已返回额度或配额不足')
     expect(html).toContain('余额刷新不会自动解除阻断')
-    expect(html).toContain('请在 OpenAiAPIKEY 页面处理')
+    expect(html).toContain('请在 OpenAi_api 页面处理')
     expect(html).toContain('仅手动刷新')
     expect(html).toContain('#/openai-apikey?vm_id=slot%20%2F%20one')
     expect(html).toContain('管理 API key')
+    expect(html).toContain('项目 key 已保存 · sk-proj-abcd…')
+    expect(html).not.toContain('wxyz')
     expect(html).not.toContain('API 独立开关')
     expect(html).not.toContain('解除额度阻断')
     expect(controls.api).not.toHaveBeenCalled()

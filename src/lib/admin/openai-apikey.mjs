@@ -1,4 +1,5 @@
-import { hasBoundExit } from '../vm/egress.mjs'
+import { hasBoundExit, isLocalEgressProxy, localEgressNodeId } from '../vm/egress.mjs'
+import { publicAllocatedProxy } from './panel-api.mjs'
 
 export function isAccountApiKey(key) {
   return !!(key?.source_account_id || key?.source_vm_id)
@@ -18,7 +19,7 @@ export function ordinaryEndpointView(endpoint) {
 }
 
 export function accountApiManagedError(code = 'account_api_key_managed') {
-  return Object.assign(new Error('账号托管 API key 请在 OpenAiAPIKEY 页面管理'), { code, status: 400 })
+  return Object.assign(new Error('账号托管 API key 请在 OpenAi_api 页面管理'), { code, status: 400 })
 }
 
 export function requireAccountIdentity(value) {
@@ -28,7 +29,46 @@ export function requireAccountIdentity(value) {
   return accountId
 }
 
-export function buildOpenaiApiKeyList(vms, manager, usageRepo, timezone) {
+function accountProxyView(vm, { proxyPool, nodes = [] }) {
+  const bound = vm.proxy
+  const nodeId = vm.node_id || localEgressNodeId(bound?.id)
+  const view = publicAllocatedProxy(proxyPool, bound, { nodeId, role: 'admin', nodes })
+  const available = hasBoundExit(bound) || hasBoundExit(view)
+  const registered = proxyPool?.state?.proxies?.some((row) => row.id === bound?.id)
+  const label = String(view?.label || (!registered && (bound?.label || bound?.name)) || '').trim() || null
+  let host = view?.host || null
+  let port = view?.port ?? null
+  if (!host && bound?.url) {
+    try {
+      const address = new URL(bound.url)
+      host = address.hostname
+      port = address.port ? Number(address.port) : null
+    } catch {}
+  }
+  const local = isLocalEgressProxy(view) || isLocalEgressProxy(bound)
+  const address = host
+    ? `${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}${port == null ? '' : `:${port}`}`
+    : null
+  const nodeName = view?.node_name
+  const name = local
+    ? nodeName
+      ? `${nodeName}local代理`
+      : '当前VPS local代理'
+    : label || address || (available ? '地址未知' : '未绑定')
+  return {
+    id: view?.id || null,
+    name,
+    label,
+    host,
+    port,
+    scheme: local ? 'local' : view?.scheme || 'socks5',
+    kind: local ? 'local' : view?.kind || 'socks5',
+    ...(local ? { node_name: view?.node_name || null } : {}),
+    available,
+  }
+}
+
+export function buildOpenaiApiKeyList(vms, manager, usageRepo, timezone, proxyOptions = {}) {
   const items = []
   const bind_candidates = []
   for (const vm of vms) {
@@ -48,11 +88,7 @@ export function buildOpenaiApiKeyList(vms, manager, usageRepo, timezone) {
     items.push({
       ...state,
       ...identity,
-      proxy: {
-        id: vm.proxy?.id || null,
-        name: vm.proxy?.name || vm.proxy?.label || vm.proxy?.id || (hasBoundExit(vm.proxy) ? '账号绑定代理' : '未绑定'),
-        available: hasBoundExit(vm.proxy),
-      },
+      proxy: accountProxyView(vm, proxyOptions),
     })
   }
   const stats =

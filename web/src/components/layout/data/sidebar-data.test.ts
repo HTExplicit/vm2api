@@ -23,7 +23,7 @@ describe('sidebar permissions', () => {
       (group) => group.items
     )
     expect(items).toEqual([
-      expect.objectContaining({ title: 'OpenAiAPIKEY', url: '/openai-apikey' }),
+      expect.objectContaining({ title: 'OpenAi_api', url: '/openai-apikey' }),
     ])
   })
 

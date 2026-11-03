@@ -27,8 +27,22 @@ export function targetId(item: OpenaiApiKeyTarget): string {
   return JSON.stringify([item.vm_id, item.account_id])
 }
 
-export function maskedKey(suffix?: string | null): string {
-  return suffix ? `•••• ${suffix}` : '已保存'
+export function maskedKey(prefix?: string | null): string {
+  return prefix?.length === 12 ? `${prefix}…` : '••••••••'
+}
+
+export function proxyAddress(proxy: OpenaiApiKeyEntry['proxy']): string {
+  return proxy?.host && proxy.port ? `${proxy.host}:${proxy.port}` : ''
+}
+
+export function proxyName(proxy: OpenaiApiKeyEntry['proxy']): string {
+  return proxy?.name || proxyAddress(proxy) || '未绑定'
+}
+
+export function proxyDescription(proxy: OpenaiApiKeyEntry['proxy']): string {
+  return [
+    ...new Set([proxyName(proxy), proxyAddress(proxy)].filter(Boolean)),
+  ].join(' · ')
 }
 
 export function balanceText(balance: string | null): string {

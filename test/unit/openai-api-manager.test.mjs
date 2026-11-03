@@ -48,6 +48,7 @@ function fixture(t) {
     configure: null,
     inspect: null,
     http: null,
+    goto: null,
   }
   let time = Date.now()
   const routing = { openai_api: { balance_refresh_interval_minutes: 10 } }
@@ -60,7 +61,12 @@ function fixture(t) {
     view(vm) {
       const { accountId, record } = this.accountForVm(vm.id)
       const key = record?.key_id ? repo.getKey(record.key_id) : null
-      return { ...record, has_key: !!key && key.source_account_id === accountId, browser_active: false }
+      return {
+        ...record,
+        has_key: !!key && key.source_account_id === accountId,
+        balance_error: repo.getOrg(record?.organization_id)?.balance_error || null,
+        browser_active: false,
+      }
     },
     async refreshClaim(vmId) {
       calls.refreshed.push(vmId)
@@ -92,8 +98,8 @@ function fixture(t) {
       await options.onKey(result)
       return result
     }
-    async readBalance() {
-      if (behavior.readBalance) return behavior.readBalance()
+    async readBalance(options) {
+      if (behavior.readBalance) return behavior.readBalance(options)
       if (behavior.balanceError) throw behavior.balanceError
       return { balance: behavior.balance }
     }
@@ -131,8 +137,20 @@ function fixture(t) {
       calls.liveBrowsers++
       calls.maxLiveBrowsers = Math.max(calls.maxLiveBrowsers, calls.liveBrowsers)
       let closed = false
+      let pageUrl = 'about:blank'
+      const page = new EventEmitter()
+      page.isClosed = () => closed
+      page.url = () => pageUrl
+      page.mainFrame = () => page
+      page.goto = async (url) => {
+        if (behavior.goto)
+          return behavior.goto(url, page, (value) => {
+            pageUrl = value
+          })
+        pageUrl = url
+      }
       return {
-        page: { async goto() {} },
+        page,
         context: {},
         fingerprint,
         async storageState() {
@@ -465,6 +483,71 @@ test('background refresh waits for identity before treating a restored session a
   assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
 })
 
+test('a same-window general navigation continuation still verifies identity, reuses the key and saves HTTP Billing', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  f.behavior.goto = (url, page, setUrl) => {
+    setTimeout(() => {
+      setUrl(url)
+      page.emit('framenavigated', page.mainFrame())
+    }, 5)
+    throw new Error('page.goto: NS_BINDING_ABORTED')
+  }
+  f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'balance', false)
+  await f.settle()
+  assert.equal(f.calls.inspections.length, 1)
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+  assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
+  assert.equal(f.profiles.get(entry.vm.id).billing_session.recovery_attempted, false)
+  assert.equal(f.profiles.get(entry.vm.id).billing_session.headers.authorization, 'Bearer fixture-billing')
+  assert.equal(f.calls.configured.length, 0)
+  assert.equal(f.calls.sessions.length, 1)
+  await f.manager.refresh(entry.vm.id)
+  await f.settle()
+  assert.equal(f.calls.http.length, 1)
+  assert.equal(f.calls.sessions.length, 1, 'the saved Billing session refreshes without another browser')
+})
+
+test('a continued general navigation cannot accept a different account identity', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  f.repo.upsertOrg('org-test', { balance: '12.5' })
+  f.behavior.goto = (url, page, setUrl) => {
+    setUrl(url)
+    page.emit('framenavigated', page.mainFrame())
+    throw new Error('page.goto: NS_BINDING_ABORTED')
+  }
+  f.behavior.inspect = () => ({ authenticated: true, email: 'wrong@example.test', organizationId: 'org-test' })
+  f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'balance', false)
+  await f.settle()
+  assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'error')
+  assert.match(f.repo.getAccount(entry.accountId).last_error, /邮箱与当前账号不一致/)
+  assert.equal(f.repo.getOrg('org-test').balance, '12.5')
+  assert.equal(f.profiles.get(entry.vm.id).billing_session.headers, null)
+  assert.equal(f.profiles.get(entry.vm.id).billing_session.recovery_attempted, true)
+  assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
+  assert.equal(f.manager.resolveAccountKey(key).enabled, true)
+  assert.equal(f.calls.configured.length, 0)
+})
+
+test('an ordinary general navigation error fails before identity and preserves the inference key', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  f.behavior.goto = () => {
+    throw new Error('proxy connection failed')
+  }
+  f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'balance', false)
+  await f.settle()
+  assert.equal(f.calls.inspections.length, 0)
+  assert.equal(f.manager.view(entry.vm).balance_refresh_status, 'error')
+  assert.equal(f.manager.view(entry.vm).balance_refresh_message, 'proxy connection failed')
+  assert.equal(f.manager.resolveAccountKey(key).enabled, true)
+  assert.equal(f.calls.configured.length, 0)
+})
+
 test('an expired session is not reopened each period and manual refresh can restore it', async (t) => {
   const f = fixture(t)
   const entry = f.add()
@@ -787,7 +870,9 @@ test('a deferred Billing result after cancellation cannot replace the old balanc
   f.repo.upsertOrg('org-test', { balance: '12.5000', balance_checked_at: '2020-01-01T00:00:00Z' })
   let release
   let reading = false
-  f.behavior.readBalance = async () => {
+  let readOptions
+  f.behavior.readBalance = async (options) => {
+    readOptions = options
     reading = true
     return new Promise((resolve) => {
       release = resolve
@@ -795,7 +880,10 @@ test('a deferred Billing result after cancellation cannot replace the old balanc
   }
   f.manager.setup(entry.vm.id)
   await until(() => reading)
+  assert.equal(readOptions.organizationId, 'org-test')
+  assert.equal(readOptions.signal.aborted, false)
   const cancelling = f.manager.cancel(entry.vm.id)
+  assert.equal(readOptions.signal.aborted, true)
   release({ balance: '999.000', paid_balance: '999.000' })
   await cancelling
   await f.settle()
@@ -803,6 +891,7 @@ test('a deferred Billing result after cancellation cannot replace the old balanc
   assert.equal(f.repo.getOrg('org-test').balance_checked_at, '2020-01-01T00:00:00Z')
   assert.equal(f.calls.models.length, 0)
   assert.notEqual(f.repo.getAccount(entry.accountId).setup_status, 'ready')
+  assert.equal(f.manager.view(entry.vm).balance_refresh_status, 'idle', 'cancelled work is not left refreshing')
 })
 
 test('cancelling a background balance task waiting on a retained same-slot browser does not reopen it', async (t) => {
@@ -947,6 +1036,108 @@ test('cached Billing HTTP survives manager restart and updates only the canonica
   assert.deepEqual(after.billing_session, before.billing_session)
   assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
   assert.equal(JSON.stringify(f.manager.view(entry.vm)).includes('saved-session'), false)
+})
+
+test('balance view follows the shared HTTP queue and clears transient state after completion', async (t) => {
+  const f = fixture(t)
+  const a = f.add()
+  const b = f.add('vm-b', 'account-b')
+  for (const entry of [a, b]) {
+    f.installKey(entry)
+    f.cacheBilling(entry)
+  }
+  const responses = []
+  f.behavior.http = () =>
+    new Promise((resolve) => {
+      responses.push(resolve)
+    })
+  f.manager.enqueue(f.credits.accountForVm(a.vm.id), 'balance', false)
+  f.manager.enqueue(f.credits.accountForVm(b.vm.id), 'balance', false)
+  await until(() => responses.length === 1)
+  assert.equal(f.manager.view(a.vm).balance_refresh_status, 'refreshing')
+  assert.equal(f.manager.view(a.vm).balance_refresh_message, '正在通过 Billing 会话刷新余额')
+  assert.equal(f.manager.view(b.vm).balance_refresh_status, 'queued')
+  assert.equal(f.manager.view(b.vm).balance_refresh_message, '等待前序余额刷新任务完成')
+  responses[0]({ summary: { balance: '31.23' }, cookies: [] })
+  await until(() => responses.length === 2)
+  assert.equal(f.manager.view(a.vm).balance_refresh_status, 'idle')
+  assert.equal(f.manager.view(b.vm).balance_refresh_status, 'refreshing')
+  responses[1]({ summary: { balance: '30.12' }, cookies: [] })
+  await f.settle()
+  for (const entry of [a, b]) {
+    assert.equal(f.manager.view(entry.vm).balance_refresh_status, 'idle')
+    assert.equal(f.manager.view(entry.vm).balance_refresh_message, null)
+  }
+  assert.equal(f.calls.sessions.length, 0)
+})
+
+test('balance view explains a manual-browser wait and cancellation leaves no active refresh state', async (t) => {
+  const f = fixture(t)
+  const a = f.add()
+  const b = f.add('vm-b', 'account-b')
+  const key = f.installKey(a)
+  f.cacheBilling(a)
+  await f.manager.browserManager.acquire(b.vm.id, { purpose: 'oauth', interactive: true })
+  f.manager.enqueue(f.credits.accountForVm(a.vm.id), 'balance', false)
+  await until(() => f.manager.view(a.vm).balance_refresh_message === '等待正在操作的账号浏览器关闭')
+  assert.equal(f.manager.view(a.vm).balance_refresh_status, 'queued')
+  await f.manager.cancel(a.vm.id)
+  await f.settle()
+  assert.equal(f.manager.view(a.vm).balance_refresh_status, 'idle')
+  assert.equal(f.manager.view(a.vm).balance_refresh_message, null)
+  assert.equal(f.calls.http.length, 0)
+  assert.equal(f.repo.getKey(key.id).disabled, false)
+  assert.equal(f.repo.getAccount(a.accountId).enabled, true)
+})
+
+test('balance view preserves login and refresh failures independently of inference and manual-only refresh', (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  f.routing.openai_api.balance_refresh_interval_minutes = 0
+  f.repo.upsertAccount(entry.accountId, { setup_status: 'needs_login', last_error: '请补充官方登录' })
+  assert.equal(f.manager.view(entry.vm).balance_refresh_status, 'needs_login')
+  assert.equal(f.manager.view(entry.vm).balance_refresh_message, '请补充官方登录')
+  assert.equal(f.manager.view(entry.vm).balance_refresh_interval_minutes, 0)
+  f.repo.upsertAccount(entry.accountId, { setup_status: 'ready', last_error: null })
+  f.repo.upsertOrg('org-test', { balance_error: '官方 Billing 请求失败' })
+  assert.equal(f.manager.view(entry.vm).balance_refresh_status, 'error')
+  assert.equal(f.manager.view(entry.vm).balance_refresh_message, '官方 Billing 请求失败')
+  assert.equal(f.manager.view(entry.vm).call_status, 'ready')
+  assert.equal(f.manager.resolveAccountKey(key).enabled, true)
+  f.repo.upsertOrg('org-test', { balance_error: null })
+  f.manager.recordKeyError(key, { code: 'model_not_found', message: 'model unavailable' })
+  assert.equal(f.manager.view(entry.vm).balance_refresh_status, 'idle', 'inference errors do not become Billing errors')
+})
+
+test('balance view explains a saved failed recovery only for the currently bound account and organization', (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  const failed = { organization_id: 'org-test', headers: null, recovery_attempted: true }
+  f.cacheBilling(entry, { billing_session: failed })
+  assert.equal(f.manager.view(entry.vm).balance_refresh_status, 'error')
+  assert.equal(f.manager.view(entry.vm).balance_refresh_message, 'Billing 会话恢复尚未完成，请手动刷新或连接 Platform')
+  f.profiles.upsert(entry.vm.id, { billing_session: { ...failed, organization_id: 'org-other' } })
+  assert.equal(f.manager.view(entry.vm).balance_refresh_status, 'idle')
+  f.profiles.upsert(entry.vm.id, { account_id: 'previous-account', billing_session: failed })
+  assert.equal(f.manager.view(entry.vm).balance_refresh_status, 'idle')
+})
+
+test('active interactive login is reported as needs-login before the task completes', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  f.installKey(entry)
+  f.behavior.authenticated = false
+  await f.manager.refresh(entry.vm.id)
+  await until(() => f.manager.sessions.get(entry.vm.id)?.waiting)
+  assert.equal(f.manager.view(entry.vm).balance_refresh_status, 'needs_login')
+  assert.equal(f.manager.view(entry.vm).balance_refresh_message, '请在账号浏览器中完成 Platform 登录')
+  f.behavior.authenticated = true
+  await f.manager.sessions.get(entry.vm.id).checkLogin()
+  await f.settle()
+  assert.equal(f.manager.view(entry.vm).balance_refresh_status, 'idle')
+  assert.equal(f.calls.configured.length, 0)
 })
 
 test('a rejected cached session recovers once with the browser and later refreshes use the replacement HTTP session', async (t) => {

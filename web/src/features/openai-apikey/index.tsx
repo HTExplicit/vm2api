@@ -35,9 +35,12 @@ import { PageHeader } from '@/components/page-header'
 import { TableSkeleton } from '@/components/page-skeletons'
 import { QueryGate } from '@/components/query-gate'
 import { meQueryOptions } from '@/features/auth/queries'
-import { isOpenaiApiBalancePending } from '@/features/vm/openai-api-state'
+import {
+  openaiApiBalanceStatusMessage,
+  openaiApiBalanceStatusText,
+} from '@/features/vm/openai-api-state'
 import { ApiKeyBindDialog } from './bind-dialog'
-import { ApiKeyDetailSheet } from './detail-sheet'
+import { ApiKeyDetailDialog } from './detail-dialog'
 import { batchApiKeys, runApiKeyAction, setApiKeyEnabled } from './key-api'
 import {
   balanceText,
@@ -46,6 +49,8 @@ import {
   CALL_STATUS_LABELS,
   filterApiKeys,
   maskedKey,
+  proxyDescription,
+  proxyName,
   targetId,
 } from './key-display'
 import { invalidateOpenaiApiKeys, openaiApiKeysQueryOptions } from './queries'
@@ -398,7 +403,7 @@ export function OpenaiApiKeyPage({
                       </div>
                     </TableCell>
                     <TableCell className='font-mono text-xs'>
-                      {maskedKey(item.key_suffix)}
+                      {maskedKey(item.key_prefix)}
                     </TableCell>
                     <TableCell>
                       <Switch
@@ -421,9 +426,12 @@ export function OpenaiApiKeyPage({
                     </TableCell>
                     <TableCell className='tabular-nums'>
                       <span>{balanceText(item.balance)}</span>
-                      {isOpenaiApiBalancePending(item) ? (
-                        <div className='text-[11px] text-muted-foreground'>
-                          待刷新
+                      {openaiApiBalanceStatusText(item) ? (
+                        <div
+                          className='text-[11px] text-muted-foreground'
+                          title={openaiApiBalanceStatusMessage(item)}
+                        >
+                          {openaiApiBalanceStatusText(item)}
                         </div>
                       ) : null}
                       {item.balance_refresh_interval_minutes === 0 ? (
@@ -435,9 +443,9 @@ export function OpenaiApiKeyPage({
                     <TableCell>
                       <span
                         className='block max-w-36 truncate'
-                        title={item.proxy?.name || ''}
+                        title={proxyDescription(item.proxy)}
                       >
-                        {item.proxy?.name || item.proxy?.id || '未绑定'}
+                        {proxyName(item.proxy)}
                       </span>
                     </TableCell>
                     <TableCell className='text-end tabular-nums'>
@@ -486,8 +494,8 @@ export function OpenaiApiKeyPage({
         </div>
       </QueryGate>
       {detail ? (
-        <ApiKeyDetailSheet
-          key={`${targetId(detail)}:${detail.key_suffix || ''}`}
+        <ApiKeyDetailDialog
+          key={`${targetId(detail)}:${detail.key_prefix || ''}`}
           item={detail}
           busy={busy}
           onClose={() => setDetailId('')}

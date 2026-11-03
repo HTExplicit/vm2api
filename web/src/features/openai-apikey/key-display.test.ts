@@ -5,6 +5,9 @@ import {
   batchSummary,
   filterApiKeys,
   maskedKey,
+  proxyAddress,
+  proxyDescription,
+  proxyName,
   targetId,
 } from './key-display'
 
@@ -22,13 +25,35 @@ const entry = (extra: Partial<OpenaiApiKeyEntry> = {}) =>
     ...extra,
   }) as OpenaiApiKeyEntry
 
-describe('OpenAiAPIKEY list display', () => {
+describe('OpenAi_api list display', () => {
   it('keeps unknown, negative and long decimal balances distinct without rounding', () => {
     expect(balanceText(null)).toBe('未知')
     expect(balanceText('93.3865591')).toBe('$93.38')
     expect(balanceText('-1.239')).toBe('$-1.23')
     expect(balanceText('-0.009')).toBe('$0')
-    expect(maskedKey('1234')).toBe('•••• 1234')
+    expect(maskedKey('sk-proj-abcd')).toBe('sk-proj-abcd…')
+    expect(maskedKey(null)).toBe('••••••••')
+    expect(maskedKey('short')).toBe('••••••••')
+  })
+  it('shows safe proxy names and addresses without falling back to internal IDs', () => {
+    const proxy = {
+      id: 'internal-proxy-id',
+      name: '美国出口',
+      host: 'safe.example.test',
+      port: 1080,
+      available: true,
+    }
+    expect(proxyName(proxy)).toBe('美国出口')
+    expect(proxyDescription(proxy)).toBe('美国出口 · safe.example.test:1080')
+    expect(proxyName({ ...proxy, name: '' })).toBe('safe.example.test:1080')
+    expect(proxyName({ ...proxy, name: '本地出口', host: null })).toBe(
+      '本地出口'
+    )
+    expect(proxyAddress({ ...proxy, host: null })).toBe('')
+    expect(proxyName({ ...proxy, name: '', host: null })).toBe('未绑定')
+    expect(proxyDescription({ ...proxy, name: '已改名出口' })).toContain(
+      '已改名出口'
+    )
   })
   it('searches slot, email and organization and combines status with intended switch', () => {
     const rows = [

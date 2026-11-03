@@ -202,6 +202,11 @@ function jsonResponse(path, payload, { method = 'GET', headers = {}, body } = {}
   }
 }
 
+function observeRequestResponse(adapter, response) {
+  adapter.page.emit('request', response.request())
+  return adapter.observe(response)
+}
+
 function beginCapture(adapter, options = {}) {
   adapter.identity = { ...adapter.identity, email: 'owner@example.com', organizationId: 'org-one' }
   return adapter.beginKeySetup({
@@ -583,8 +588,9 @@ test('an already aborted task never begins waiting or attaches browser listeners
 test('Billing observations require the exact official GET and organization header', async () => {
   const adapter = new PlatformAdapter({ page: pageFixture(), email: 'owner@example.com' })
   const path = '/v1/dashboard/billing/credit_grants'
-  await adapter.observe(jsonResponse(path, { total_available: '12.3' }))
-  await adapter.observe(
+  await observeRequestResponse(adapter, jsonResponse(path, { total_available: '12.3' }))
+  await observeRequestResponse(
+    adapter,
     jsonResponse(
       path,
       { total_available: '12.3' },
@@ -595,12 +601,14 @@ test('Billing observations require the exact official GET and organization heade
     ),
   )
   assert.equal(adapter.creditSummaries.size, 0)
-  await adapter.observe(
+  await observeRequestResponse(
+    adapter,
     jsonResponse(path, '{"total_available":12.1234567890123456789}', {
       headers: { 'openai-organization': 'org-one' },
     }),
   )
-  await adapter.observe(
+  await observeRequestResponse(
+    adapter,
     jsonResponse(
       path,
       { total_available: '-1.20' },
@@ -636,12 +644,14 @@ test('Billing credentials come only from the successful exact request and requir
   const response = jsonResponse('/v1/dashboard/billing/credit_grants', '{"total_available":1.000000000000000000009}', {
     headers: { 'openai-organization': 'org-one' },
   })
-  response.request = () => ({
+  const request = {
+    url: response.url,
     method: () => 'GET',
     headers: () => ({ 'openai-organization': 'org-one' }),
     allHeaders: async () => headers,
-  })
-  await adapter.observe(response)
+  }
+  response.request = () => request
+  await observeRequestResponse(adapter, response)
   assert.equal(
     adapter.billingSessionFor('org-one'),
     null,
@@ -677,12 +687,17 @@ test('an unsuccessful, unscoped or incomplete Billing response cannot supply sav
   const headers = { authorization: 'Bearer fixture-only', 'user-agent': 'fixture-ua', 'openai-organization': 'org-one' }
   const failed = jsonResponse('/v1/dashboard/billing/credit_grants', { total_available: '3' }, { headers })
   failed.ok = () => false
-  await adapter.observe(failed)
-  await adapter.observe(
+  await observeRequestResponse(adapter, failed)
+  await observeRequestResponse(
+    adapter,
     jsonResponse('/v1/dashboard/billing/credit_grants', { total_available: '3' }, { method: 'POST', headers }),
   )
-  await adapter.observe(jsonResponse('/v1/dashboard/billing/credit_grants', { total_available: null }, { headers }))
-  await adapter.observe(
+  await observeRequestResponse(
+    adapter,
+    jsonResponse('/v1/dashboard/billing/credit_grants', { total_available: null }, { headers }),
+  )
+  await observeRequestResponse(
+    adapter,
     jsonResponse(
       '/v1/dashboard/billing/credit_grants',
       { total_available: '3' },
@@ -712,17 +727,11 @@ test('readBalance waits for this organization and cannot reuse an earlier cached
       headers: { 'openai-organization': 'org-one' },
     },
   )
-  let resolveObserved
-  page.waitForResponse = (predicate) => {
-    assert.equal(predicate(response), true)
-    return new Promise((resolve) => {
-      resolveObserved = resolve
-    })
-  }
-  adapter.goto = async () => {
+  page.goto = async (url) => {
     assert.equal(adapter.creditSummaries.has('org-one'), false)
-    await adapter.observe(response)
-    resolveObserved(response)
+    page.url = () => url
+    page.emit('request', response.request())
+    page.emit('response', response)
   }
   const result = await adapter.readBalance()
   assert.equal(result.balance, '37')
@@ -744,30 +753,21 @@ test('Billing can confirm the bound organization before a selected organization 
   const response = jsonResponse('/v1/dashboard/billing/credit_grants', '{"total_available":36.999999999999999999}', {
     headers: { 'openai-organization': 'org-one' },
   })
-  let resolveObserved
-  page.waitForResponse = (predicate) => {
-    assert.equal(
-      predicate(
-        jsonResponse(
-          '/v1/dashboard/billing/credit_grants',
-          { total_available: '99' },
-          {
-            headers: { 'openai-organization': 'org-other' },
-          },
-        ),
-      ),
-      false,
-    )
-    assert.equal(predicate(response), true)
-    return new Promise((resolve) => {
-      resolveObserved = resolve
-    })
-  }
   adapter.selectOrganization = async () => assert.fail('an unobserved selected organization cannot require a UI switch')
-  adapter.goto = async (url) => {
+  page.goto = async (url) => {
     assert.equal(url, 'https://platform.openai.com/settings/organization/billing/overview')
-    await adapter.observe(response)
-    resolveObserved(response)
+    page.url = () => url
+    const wrongOrganization = jsonResponse(
+      '/v1/dashboard/billing/credit_grants',
+      { total_available: '99' },
+      {
+        headers: { 'openai-organization': 'org-other' },
+      },
+    )
+    page.emit('request', wrongOrganization.request())
+    page.emit('response', wrongOrganization)
+    page.emit('request', response.request())
+    page.emit('response', response)
   }
   assert.equal((await adapter.readBalance()).balance, '36.999999999999999999')
   adapter.dispose()
@@ -783,8 +783,8 @@ test('a slower earlier response cannot overwrite the later organization balance'
     new Promise((resolve) => {
       finishEarlier = resolve
     })
-  const pending = adapter.observe(earlier)
-  await adapter.observe(jsonResponse(path, { total_available: '30' }, { headers }))
+  const pending = observeRequestResponse(adapter, earlier)
+  await observeRequestResponse(adapter, jsonResponse(path, { total_available: '30' }, { headers }))
   finishEarlier('{"total_available":37}')
   await pending
   assert.equal(adapter.creditSummaries.get('org-one').balance, '30')

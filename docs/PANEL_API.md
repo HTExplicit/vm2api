@@ -560,21 +560,21 @@ Platform 自动配置推送 `configuring`，此时禁用重复操作；创建 ke
 
 ## OpenAI 账号 API（仅 admin）
 
-面板 `/openai-apikey` 集中管理账号托管 key，支持 `?vm_id=…` 定位。账号页保留领取、Platform 登录、自动配置及余额；通用 API 上游管理隐藏托管来源，混合端点只展示普通 key，运行时上游集合不变。
+面板 OpenAi_api（`/openai-apikey`）集中管理账号托管 key，支持 `?vm_id=…` 定位；详情使用居中、限高滚动弹窗，关闭后清除临时 key 明文。账号页保留领取、Platform 登录、自动配置及余额；通用 API 上游管理隐藏托管来源，混合端点只展示普通 key，运行时上游集合不变。可见名称调整不改变路由和权限标识。
 
-`GET /api/panel/openai-apikey?timezone=Asia%2FSingapore` 返回 `{ items, bind_candidates }`：只列当前账号已有 key，待绑定候选为 `pending/claimed` 且无 key。列表包含 `account_id/vm_id/key_id/endpoint_id`、安全代理摘要、`call_status/call_reason/call_error`、余额及 `today_requests/today_cost/last_used_at/unpriced_requests`，不返回 secret。今日按页面时区统计，费用为 vm2api 用量估算，未定价保持未知。
+`GET /api/panel/openai-apikey?timezone=Asia%2FSingapore` 返回 `{ items, bind_candidates }`：只列当前账号已有 key，待绑定候选为 `pending/claimed` 且无 key。列表包含 `account_id/vm_id/key_id/endpoint_id`、安全代理摘要、`call_status/call_reason/call_error`、余额及 `today_requests/today_cost/last_used_at/unpriced_requests`，不返回 secret。代理使用当前池内最新名称，无名时显示安全 `host:port`；提示和详情补地址，不返回认证信息。今日按页面时区统计，费用为 vm2api 用量估算，未定价保持未知。
 
 `GET/PUT/DELETE /api/panel/vms/:id/openai-api/key` 按需读取、人工绑定／替换及本地解绑。GET 查询参数带 `account_id`，响应 `Cache-Control: no-store`；PUT 接收 `{ account_id, api_key }`，DELETE 接收 `{ account_id }`。人工 key 直接保存，不联网验证归属、不查询模型；首次默认开启，替换保留使用开关并清旧调用阻断，同值保存不清。删除保留领取、组织及历史，不撤销官方 key。`POST /api/panel/openai-apikey/batch` 接收 `{ action: "enable" | "disable" | "refresh_balance" | "delete" | "resume", items: [{ vm_id, account_id }] }`，逐项返回 `done/queued/error` 与原因，同组织刷新去重。新页修改携带账号身份核对，旧单账号开关／刷新接口兼容原请求。
 
 基址 `/vms/:id/openai-api`。GET 返回公开状态；POST `/preview` 查询 Pro 三档赠额资格与接收组织，POST `/claim` 接收 `{ destination_account_id? }`，唯一组织可省略。资格样本超过 5 分钟后，首次领取前重新查询；关联后的 `pending/claimed` 状态锁定领取，复查沿用原操作编号。外部已领取账号也可继续配置。
 
-POST `/setup` 继续 Platform 登录并在当前组织已有的 Default project 内创建账号 key，有效期选择官方 `Never`；已有 key 直接复用，不新建项目。POST `/refresh` 刷新发放或组织总余额；PATCH `/enabled` 接收 `{ enabled: boolean }`，独立于 OAuth 启停、调度及登录会话。POST `/resume` 仅解除当前账号 key 的上游额度／配额阻断，不打开 API 开关、不重新启用无效 key、不发送模型请求；`quota_blocked` 返回该阻断状态。账号行 `openai_api` 返回领取、配置、key 尾号、组织余额及更新时间，不返回 secret、指纹或登录会话。
+POST `/setup` 继续 Platform 登录并在当前组织已有的 Default project 内创建账号 key，有效期选择官方 `Never`；已有 key 直接复用，不新建项目。POST `/refresh` 刷新发放或组织总余额；PATCH `/enabled` 接收 `{ enabled: boolean }`，独立于 OAuth 启停、调度及登录会话。POST `/resume` 仅解除当前账号 key 的上游额度／配额阻断，不打开 API 开关、不重新启用无效 key、不发送模型请求；`quota_blocked` 返回该阻断状态。账号行 `openai_api` 返回领取、配置、`key_prefix`、组织余额及更新时间，不返回 secret、指纹或登录会话。前缀取前 12 位，界面追加省略号；长度不超过 12 时返回空值并使用固定遮罩，旧 `key_suffix` 保留兼容。
 
 组织余额来自官方 Billing `credit_grants` JSON 的 `total_available`，购买余额来自 `total_paid_available`；不由逐笔额度推导总余额。`paid_balance/grants/next_expiring_amount/next_expiring_at` 补充购买余额及最近到期额度，金额以十进制字符串保存并去尾零，未知保持空值，负余额照实返回。面板中的点数余额及 API 金额最多显示两位小数，直接截断、不进位并去尾零，截断后的负零显示为 0；接口和后台原值精度不变。`offer_checked_at/link_checked_at/balance_checked_at` 分别记录资格、关联和余额观测时间；`offer_stale` 提示资格待重查，余额刷新不更新领取资格。
 
-已启用且配置 key 的账号按全局间隔经当前绑定代理刷新组织余额，同组织共用一次成功样本。`GET/PUT /api/panel/routing` 的 `openai_api.balance_refresh_interval_minutes` 默认为 10，支持整数 1–1440，0 表示仅手动；保存后下一次后台扫描热生效。失败重试使用当前间隔，手动刷新不受间隔限制；设置为 0 后未发送的后台任务停止，已发送的请求可完成。账号 view 返回有效 `balance_refresh_interval_minutes`，面板据此判断待刷新，0 显示“仅手动刷新”。
+已启用且配置 key 的账号按全局间隔经当前绑定代理刷新组织余额，同组织共用一次成功样本。`GET/PUT /api/panel/routing` 的 `openai_api.balance_refresh_interval_minutes` 默认为 10，支持整数 1–1440，0 表示仅手动；保存后下一次后台扫描热生效。失败重试使用当前间隔，手动刷新不受间隔限制；设置为 0 后未发送的后台任务停止，已发送的请求可完成。账号 view 返回有效 `balance_refresh_interval_minutes` 和只读 `balance_refresh_status: idle|queued|refreshing|needs_login|error`、`balance_refresh_message`。无任务但样本过期显示“等待刷新”；失败保留最后成功金额、时间及原因，0 的“仅手动刷新”独立显示。
 
-Billing 认证头按槽加密保存，Cookie 沿用同一份加密网页会话；正常查询使用独立 HTTP，不启动浏览器，更新 Cookie 时保留网页存储。仅缺会话或官方明确认证失效时自动用原固定身份恢复一次；仍需登录、验证码或恢复失败时保留状态，等待管理员手动刷新／连接 Platform。普通网络、代理、429、5xx 错误只标待刷新。浏览器恢复仍等待官方账号身份、按精确组织请求核对余额；同槽人工窗口活动时后台等待，避免 Cookie 覆盖。查询失败不改变推理 key、API 独立开关或 OAuth 调度。
+Billing 认证头按槽加密保存，Cookie 沿用同一份加密网页会话；正常查询使用独立 HTTP，不启动浏览器，更新 Cookie 时保留网页存储。仅缺会话或官方明确认证失效时自动用原固定身份恢复一次；仍需登录、验证码或恢复失败时保留状态，等待管理员手动刷新／连接 Platform。普通网络、代理、429、5xx 错误只影响余额查询。Billing 导航与本次精确组织成功响应共用 30 秒期限，仅对同窗口官方接续导航的 `NS_BINDING_ABORTED` 继续观测；仍核验实际邮箱，不接受旧请求／响应、错误组织或取消结果，不刷新重开。同槽人工窗口活动时后台等待，避免 Cookie 覆盖。查询失败不改变推理 key、API 独立开关或 OAuth 调度。
 
 生成密钥使用 `group_type: "openai_apikey"`、`category: "api"`、`allowed_vms: [...]`。新增候选只要求已配置正确归属的 OpenAI 账号 key，不要求 Pro 或正余额；零、负数、未知或待刷新余额均可选择。编辑时已有绑定保留回显、可移除，仅校验新加入的账号。勾选不会开启 API 独立开关。余额数字不决定推理停调或恢复；上游明确额度／配额不足阻断当前 key，仅管理员 `/resume` 解除，正余额刷新不解锁。无效 key 保持禁用，临时限流保持冷却，托管密钥预算维持原规则。模型列表和推理均限所选账号，普通 API 全局池不隐式使用账号 key；保留官方错误码，API 请求不计入 OAuth 5H/7D 窗口估算。
 

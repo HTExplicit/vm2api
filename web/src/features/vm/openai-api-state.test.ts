@@ -6,6 +6,8 @@ import {
   isProApiAccount,
   isOpenaiApiKeyCandidate,
   isOpenaiApiBalancePending,
+  openaiApiBalanceStatusMessage,
+  openaiApiBalanceStatusText,
   openaiApiClaimLabel,
   openaiApiClaimLocked,
 } from './openai-api-state'
@@ -201,5 +203,67 @@ describe('account API feature gates', () => {
         { width: 1000, height: 600 }
       )
     ).toEqual({ x: 500, y: 300 })
+  })
+
+  it('distinguishes queued, active, login and failed refreshes while keeping sample age separate', () => {
+    const now = Date.parse('2026-11-04T00:30:00Z')
+    const current = {
+      ...state,
+      balance: '31.78',
+      balance_checked_at: '2026-11-04T00:29:00Z',
+    }
+    expect(openaiApiBalanceStatusText(current, now)).toBe('')
+    for (const [status, label] of [
+      ['queued', '排队中'],
+      ['refreshing', '刷新中'],
+      ['needs_login', '需要登录'],
+      ['error', '刷新失败'],
+    ] as const) {
+      expect(
+        openaiApiBalanceStatusText(
+          { ...current, balance_refresh_status: status },
+          now
+        )
+      ).toBe(label)
+    }
+    const old = { ...current, balance_checked_at: '2026-11-04T00:00:00Z' }
+    expect(
+      openaiApiBalanceStatusText(
+        { ...old, balance_refresh_status: 'idle' },
+        now
+      )
+    ).toBe('等待刷新')
+    expect(
+      openaiApiBalanceStatusText(
+        { ...old, balance_refresh_interval_minutes: 0 },
+        now
+      )
+    ).toBe('')
+    expect(
+      openaiApiBalanceStatusText(
+        {
+          ...old,
+          balance_refresh_interval_minutes: 0,
+          balance_refresh_status: 'error',
+        },
+        now
+      )
+    ).toBe('刷新失败')
+    expect(openaiApiBalanceStatusText({ ...current, balance: null }, now)).toBe(
+      ''
+    )
+    expect(
+      openaiApiBalanceStatusText({ ...current, balance_error: '连接失败' }, now)
+    ).toBe('刷新失败')
+    expect(
+      openaiApiBalanceStatusMessage({
+        ...current,
+        balance_refresh_message: '请补充登录',
+        balance_error: '旧错误',
+      })
+    ).toBe('请补充登录')
+    expect(
+      openaiApiBalanceStatusMessage({ ...current, balance_error: '连接失败' })
+    ).toBe('连接失败')
   })
 })
