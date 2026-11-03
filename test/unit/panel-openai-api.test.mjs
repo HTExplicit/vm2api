@@ -9,9 +9,19 @@ import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
 import { ApiEndpointStore } from '../../src/lib/admin/api-endpoints.mjs'
 import { createDatabase } from '../../src/lib/db/database.mjs'
 import { authorizePanelRoute } from '../../src/lib/admin/panel-acl.mjs'
+import { buildOpenaiApiKeyList } from '../../src/lib/admin/openai-apikey.mjs'
 
 const ADMIN = { apiKeyKind: 'master' }
 const VIEW = { has_key: true, enabled: true, balance: '37.00', claim_status: 'claimed', setup_status: 'ready' }
+
+test('a manually bound unnamed proxy is displayed without exposing its address', () => {
+  const data = buildOpenaiApiKeyList(
+    [{ id: 'slot', proxy: { host: 'private.proxy', port: 1080 } }],
+    { view: () => ({ ...VIEW, account_id: 'account', email: 'account@example.test' }) },
+  )
+  assert.deepEqual(data.items[0].proxy, { id: null, name: '账号绑定代理', available: true })
+  assert.equal(JSON.stringify(data).includes('private.proxy'), false)
+})
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-panel-openai-api-'))

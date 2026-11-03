@@ -50,7 +50,7 @@ export function buildOpenaiApiKeyList(vms, manager, usageRepo, timezone) {
       ...identity,
       proxy: {
         id: vm.proxy?.id || null,
-        name: vm.proxy?.name || vm.proxy?.label || vm.proxy?.id || '未绑定',
+        name: vm.proxy?.name || vm.proxy?.label || vm.proxy?.id || (hasBoundExit(vm.proxy) ? '账号绑定代理' : '未绑定'),
         available: hasBoundExit(vm.proxy),
       },
     })
