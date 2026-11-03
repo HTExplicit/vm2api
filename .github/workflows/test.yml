@@ -46,8 +46,13 @@ jobs:
             test/unit/forced-tool-choice.test.mjs \
             test/unit/sonnet-55-policy.test.mjs \
             test/unit/auto-mode-reminder.test.mjs \
+            test/unit/auto-mode-api.test.mjs \
             test/unit/claude-auth-login.test.mjs \
             test/unit/crs-persona.test.mjs \
+            test/unit/anthropic-policy.test.mjs \
+            test/unit/cache-ttl.test.mjs \
+            test/unit/cache-prefix.test.mjs \
+            test/unit/persona-outbound-contract.test.mjs \
             test/unit/persona-settings-switch.test.mjs \
             test/unit/upstream-error-policy.test.mjs \
             test/unit/zero-retry-contract.test.mjs \
@@ -67,6 +72,8 @@ jobs:
             test/unit/billing-aggregation.test.mjs \
             test/unit/usage-logs-repo.test.mjs \
             test/unit/panel-billing-lookup.test.mjs \
+            test/unit/sqlite-pool.test.mjs \
+            test/unit/write-behind.test.mjs \
             test/unit/openai-auth-state.test.mjs \
             test/unit/openai-api-credits.test.mjs \
             test/unit/openai-api-manager.test.mjs \
@@ -103,8 +110,14 @@ jobs:
             test/unit/codex-slot.test.mjs \
             test/unit/codex-quota-stale.test.mjs \
             test/unit/usage-probe-monitor.test.mjs \
+            test/unit/crs-usage-probe.test.mjs \
+            test/unit/guest-oauth-transparent-egress.test.mjs \
+            test/unit/kvm-runtime.test.mjs \
             test/unit/panel-subscription.test.mjs \
             test/unit/jev-account-scope.test.mjs \
+            test/unit/jev-intercept.test.mjs \
+            test/unit/jev-usage.test.mjs \
+            test/unit/jev-usage-panel.test.mjs \
             test/unit/codex-slot-reload.test.mjs \
             test/unit/handle-codex.test.mjs \
             test/unit/handle-codex-search.test.mjs \
@@ -136,6 +149,7 @@ jobs:
           pnpm exec vitest run src/features/models/model-mapping.test.ts src/features/models/policy.test.ts
           pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx src/features/vm/openai-api-actions.test.tsx src/features/settings/openai-api-balance-section.test.tsx
           pnpm exec vitest run src/features/vm/openai-platform-browser-dialog.test.tsx
+          pnpm exec vitest run src/features/risk/jev-usage.test.tsx
           pnpm build
       - name: Platform configuration retry UI
         run: node scripts/smoke-platform-retry-ui.mjs

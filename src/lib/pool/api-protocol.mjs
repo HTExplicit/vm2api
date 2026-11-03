@@ -1,4 +1,6 @@
+import { OFFICIAL_CLAUDE_CLI_UA } from '../identity/vm-identity.mjs'
 import { officialMessagesBody } from '../protocol/anthropic-messages.mjs'
+import { restoreToolNamesInSSELine } from '../protocol/anthropic-policy.mjs'
 import { prepareClassifierBody } from '../protocol/request-purpose.mjs'
 import { consumeClaudeSSEData } from '../protocol/convert.mjs'
 import { isCompleteAssistantMessage, mapUpstreamError } from '../core/errors.mjs'
@@ -49,11 +51,12 @@ function joinHeaderMap(headers = {}) {
  * know yet.  Headers the operator configured on the endpoint win; anthropic-beta
  * is the union of endpoint and caller tokens so neither opt-in is dropped.
  */
-function forwardAnthropicProtocolHeaders(headers = {}, protocol = '', protocolKind = '') {
+function forwardAnthropicProtocolHeaders(headers = {}, protocol = '', protocolKind = '', { passthrough = false } = {}) {
   if (protocol !== 'anthropic.messages' || protocolKind !== 'anthropic') return {}
   const out = {}
   for (const [rawName, rawValue] of Object.entries(headers || {})) {
     const name = String(rawName || '').toLowerCase()
+    if (name === 'user-agent' && !passthrough) continue
     if (
       !name.startsWith('anthropic-') &&
       !name.startsWith('x-claude-code-') &&
@@ -246,6 +249,8 @@ export async function runApiInference({
   converters,
   requestContext = null,
   forwardImpl = forwardApi,
+  passthrough = false,
+  toolNames = {},
 } = {}) {
   const model = (nativeResponsesBody || convertedBody)?.model
   const scope = keyScopeFromRequest(req)
@@ -302,16 +307,25 @@ export async function runApiInference({
     }
   }
   if (requestContext) Object.assign(body, prepareClassifierBody(body))
-  const callerProtocolHeaders = forwardAnthropicProtocolHeaders(req?.headers, protocol, protocolKind)
+  const callerProtocolHeaders = forwardAnthropicProtocolHeaders(req?.headers, protocol, protocolKind, {
+    passthrough,
+  })
+  const authHeaders = upstreamAuthHeaders(protocolKind, picked.key.api_key, {
+    ...extraHeaders,
+    auth_scheme: picked.endpoint.auth_scheme || extraHeaders.auth_scheme || extraHeaders.anthropic_apikey_auth_scheme,
+  })
+  if (
+    protocolKind === 'anthropic' &&
+    !passthrough &&
+    !Object.keys(authHeaders).some((key) => key.toLowerCase() === 'user-agent')
+  ) {
+    authHeaders['user-agent'] = OFFICIAL_CLAUDE_CLI_UA
+  }
   const headers = mergeCallerProtocolHeaders(
     {
       'content-type': 'application/json',
       accept: 'text/event-stream',
-      ...upstreamAuthHeaders(protocolKind, picked.key.api_key, {
-        ...extraHeaders,
-        auth_scheme:
-          picked.endpoint.auth_scheme || extraHeaders.auth_scheme || extraHeaders.anthropic_apikey_auth_scheme,
-      }),
+      ...authHeaders,
     },
     callerProtocolHeaders,
     extraHeaders,
@@ -436,6 +450,7 @@ export async function runApiInference({
   const readUpstreamLines = async (onLine) => {
     try {
       await readLines(upstream, async (line, receivedAt) => {
+        line = restoreToolNamesInSSELine(line, toolNames)
         const event = consumeClaudeSSEData(line, classifierSseState)
         timing.observe(event, receivedAt)
         streamedUsage = mergeUsage(streamedUsage, event?.message?.usage || event?.usage)

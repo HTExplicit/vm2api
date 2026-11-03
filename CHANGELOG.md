@@ -2,6 +2,51 @@
 
 ## Unreleased
 
+## 1.4.3601 — 2026-11-03
+
+- 合入官方 1.4.033–1.4.036（5211032d），保留 1.4.3202–1.4.3206 的 Billing 会话、账号 key 配置与捕获、组织识别及金额显示修复。
+- Claude 入站按最终 036 统一标准化、客户端身份清洗、billing 与 UA 重写；仅官方家族识别且开启透传时保留原入站。移除未文档化的 strict-passthrough 请求头，保留 OpenAI API 独立目录和原生 Responses/Lite 工具路径。
+- 补齐被重写的官方请求中缺失的会话缓存 TTL，保留显式值和断点约束；非 zero persona 的 Environment 固定在首个 user 后，稳定缓存前缀。
+- 风险审计增加调用方 system/instructions/developer，排除官方模板、Environment 和工具结果；决策模型用量按当前配置 key 脱敏展示。既有开关不因升级开启。
+- 面板日志扫描使用只读 SQLite worker，请求日志和 attempt 记录在主连接分批写入、正常停机刷写；接受强制退出时未落盘尾部日志丢失，保留 fork 账单缓存。3 核容器默认使用两个读 worker。
+- 合入 weekly-only Claude 用量、Linux guest OAuth 透明出口及暂存文件清理；保留第三方计费拒绝不缓存提示词、不封设备和二开的实时启停、调度及代理恢复。
+
+使用正常面板升级，无新增数据库迁移、依赖或 payload 变更；无需额外 wrap-cli/sync，不覆盖 routing.json、vms/、data/ 或 .env。下方保留官方 033–036 原始记录，最终行为以 036 为准。
+
+## 1.4.036 — 2026-11-03
+
+- #850：官方 Claude Code 在「官方 Claude Code 家族透传」关闭时被重写后，入站不带 `ttl` 的缓存断点不再以隐式 5m 出站。渲染前按会话已解析的 TTL（协议页全局值或入站显式值）补齐，调用方显式 `5m` / `1h` 保留，补齐结果仍满足 1h 在 5m 前、最多四点。cli-hop、HTTP hop 与 API 直连一致；透传打开时不经过这一步。
+- 入站统一收成标准 Anthropic 结构再按槽位档重写，回到 1.4.00 的官方档标准（billing、身份、harness、guidance，调用方 system 接在后面）。官方家族识别本身不再跳过重写，只有协议页透传开关打开才保留官方家族入站 system、billing 与 UA；API 直连与 cli-hop / HTTP 走同一道门。修复 #843 → 1.4.033 → 1.4.034 来回改动后各路径判断不一致（cli-hop 已重写、前置层仍按“已识别即保留”处理，Claude Code 的无 TTL 断点被当成 5m 写入，会话超过 5 分钟即整段重写缓存）。
+- 移除未文档化的 `x-kin-strict-passthrough` 请求头：调用方不能再用它跳过入站剥离与客户端指纹清洗。
+- 修复 native cli-hop 最终请求未读取 `kernel.json.default_cache_ttl` 的回归：Web 设置的 `5m` / `1h` 现在传到 CLI 自有 system/tools 缓存断点；调用方保留的 message 断点不被覆盖。
+- #863 / #864：风险审计的决策模型用量按当前配置的每把 JEV key 列出请求数、成功数、估算消耗和最近状态（正常、余额不足、鉴权失败、限流、请求错误、已暂停、未请求）。key 只显示前 4 位和后 4 位，不回传完整 key 或地址。
+
+已部署机升级：更新 Node 控制面与 `web/dist` 后重启。不必 `wrap-cli/sync`，不必换 payload。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.4.035 — 2026-11-03
+
+- 清理：删除零引用导出 `rewriteTelemetryBody`、`persistVmFingerprint`（REQ-CLEANUP-01 D-08），无行为变化。
+- #847：官方用量只返回 weekly 窗口时不再当成残缺结果丢掉。缺 5 小时窗口保持未知；窗口给了但读不出来仍算无效。
+- #848：修复 Docker/KVM guest OAuth 换票把控制面的宿主 loopback SOCKS 地址传给 `kin-oauth-auth`，导致容器内连接 `127.0.0.1` 被拒；Linux guest 改由槽位 `kin-eg-*` 透明出口选路，macOS native 路径不变。
+- #854：persona 重渲染注入的 `# Environment` role=system 消息改为锚定在首个 user 之后（原为最后一个 user 之后）。客户端下一轮不会回传该临时块，旧位置的 content block 数量变化会让 cache prefix 在历史中段断开、整段重写 cache；位置固定后前缀稳定。zero 模板保持原有尾部位置。
+- #861：面板 `usage_logs` 大查询改到只读 worker，失败时回退同步读。请求 finish 和 hop 尝试先入队，再在同一条写连接上分批提交，避免另开写连接撞上 `SQLITE_BUSY`。
+
+已部署机升级：只更新 Node 控制面后重启。不必 `wrap-cli/sync`，不必换 payload。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.4.034 — 2026-11-02
+
+- #859：透传关闭时，任何入站都先收成标准 Anthropic 结构再进人设：调用方 billing 删掉并由项目重写；调用方 User-Agent 不出站。只有协议页打开官方家族透传才保留这两者。第三方工具名改为 `mcp__`，回包按原名还原。
+- #836：`ensureSlotGuestBinDir` 原子替换失败时清理 `${dest}.${pid}.tmp` 暂存文件，避免 `data/run/slot-guest-bin` 下残留堆积。
+
+已部署机升级：只更新 Node 控制面后重启。不必 `wrap-cli/sync`，不必换 payload。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.4.033 — 2026-11-02
+
+- #850：回滚 #843 对已识别官方 Claude Code 的 cli-hop 强制 persona。识别命中且未开「官方 Claude Code 家族透传」时，cli-hop 保留入站 system 和缓存断点，不再把无 TTL 的调用方断点留给上游当成隐式 5m。`forceConfigured` 仍可改写。API 直连在开关关闭时仍按原分支清洗。
+- 风险审计送审调用方提示词（system / instructions / developer）。「官方提示词」和「官方完整提示词」正文在白名单内，不送审；夹在官方正文后的调用方文字仍送审。工具结果和 Environment 不送审。
+
+已部署机升级：只更新 Node 控制面后重启。不必 `wrap-cli/sync`，不必换 payload。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
 ## 1.4.3206 — 2026-11-01
 
 - 点数余额和 API 金额统一最多显示两位小数，直接截断、不进位，继续去掉末尾零并将截断后的负零显示为 0。
