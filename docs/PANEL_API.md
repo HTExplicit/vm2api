@@ -92,7 +92,8 @@
 | POST | `/wrap-cli/sync` | `{ ids?, restart? }` 铺到槽 `.kin`（cli-node ELF + **最新** kernel.bin + 包装器）。kernel 优先仓内二进制，不被旧母样本盖回。`restart` 默认 true：有 kernel 字节变化时复制并 rust 槽 bounce kernel。**`restart: false`** 只读对比仓内 kernel 与各槽 `.kin`（含待重启标记），**不** hold 调度、**不**复制、**不**重启；用于升级前判断是否需要动槽 |
 | POST | `/vms/:id/wrap-cli/promote` | 从该槽晋升 wrap 文件，不复制凭证/SOCKS。下次 sync 仍优先仓内最新 kernel |
 | POST | `/vms/:id/wrap-cli/repair` | 单槽重装 kernel。`{ wrap, kernel }`；wrap 成功时 HTTP 200 |
-| POST | `/vms/:id/start` · `/stop` | 容器生命周期。运行中容器除非显式 recreate，禁止 `docker rm -f` |
+| POST | `/vms/:id/start` · `/stop` | 容器生命周期。`start` 可传 `{ ensure_kernel: true }`，仅本次 GPT 开机确保内核就绪，默认 `false`；不改全局按需启动设置。运行中容器除非显式 recreate，禁止 `docker rm -f` |
+| GET | `/vms/:id/health` | 仅检查内核，返回 `{ id, kernel: { go_health, rust_health, codex_health } }`，不发模型请求；核验实际槽位还须结合实时记录、`kin.vm.id` 容器标签及真实内核 |
 | POST | `/vms/:id/activate` | 写入 `vms/active.json` 与 DB `active_vm`；列表/详情 `vm.active === true` 表示当前指针。管理台表格、机架、详情与行菜单可切换 |
 | POST | `/vms/:id/reset` | 销毁容器与家目录，再按原槽位重建（保留 ID/代理/种子；凭证清空） |
 | POST | `/vms/:id/reset-fingerprint` | |
@@ -545,7 +546,7 @@ sessionKey / 授权码导入必须走该槽 SOCKS5。
 
 基址 `/vms/:id`。POST `/browser/open` 接收 `{ purpose: "oauth" | "platform" }`，立即返回公开状态并在后台排队、启动；GET `/browser` 读取当前 `active/status/purpose/message`。POST `/browser-ticket` 返回 `{ ticket, url }`，30 秒单次票据可在排队时连接 WebSocket `/browser?ticket=…`。POST `/browser/close` 取消该槽登录及配置任务，保存会话并释放浏览器。`/openai-api/browser-ticket` 与 WebSocket `/openai-api/browser` 保留兼容。
 
-一个槽位固定一套首次随机生成的 Camoufox 身份，OAuth 与 Platform 共用加密网页会话，所有网页及换票请求使用当前绑定代理；改绑后须重新打开。同账号 OAuth 回调自动换票、保存并推送 `oauth_complete`，窗口保留，可继续进入 Platform；API 配置完成为 `api_ready`，`ready` 仅表示浏览器已就绪。未关联赠额的账号打开 Platform 只导航，不自动领取。
+一个槽位固定一套首次随机生成的 Camoufox 身份，OAuth 与 Platform 共用加密网页会话，所有网页及换票请求使用当前绑定代理；改绑后须重新打开。同账号 OAuth 回调自动换票、保存并推送 `oauth_complete`，仅表示凭据已保存。登录窗口保留，点击“开机并完成”依次调用 `POST /vms/:id/start`、`{ ensure_kernel: true }`，`GET /vms/:id/health` 核验目标 GPT 内核，再调用 `POST /vms/:id/schedulable`、`{ schedulable: true }` 开启调度；全部成功后点击“完成”才结束向导，也可继续进入 Platform。失败保留凭据并允许重试，直接关闭不报告向导完成。API 配置完成为 `api_ready`，`ready` 仅表示浏览器已就绪。未关联赠额的账号打开 Platform 只导航，不自动领取。
 
 账号邮箱确认后，组织可由官方请求或 General 页唯一只读 `Organization ID` 字段核对；字段必须属于已观测的当前账号组织列表。身份先返回时，组织选择最多等待 10 秒供页面及网络信息就绪，取消或关窗立即退出，不从用户菜单名称推断组织。
 

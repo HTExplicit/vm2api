@@ -236,20 +236,21 @@ export class CodexBrowserLoginService {
         job.completed.resolve(result)
         return
       }
-      let message = 'OpenAI 授权成功，凭据已保存。可继续进入 Platform，或关闭浏览器。'
+      let message = 'OpenAI 授权成功，凭据已保存。请点击“开机并完成”启动此槽并开启调度。'
       try {
         this.browserManager.assertCurrent(job.live)
         job.live.persistable = true
         await this.browserManager.bindAccount(job.live, identity.chatgpt_account_id)
         await this.browserManager.persist(job.live)
       } catch {
-        message = 'OpenAI 凭据已保存；网页会话保存失败，需要时可重新登录 Platform。'
+        message =
+          'OpenAI 凭据已保存；网页会话保存失败，需要时可重新登录 Platform。请点击“开机并完成”启动此槽并开启调度。'
       }
       await route
         .fulfill({
           status: 200,
           contentType: 'text/html; charset=utf-8',
-          body: '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>OpenAI 授权成功</title><body><h1>OpenAI 授权成功</h1><p>凭据已保存，可以在面板继续进入 Platform 或关闭浏览器。</p></body></html>',
+          body: '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>OpenAI 授权成功</title><body><h1>OpenAI 授权成功</h1><p>凭据已保存。请返回面板点击“开机并完成”，启动此槽并开启调度。</p></body></html>',
         })
         .catch(() => {})
       if (!job.live.closeSignal?.aborted) {

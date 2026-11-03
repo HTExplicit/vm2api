@@ -377,6 +377,7 @@ export async function powerOnSlot({
   proxyPool,
   routing = {},
   fillTimezone = null,
+  ensureKernel = false,
   ops = {},
   by = null,
 }) {
@@ -395,7 +396,7 @@ export async function powerOnSlot({
   await (fillTimezone || ((vmId) => fillVmTimezoneFromExit(projectRoot, proxyPool, vmId)))(id)
   vm = getVm(projectRoot, id) || vm
   const runtimeBeforeBoot = structuredClone(vm.runtime || {})
-  const boot = await (ops.startSlotReady || startSlotReady)(vm, projectRoot, { routing })
+  const boot = await (ops.startSlotReady || startSlotReady)(vm, projectRoot, { routing, ensureKernel })
   if (!boot.ok) {
     return {
       ok: false,

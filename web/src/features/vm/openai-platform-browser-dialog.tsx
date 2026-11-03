@@ -21,6 +21,11 @@ import {
   type DisplayedBrowserFrame,
 } from '@/features/vm/browser-frames'
 import { browserInputPoint } from '@/features/vm/browser-input'
+import {
+  CodexBrowserFinishError,
+  finishCodexBrowserLogin,
+  type FinishRetry,
+} from '@/features/vm/codex-browser-finish'
 import type { CommitResult } from '@/features/vm/credential-panel'
 
 type BrowserPurpose = 'oauth' | 'platform'
@@ -39,7 +44,21 @@ type SlotBrowserDialogProps = {
   purpose: BrowserPurpose
   open: boolean
   onOpenChange: (open: boolean) => void
+  onCredentialsSaved?: (result?: CommitResult) => void
   onComplete?: (result?: CommitResult) => void
+}
+
+type OauthFinish = {
+  saved: boolean
+  phase: 'idle' | 'starting' | 'checking' | 'scheduling' | 'failed' | 'ready'
+  retry: FinishRetry
+  result?: CommitResult
+  warning: string
+  error: string
+}
+
+function emptyOauthFinish(): OauthFinish {
+  return { saved: false, phase: 'idle', retry: 'start', warning: '', error: '' }
 }
 
 export function OpenaiPlatformBrowserDialog(
@@ -54,6 +73,7 @@ export function SlotBrowserDialog({
   purpose,
   open,
   onOpenChange,
+  onCredentialsSaved,
   onComplete,
 }: SlotBrowserDialogProps) {
   const socket = useRef<WebSocket | null>(null)
@@ -67,8 +87,8 @@ export function SlotBrowserDialog({
   const lastMoveAt = useRef(0)
   const inputSeq = useRef(0)
   const retrying = useRef(false)
-  const callbacks = useRef({ onOpenChange, onComplete })
-  callbacks.current = { onOpenChange, onComplete }
+  const callbacks = useRef({ onOpenChange, onCredentialsSaved, onComplete })
+  callbacks.current = { onOpenChange, onCredentialsSaved, onComplete }
   const lifecycle = useRef({ vmId: '', epoch: 0 })
   const opened = useRef('')
   const opening = useRef<{ vmId: string; promise: Promise<unknown> } | null>(
@@ -78,6 +98,10 @@ export function SlotBrowserDialog({
   const resultReported = useRef(false)
   const qualityRef = useRef<BrowserQuality>('smooth')
   const purposeRef = useRef(purpose)
+  const finishing = useRef(false)
+  const finishReported = useRef(false)
+  const finishRef = useRef<OauthFinish>(emptyOauthFinish())
+  const [finish, setFinish] = useState<OauthFinish>(emptyOauthFinish)
   const [frame, setFrame] = useState<DisplayedBrowserFrame | null>(null)
   const [currentPurpose, setCurrentPurpose] = useState(purpose)
   const [message, setMessage] = useState('正在连接槽位浏览器…')
@@ -88,6 +112,37 @@ export function SlotBrowserDialog({
   const [originalSize, setOriginalSize] = useState(false)
   const [quality, setQuality] = useState<BrowserQuality>('smooth')
   const [switching, setSwitching] = useState(false)
+  const updateFinish = (next: OauthFinish) => {
+    finishRef.current = next
+    setFinish(next)
+  }
+  const finishBusy = ['starting', 'checking', 'scheduling'].includes(
+    finish.phase
+  )
+  const oauthMessage =
+    finish.phase === 'ready'
+      ? '已开机，内核已就绪，调度已开启。点击“完成”结束登录。'
+      : finish.phase === 'starting'
+        ? '正在开机并启动内核…'
+        : finish.phase === 'checking'
+          ? '正在确认目标槽位的内核状态…'
+          : finish.phase === 'scheduling'
+            ? '内核已就绪，正在开启调度…'
+            : '登录凭据已保存。点击“开机并完成”启动槽位并开启调度。'
+  const finishActionLabel =
+    finish.phase === 'starting'
+      ? '正在开机…'
+      : finish.phase === 'checking'
+        ? '正在检查…'
+        : finish.phase === 'scheduling'
+          ? '正在开启调度…'
+          : finish.phase === 'failed'
+            ? finish.retry === 'schedule'
+              ? '重试开启调度'
+              : finish.retry === 'verify'
+                ? '重新检查并完成'
+                : '重试开机并完成'
+            : '开机并完成'
   const base = `/api/panel/vms/${encodeURIComponent(vmId)}/browser`
   const platformBusy =
     switching ||
@@ -136,6 +191,9 @@ export function SlotBrowserDialog({
     const epoch = lifecycle.current.epoch + 1
     lifecycle.current = { vmId: open ? vmId : '', epoch }
     retrying.current = false
+    finishing.current = false
+    finishReported.current = false
+    updateFinish(emptyOauthFinish())
     setSwitching(false)
     if (!open) {
       opened.current = ''
@@ -143,6 +201,8 @@ export function SlotBrowserDialog({
       return
     }
     return () => {
+      if (lifecycle.current.vmId === vmId && lifecycle.current.epoch === epoch)
+        lifecycle.current = { vmId: '', epoch: epoch + 1 }
       // Reconnecting the transport keeps the browser alive. Closing the dialog
       // or leaving this slot releases it, including during an in-flight start.
       const starting =
@@ -255,10 +315,20 @@ export function SlotBrowserDialog({
           if (payload.status === 'error')
             setError(payload.message || '浏览器任务失败，请重新连接。')
           else setError('')
-          if (
-            payload.status === 'oauth_complete' ||
-            payload.status === 'api_ready'
-          ) {
+          if (purpose === 'oauth' && payload.status === 'oauth_complete') {
+            const previous = finishRef.current
+            updateFinish({
+              ...previous,
+              saved: true,
+              result: payload.result || previous.result,
+              warning: payload.message?.includes('会话保存失败')
+                ? payload.message
+                : previous.warning,
+            })
+            if (!previous.saved) {
+              callbacks.current.onCredentialsSaved?.(payload.result)
+            }
+          } else if (purpose === 'platform' && payload.status === 'api_ready') {
             if (!completed.current.has(payload.status)) {
               completed.current.add(payload.status)
               callbacks.current.onComplete?.(payload.result)
@@ -295,6 +365,51 @@ export function SlotBrowserDialog({
         JSON.stringify({ ...payload, seq: ++inputSeq.current })
       )
     }
+  }
+
+  const startAndFinish = async () => {
+    if (finishing.current || !finishRef.current.saved) return
+    finishing.current = true
+    const epoch = lifecycle.current.epoch
+    const isCurrent = () =>
+      lifecycle.current.epoch === epoch && lifecycle.current.vmId === vmId
+    setError('')
+    updateFinish({ ...finishRef.current, error: '' })
+    try {
+      await finishCodexBrowserLogin(vmId, {
+        retry: finishRef.current.retry,
+        isCurrent,
+        onProgress: (phase) => {
+          if (isCurrent()) updateFinish({ ...finishRef.current, phase })
+        },
+      })
+      if (isCurrent())
+        updateFinish({ ...finishRef.current, phase: 'ready', error: '' })
+    } catch (reason) {
+      if (isCurrent())
+        updateFinish({
+          ...finishRef.current,
+          phase: 'failed',
+          retry:
+            reason instanceof CodexBrowserFinishError ? reason.retry : 'verify',
+          error: (reason as Error).message,
+        })
+    } finally {
+      if (isCurrent()) finishing.current = false
+    }
+  }
+
+  const completeOauth = () => {
+    if (finishRef.current.phase !== 'ready' || finishReported.current) return
+    finishReported.current = true
+    callbacks.current.onComplete?.(finishRef.current.result)
+    callbacks.current.onOpenChange(false)
+  }
+
+  const changeOpen = (nextOpen: boolean) => {
+    if (!nextOpen)
+      lifecycle.current = { vmId: '', epoch: lifecycle.current.epoch + 1 }
+    callbacks.current.onOpenChange(nextOpen)
   }
 
   const retryPlatformSetup = async () => {
@@ -351,7 +466,7 @@ export function SlotBrowserDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent className='flex max-h-[94vh] flex-col gap-3 p-4 sm:max-w-6xl'>
         <DialogHeader className='pe-6'>
           <DialogTitle className='flex items-center gap-2 text-base'>
@@ -365,11 +480,16 @@ export function SlotBrowserDialog({
           </DialogDescription>
         </DialogHeader>
         <p className='m-0 text-xs text-muted-foreground' role='status'>
-          {message}
+          {purpose === 'oauth' && finish.saved && currentPurpose === 'oauth'
+            ? oauthMessage
+            : message}
         </p>
-        {error ? (
+        {purpose === 'oauth' && finish.warning ? (
+          <p className='m-0 text-xs text-muted-foreground'>{finish.warning}</p>
+        ) : null}
+        {finish.error || error ? (
           <p role='alert' className='m-0 text-sm text-destructive'>
-            {error}
+            {finish.error || error}
           </p>
         ) : null}
         <div
@@ -544,52 +664,75 @@ export function SlotBrowserDialog({
               </>
             ) : null}
           </div>
-          {currentPurpose === 'oauth' ? (
-            status === 'oauth_complete' ? (
+          <div className='flex flex-wrap items-center gap-2'>
+            {currentPurpose === 'oauth' ? (
+              purpose === 'oauth' && finish.phase === 'ready' ? (
+                <Button
+                  size='sm'
+                  variant='outline'
+                  disabled={!connected || switching}
+                  loading={switching}
+                  onClick={async () => {
+                    const epoch = lifecycle.current.epoch
+                    setSwitching(true)
+                    setError('')
+                    try {
+                      await api(`${base}/open`, {
+                        method: 'POST',
+                        body: JSON.stringify({ purpose: 'platform' }),
+                      })
+                      if (lifecycle.current.epoch !== epoch) return
+                      purposeRef.current = 'platform'
+                      setCurrentPurpose('platform')
+                      setStatus('opening')
+                      setMessage('正在打开 OpenAI Platform…')
+                    } catch (reason) {
+                      if (lifecycle.current.epoch === epoch)
+                        setError((reason as Error).message)
+                    } finally {
+                      if (lifecycle.current.epoch === epoch) setSwitching(false)
+                    }
+                  }}
+                >
+                  继续进入 Platform
+                </Button>
+              ) : !finish.saved ? (
+                <p className='m-0 text-xs text-muted-foreground'>
+                  授权成功后自动保存凭据，再开机完成配置
+                </p>
+              ) : null
+            ) : (
               <Button
                 size='sm'
-                disabled={!connected || switching}
-                loading={switching}
-                onClick={async () => {
-                  setSwitching(true)
-                  setError('')
-                  try {
-                    await api(`${base}/open`, {
-                      method: 'POST',
-                      body: JSON.stringify({ purpose: 'platform' }),
-                    })
-                    purposeRef.current = 'platform'
-                    setCurrentPurpose('platform')
-                    setStatus('opening')
-                    setMessage('正在打开 OpenAI Platform…')
-                  } catch (reason) {
-                    setError((reason as Error).message)
-                  } finally {
-                    setSwitching(false)
-                  }
+                aria-label={platformActionLabel}
+                disabled={!connected || platformBusy || status === 'api_ready'}
+                loading={platformBusy}
+                onClick={() => {
+                  if (status === 'error') void retryPlatformSetup()
+                  else send({ type: 'continue' })
                 }}
               >
-                继续进入 Platform
+                {platformActionLabel}
               </Button>
-            ) : (
-              <p className='m-0 text-xs text-muted-foreground'>
-                授权成功后自动保存凭据
-              </p>
-            )
-          ) : (
-            <Button
-              size='sm'
-              aria-label={platformActionLabel}
-              disabled={!connected || platformBusy || status === 'api_ready'}
-              loading={platformBusy}
-              onClick={() => {
-                if (status === 'error') void retryPlatformSetup()
-                else send({ type: 'continue' })
-              }}
-            >
-              {platformActionLabel}
-            </Button>
-          )}
+            )}
+            {purpose === 'oauth' && finish.saved ? (
+              finish.phase === 'ready' ? (
+                <Button size='sm' aria-label='完成' onClick={completeOauth}>
+                  完成
+                </Button>
+              ) : (
+                <Button
+                  size='sm'
+                  aria-label={finishActionLabel}
+                  disabled={finishBusy}
+                  loading={finishBusy}
+                  onClick={() => void startAndFinish()}
+                >
+                  {finishActionLabel}
+                </Button>
+              )
+            ) : null}
+          </div>
         </div>
       </DialogContent>
     </Dialog>
