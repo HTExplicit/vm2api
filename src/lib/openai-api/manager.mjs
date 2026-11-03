@@ -4,14 +4,13 @@ import { SlotBrowserRepo } from '../db/repos/slot-browser-repo.mjs'
 import { withTransaction } from '../db/database.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
 import { hasBoundExit } from '../vm/egress.mjs'
-import { fetchUpstreamModels } from '../admin/api-endpoints.mjs'
 import { createPlatformBrowserSession } from './platform-browser.mjs'
 import { PlatformAdapter } from './platform-adapter.mjs'
 import { fetchBillingBalance } from './billing-client.mjs'
 import { balanceRefreshIntervalMinutes } from './config.mjs'
+import { accountApiKeyState, QUOTA_BLOCK } from './key-state.mjs'
 
 const IDLE_TIMEOUT = 15 * 60_000
-const QUOTA_BLOCK = '9999-12-31T23:59:59.999Z'
 
 function problem(code, message, status = 400) {
   return Object.assign(new Error(message), { code, status })
@@ -42,7 +41,6 @@ export class OpenaiApiManager {
     createSession = createPlatformBrowserSession,
     browserManager,
     Adapter = PlatformAdapter,
-    fetchModels = fetchUpstreamModels,
     fetchBalance = fetchBillingBalance,
     getRouting = () => cfg?.routing || {},
     now = Date.now,
@@ -55,7 +53,6 @@ export class OpenaiApiManager {
       apiScheduler,
       createSession,
       Adapter,
-      fetchModels,
       fetchBalance,
       getRouting,
       now,
@@ -82,29 +79,49 @@ export class OpenaiApiManager {
 
   view(vm) {
     const view = this.credits.view(vm)
-    let quotaBlocked = false
-    if (view?.has_key) {
-      const { record } = this.credits.accountForVm(vm.id)
-      quotaBlocked = this.repo.getKey(record?.key_id)?.cooldown_until === QUOTA_BLOCK
+    if (!view) return null
+    let context
+    try {
+      context = this.credits.accountForVm(vm.id)
+    } catch {}
+    const record = context?.record
+    const key = this.repo.getKey(record?.key_id)
+    const endpoint = key ? this.apiEndpointStore.getRaw(key.endpoint_id) : null
+    const state = accountApiKeyState({ vm, accountId: context?.accountId, record, key, endpoint, now: this.now() })
+    return {
+      ...view,
+      vm_id: vm.id,
+      account_id: context?.accountId || null,
+      email: context?.account?.email || '',
+      key_id: view.has_key ? key?.id : null,
+      endpoint_id: view.has_key ? key?.endpoint_id : null,
+      project_id: record?.organization_id ? this.repo.getOrg(record.organization_id)?.project_id || null : null,
+      call_status: state.status,
+      call_reason: state.reason,
+      call_error: record?.call_error || null,
+      cooldown_until: key?.cooldown_until || null,
+      browser_active: !!this.browserManager.state(vm.id).active,
+      balance_refresh_interval_minutes: balanceRefreshIntervalMinutes(this.getRouting()),
+      quota_blocked: key?.cooldown_until === QUOTA_BLOCK,
     }
-    return view
-      ? {
-          ...view,
-          browser_active: !!this.browserManager.state(vm.id).active,
-          balance_refresh_interval_minutes: balanceRefreshIntervalMinutes(this.getRouting()),
-          quota_blocked: quotaBlocked,
-        }
-      : null
   }
 
-  resume(vmId) {
-    const { vm, accountId, record } = this.credits.accountForVm(vmId)
+  assertAccountIdentity(vmId, expectedAccountId) {
+    const context = this.credits.accountForVm(vmId)
+    if (expectedAccountId != null && expectedAccountId !== context.accountId)
+      throw problem('api_account_changed', '槽位账号已更换，请刷新后重试', 409)
+    return context
+  }
+
+  resume(vmId, { account_id } = {}) {
+    const { vm, accountId, record } = this.assertAccountIdentity(vmId, account_id)
     const key = this.repo.getKey(record?.key_id)
     if (!key || key.source_vm_id !== vmId || key.source_account_id !== accountId)
       throw problem('api_key_required', '账号尚未配置对应的 API key', 409)
     if (key.cooldown_until === QUOTA_BLOCK) {
       this.apiEndpointStore.setKeyCooldown(key.id, null)
-      this.repo.upsertAccount(accountId, { last_error: null })
+      if (['credit_balance_exhausted', 'insufficient_quota'].includes(record.call_error?.code))
+        this.repo.upsertAccount(accountId, { call_error: null })
       this.reload()
     }
     return this.view(vm)
@@ -113,25 +130,136 @@ export class OpenaiApiManager {
   resolveAccountKey(key) {
     try {
       const { vm, account, accountId, record } = this.credits.accountForVm(key.source_vm_id)
-      if (accountId !== key.source_account_id || record?.key_id !== key.id || !hasBoundExit(vm.proxy)) return null
+      const storedKey = this.repo.getKey(record?.key_id)
+      if (!storedKey || storedKey.id !== key.id) return null
+      const endpoint = this.apiEndpointStore.getRaw(storedKey.endpoint_id)
+      const state = accountApiKeyState({ vm, accountId, record, key: storedKey, endpoint, now: this.now() })
+      if (state.status === 'binding_error' || state.status === 'proxy_missing') return null
       const proxyUrl = hostProxyUrlForVm(vm)
-      return { accountId, enabled: !!record.enabled, proxyUrl, email: account.email || '' }
+      return {
+        accountId,
+        enabled: state.status === 'ready',
+        proxyUrl,
+        email: account.email || '',
+        call_status: state.status,
+        key: storedKey,
+      }
     } catch {
       return null
     }
   }
 
-  setEnabled(vmId, enabled) {
-    const { vm, accountId, record } = this.credits.accountForVm(vmId)
-    if (!record?.key_id) throw problem('api_key_required', '请先完成 API 配置')
+  setEnabled(vmId, enabled, { account_id } = {}) {
+    const { vm, accountId } = this.boundKey(vmId, account_id)
     this.repo.upsertAccount(accountId, { enabled: !!enabled })
     this.reload()
     return this.view(vm)
   }
 
   recordKeyError(key, error) {
-    const source = this.resolveAccountKey(key)
-    if (source) this.repo.upsertAccount(source.accountId, { last_error: safeMessage(error) })
+    let context
+    try {
+      context = this.credits.accountForVm(key.source_vm_id)
+    } catch {
+      return
+    }
+    if (context.accountId !== key.source_account_id || context.record?.key_id !== key.id) return
+    if (this.repo.getKey(key.id)?.api_key !== key.api_key) return
+    this.repo.upsertAccount(context.accountId, {
+      call_error: {
+        code: error.code || 'api_error',
+        message: safeMessage(error),
+        at: new Date(this.now()).toISOString(),
+      },
+    })
+  }
+
+  boundKey(vmId, accountId) {
+    const context = this.assertAccountIdentity(vmId, accountId)
+    const key = this.repo.getKey(context.record?.key_id)
+    if (!key || key.source_vm_id !== vmId || key.source_account_id !== context.accountId)
+      throw problem('api_key_required', '账号尚未配置对应的 API key', 409)
+    return { ...context, key }
+  }
+
+  revealKey(vmId, { account_id } = {}) {
+    const { key } = this.boundKey(vmId, account_id)
+    return { api_key: key.api_key }
+  }
+
+  bindKey(vmId, { account_id, api_key } = {}) {
+    const context = this.assertAccountIdentity(vmId, account_id)
+    if (!['claimed', 'pending'].includes(context.record?.claim_status))
+      throw problem('api_promo_link_required', '请先查询并领取 API 赠额')
+    if (this.jobs.has(vmId)) throw problem('api_task_busy', '账号正在执行 API 配置或余额任务，请完成后重试', 409)
+    const secret = String(api_key || '').trim()
+    if (secret.length < 4) throw problem('invalid_api_key', '请输入完整的官方 API key')
+    const organizationId = context.record.organization_id
+    if (!organizationId) throw problem('api_org_required', '账号尚未关联接收赠额的 API 组织', 409)
+    this.saveBoundKey(context, { apiKey: secret, organizationId }, { replace: true })
+    this.reload()
+    return this.view(context.vm)
+  }
+
+  async removeKey(vmId, { account_id } = {}) {
+    const context = this.assertAccountIdentity(vmId, account_id)
+    if (this.jobs.has(vmId)) await this.cancel(vmId)
+    const current = this.assertAccountIdentity(vmId, context.accountId)
+    const key = this.repo.getKey(current.record?.key_id)
+    if (key && (key.source_vm_id !== vmId || key.source_account_id !== context.accountId))
+      throw problem('api_key_account_mismatch', '已保存的 API key 与当前账号不匹配', 409)
+    this.repo.detachKey(context.accountId, current.record?.key_id)
+    this.reload()
+    return this.view(current.vm)
+  }
+
+  saveBoundKey(context, created, { replace = false, assertCurrent = () => {} } = {}) {
+    return withTransaction(this.repo.db, () => {
+      assertCurrent()
+      const currentContext = this.assertAccountIdentity(context.vm.id, context.accountId)
+      const current = currentContext.record
+      if (current?.organization_id && current.organization_id !== created.organizationId)
+        throw problem('platform_key_save_conflict', '账号的 API 组织已改变，请核对当前配置', 409)
+      const sourceKeys = this.repo.db
+        .prepare('SELECT id FROM api_endpoint_keys WHERE source_vm_id = ? AND source_account_id = ?')
+        .all(context.vm.id, context.accountId)
+        .map((row) => this.repo.getKey(row.id))
+      const referenced = this.repo.getKey(current?.key_id)
+      if (
+        sourceKeys.length > 1 ||
+        (referenced &&
+          (referenced.source_vm_id !== context.vm.id || referenced.source_account_id !== context.accountId))
+      )
+        throw problem('platform_key_save_conflict', '账号 API key 关联不一致，请核对当前配置', 409)
+      let key = referenced || sourceKeys[0]
+      const existing = !!key
+      const changed = existing && key.api_key !== created.apiKey
+      if (changed && !replace)
+        throw problem('platform_key_save_conflict', '账号已保存其他 API key，请核对当前配置，不会覆盖已有密钥', 409)
+      if (!key) {
+        const endpoint = this.apiEndpointStore.create({ kind: 'openai', name: `OpenAI API · ${context.account.email}` })
+        key = this.apiEndpointStore.addKey(endpoint.id, {
+          api_key: created.apiKey,
+          source_vm_id: context.vm.id,
+          source_account_id: context.accountId,
+        })
+      } else if (changed) {
+        this.apiEndpointStore.updateKey(key.id, { api_key: created.apiKey, disabled: false, cooldown_until: null })
+      }
+      if (created.organizationName || created.projectId)
+        this.repo.upsertOrg(created.organizationId, {
+          ...(created.organizationName ? { display_name: created.organizationName } : {}),
+          ...(created.projectId ? { project_id: created.projectId } : {}),
+        })
+      this.repo.upsertAccount(context.accountId, {
+        vm_id: context.vm.id,
+        organization_id: created.organizationId,
+        key_id: key.id,
+        enabled: current?.key_id === key.id ? !!current.enabled : true,
+        ...(!existing || changed ? { setup_status: 'ready', last_error: null, call_error: null } : {}),
+      })
+      return this.repo.getKey(key.id)
+    })
   }
 
   setup(vmId) {
@@ -436,47 +564,16 @@ export class OpenaiApiManager {
           throw problem('platform_key_save_conflict', '新 key 的组织与当前配置不一致，请核对当前账号配置', 409)
         const organizationName =
           created.organizationName || identity.organizations?.find((x) => x.id === organizationId)?.name || 'OpenAI'
-        withTransaction(this.repo.db, () => {
-          assertSetupCurrent()
-          const current = this.repo.getAccount(job.accountId)
-          if (current.organization_id && current.organization_id !== organizationId)
-            throw problem('platform_key_save_conflict', '账号的 API 组织已改变，请核对当前配置', 409)
-          const keyIds = current.key_id
-            ? [current.key_id]
-            : this.repo.db
-                .prepare('SELECT id FROM api_endpoint_keys WHERE source_vm_id = ? AND source_account_id = ?')
-                .all(job.vmId, job.accountId)
-                .map((row) => row.id)
-          const keys = keyIds.map((id) => this.repo.getKey(id))
-          if (
-            keys.length > 1 ||
-            keys.some(
-              (key) =>
-                !key ||
-                key.source_vm_id !== job.vmId ||
-                key.source_account_id !== job.accountId ||
-                key.api_key !== created.apiKey,
-            )
-          )
-            throw problem('platform_key_save_conflict', '账号已保存其他 API key，请核对当前配置，不会覆盖已有密钥', 409)
-          let key = keys[0]
-          if (!key) {
-            const endpoint = this.apiEndpointStore.create({
-              kind: 'openai',
-              name: `OpenAI API · ${context.account.email}`,
-            })
-            key = this.apiEndpointStore.addKey(endpoint.id, {
-              api_key: created.apiKey,
-              source_vm_id: job.vmId,
-              source_account_id: job.accountId,
-            })
-          }
-          this.repo.upsertOrg(organizationId, {
-            display_name: organizationName,
-            project_id: created.projectId,
-          })
-          this.repo.upsertAccount(job.accountId, { organization_id: organizationId, key_id: key.id, enabled: true })
-        })
+        this.saveBoundKey(
+          context,
+          {
+            apiKey: created.apiKey,
+            organizationId,
+            organizationName,
+            projectId: created.projectId,
+          },
+          { assertCurrent: assertSetupCurrent },
+        )
         this.reload()
       }
       const previousCheckLogin = live.checkLogin
@@ -521,19 +618,6 @@ export class OpenaiApiManager {
       this.assertCurrent(job)
       if (job.kind === 'balance' || error.code === 'platform_login_required') throw error
       this.repo.upsertOrg(organizationId, { balance_error: safeMessage(error) })
-    }
-    const endpoint = this.apiEndpointStore.getRaw(this.repo.getKey(record.key_id).endpoint_id)
-    if (endpoint && (!endpoint.models?.length || job.kind === 'setup')) {
-      const current = this.assertCurrent(job)
-      const key = this.repo.getKey(record.key_id)
-      const fetched = await this.fetchModels({
-        cfg: this.cfg,
-        kind: 'openai',
-        api_key: key.api_key,
-        proxy_url: hostProxyUrlForVm(current.vm),
-      })
-      this.assertCurrent(job)
-      this.apiEndpointStore.mergeFetchedModels(endpoint.id, fetched.models)
     }
     this.assertCurrent(job)
     this.repo.upsertAccount(job.accountId, { setup_status: 'ready', last_error: null })

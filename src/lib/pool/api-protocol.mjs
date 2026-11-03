@@ -3,7 +3,7 @@ import { officialMessagesBody } from '../protocol/anthropic-messages.mjs'
 import { restoreToolNamesInSSELine } from '../protocol/anthropic-policy.mjs'
 import { prepareClassifierBody } from '../protocol/request-purpose.mjs'
 import { consumeClaudeSSEData } from '../protocol/convert.mjs'
-import { isCompleteAssistantMessage, mapUpstreamError } from '../core/errors.mjs'
+import { clientCancelledResult, isCompleteAssistantMessage, mapUpstreamError } from '../core/errors.mjs'
 import { isContentPolicyErrorCode } from '../core/refusal-guard.mjs'
 import { forwardApi, readApiJson } from '../transport/api-kernel-client.mjs'
 import { messagesUrl, normalizeProtocol, resolvePreset, responsesUrl, upstreamAuthHeaders } from './api-presets.mjs'
@@ -211,16 +211,23 @@ function mappedOpenAIResponsesFailure(resultBase, event, committed, extras = {})
 
 function recordApiKeyFailure(picked, { status, code, message, headers = {} }, store, scheduler) {
   const accountKey = !!picked.key.source_account_id
+  if (accountKey && typeof store?.getKey === 'function') {
+    const current = store.getKey(picked.key.id)
+    // A late response belongs to the secret actually sent, never its replacement.
+    if (
+      !current ||
+      current.api_key !== picked.key.api_key ||
+      current.source_account_id !== picked.key.source_account_id ||
+      current.source_vm_id !== picked.key.source_vm_id
+    )
+      return
+  }
   const exhausted = ['credit_balance_exhausted', 'insufficient_quota'].includes(code)
   const invalid = status === 401 || ['invalid_api_key', 'invalid_key'].includes(code)
   if (accountKey && (exhausted || invalid)) {
-      // An administrator releases exhaustion; invalid keys require reconnecting.
+    // An administrator releases exhaustion; invalid keys require reconnecting.
     if (invalid) store.updateKey(picked.key.id, { disabled: true })
     else store.setKeyCooldown(picked.key.id, '9999-12-31T23:59:59.999Z')
-    scheduler.onAccountKeyError?.(picked.key, {
-      code: code || 'invalid_api_key',
-      message: String(message).slice(0, 300),
-    })
     scheduler.reload(store.listRaw())
   } else if (status === 429 && !picked.endpoint.disable_cooling) {
     const retry = Number(headers['retry-after'] || 30)
@@ -228,9 +235,136 @@ function recordApiKeyFailure(picked, { status, code, message, headers = {} }, st
     store.setKeyCooldown(picked.key.id, until)
     scheduler.reload(store.listRaw())
   }
+  if (accountKey)
+    scheduler.onAccountKeyError?.(picked.key, {
+      code: code || (invalid ? 'invalid_api_key' : 'api_error'),
+      message: String(message || `upstream ${status}`).slice(0, 300),
+    })
 }
 
-export async function runApiInference({
+function apiResultIdentity(picked, key) {
+  return {
+    vmId: null,
+    accountId: key.id,
+    endpointId: picked.endpoint.id,
+    model: picked.upstream_model,
+    ...(key.source_vm_id
+      ? {
+          sourceVmId: key.source_vm_id,
+          sourceAccountId: key.source_account_id,
+          sourceEmail: key.source_email || null,
+        }
+      : {}),
+  }
+}
+
+function accountRetryLimits(routing = {}) {
+  const policy = routing.failover || {}
+  const integer = (value, fallback, minimum) =>
+    Number.isFinite(Number(value)) ? Math.max(minimum, Math.floor(Number(value))) : fallback
+  return {
+    attempts: Math.min(integer(policy.max_total_attempts, 12, 1), 1 + integer(policy.max_account_switches, 10, 0)),
+    deadlineMs: integer(policy.total_retry_deadline_ms, 120_000, 0),
+  }
+}
+
+/** Account API retries are only for explicit HTTP rejections before any output. */
+export async function runApiInference(options = {}) {
+  const scope = keyScopeFromRequest(options.req)
+  if (scope.group_type !== 'openai_apikey') return runApiAttempt(options)
+  const model = (options.nativeResponsesBody || options.convertedBody)?.model
+  const routing = options.getRouting?.() || options.cfg?.routing || {}
+  const limits = accountRetryLimits(routing)
+  const excludedAccountIds = new Set()
+  const excludedKeyIds = new Set()
+  const startedAt = Date.now()
+  let lastResult
+  let attemptCount = 0
+  for (let hop = 0; hop < limits.attempts; hop++) {
+    if (options.signal?.aborted) return { ...clientCancelledResult(lastResult), attemptCount }
+    if (hop > 0 && Date.now() - startedAt >= limits.deadlineMs) break
+    const picked = options.scheduler.pick(model, Date.now(), scope, { excludedAccountIds, excludedKeyIds })
+    if (!picked.ok) {
+      if (lastResult) break
+      return { ...(await runApiAttempt({ ...options, picked })), attemptCount }
+    }
+    // One account gets at most one attempt, including a transport-unknown result.
+    excludedAccountIds.add(picked.key.source_account_id)
+    excludedKeyIds.add(picked.key.id)
+    let dispatched = false
+    let dispatchAt
+    let sourceKey = picked.key
+    let result
+    try {
+      result = await runApiAttempt({
+        ...options,
+        picked,
+        onDispatch(key) {
+          dispatched = true
+          sourceKey = key
+          dispatchAt = Date.now()
+          attemptCount++
+          options.attemptsRepo?.begin({
+            requestId: options.requestId,
+            attemptNo: attemptCount,
+            vmId: null,
+            accountId: key.id,
+            model: picked.upstream_model,
+            selectionReason: 'account_api',
+            sourceAccountId: key.source_account_id,
+            sourceVmId: key.source_vm_id,
+            sourceEmail: key.source_email,
+          })
+        },
+      })
+    } catch (error) {
+      result = {
+        ...apiResultIdentity(picked, sourceKey),
+        ok: false,
+        status: 502,
+        via: 'api-kernel',
+        transportError: true,
+        committed: !!options.res?.headersSent,
+        terminalState: options.res?.headersSent ? 'incomplete' : 'transport_error',
+        body: {
+          type: 'error',
+          error: {
+            type: 'api_error',
+            code: error.code || 'upstream_stream_interrupted',
+            message: String(error.message || error).slice(0, 300),
+          },
+        },
+      }
+      if (options.signal?.aborted) result = clientCancelledResult(result)
+    }
+    if (options.signal?.aborted && !result.clientCancelled) result = clientCancelledResult(result)
+    if (!dispatched && lastResult) break
+    lastResult = { ...result, attemptCount }
+    const maySwitch =
+      result.retryableAccountRejection === true &&
+      !options.res?.headersSent &&
+      !options.signal?.aborted &&
+      hop + 1 < limits.attempts &&
+      Date.now() - startedAt < limits.deadlineMs
+    if (dispatched)
+      options.attemptsRepo?.complete(options.requestId, attemptCount, {
+        upstreamStatus: result.status,
+        errorScope: result.ok ? null : result.status === 401 ? 'credential' : 'account',
+        action: maySwitch ? 'next_unit' : 'return',
+        downstreamCommitted: !!options.res?.headersSent || !!result.committed,
+        terminalState: result.terminalState,
+        usage: result.usage,
+        ttftMs: result.ttftMs,
+        latencyMs: Date.now() - dispatchAt,
+        errorCode: result.body?.error?.upstream_code || result.body?.error?.code || null,
+        errorMessage: result.body?.error?.message || null,
+      })
+    if (!maySwitch) break
+  }
+  return lastResult
+}
+
+async function runApiAttempt({
   req,
   res,
   cfg,
@@ -251,10 +385,12 @@ export async function runApiInference({
   forwardImpl = forwardApi,
   passthrough = false,
   toolNames = {},
+  picked: selected = null,
+  onDispatch = null,
 } = {}) {
   const model = (nativeResponsesBody || convertedBody)?.model
   const scope = keyScopeFromRequest(req)
-  const picked = scheduler.pick(model, Date.now(), scope)
+  const picked = selected || scheduler.pick(model, Date.now(), scope)
   if (!picked.ok) {
     return {
       ok: false,
@@ -334,6 +470,8 @@ export async function runApiInference({
 
   const timing = createStreamTiming()
   let upstream
+  let dispatchedKey = picked.key
+  let dispatched = false
   try {
     const currentKey = scheduler.resolveKey ? scheduler.resolveKey(picked.key, scope) : picked.key
     if (!currentKey) {
@@ -348,6 +486,16 @@ export async function runApiInference({
         terminalState: 'exhausted',
       }
     }
+    dispatchedKey = currentKey
+    if (currentKey.api_key !== picked.key.api_key) {
+      const currentAuth = upstreamAuthHeaders(protocolKind, currentKey.api_key, {
+        ...extraHeaders,
+        auth_scheme: picked.endpoint.auth_scheme || extraHeaders.auth_scheme,
+      })
+      for (const [name, value] of Object.entries(currentAuth)) headers[name] = value
+    }
+    onDispatch?.(currentKey)
+    dispatched = true
     upstream = await forwardImpl({
       cfg,
       url: isOpenAI ? responsesUrl(preset.base_url) : messagesUrl(preset.base_url),
@@ -358,7 +506,8 @@ export async function runApiInference({
       timeoutMs,
     })
   } catch (error) {
-    return {
+    const failure = {
+      ...(dispatched ? apiResultIdentity(picked, dispatchedKey) : {}),
       ok: false,
       status: 502,
       via: 'api-kernel',
@@ -373,6 +522,7 @@ export async function runApiInference({
       terminalState: 'transport_error',
       transportError: true,
     }
+    return signal?.aborted ? clientCancelledResult(failure) : failure
   }
 
   const status = Number(upstream.statusCode) || 502
@@ -380,14 +530,8 @@ export async function runApiInference({
     ok: status >= 200 && status < 300,
     status,
     via: 'api-kernel',
-    vmId: null,
-    accountId: picked.key.id,
-    endpointId: picked.endpoint.id,
-    model: picked.upstream_model,
+    ...apiResultIdentity(picked, dispatchedKey),
     headers: { ...upstream.headers },
-    ...(picked.key.source_vm_id
-      ? { sourceVmId: picked.key.source_vm_id, sourceAccountId: picked.key.source_account_id }
-      : {}),
   }
 
   if (status >= 400) {
@@ -395,7 +539,12 @@ export async function runApiInference({
     const message = payload?.error?.message || payload?.message || `upstream ${status}`
     const upstreamCode = String(payload?.error?.code || payload?.code || '').trim()
     const contentCode = isContentPolicyErrorCode(upstreamCode) ? upstreamCode.toLowerCase() : ''
-    recordApiKeyFailure(picked, { status, code: upstreamCode, message, headers: upstream.headers }, store, scheduler)
+    recordApiKeyFailure(
+      { ...picked, key: dispatchedKey },
+      { status, code: upstreamCode, message, headers: upstream.headers },
+      store,
+      scheduler,
+    )
     return {
       ...resultBase,
       ok: false,
@@ -410,6 +559,11 @@ export async function runApiInference({
         },
       },
       terminalState: 'rejected',
+      retryableAccountRejection:
+        !!picked.key.source_account_id &&
+        (status === 401 ||
+          ['invalid_api_key', 'invalid_key', 'credit_balance_exhausted', 'insufficient_quota'].includes(upstreamCode) ||
+          status === 429),
     }
   }
 
@@ -429,7 +583,7 @@ export async function runApiInference({
     })
     if (!result.ok) {
       recordApiKeyFailure(
-        picked,
+        { ...picked, key: dispatchedKey },
         {
           status: result.status,
           code: result.body?.error?.upstream_code || result.body?.error?.details?.upstream_code,

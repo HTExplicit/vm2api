@@ -36,6 +36,7 @@ export function UsageLogsFilters({
     (isAdmin && draft.userId ? 1 : 0) +
     (draft.keyId ? 1 : 0) +
     (isAdmin && draft.vmId ? 1 : 0) +
+    (isAdmin && draft.sourceAccountId ? 1 : 0) +
     (draft.sessionId ? 1 : 0)
   const requestCount =
     (draft.model ? 1 : 0) +

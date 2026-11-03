@@ -107,7 +107,15 @@ import { setPriceOverride, listPriceOverrides, syncModelsDev } from './price-cat
 import { buildPricing } from './pricing-view.mjs'
 import { publicKeyView } from './api-keys.mjs'
 import { assertVmScope, normalizeKeyScope, keyScopeFromRecord } from './key-scope.mjs'
-import { resolvePreset } from '../pool/api-presets.mjs'
+import {
+  accountApiManagedError,
+  buildOpenaiApiKeyList,
+  hasAccountApiKeys,
+  isAccountApiKey,
+  ordinaryEndpointView,
+  requireAccountIdentity,
+  runOpenaiApiKeyBatch,
+} from './openai-apikey.mjs'
 import {
   assertVmPoolExists,
   createVmPool,
@@ -392,6 +400,7 @@ function usageLogFilters(req, u) {
     key_id: get('key_id'),
     vm_id: get('vm_id'),
     account_id: get('account_id'),
+    source_account_id: get('source_account_id'),
     session_id: get('session_id'),
     model: get('model'),
     endpoint: get('endpoint'),
@@ -963,37 +972,11 @@ export function createPanelHandler(ctx) {
     openaiApiRepo?.cleanupForVm(vmId)
   }
 
-  function endpointKeyProxy(key) {
-    if (!key?.source_account_id && !key?.source_vm_id) return key?.proxy_url || ''
-    const source = openaiApiManager?.resolveAccountKey(key)
-    if (!source?.proxyUrl || source.accountId !== key.source_account_id) {
-      throw Object.assign(new Error('账号未绑定可用代理'), { code: 'proxy_required', status: 400 })
-    }
-    return source.proxyUrl
-  }
-
-  function accountModelOptions(key) {
-    if (!key?.source_account_id && !key?.source_vm_id) return null
-    return {
-      kind: 'openai',
-      protocol: 'openai',
-      base_url: 'https://api.openai.com',
-      api_key: key.api_key,
-      proxy_url: endpointKeyProxy(key),
-      headers: {},
-    }
-  }
-
   function assertEndpointKeyPatch(key, patch = {}) {
     if (Object.hasOwn(patch, 'source_vm_id') || Object.hasOwn(patch, 'source_account_id')) {
       throw Object.assign(new Error('账号 API key 的归属由账号配置管理'), { code: 'account_api_key_managed' })
     }
-    if (
-      (key?.source_account_id || key?.source_vm_id) &&
-      ['api_key', 'proxy_id', 'proxy_url'].some((field) => Object.hasOwn(patch, field))
-    ) {
-      throw Object.assign(new Error('账号 API key 与代理请在对应账号中管理'), { code: 'account_api_key_managed' })
-    }
+    if (isAccountApiKey(key)) throw accountApiManagedError()
   }
 
   function rulesFile() {
@@ -1562,6 +1545,34 @@ export function createPanelHandler(ctx) {
           })
         }
       }
+      if (p === '/api/panel/openai-apikey' || p === '/api/panel/openai-apikey/batch') {
+        try {
+          if (req.method === 'GET' && p === '/api/panel/openai-apikey') {
+            return json(
+              res,
+              200,
+              panel.ok(
+                buildOpenaiApiKeyList(
+                  listVms(cfg.paths.project),
+                  openaiApiManager,
+                  requestLog?.repo,
+                  url.searchParams.get('timezone'),
+                ),
+              ),
+            )
+          }
+          if (req.method === 'POST' && p === '/api/panel/openai-apikey/batch') {
+            const body = await readBody(req, 64 * 1024)
+            return json(res, 200, panel.ok(await runOpenaiApiKeyBatch(openaiApiManager, body)))
+          }
+          return json(res, 404, { ok: false, error: { code: 'not_found', message: '接口不存在' } })
+        } catch (error) {
+          return json(res, error.status || 502, {
+            ok: false,
+            error: { code: error.code || 'openai_api_failed', message: error.message },
+          })
+        }
+      }
       const openaiApiRoute = p.match(/^\/api\/panel\/vms\/([^/]+)\/openai-api(?:\/([^/]+))?$/)
       if (openaiApiRoute) {
         if (panelIdentity(req).role !== 'admin') {
@@ -1572,7 +1583,21 @@ export function createPanelHandler(ctx) {
           const vm = getVm(cfg.paths.project, vmId)
           if (!vm) return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: '账号槽位不存在' } })
           let result
-          if (req.method === 'GET' && !action) result = openaiApiManager.view(vm)
+          if (action === 'key') {
+            if (req.method === 'GET') {
+              res.setHeader?.('Cache-Control', 'no-store')
+              result = await openaiApiManager.revealKey(vmId, {
+                account_id: requireAccountIdentity(url.searchParams.get('account_id')),
+              })
+            } else if (req.method === 'PUT' || req.method === 'DELETE') {
+              const body = await readBody(req, 8192)
+              const input = { account_id: requireAccountIdentity(body?.account_id), api_key: body?.api_key }
+              result =
+                req.method === 'PUT'
+                  ? await openaiApiManager.bindKey(vmId, input)
+                  : await openaiApiManager.removeKey(vmId, input)
+            } else return json(res, 404, { ok: false, error: { code: 'not_found', message: '接口不存在' } })
+          } else if (req.method === 'GET' && !action) result = openaiApiManager.view(vm)
           else if (req.method === 'POST' && action === 'preview') result = await openaiApiCredits.preview(vmId)
           else if (req.method === 'POST' && action === 'claim') {
             const body = await readBody(req, 8192)
@@ -1581,9 +1606,15 @@ export function createPanelHandler(ctx) {
             await codexBrowserLogin?.cancel(vmId)
             result = await openaiApiManager.setup(vmId)
           } else if (req.method === 'POST' && action === 'refresh') {
+            const body = await readBody(req, 8192)
+            if (body?.account_id != null) openaiApiManager.assertAccountIdentity(vmId, body.account_id)
             result = await openaiApiManager.refresh(vmId)
           } else if (req.method === 'POST' && action === 'resume') {
-            result = await openaiApiManager.resume(vmId)
+            const body = await readBody(req, 8192)
+            result = await openaiApiManager.resume(
+              vmId,
+              body?.account_id != null ? { account_id: body.account_id } : undefined,
+            )
           } else if (req.method === 'POST' && action === 'browser-ticket') {
             await codexBrowserLogin?.cancel(vmId)
             result = await openaiApiManager.browserTicket(vmId)
@@ -1592,7 +1623,10 @@ export function createPanelHandler(ctx) {
             if (typeof body?.enabled !== 'boolean') {
               return json(res, 400, { ok: false, error: { code: 'invalid_enabled', message: 'enabled 必须为布尔值' } })
             }
-            result = await openaiApiManager.setEnabled(vmId, body.enabled)
+            result =
+              body?.account_id != null
+                ? await openaiApiManager.setEnabled(vmId, body.enabled, { account_id: body.account_id })
+                : await openaiApiManager.setEnabled(vmId, body.enabled)
           } else return json(res, 404, { ok: false, error: { code: 'not_found', message: '接口不存在' } })
           return json(res, 200, panel.ok(result))
         } catch (error) {
@@ -2002,7 +2036,7 @@ export function createPanelHandler(ctx) {
       if (req.method === 'GET' && p === '/api/panel/api-endpoints') {
         return json(res, 200, {
           ok: true,
-          items: apiEndpointStore.list({ reveal: false }),
+          items: apiEndpointStore.list({ reveal: false }).map(ordinaryEndpointView).filter(Boolean),
           presets: API_ENDPOINT_PRESETS,
         })
       }
@@ -2010,10 +2044,10 @@ export function createPanelHandler(ctx) {
         const body = await readBody(req, 8192).catch(() => ({}))
         try {
           const saved = savedEndpointKey(apiEndpointStore, body?.key_id)
-          const accountOptions = accountModelOptions(saved)
+          if (isAccountApiKey(saved)) throw accountApiManagedError()
           const result = await fetchUpstreamModels({
             cfg,
-            ...(accountOptions || {
+            ...{
               kind: body?.kind,
               protocol: body?.protocol,
               base_url: body?.base_url || saved?.base_url,
@@ -2023,7 +2057,7 @@ export function createPanelHandler(ctx) {
                 : saved?.proxy_url || body?.proxy_url,
               headers: body?.headers,
               auth_scheme: body?.auth_scheme || body?.authScheme || saved?.auth_scheme,
-            }),
+            },
             forward: ctx.forwardApi,
           })
           return json(res, 200, { ok: true, ...result })
@@ -2060,20 +2094,19 @@ export function createPanelHandler(ctx) {
         const body = await readBody(req, 1 << 20).catch(() => ({}))
         try {
           const previous = apiEndpointStore.getRaw(id)
-          if ((previous?.api_key_entries || []).some((key) => key.source_account_id || key.source_vm_id)) {
-            const preset = resolvePreset(body?.kind ?? previous.kind, { ...previous, ...body })
-            if (
-              preset.kind !== 'openai' ||
-              preset.protocol !== 'openai' ||
-              preset.base_url !== 'https://api.openai.com'
-            ) {
-              throw Object.assign(new Error('账号 API key 只能使用 OpenAI 官方上游'), {
-                code: 'account_api_endpoint_managed',
-              })
-            }
-          }
           const keyId = String(body?.key_id || '').trim()
           const apiKey = String(body?.api_key || '').trim()
+          if (hasAccountApiKeys(previous)) {
+            const key = keyId ? apiEndpointStore.getKey(keyId) : null
+            if (isAccountApiKey(key)) throw accountApiManagedError()
+            // Endpoint-wide edits would also alter the hidden managed keys.
+            if (
+              Object.keys(body || {}).some((field) => !['key_id', 'api_key', 'proxy_id'].includes(field)) ||
+              (!keyId && !apiKey)
+            )
+              throw accountApiManagedError('account_api_endpoint_managed')
+            if (!ordinaryEndpointView(previous)) throw accountApiManagedError('account_api_endpoint_managed')
+          }
           if (keyId) {
             const keyPatch = {
               ...(apiKey ? { api_key: apiKey } : {}),
@@ -2098,13 +2131,21 @@ export function createPanelHandler(ctx) {
           }
           apiScheduler.reload(apiEndpointStore.listRaw())
           const saved = apiEndpointStore.getRaw(id) || rec
-          return json(res, 200, { ok: true, item: publicEndpointView(saved) })
+          return json(res, 200, { ok: true, item: ordinaryEndpointView(publicEndpointView(saved)) })
         } catch (e) {
           return json(res, 400, { ok: false, error: { message: String(e.message || e), code: e.code } })
         }
       }
       if (req.method === 'DELETE' && /^\/api\/panel\/api-endpoints\/[^/]+$/.test(p)) {
         const id = p.split('/').pop()
+        if (hasAccountApiKeys(apiEndpointStore.getRaw(id)))
+          return json(res, 400, {
+            ok: false,
+            error: {
+              code: 'account_api_endpoint_managed',
+              message: '该上游包含账号托管 key，请在 OpenAiAPIKEY 管理；普通 key 可单独删除',
+            },
+          })
         const ok = apiEndpointStore.remove(id)
         if (!ok) return json(res, 404, { ok: false, error: { message: 'endpoint not found' } })
         apiScheduler.reload(apiEndpointStore.listRaw())
@@ -2115,20 +2156,38 @@ export function createPanelHandler(ctx) {
         const body = await readBody(req, 8192).catch(() => ({}))
         const ep = apiEndpointStore.getRaw(id)
         if (!ep) return json(res, 404, { ok: false, error: { message: 'endpoint not found' } })
-        const key = (ep.api_key_entries || []).find((k) => !k.disabled && (body?.key_id ? k.id === body.key_id : true))
+        if (body?.key_id && isAccountApiKey((ep.api_key_entries || []).find((key) => key.id === body.key_id)))
+          return json(res, 400, {
+            ok: false,
+            error: {
+              code: 'account_api_key_managed',
+              message: '账号托管 API key 使用现有 OpenAI 模型列表，请在 OpenAiAPIKEY 管理',
+            },
+          })
+        const key = (ep.api_key_entries || []).find(
+          (k) => !isAccountApiKey(k) && !k.disabled && (body?.key_id ? k.id === body.key_id : true),
+        )
         if (!key)
-          return json(res, 400, { ok: false, error: { message: '需要上游 key 才能获取模型', code: 'key_required' } })
+          return json(res, 400, {
+            ok: false,
+            error: hasAccountApiKeys(ep)
+              ? {
+                  code: 'account_api_key_managed',
+                  message: '账号托管 API key 使用现有 OpenAI 模型列表，请在 OpenAiAPIKEY 管理',
+                }
+              : { message: '需要上游 key 才能获取模型', code: 'key_required' },
+          })
         try {
           const result = await fetchUpstreamModels({
             cfg,
-            ...(accountModelOptions(key) || {
+            ...{
               kind: ep.kind,
               protocol: ep.protocol,
               base_url: ep.base_url,
               api_key: key.api_key,
               proxy_url: key.proxy_url,
               headers: ep.headers,
-            }),
+            },
             forward: ctx.forwardApi,
           })
           const apply = body?.apply !== false
@@ -2137,7 +2196,7 @@ export function createPanelHandler(ctx) {
           return json(res, 200, {
             ok: true,
             fetched: result.models.length,
-            item: publicEndpointView(rec),
+            item: ordinaryEndpointView(publicEndpointView(rec)),
             models: result.models,
           })
         } catch (e) {
@@ -2151,6 +2210,9 @@ export function createPanelHandler(ctx) {
         const id = p.split('/')[4]
         const body = await readBody(req, 8192).catch(() => ({}))
         try {
+          const endpoint = apiEndpointStore.getRaw(id)
+          if (hasAccountApiKeys(endpoint) && !ordinaryEndpointView(endpoint))
+            throw accountApiManagedError('account_api_endpoint_managed')
           assertEndpointKeyPatch(null, body || {})
           const key = apiEndpointStore.addKey(id, body || {})
           apiScheduler.reload(apiEndpointStore.listRaw())
@@ -2163,6 +2225,11 @@ export function createPanelHandler(ctx) {
       }
       if (req.method === 'DELETE' && /^\/api\/panel\/api-endpoints\/[^/]+\/keys\/[^/]+$/.test(p)) {
         const kid = p.split('/').pop()
+        if (isAccountApiKey(apiEndpointStore.getKey(kid)))
+          return json(res, 400, {
+            ok: false,
+            error: { code: 'account_api_key_managed', message: '账号托管 API key 请在 OpenAiAPIKEY 页面删除' },
+          })
         const ok = apiEndpointStore.removeKey(kid)
         if (!ok) return json(res, 404, { ok: false, error: { message: 'key not found' } })
         apiScheduler.reload(apiEndpointStore.listRaw())
@@ -2176,7 +2243,8 @@ export function createPanelHandler(ctx) {
         } catch (error) {
           return json(res, 400, { ok: false, error: { code: error.code, message: error.message } })
         }
-        const rec = apiEndpointStore.updateKey(kid, body || {})
+        apiEndpointStore.updateKey(kid, body || {})
+        const rec = apiEndpointStore.getKey(kid)
         if (!rec) return json(res, 404, { ok: false, error: { message: 'key not found' } })
         apiScheduler.reload(apiEndpointStore.listRaw())
         const ep = apiEndpointStore.getRaw(rec.endpoint_id)

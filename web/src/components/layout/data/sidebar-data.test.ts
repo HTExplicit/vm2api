@@ -13,6 +13,20 @@ describe('sidebar permissions', () => {
     expect(urls).toEqual(['/overview', '/logs'])
   })
 
+  it('shows account API management only with its own view capability', () => {
+    expect(
+      navGroupsFor(['vm', 'keys']).flatMap((group) =>
+        group.items.map((item) => item.url)
+      )
+    ).not.toContain('/openai-apikey')
+    const items = navGroupsFor(['openai-apikey']).flatMap(
+      (group) => group.items
+    )
+    expect(items).toEqual([
+      expect.objectContaining({ title: 'OpenAiAPIKEY', url: '/openai-apikey' }),
+    ])
+  })
+
   it('keeps the monitoring pages together in hub order', () => {
     // A stale `usage` capability from an older server must not resurrect the removed page.
     const groups = navGroupsFor([

@@ -10,6 +10,8 @@ export type LogsSearch = {
   keyId?: string
   /** 供应商 = 槽位。 */
   vmId?: string
+  /** 账号 API 的稳定来源身份，不是上游 key 的计费 ID。 */
+  source_account_id?: string
   sessionId?: string
   /** 毫秒时间戳，含。 */
   startTime?: number
@@ -36,6 +38,7 @@ export type LogsFilterState = {
   userId?: string
   keyId?: string
   vmId?: string
+  sourceAccountId?: string
   sessionId?: string
   startTime?: number
   endTime?: number
@@ -84,6 +87,7 @@ export function validateLogsSearch(
     userId: str(search.userId),
     keyId: str(search.keyId),
     vmId: str(search.vmId),
+    source_account_id: str(search.source_account_id),
     sessionId: str(search.sessionId),
     startTime: search.startTime == null ? undefined : int(search.startTime),
     endTime: search.endTime == null ? undefined : int(search.endTime),
@@ -105,6 +109,7 @@ export function searchToFilters(search: LogsSearch): LogsFilterState {
     userId: search.userId,
     keyId: search.keyId,
     vmId: search.vmId,
+    sourceAccountId: search.source_account_id,
     sessionId: search.sessionId,
     startTime: search.startTime,
     endTime: search.endTime,
@@ -127,6 +132,7 @@ export function filtersToSearch(filters: LogsFilterState): LogsSearch {
   if (filters.userId) out.userId = filters.userId
   if (filters.keyId) out.keyId = filters.keyId
   if (filters.vmId) out.vmId = filters.vmId
+  if (filters.sourceAccountId) out.source_account_id = filters.sourceAccountId
   if (filters.sessionId?.trim()) out.sessionId = filters.sessionId.trim()
   if (filters.startTime != null) out.startTime = filters.startTime
   if (filters.endTime != null) out.endTime = filters.endTime
@@ -154,6 +160,7 @@ export function filtersToApi(
   if (filters.userId) out.userId = filters.userId
   if (filters.keyId) out.keyId = filters.keyId
   if (filters.vmId) out.vmId = filters.vmId
+  if (filters.sourceAccountId) out.sourceAccountId = filters.sourceAccountId
   if (filters.sessionId) out.sessionId = filters.sessionId
   if (filters.model) out.model = filters.model
   if (filters.endpoint) out.endpoint = filters.endpoint
@@ -185,6 +192,7 @@ export function usageLogFiltersQuery(
   set('key_id', filters.keyId)
   set('vm_id', filters.vmId)
   set('account_id', filters.accountId)
+  set('source_account_id', filters.sourceAccountId)
   set('session_id', filters.sessionId)
   set('model', filters.model)
   set('endpoint', filters.endpoint)
@@ -210,6 +218,7 @@ export function activeFilterCount(filters: LogsFilterState): number {
   if (filters.userId) count++
   if (filters.keyId) count++
   if (filters.vmId) count++
+  if (filters.sourceAccountId) count++
   if (filters.sessionId) count++
   if (filters.statusCode != null || filters.excludeStatus200) count++
   if (filters.model) count++

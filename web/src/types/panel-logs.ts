@@ -28,6 +28,9 @@ export type RequestLogItem = {
   duration_ms?: number
   attempt_count?: number
   account_id?: string
+  source_account_id?: string | null
+  source_vm_id?: string | null
+  source_email?: string | null
   upstream_status?: number | string
   protocol?: string
   stream?: boolean | number
@@ -66,12 +69,17 @@ export type RequestAttempt = {
   attempt_no?: number
   vm_id?: string | null
   account_id?: string | null
+  source_account_id?: string | null
+  source_vm_id?: string | null
+  source_email?: string | null
   model?: string | null
   selection_reason?: string | null
   started_at?: string
   completed_at?: string | null
   upstream_status?: number | string | null
   error_scope?: string | null
+  error_code?: string | null
+  error_message?: string | null
   action?: string | null
   cooldown_until?: number | null
   downstream_committed?: boolean

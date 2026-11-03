@@ -82,6 +82,10 @@ jobs:
             test/unit/openai-auth-state.test.mjs \
             test/unit/openai-api-credits.test.mjs \
             test/unit/openai-api-manager.test.mjs \
+            test/unit/openai-api-key-state.test.mjs \
+            test/unit/account-api-model-catalog.test.mjs \
+            test/unit/account-api-failover.test.mjs \
+            test/unit/account-api-log-stats.test.mjs \
             test/unit/openai-api-config.test.mjs \
             test/unit/openai-billing-client.test.mjs \
             test/unit/slot-browser-repo.test.mjs \
@@ -155,10 +159,13 @@ jobs:
           pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx src/features/vm/openai-api-actions.test.tsx src/features/settings/openai-api-balance-section.test.tsx
           pnpm exec vitest run src/features/vm/openai-platform-browser-dialog.test.tsx
           pnpm exec vitest run src/features/vm/codex-browser-finish.test.ts src/features/vm/codex-credential-browser-completion.test.tsx
+          pnpm exec vitest run src/features/openai-apikey src/features/logs/account-api-logs.test.tsx src/components/layout/data/sidebar-data.test.ts
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx
           pnpm build
       - name: Platform configuration retry UI
         run: node scripts/smoke-platform-retry-ui.mjs
+      - name: Account API key management UI
+        run: node scripts/smoke-openai-apikey-ui.mjs
 
   browser-image:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

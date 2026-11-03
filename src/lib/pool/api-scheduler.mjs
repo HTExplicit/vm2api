@@ -2,6 +2,7 @@
  * CLIProxy-shaped picker: grouped round-robin by endpoint then key.
  * Same alias across endpoints shares a model id; prefix/alias pins an endpoint.
  */
+import { accountApiModels } from '../openai-api/model-catalog.mjs'
 
 function norm(s) {
   return String(s || '').trim()
@@ -79,7 +80,7 @@ function keyReady(key, now, disableCooling) {
 }
 
 export class ApiScheduler {
-  constructor({ resolveAccountKey = null, onAccountKeyError = null } = {}) {
+  constructor({ resolveAccountKey = null, onAccountKeyError = null, getRouting = () => ({}), getAccountModels } = {}) {
     this.endpoints = []
     this.parentCursor = 0
     this.childCursor = new Map()
@@ -87,10 +88,17 @@ export class ApiScheduler {
     this.forcePrefix = false
     this.resolveAccountKey = resolveAccountKey
     this.onAccountKeyError = onAccountKeyError
+    this.getAccountModels = getAccountModels || (() => accountApiModels(undefined, getRouting()))
   }
 
   reload(endpoints = []) {
     this.endpoints = Array.isArray(endpoints) ? endpoints : []
+  }
+
+  scopedEndpoints(scope) {
+    if (scope?.group_type !== 'openai_apikey') return this.endpoints
+    const models = this.getAccountModels()
+    return this.endpoints.filter((ep) => ep.kind === 'openai').map((ep) => ({ ...ep, models }))
   }
 
   /** Resolve again immediately before sending: proxy bindings are live configuration. */
@@ -99,14 +107,20 @@ export class ApiScheduler {
     if (scope?.group_type !== 'openai_apikey') return owned ? null : key
     if (!key?.source_vm_id || !key.source_account_id || !scope.allowed_vms?.includes(key.source_vm_id)) return null
     const source = this.resolveAccountKey?.(key)
-    if (!source?.enabled || source.accountId !== key.source_account_id || !source.proxyUrl) return null
-    return { ...key, proxy_url: source.proxyUrl, source_email: source.email || null }
+    if (
+      !source?.enabled ||
+      source.accountId !== key.source_account_id ||
+      !source.proxyUrl ||
+      (source.call_status && source.call_status !== 'ready')
+    )
+      return null
+    return { ...key, ...(source.key || {}), proxy_url: source.proxyUrl, source_email: source.email || null }
   }
 
   catalog(scope = {}) {
     const data = []
     const seen = new Set()
-    for (const ep of this.endpoints) {
+    for (const ep of this.scopedEndpoints(scope)) {
       if (ep.disabled) continue
       if (scope.group_type === 'openai_apikey' && ep.kind !== 'openai') continue
       const visibleKeys = (ep.api_key_entries || []).filter((key) => this.resolveKey(key, scope))
@@ -132,8 +146,8 @@ export class ApiScheduler {
     return { object: 'list', data, source: 'api-endpoints' }
   }
 
-  pick(requestedModel, now = Date.now(), scope = {}) {
-    const parents = this.endpoints
+  pick(requestedModel, now = Date.now(), scope = {}, { excludedAccountIds, excludedKeyIds } = {}) {
+    const parents = this.scopedEndpoints(scope)
       .filter(
         (ep) =>
           endpointMatchesModel(ep, requestedModel) && (scope.group_type !== 'openai_apikey' || ep.kind === 'openai'),
@@ -146,6 +160,7 @@ export class ApiScheduler {
     for (let off = 0; off < parents.length; off++) {
       const ep = parents[(start + off) % parents.length]
       const keys = (ep.api_key_entries || [])
+        .filter((key) => !excludedAccountIds?.has(key.source_account_id) && !excludedKeyIds?.has(key.id))
         .filter((key) => keyReady(key, now, ep.disable_cooling))
         .map((key) => this.resolveKey(key, scope))
         .filter(Boolean)

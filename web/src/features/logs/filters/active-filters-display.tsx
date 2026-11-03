@@ -45,6 +45,12 @@ export function ActiveFiltersDisplay({
       label: '供应商',
       value: nameOf(options?.vms, filters.vmId),
     })
+  if (isAdmin && filters.sourceAccountId)
+    chips.push({
+      key: 'sourceAccountId',
+      label: '账号 API 来源',
+      value: nameOf(options?.sourceAccounts, filters.sourceAccountId),
+    })
   if (filters.sessionId)
     chips.push({
       key: 'sessionId',

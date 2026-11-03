@@ -129,6 +129,22 @@ export function IdentityFilters({
           />
         </div>
       ) : null}
+      {isAdmin ? (
+        <div className='space-y-2'>
+          <Label>账号 API 来源</Label>
+          <FilterCombobox
+            value={filters.sourceAccountId}
+            options={options?.sourceAccounts ?? []}
+            allLabel='全部账号 API 来源'
+            searchPlaceholder='搜索来源账号...'
+            emptyLabel='未找到匹配的来源账号'
+            loading={optionsLoading}
+            onChange={(sourceAccountId) =>
+              onChange({ ...filters, sourceAccountId })
+            }
+          />
+        </div>
+      ) : null}
       <div className='space-y-2'>
         <Label>API 密钥</Label>
         <Select

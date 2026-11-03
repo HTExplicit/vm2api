@@ -30,6 +30,7 @@ import {
   totalTokens,
 } from './usage-log-preds.mjs'
 import { collapseBlockKeywords, foldInterceptRows } from '../../protocol/intercept-stats.mjs'
+import { reportTimezone, zonedDayStartMs } from '../../core/timezone.mjs'
 
 /** settings key: ISO instant before which usage_logs rows may have been pruned. Monotonic. */
 const PRUNED_THROUGH_KEY = 'usage_logs_pruned_through'
@@ -78,6 +79,9 @@ const SUMMARY_COLUMNS = [
   'api_key_id',
   'vm_id',
   'account_id',
+  'source_account_id',
+  'source_vm_id',
+  'source_email',
   'workspace',
   'input_tokens',
   'output_tokens',
@@ -300,6 +304,69 @@ export class UsageLogsRepo {
     if (!requestId) return null
     const row = this._getByRequestId.get(requestId)
     return row ? enrichLogRow(fromRow(row)) : null
+  }
+
+  /** Account API calls, including rejected attempts; costs stay on the final summary. */
+  accountApiUsage(accountIds, now = Date.now(), timezone = 'UTC') {
+    const ids = [...new Set((accountIds || []).filter(Boolean))]
+    const out = new Map(ids.map((id) => [id, {
+      today_requests: 0,
+      today_cost: 0,
+      last_used_at: null,
+      unpriced_requests: 0,
+    }]))
+    if (!ids.length) return out
+    const since = new Date(zonedDayStartMs(now, reportTimezone(timezone))).toISOString()
+    const until = new Date(now).toISOString()
+    const marks = ids.map(() => '?').join(', ')
+    const attempts = this.db.prepare(`
+      SELECT source_account_id, SUM(started_at >= ? AND started_at <= ?) AS requests,
+             MAX(started_at) AS last_used_at
+      FROM request_attempts
+      WHERE source_account_id IN (${marks}) AND started_at <= ?
+      GROUP BY source_account_id
+    `).all(since, until, ...ids, until)
+    for (const row of attempts) {
+      const stat = out.get(row.source_account_id)
+      stat.today_requests = Number(row.requests)
+      stat.last_used_at = row.last_used_at
+    }
+    // Before API attempts were recorded, a proven source on the main log is one
+    // call. Do not count a modern request's final summary a second time.
+    const legacy = this.db.prepare(`
+      SELECT l.source_account_id, SUM(l.created_at >= ?) AS requests, MAX(l.created_at) AS last_used_at
+      FROM usage_logs l
+      WHERE l.source_account_id IN (${marks}) AND l.created_at <= ?
+        AND NOT EXISTS (
+          SELECT 1 FROM request_attempts a WHERE a.request_id = l.request_id
+            AND a.source_account_id IS NOT NULL
+            AND a.started_at <= l.created_at
+            AND (l.duration_ms IS NULL OR
+              julianday(a.started_at) >= julianday(l.created_at) - (l.duration_ms + 1000) / 86400000.0)
+        )
+      GROUP BY l.source_account_id
+    `).all(since, ...ids, until)
+    for (const row of legacy) {
+      const stat = out.get(row.source_account_id)
+      stat.today_requests += Number(row.requests)
+      if (!stat.last_used_at || row.last_used_at > stat.last_used_at) stat.last_used_at = row.last_used_at
+    }
+    const costs = this.db.prepare(`
+      SELECT source_account_id, SUM(total_cost) AS cost,
+        SUM(CASE WHEN total_cost IS NULL AND (
+          input_tokens > 0 OR output_tokens > 0 OR cache_read_tokens > 0 OR cache_creation_tokens > 0
+          OR image_input_tokens > 0 OR image_output_tokens > 0 OR web_search_requests > 0
+        ) THEN 1 ELSE 0 END) AS unpriced_requests
+      FROM usage_logs
+      WHERE source_account_id IN (${marks}) AND created_at >= ? AND created_at <= ?
+      GROUP BY source_account_id
+    `).all(...ids, since, until)
+    for (const row of costs) {
+      const stat = out.get(row.source_account_id)
+      stat.unpriced_requests = Number(row.unpriced_requests)
+      stat.today_cost = row.cost == null && stat.unpriced_requests > 0 ? null : Number(row.cost || 0)
+    }
+    return out
   }
 
   insertSummary(rec) {

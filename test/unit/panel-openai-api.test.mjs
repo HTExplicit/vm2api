@@ -43,10 +43,237 @@ function handler(root, { who = ADMIN, body = {}, manager = {}, credits = {}, ...
     readBody: async () => body,
   })
   return async (method, url) => {
-    await call({ method, headers: {} }, {}, new URL(url, 'http://localhost'))
+    const headers = {}
+    await call(
+      { method, url, headers: {} },
+      {
+        setHeader(name, value) {
+          headers[name.toLowerCase()] = value
+        },
+      },
+      new URL(url, 'http://localhost'),
+    )
+    response.headers = headers
     return response
   }
 }
+
+test('OpenAiAPIKEY aggregates only current bound keys, eligible bind choices and safe proxy summaries', async (t) => {
+  const root = fixture(t)
+  for (const [id, name] of [
+    ['vm-bind', '待绑定'],
+    ['vm-free', '未领取'],
+  ]) {
+    fs.writeFileSync(
+      path.join(root, 'vms', `${id}.json`),
+      JSON.stringify({ id, name, platform: 'openai', family: 'codex' }),
+    )
+  }
+  const vmPath = path.join(root, 'vms', 'vm-api.json')
+  fs.writeFileSync(
+    vmPath,
+    JSON.stringify({
+      id: 'vm-api',
+      name: '主账号',
+      platform: 'openai',
+      family: 'codex',
+      proxy: { id: 'px-a', name: '账号出口', host: 'private.proxy', port: 1080, password: 'private-password' },
+    }),
+  )
+  const out = await handler(root, {
+    manager: {
+      view(vm) {
+        return {
+          ...VIEW,
+          account_id: `account-${vm.id}`,
+          email: `${vm.id}@example.test`,
+          has_key: vm.id === 'vm-api',
+          claim_status: vm.id === 'vm-free' ? 'unknown' : 'claimed',
+          call_status: 'ready',
+          key_suffix: 'abcd',
+        }
+      },
+    },
+    requestLog: {
+      repo: {
+        accountApiUsage(ids, now, timezone) {
+          assert.deepEqual(ids, ['account-vm-api'])
+          assert.equal(timezone, 'Asia/Singapore')
+          assert.equal(typeof now, 'number')
+          return new Map([
+            [
+              'account-vm-api',
+              { today_requests: 2, today_cost: 0.01, last_used_at: '2026-11-03T12:00:00Z', unpriced_requests: 0 },
+            ],
+          ])
+        },
+      },
+    },
+  })('GET', '/api/panel/openai-apikey?timezone=Asia%2FSingapore')
+  assert.equal(out.status, 200)
+  assert.equal(out.body.data.items.length, 1)
+  assert.equal(out.body.data.items[0].slot_name, '主账号')
+  assert.equal(out.body.data.items[0].today_requests, 2)
+  assert.deepEqual(out.body.data.items[0].proxy, { id: 'px-a', name: '账号出口', available: true })
+  assert.deepEqual(
+    out.body.data.bind_candidates.map((item) => item.vm_id),
+    ['vm-bind'],
+  )
+  assert.equal(JSON.stringify(out.body).includes('private.proxy'), false)
+  assert.equal(JSON.stringify(out.body).includes('private-password'), false)
+  assert.equal(JSON.stringify(out.body).includes('api_key'), false)
+})
+
+test('dedicated key endpoints require account identity and reveal only on demand with no-store', async (t) => {
+  const root = fixture(t)
+  const seen = []
+  const manager = {
+    revealKey(id, input) {
+      seen.push(['reveal', id, input])
+      return { api_key: 'sk-secret-fixture' }
+    },
+    bindKey(id, input) {
+      seen.push(['bind', id, input])
+      return VIEW
+    },
+    removeKey(id, input) {
+      seen.push(['remove', id, input])
+      return { ...VIEW, has_key: false }
+    },
+  }
+  const reveal = await handler(root, { manager })('GET', '/api/panel/vms/vm-api/openai-api/key?account_id=account-a')
+  assert.equal(reveal.status, 200)
+  assert.equal(reveal.headers['cache-control'], 'no-store')
+  assert.deepEqual(reveal.body.data, { api_key: 'sk-secret-fixture' })
+  const missing = await handler(root, { manager })('GET', '/api/panel/vms/vm-api/openai-api/key')
+  assert.equal(missing.status, 400)
+  assert.equal(missing.body.error.code, 'account_identity_required')
+  for (const [method, name] of [
+    ['PUT', 'bind'],
+    ['DELETE', 'remove'],
+  ]) {
+    const out = await handler(root, { manager, body: { account_id: 'account-a', api_key: 'sk-new' } })(
+      method,
+      '/api/panel/vms/vm-api/openai-api/key',
+    )
+    assert.equal(out.status, 200)
+    assert.deepEqual(seen.at(-1), [name, 'vm-api', { account_id: 'account-a', api_key: 'sk-new' }])
+  }
+})
+
+test('dedicated console and key APIs deny non-administrators before reading records', async (t) => {
+  const root = fixture(t)
+  for (const role of ['user', 'super']) {
+    for (const [method, url] of [
+      ['GET', '/api/panel/openai-apikey'],
+      ['POST', '/api/panel/openai-apikey/batch'],
+      ['GET', '/api/panel/vms/vm-api/openai-api/key?account_id=account-a'],
+      ['PUT', '/api/panel/vms/vm-api/openai-api/key'],
+      ['DELETE', '/api/panel/vms/vm-api/openai-api/key'],
+    ]) {
+      const out = await handler(root, {
+        who: { panelUser: 'fixture', panelRole: role },
+        manager: {
+          view() {
+            assert.fail('unauthorized read')
+          },
+        },
+      })(method, url)
+      assert.equal(out.status, 403, `${role} ${method} ${url}`)
+    }
+  }
+})
+
+test('batch operations preserve partial results, verify identity and deduplicate organization refreshes', async (t) => {
+  const root = fixture(t)
+  const seen = []
+  const manager = {
+    jobs: new Map(),
+    assertAccountIdentity(vmId, accountId) {
+      seen.push(['identity', vmId, accountId])
+      if (accountId === 'old-account')
+        throw Object.assign(new Error('槽位账号已改变'), { code: 'api_account_changed', status: 409 })
+      return { vm: { id: vmId }, record: { organization_id: 'org-shared' } }
+    },
+    refresh(vmId) {
+      seen.push(['refresh', vmId])
+      this.jobs.set(vmId, {})
+      return VIEW
+    },
+    view() {
+      return VIEW
+    },
+    setEnabled(vmId, enabled, options) {
+      seen.push(['enabled', vmId, enabled, options])
+      return VIEW
+    },
+    resume(vmId, options) {
+      seen.push(['resume', vmId, options])
+      return VIEW
+    },
+    removeKey(vmId, options) {
+      seen.push(['remove', vmId, options])
+      return { ...VIEW, has_key: false }
+    },
+  }
+  const selected = [
+    { vm_id: 'vm-api', account_id: 'account-a' },
+    { vm_id: 'vm-other', account_id: 'account-b' },
+    { vm_id: 'vm-old', account_id: 'old-account' },
+  ]
+  const refreshed = await handler(root, { manager, body: { action: 'refresh_balance', items: selected } })(
+    'POST',
+    '/api/panel/openai-apikey/batch',
+  )
+  assert.equal(refreshed.status, 200)
+  assert.deepEqual(
+    refreshed.body.data.results.map((item) => item.status),
+    ['queued', 'queued', 'error'],
+  )
+  assert.equal(refreshed.body.data.results[2].error.code, 'api_account_changed')
+  assert.equal(seen.filter(([name]) => name === 'refresh').length, 1)
+  for (const [action, expected] of [
+    ['enable', 'enabled'],
+    ['disable', 'enabled'],
+    ['resume', 'resume'],
+    ['delete', 'remove'],
+  ]) {
+    const out = await handler(root, { manager, body: { action, items: selected.slice(0, 1) } })(
+      'POST',
+      '/api/panel/openai-apikey/batch',
+    )
+    assert.equal(out.body.data.results[0].status, 'done')
+    assert.equal(seen.at(-1)[0], expected)
+  }
+})
+
+test('identity-bearing switches and refreshes reject stale account selections', async (t) => {
+  const root = fixture(t)
+  const mismatch = () => {
+    throw Object.assign(new Error('槽位账号已改变'), { code: 'api_account_changed', status: 409 })
+  }
+  for (const [method, action, manager] of [
+    ['PATCH', 'enabled', { setEnabled: mismatch }],
+    ['POST', 'resume', { resume: mismatch }],
+    [
+      'POST',
+      'refresh',
+      {
+        assertAccountIdentity: mismatch,
+        refresh() {
+          assert.fail('stale refresh')
+        },
+      },
+    ],
+  ]) {
+    const out = await handler(root, { manager, body: { enabled: false, account_id: 'old-account' } })(
+      method,
+      `/api/panel/vms/vm-api/openai-api/${action}`,
+    )
+    assert.equal(out.status, 409)
+    assert.equal(out.body.error.code, 'api_account_changed')
+  }
+})
 
 test('account API routes use the administrator session and return direct public views', async (t) => {
   const root = fixture(t)
@@ -231,7 +458,7 @@ test('restore waits for account browsers to close and restarts the monitor after
   }
 })
 
-test('both model-fetch routes use the account current proxy and ignore manual overrides', async (t) => {
+test('generic model-fetch routes cannot use managed account keys or bypass their shared catalog', async (t) => {
   const root = fixture(t)
   const db = createDatabase({ dbPath: ':memory:' })
   t.after(() => db.close())
@@ -244,11 +471,9 @@ test('both model-fetch routes use the account current proxy and ignore manual ov
     proxy_url: 'socks5h://old-proxy:1080',
   })
   const seen = []
-  let proxyUrl = 'socks5h://new-proxy:1080'
   const manager = {
-    resolveAccountKey(input) {
-      assert.equal(input.id, key.id)
-      return proxyUrl ? { accountId: 'account-api', proxyUrl, enabled: false } : null
+    resolveAccountKey() {
+      assert.fail('managed model fetch must not resolve an account key')
     },
   }
   const extra = {
@@ -277,17 +502,9 @@ test('both model-fetch routes use the account current proxy and ignore manual ov
       apply: false,
     }
     const out = await handler(root, { ...extra, body })('POST', url)
-    assert.equal(out.status, 200, JSON.stringify(out.body))
-    assert.equal(seen.at(-1).url, 'https://api.openai.com/v1/models')
-    assert.equal(seen.at(-1).headers.authorization, 'Bearer sk-account-fixture')
-    assert.equal(seen.at(-1).proxyUrl, proxyUrl)
-    proxyUrl = ''
-    const count = seen.length
-    const missing = await handler(root, { ...extra, body })('POST', url)
-    assert.equal(missing.status, 400)
-    assert.equal(missing.body.error.code, 'proxy_required')
-    assert.equal(seen.length, count, 'missing binding must not forward a request')
-    proxyUrl = 'socks5h://another-current-proxy:1080'
+    assert.equal(out.status, 400, JSON.stringify(out.body))
+    assert.equal(out.body.error.code, 'account_api_key_managed')
+    assert.equal(seen.length, 0, 'managed keys must not use the old model-fetch paths')
   }
 })
 
@@ -328,6 +545,65 @@ test('generic endpoint edits cannot detach an account key from its identity or o
   assert.equal(store.getKey(key.id).source_account_id, 'account-api')
   assert.equal(store.getKey(key.id).api_key, 'sk-account-fixture')
   assert.equal(store.getRaw(ep.id).kind, 'openai')
+})
+
+test('generic endpoint management hides managed keys and cannot delete or mutate their resources', async (t) => {
+  const root = fixture(t)
+  const db = createDatabase({ dbPath: ':memory:' })
+  t.after(() => db.close())
+  const store = new ApiEndpointStore({ db })
+  const pure = store.create({ kind: 'openai', name: 'managed-only' })
+  const pureKey = store.addKey(pure.id, {
+    api_key: 'sk-managed-only',
+    source_vm_id: 'vm-api',
+    source_account_id: 'account-a',
+  })
+  const mixed = store.create({ kind: 'openai', name: 'mixed' })
+  const mixedKey = store.addKey(mixed.id, {
+    api_key: 'sk-managed-mixed',
+    source_vm_id: 'vm-other',
+    source_account_id: 'account-b',
+  })
+  const ordinary = store.addKey(mixed.id, { api_key: 'sk-ordinary' })
+  const extra = { apiEndpointStore: store, apiScheduler: { reload() {} } }
+  const listed = await handler(root, extra)('GET', '/api/panel/api-endpoints')
+  assert.deepEqual(
+    listed.body.items.map((ep) => ep.id),
+    [mixed.id],
+  )
+  assert.deepEqual(
+    listed.body.items[0].api_key_entries.map((key) => key.id),
+    [ordinary.id],
+  )
+  assert.equal(store.listRaw().length, 2, 'runtime still sees managed endpoints')
+  for (const [method, url, body] of [
+    ['DELETE', `/api/panel/api-endpoints/${pure.id}`, {}],
+    ['DELETE', `/api/panel/api-endpoints/${mixed.id}`, {}],
+    ['DELETE', `/api/panel/api-endpoints/${pure.id}/keys/${pureKey.id}`, {}],
+    ['PATCH', `/api/panel/api-endpoints/${pure.id}/keys/${pureKey.id}`, { disabled: true }],
+    ['POST', `/api/panel/api-endpoints/${pure.id}/keys`, { api_key: 'sk-extra' }],
+    ['PATCH', `/api/panel/api-endpoints/${mixed.id}`, { disabled: true }],
+  ]) {
+    const out = await handler(root, { ...extra, body })(method, url)
+    assert.equal(out.status, 400, `${method} ${url}`)
+    assert.match(out.body.error.code, /^account_api_(?:key|endpoint)_managed$/)
+  }
+  const changed = await handler(root, { ...extra, body: { api_key: 'sk-ordinary-replaced' } })(
+    'PATCH',
+    `/api/panel/api-endpoints/${mixed.id}/keys/${ordinary.id}`,
+  )
+  assert.equal(changed.status, 200)
+  assert.equal(store.getKey(ordinary.id).api_key, 'sk-ordinary-replaced')
+  const added = await handler(root, { ...extra, body: { api_key: 'sk-new-ordinary' } })(
+    'POST',
+    `/api/panel/api-endpoints/${mixed.id}/keys`,
+  )
+  assert.equal(added.status, 201)
+  assert.equal(JSON.stringify(added.body).includes('managed-mixed'), false)
+  const deleted = await handler(root, extra)('DELETE', `/api/panel/api-endpoints/${mixed.id}/keys/${ordinary.id}`)
+  assert.equal(deleted.status, 200)
+  assert.ok(store.getKey(mixedKey.id))
+  assert.ok(store.getKey(pureKey.id))
 })
 
 test('slot browser routes dispatch administrator login, immediate tickets and ordered close', async (t) => {

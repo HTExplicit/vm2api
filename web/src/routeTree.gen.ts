@@ -22,6 +22,7 @@ import { Route as AuthenticatedImportRouteImport } from './routes/_authenticated
 import { Route as AuthenticatedKeysRouteImport } from './routes/_authenticated/keys'
 import { Route as AuthenticatedLogsRouteImport } from './routes/_authenticated/logs'
 import { Route as AuthenticatedModelsRouteImport } from './routes/_authenticated/models'
+import { Route as AuthenticatedOpenaiApikeyRouteImport } from './routes/_authenticated/openai-apikey'
 import { Route as AuthenticatedOverviewRouteImport } from './routes/_authenticated/overview'
 import { Route as AuthenticatedProxiesRouteImport } from './routes/_authenticated/proxies'
 import { Route as AuthenticatedRiskRouteImport } from './routes/_authenticated/risk'
@@ -99,6 +100,12 @@ const AuthenticatedModelsRoute = AuthenticatedModelsRouteImport.update({
   path: '/models',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedOpenaiApikeyRoute =
+  AuthenticatedOpenaiApikeyRouteImport.update({
+    id: '/openai-apikey',
+    path: '/openai-apikey',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedOverviewRoute = AuthenticatedOverviewRouteImport.update({
   id: '/overview',
   path: '/overview',
@@ -175,6 +182,7 @@ export interface FileRoutesByFullPath {
   '/keys': typeof AuthenticatedKeysRoute
   '/logs': typeof AuthenticatedLogsRoute
   '/models': typeof AuthenticatedModelsRoute
+  '/openai-apikey': typeof AuthenticatedOpenaiApikeyRoute
   '/overview': typeof AuthenticatedOverviewRoute
   '/proxies': typeof AuthenticatedProxiesRoute
   '/risk': typeof AuthenticatedRiskRoute
@@ -200,6 +208,7 @@ export interface FileRoutesByTo {
   '/keys': typeof AuthenticatedKeysRoute
   '/logs': typeof AuthenticatedLogsRoute
   '/models': typeof AuthenticatedModelsRoute
+  '/openai-apikey': typeof AuthenticatedOpenaiApikeyRoute
   '/overview': typeof AuthenticatedOverviewRoute
   '/proxies': typeof AuthenticatedProxiesRoute
   '/risk': typeof AuthenticatedRiskRoute
@@ -228,6 +237,7 @@ export interface FileRoutesById {
   '/_authenticated/keys': typeof AuthenticatedKeysRoute
   '/_authenticated/logs': typeof AuthenticatedLogsRoute
   '/_authenticated/models': typeof AuthenticatedModelsRoute
+  '/_authenticated/openai-apikey': typeof AuthenticatedOpenaiApikeyRoute
   '/_authenticated/overview': typeof AuthenticatedOverviewRoute
   '/_authenticated/proxies': typeof AuthenticatedProxiesRoute
   '/_authenticated/risk': typeof AuthenticatedRiskRoute
@@ -257,6 +267,7 @@ export interface FileRouteTypes {
     | '/keys'
     | '/logs'
     | '/models'
+    | '/openai-apikey'
     | '/overview'
     | '/proxies'
     | '/risk'
@@ -282,6 +293,7 @@ export interface FileRouteTypes {
     | '/keys'
     | '/logs'
     | '/models'
+    | '/openai-apikey'
     | '/overview'
     | '/proxies'
     | '/risk'
@@ -309,6 +321,7 @@ export interface FileRouteTypes {
     | '/_authenticated/keys'
     | '/_authenticated/logs'
     | '/_authenticated/models'
+    | '/_authenticated/openai-apikey'
     | '/_authenticated/overview'
     | '/_authenticated/proxies'
     | '/_authenticated/risk'
@@ -423,6 +436,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedModelsRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/openai-apikey': {
+      id: '/_authenticated/openai-apikey'
+      path: '/openai-apikey'
+      fullPath: '/openai-apikey'
+      preLoaderRoute: typeof AuthenticatedOpenaiApikeyRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/overview': {
       id: '/_authenticated/overview'
       path: '/overview'
@@ -520,6 +540,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedKeysRoute: typeof AuthenticatedKeysRoute
   AuthenticatedLogsRoute: typeof AuthenticatedLogsRoute
   AuthenticatedModelsRoute: typeof AuthenticatedModelsRoute
+  AuthenticatedOpenaiApikeyRoute: typeof AuthenticatedOpenaiApikeyRoute
   AuthenticatedOverviewRoute: typeof AuthenticatedOverviewRoute
   AuthenticatedProxiesRoute: typeof AuthenticatedProxiesRoute
   AuthenticatedRiskRoute: typeof AuthenticatedRiskRoute
@@ -545,6 +566,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedKeysRoute: AuthenticatedKeysRoute,
   AuthenticatedLogsRoute: AuthenticatedLogsRoute,
   AuthenticatedModelsRoute: AuthenticatedModelsRoute,
+  AuthenticatedOpenaiApikeyRoute: AuthenticatedOpenaiApikeyRoute,
   AuthenticatedOverviewRoute: AuthenticatedOverviewRoute,
   AuthenticatedProxiesRoute: AuthenticatedProxiesRoute,
   AuthenticatedRiskRoute: AuthenticatedRiskRoute,

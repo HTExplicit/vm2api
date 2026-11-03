@@ -560,6 +560,12 @@ Platform 自动配置推送 `configuring`，此时禁用重复操作；创建 ke
 
 ## OpenAI 账号 API（仅 admin）
 
+面板 `/openai-apikey` 集中管理账号托管 key，支持 `?vm_id=…` 定位。账号页保留领取、Platform 登录、自动配置及余额；通用 API 上游管理隐藏托管来源，混合端点只展示普通 key，运行时上游集合不变。
+
+`GET /api/panel/openai-apikey?timezone=Asia%2FSingapore` 返回 `{ items, bind_candidates }`：只列当前账号已有 key，待绑定候选为 `pending/claimed` 且无 key。列表包含 `account_id/vm_id/key_id/endpoint_id`、安全代理摘要、`call_status/call_reason/call_error`、余额及 `today_requests/today_cost/last_used_at/unpriced_requests`，不返回 secret。今日按页面时区统计，费用为 vm2api 用量估算，未定价保持未知。
+
+`GET/PUT/DELETE /api/panel/vms/:id/openai-api/key` 按需读取、人工绑定／替换及本地解绑。GET 查询参数带 `account_id`，响应 `Cache-Control: no-store`；PUT 接收 `{ account_id, api_key }`，DELETE 接收 `{ account_id }`。人工 key 直接保存，不联网验证归属、不查询模型；首次默认开启，替换保留使用开关并清旧调用阻断，同值保存不清。删除保留领取、组织及历史，不撤销官方 key。`POST /api/panel/openai-apikey/batch` 接收 `{ action: "enable" | "disable" | "refresh_balance" | "delete" | "resume", items: [{ vm_id, account_id }] }`，逐项返回 `done/queued/error` 与原因，同组织刷新去重。新页修改携带账号身份核对，旧单账号开关／刷新接口兼容原请求。
+
 基址 `/vms/:id/openai-api`。GET 返回公开状态；POST `/preview` 查询 Pro 三档赠额资格与接收组织，POST `/claim` 接收 `{ destination_account_id? }`，唯一组织可省略。资格样本超过 5 分钟后，首次领取前重新查询；关联后的 `pending/claimed` 状态锁定领取，复查沿用原操作编号。外部已领取账号也可继续配置。
 
 POST `/setup` 继续 Platform 登录并在当前组织已有的 Default project 内创建账号 key，有效期选择官方 `Never`；已有 key 直接复用，不新建项目。POST `/refresh` 刷新发放或组织总余额；PATCH `/enabled` 接收 `{ enabled: boolean }`，独立于 OAuth 启停、调度及登录会话。POST `/resume` 仅解除当前账号 key 的上游额度／配额阻断，不打开 API 开关、不重新启用无效 key、不发送模型请求；`quota_blocked` 返回该阻断状态。账号行 `openai_api` 返回领取、配置、key 尾号、组织余额及更新时间，不返回 secret、指纹或登录会话。
@@ -573,6 +579,12 @@ Billing 认证头按槽加密保存，Cookie 沿用同一份加密网页会话�
 生成密钥使用 `group_type: "openai_apikey"`、`category: "api"`、`allowed_vms: [...]`。新增候选只要求已配置正确归属的 OpenAI 账号 key，不要求 Pro 或正余额；零、负数、未知或待刷新余额均可选择。编辑时已有绑定保留回显、可移除，仅校验新加入的账号。勾选不会开启 API 独立开关。余额数字不决定推理停调或恢复；上游明确额度／配额不足阻断当前 key，仅管理员 `/resume` 解除，正余额刷新不解锁。无效 key 保持禁用，临时限流保持冷却，托管密钥预算维持原规则。模型列表和推理均限所选账号，普通 API 全局池不隐式使用账号 key；保留官方错误码，API 请求不计入 OAuth 5H/7D 窗口估算。
 
 该分组的 `/v1/responses` 保留 OpenAI 原生工具协议，包括 Codex 桌面版 Responses-Lite 在 `input` 内的 `additional_tools` 声明及其位置；只移除桌面内部追踪元数据。保留 namespace、function/custom、工具选择及调用/结果历史，不做 Claude 名称映射。流式保留官方 SSE，非流式保留原生响应对象；工具由调用方执行并回传结果。请求仍执行现有拦截，发送前读取账号当前代理，并按 API key 归属计费。
+
+账号 API 的模型列表和分配共用“模型 → OpenAI”的已启用普通模型、普通别名及自定义映射，修改热生效；不生成 Fast 别名、不隐式添加 Priority、不查询逐账号官方模型。客户端仍按 `allowed_vms` 授权槽位，换号后授权随槽位；模型权限错误原样返回，不禁用 key。
+
+账号 API 仅对输出前官方 HTTP 明确无效 key、额度／配额不足或限流拒绝切换其他已选账号，每账号最多一次；次数与时限读取现有 `failover.max_total_attempts/max_account_switches/total_retry_deadline_ms`。网络结果不明、取消、HTTP 200 后流内失败及已输出不重发，全部失败保留最后官方错误。关闭开关阻止新分配，在途请求完成。`call_status` 区分 `ready/disabled/upstream_disabled/rate_limited/quota_blocked/invalid_key/proxy_missing/binding_error`；Billing 错误不清调用错误，替换前旧 secret 的迟到失败不改变新 key。
+
+API 主日志计费身份仍为上游 key ID，`vm_id` 为空；主日志及 `request_attempts` 增加 `source_account_id/source_vm_id/source_email` 发送快照，尝试补官方错误。`/api/panel/usage-logs` 的 `source_account_id` 可筛选最终来源或切号链任一来源。今日次数按官方尝试，费用按主日志最终来源，旧无尝试记录不重复计数；统计按账号延续，不进入 OAuth 窗口。历史仅回填仍能证明的 key 关联。
 
 ## 集群（SSH 节点，仅 admin；super 只读 `GET /cluster/nodes`）
 

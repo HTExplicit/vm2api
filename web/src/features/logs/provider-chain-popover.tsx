@@ -133,6 +133,14 @@ function SingleAttempt({
               ) : null}
             </div>
           ) : null}
+          {item?.errorCode || item?.errorMessage ? (
+            <p className='text-xs break-words'>
+              {item.errorCode ? (
+                <span className='font-mono'>{item.errorCode}: </span>
+              ) : null}
+              {item.errorMessage}
+            </p>
+          ) : null}
         </div>
       </TooltipContent>
     </Tooltip>
@@ -235,6 +243,14 @@ export function ProviderChainPopover({
                   {attemptMeta(item).length ? (
                     <p className='mt-0.5 line-clamp-1 text-[10px] text-muted-foreground'>
                       {attemptMeta(item).join(' · ')}
+                    </p>
+                  ) : null}
+                  {item.errorCode || item.errorMessage ? (
+                    <p className='mt-1 line-clamp-2 text-xs break-words text-muted-foreground'>
+                      {item.errorCode ? (
+                        <span className='font-mono'>{item.errorCode}: </span>
+                      ) : null}
+                      {item.errorMessage}
                     </p>
                   ) : null}
                 </div>

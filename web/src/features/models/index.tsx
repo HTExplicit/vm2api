@@ -50,12 +50,16 @@ const BETA_FILTERS: [BetaFilter, string][] = [
   ['inherit', '跟随通配'],
 ]
 
-export function ModelsPage() {
+export function ModelsPage({
+  initialPlatform = 'anthropic',
+}: {
+  initialPlatform?: 'anthropic' | 'openai'
+}) {
   const qc = useQueryClient()
   const [pageTab, setPageTab] = useState<'models' | 'pricing'>('models')
   const [catalogPlatform, setCatalogPlatform] = useState<
     'anthropic' | 'openai'
-  >('anthropic')
+  >(initialPlatform)
   const q = useQuery(modelPolicyQueryOptions(catalogPlatform))
   const pricingQ = useQuery(pricingQueryOptions())
   const [draft, setDraft] = useState<ModelPolicy>(() => hydratePolicy(null))
@@ -64,6 +68,10 @@ export function ModelsPage() {
   const [family, setFamily] = useState('all')
   const [beta, setBeta] = useState<BetaFilter>('all')
   const [expanded, setExpanded] = useState<string | null>(null)
+
+  useEffect(() => {
+    setCatalogPlatform(initialPlatform)
+  }, [initialPlatform])
 
   useEffect(() => {
     if (!q.data) return

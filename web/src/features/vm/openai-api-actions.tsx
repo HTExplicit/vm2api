@@ -23,7 +23,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Switch } from '@/components/ui/switch'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { CodexCreditSummary } from '@/features/vm/codex-credit-summary'
 import { OpenaiApiCreditDetails } from '@/features/vm/openai-api-credit-details'
@@ -37,8 +36,7 @@ import { OpenaiPlatformBrowserDialog } from '@/features/vm/openai-platform-brows
 import { vmQueryOptions, vmsListQueryOptions } from '@/features/vm/queries'
 import { useVmPerms } from '@/features/vm/vm-perms'
 
-type ApiAction =
-  'preview' | 'claim' | 'setup' | 'refresh' | 'enabled' | 'resume'
+type ApiAction = 'preview' | 'claim' | 'setup' | 'refresh'
 
 export function OpenaiApiActions({
   vm,
@@ -70,7 +68,7 @@ export function OpenaiApiActions({
         ) : (
           <Gift className='size-3' aria-hidden />
         )}
-        {vm.openai_api?.has_key ? 'API管理' : 'API赠额'}
+        {vm.openai_api?.has_key ? 'API配置' : 'API赠额'}
       </Button>
       {open ? (
         <OpenaiApiDialog vm={vm} open={open} onOpenChange={setOpen} />
@@ -119,11 +117,12 @@ export function OpenaiApiDialog({
       qc.invalidateQueries({ queryKey: vmQueryOptions(vm.id).queryKey }),
       qc.invalidateQueries({ queryKey: vmsListQueryOptions().queryKey }),
       qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey }),
+      qc.invalidateQueries({ queryKey: ['panel', 'openai-apikey'] }),
     ])
   const action = useMutation({
     mutationFn: ({ name, body }: { name: ApiAction; body?: object }) =>
       api<OpenaiApiView>(`${base}/${name}`, {
-        method: name === 'enabled' ? 'PATCH' : 'POST',
+        method: 'POST',
         body: JSON.stringify(body || {}),
       }),
     onSuccess: (data, variables) => {
@@ -135,8 +134,6 @@ export function OpenaiApiDialog({
         claim: '已提交领取，后续按期自动发放',
         setup: '已开始配置 API',
         refresh: '已刷新 API 状态',
-        enabled: data.enabled ? 'API 已开启' : 'API 已关闭',
-        resume: '已解除额度阻断，下次请求将重新尝试上游',
       }
       toast.success(labels[variables.name])
     },
@@ -167,7 +164,7 @@ export function OpenaiApiDialog({
         onClick={(event) => event.stopPropagation()}
       >
         <DialogHeader>
-          <DialogTitle>API 赠额与调用</DialogTitle>
+          <DialogTitle>API 赠额与配置</DialogTitle>
           <DialogDescription>
             {vm.email || vm.name || vm.id} · 使用账号当前绑定代理
           </DialogDescription>
@@ -311,22 +308,7 @@ export function OpenaiApiDialog({
             className='grid gap-3 border-t pt-4'
             aria-label='API 调用配置'
           >
-            <div className='flex flex-wrap items-center justify-between gap-3'>
-              <Label
-                htmlFor={`api-enabled-${vm.id}`}
-                className='text-sm font-medium'
-              >
-                API 独立开关
-              </Label>
-              <Switch
-                id={`api-enabled-${vm.id}`}
-                checked={!!state?.enabled}
-                disabled={!state?.has_key || busy}
-                onCheckedChange={(enabled) =>
-                  action.mutate({ name: 'enabled', body: { enabled } })
-                }
-              />
-            </div>
+            <h3 className='m-0 text-sm font-medium'>Platform 与余额</h3>
             <p className='m-0 text-xs text-muted-foreground'>
               独立于 GPT 内核启停与 OAuth
               调度；余额仅作展示，由上游决定是否可用。
@@ -346,20 +328,21 @@ export function OpenaiApiDialog({
               <div className='grid gap-2 rounded-md border border-[color:var(--status-warn)] p-3'>
                 <p role='status' className='m-0 text-xs'>
                   上游已返回额度或配额不足，此账号 API 暂停调度。
-                  余额刷新不会自动解除阻断，可手动解除后由下次请求重新尝试。
+                  余额刷新不会自动解除阻断，请在 OpenAiAPIKEY 页面处理。
                 </p>
-                <Button
-                  size='sm'
-                  variant='outline'
-                  className='justify-self-start'
-                  disabled={busy}
-                  onClick={() => action.mutate({ name: 'resume' })}
-                >
-                  {showingAction === 'resume' ? '解除中…' : '解除额度阻断'}
-                </Button>
               </div>
             ) : null}
             <div className='flex flex-wrap items-center gap-2'>
+              {state?.has_key ? (
+                <Button size='sm' variant='outline' asChild>
+                  <a
+                    href={`#/openai-apikey?vm_id=${encodeURIComponent(vm.id)}`}
+                  >
+                    <KeyRound className='size-3.5' aria-hidden />
+                    管理 API key
+                  </a>
+                </Button>
+              ) : null}
               {locked || state?.has_key ? (
                 <Button
                   size='sm'
@@ -407,6 +390,7 @@ export function OpenaiApiDialog({
             </div>
             {state?.has_key ? (
               <p className='m-0 text-xs text-muted-foreground'>
+                key 开关、替换和调用状态在 OpenAiAPIKEY 页面管理。
                 在生成密钥的分组中选择 OpenAI(apikey)，勾选此账号即可调用。API
                 {state.balance_refresh_interval_minutes === 0
                   ? '余额仅手动刷新。'

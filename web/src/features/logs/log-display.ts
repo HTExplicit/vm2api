@@ -292,9 +292,11 @@ export function chainItemStatus(item: ProviderChainItem): ChainItemStatus {
   return 'pending'
 }
 
-/** 尝试的展示名：槽位名 → 槽位 id → 账号。 */
+/** 账号 API 优先使用发送时的邮箱快照；其他来源保持槽位展示。 */
 export function chainItemName(item: ProviderChainItem): string {
-  return item.vmName || item.vmId || item.providerName || '未知'
+  return (
+    item.sourceEmail || item.vmName || item.vmId || item.providerName || '未知'
+  )
 }
 
 /** 重试次数 = 尝试数 - 1（每条 request_attempts 都是真实上游请求）。 */
@@ -316,7 +318,7 @@ export function finalChainItem(
 export function finalProviderName(row: UsageLogRow): string {
   const last = finalChainItem(row.providerChain)
   if (last) return chainItemName(last)
-  return row.vmName || row.vmId || row.providerName || '未知'
+  return row.sourceEmail || row.vmName || row.vmId || row.providerName || '未知'
 }
 
 /** 首次尝试的实测队列等待。历史总调度时间不能当作排队。 */
