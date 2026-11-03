@@ -343,12 +343,15 @@ Claude `routing.quota` 的 5h/7d 闸分三段（`critical_band` 默认 0.05，`g
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET/PUT | `/jev-intercept` | 协议入口。顺序：蒸馏硬规则 → 去掉 reminder、按需展开 base64 后的硬正则 → 拒答缓存 → 决策模型。没配地址则跳过模型；模型失败默认放行。`fail_open: false` 时模型不可用则 403，不封设备 |
+| GET | `/jev-usage` | 仅 admin；决策模型用量汇总、分页明细及当前配置 key 的脱敏统计 |
 
 `PUT` 写入 SQLite `settings.jev_intercept`。字段：`enabled`（默认关）、`hard_regex_enabled`（默认开）、`openai_platform_enabled`（默认关）、`provider`（`jev` 默认、`laya`、`modernbert`）、`base_url`、`model`、`timeout_ms`（200–8000，默认 2000）、`patterns[]`、`rules`（`null` 与 `[]` 都用内置规则；关掉这一层用 `hard_regex_enabled: false`）、`api_key` 或 `api_keys`（最多 999 把）、`question_ids`（题库 id，缺省为全部）。省略密钥保持原值；`api_key: ""` 或 `api_keys: []` 清除。一行可以是裸 key（用 `base_url`），或 `https://host/v1/systemone <key>` 打到另一个 systemone。`401` / `429` / `529` 退役该 key，之后不再调度，再次保存密钥列表会重新启用。网络错误和其它 HTTP 状态只跳过这一跳的同一主机，不退役 key；失败放行的原因写在放行 keyword（`网络异常` 或 `上游 <status>`）。另有 `safety_instruction`（空则不加自定义题）、`safety_threshold`（0–1，默认 0.5）、`block_if_below`（默认开）、`fail_open`（默认开）、`dedup_sec`（0–3600，默认 60）、`max_state_chars`（256–64000，默认 16000）、`expand_base64`、`strip_reminders`（后两个默认开）。GET 不回密钥，回 `api_key_set`、`api_key_count`、`question_bank`、`providers`、`builtin_patterns`、`rules`、`rules_customized`、`openai_platform_enabled`。
 
 三个后端走同一套 `/v1/systemone`。题库存在 `questions`：可增删改，缺省是内置六题（综合、色情、破限、逆向、渗透、网络攻击）。每题都是「是否安全」，高分表示安全，启用的题目一起问，任一题低于阈值就拦。`safety_instruction` 非空时再多问一题自定义要求。`POST /jev-intercept/models` 用地址和 Key（留空则用已存的第一把）请求 `{base}/v1/models`，失败回 502，不会把上游 401 当成面板登出。
 
-内置正则覆盖 NSFW、蒸馏、破解、破限，面板删不掉。比较的是用户自己写下的正文，不含 user 轮里的 `tool_result` / `*_tool_result` / `function_call_output`，也不含 `system`、`instructions`、`# Environment` 和已闭合的 `<system-reminder>`。决策模型只看这些用户正文；多轮时当前用户句再附在末尾。命中硬正则或模型返回 HTTP 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device id。模型不可用且 `fail_open` 为 false 时同样 403，不封设备。上游 `content_policy` / `content_filter` / `cyber_policy` / `moderation_blocked` / `safety_violation` / `usage_policy` 同样入库。仅 admin。
+内置正则覆盖 NSFW、蒸馏、破解、破限，面板删不掉。硬正则和决策模型检查用户正文及调用方 `system` / `instructions` / `developer` 提示词；剔除白名单中的官方提示词、官方完整提示词、`# Environment`、已闭合的 `<system-reminder>`，不含工具回传 `tool_result` / `*_tool_result` / `function_call_output`。官方模板前后附加的调用方文字仍检查；多轮时当前用户句再附在决策模型送审正文末尾。命中硬正则或模型返回 HTTP 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device id。模型不可用且 `fail_open` 为 false 时同样 403，不封设备。上游 `content_policy` / `content_filter` / `cyber_policy` / `moderation_blocked` / `safety_violation` / `usage_policy` 同样入库。仅 admin。
+
+`GET /jev-usage` 保留 `total` / `today` 汇总、`rows` 和游标分页，新增 `keys[]`：`number`、`masked_key`（长 key 仅前四后四位）、`key_fingerprint`、`retired`、`requests`、`successful`、`estimated_cost_nano_usd`、`unknown_cost_requests`、`status`、`last_request_at`、`last_http_status`。只列当前配置的 key，不回完整 key 或地址；逐 key 按保留明细汇总（`detail_retention_days: 30`），不同于 `total` 的生命周期累计。`status` 为 `normal` / `insufficient_balance` / `auth_error` / `rate_limited` / `request_error` / `paused` / `unrequested`。费用是本系统调用估算，不是账号余额或官方账单。
 
 账号范围（`account_platform_plans[]`、`account_ids[]`，都可为空）把关卡收窄到部分槽位。每一项是 `平台:套餐`，例如 `claude:max`、`gpt:plus`、`gpt:business`；`none` 是没标注套餐。Claude 的 Max/Pro 与虚拟机列表相同（usage 里有 Fable 就是 Max，盖过落盘的 Pro）。指定账号收槽位 id、邮箱或名称，和勾选取并集，全空 = 所有账号都进关卡。只选了 GPT 套餐时 Claude 仍全部进关卡；选了 Claude 套餐或指定账号后，Claude 在选中槽位后再判，没命中的放行。GPT 一旦有范围就只由范围决定，没有范围时仍看 `openai_platform_enabled`。`GET` / `PUT` 都回 `account_scope.account_platform_plan_options`（带当前槽位数）和槽位清单（每条有 `scope_key`）。旧的 `account_types` 不再参与判断；只写过 `account_plan_types`、还没有 `account_platform_plans` 的配置会收成对应的 GPT 套餐（`none` 同时包含两边的未标注）。
 
@@ -370,6 +373,8 @@ Claude `routing.quota` 的 5h/7d 闸分三段（`critical_band` 默认 0.05，`g
 attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终态。`normal` 摘要；`debug` 另存入站原文及脱敏出站数据。`outbound_body` 仍为最后一次真正 POST 给 worker 的 envelope body，Node → worker 的头为 `worker_envelope_headers`。`outbound_headers_source=cli_final` 表示 `outbound_headers` 来自 cli-node 完成组装、CCH 和长度处理后的最终 fetch 调用边界；不包含底层补的 Host / HTTP/2 伪头，凭证及未知自定义头值已在 CLI 脱敏。每次重试覆盖，最后一次尝试未回传则 source=`unavailable`、headers=null，绝不以 envelope 代替。旧记录没有 source，原值不能视作最终值。最终 HTTP body 字节仍不在日志里。该功能需升级 Node、web 与 cli-node，旧 CLI 不支持回传。`X-Request-ID` 回写。`X-Kin-Debug` / `X-Kin-Log` 可单请求覆盖，但出站数据仅按管理员配置的 debug 采样保存。
 
 日志性能（`GET /usage-logs` 为 camelCase，`/request-logs` 与导出为 snake_case）：
+
+`/usage-logs` 系列、日志导出、`/request-logs/stats` 及 dashboard 历史统计使用只读 SQLite worker，查询报错时回落主连接；请求日志与 attempt 仍用同一主连接短暂排队批写，正常关闭数据库前 flush。硬终止可能丢失尚未落库的尾部日志。
 
 | 字段 | 定义 |
 |------|------|

@@ -109,7 +109,7 @@ test('messagesUrl appends /v1/messages?beta=true', () => {
   assert.equal(messagesUrl('https://api.example.com/'), 'https://api.example.com/v1/messages?beta=true')
 })
 
-test('API backend applies the global official_full persona setting', async () => {
+async function runOfficialFullApiFixture({ input = {}, extraEvents = '' } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-api-persona-'))
   const routingFile = path.join(root, 'routing.json')
   const socketPath = path.join(root, 'run', 'api-kernel.sock')
@@ -131,7 +131,7 @@ test('API backend applies the global official_full persona setting', async () =>
     req.on('end', () => {
       received = JSON.parse(Buffer.concat(chunks).toString('utf8'))
       res.writeHead(200, { 'content-type': 'text/event-stream' })
-      res.end(completeAnthropicSse())
+      res.end(completeAnthropicSse(extraEvents))
     })
   })
   await new Promise((resolve, reject) => {
@@ -147,7 +147,7 @@ test('API backend applies the global official_full persona setting', async () =>
       return body
     },
     writeSSEHeaders() {},
-    readBody: async () => ({ model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hello' }] }),
+    readBody: async () => ({ model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hello' }], ...input }),
     requireAuth: () => true,
     cfg: {
       rewrite: { enabled: false },
@@ -218,10 +218,32 @@ test('API backend applies the global official_full persona setting', async () =>
       texts.some((text) => text.includes('# Environment')),
       shape,
     )
+    return { outbound, response }
   } finally {
     await new Promise((resolve) => kernel.close(resolve))
     fs.rmSync(root, { recursive: true, force: true })
   }
+}
+
+test('API backend applies the global official_full persona setting', () => runOfficialFullApiFixture())
+
+test('Anthropic API direct restores a rewritten tool name in its assembled response', async () => {
+  const events = [
+    {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'tool_use', id: 'tool-api', name: 'mcp__read_file', input: { path: 'example.txt' } },
+    },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 1 } },
+  ]
+  const run = await runOfficialFullApiFixture({
+    input: { tools: [{ name: 'read_file', input_schema: { type: 'object', properties: {} } }] },
+    extraEvents: events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
+  })
+  assert.equal(run.outbound.tools[0].name, 'mcp__read_file')
+  assert.equal(run.response.body.content[0].name, 'read_file')
+  assert.equal(run.response.body.content[0].id, 'tool-api')
 })
 
 test('OAuth cli-hop applies the resolved Protocol custom persona template', async () => {
