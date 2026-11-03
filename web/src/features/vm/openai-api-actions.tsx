@@ -317,7 +317,7 @@ export function OpenaiApiDialog({
             <OpenaiApiCreditDetails state={state} />
             <p className='m-0 text-xs text-muted-foreground'>
               {state?.has_key
-                ? `项目 key 已保存${state.key_suffix ? ` · 尾号 ${state.key_suffix}` : ''}`
+                ? `项目 key 已保存${state.key_prefix ? ` · ${state.key_prefix}…` : ''}`
                 : state?.setup_status === 'configuring'
                   ? '正在配置专用项目与 key…'
                   : state?.setup_status === 'needs_login'
@@ -328,7 +328,7 @@ export function OpenaiApiDialog({
               <div className='grid gap-2 rounded-md border border-[color:var(--status-warn)] p-3'>
                 <p role='status' className='m-0 text-xs'>
                   上游已返回额度或配额不足，此账号 API 暂停调度。
-                  余额刷新不会自动解除阻断，请在 OpenAiAPIKEY 页面处理。
+                  余额刷新不会自动解除阻断，请在 OpenAi_api 页面处理。
                 </p>
               </div>
             ) : null}
@@ -390,7 +390,7 @@ export function OpenaiApiDialog({
             </div>
             {state?.has_key ? (
               <p className='m-0 text-xs text-muted-foreground'>
-                key 开关、替换和调用状态在 OpenAiAPIKEY 页面管理。
+                key 开关、替换和调用状态在 OpenAi_api 页面管理。
                 在生成密钥的分组中选择 OpenAI(apikey)，勾选此账号即可调用。API
                 {state.balance_refresh_interval_minutes === 0
                   ? '余额仅手动刷新。'

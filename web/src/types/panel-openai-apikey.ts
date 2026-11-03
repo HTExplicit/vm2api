@@ -21,7 +21,17 @@ export type OpenaiApiKeyEntry = OpenaiApiView &
     call_status: OpenaiApiCallStatus
     call_error?: { code: string; message: string; at: string } | null
     cooldown_until?: string | null
-    proxy: { id: string | null; name: string; available: boolean }
+    proxy: {
+      id: string | null
+      name: string
+      label?: string | null
+      host?: string | null
+      port?: number | string | null
+      scheme?: string | null
+      kind?: string | null
+      node_name?: string | null
+      available: boolean
+    }
     today_requests: number
     today_cost: number | null
     last_used_at: string | null

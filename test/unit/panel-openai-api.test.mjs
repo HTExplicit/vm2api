@@ -14,13 +14,89 @@ import { buildOpenaiApiKeyList } from '../../src/lib/admin/openai-apikey.mjs'
 const ADMIN = { apiKeyKind: 'master' }
 const VIEW = { has_key: true, enabled: true, balance: '37.00', claim_status: 'claimed', setup_status: 'ready' }
 
-test('a manually bound unnamed proxy is displayed without exposing its address', () => {
+test('a manually bound unnamed proxy displays only its safe address fields', () => {
   const data = buildOpenaiApiKeyList(
-    [{ id: 'slot', proxy: { host: 'private.proxy', port: 1080 } }],
+    [
+      {
+        id: 'slot',
+        proxy: { host: 'private.proxy', port: 1080, username: 'private-user', password: 'private-password' },
+      },
+    ],
     { view: () => ({ ...VIEW, account_id: 'account', email: 'account@example.test' }) },
   )
-  assert.deepEqual(data.items[0].proxy, { id: null, name: '账号绑定代理', available: true })
-  assert.equal(JSON.stringify(data).includes('private.proxy'), false)
+  assert.deepEqual(data.items[0].proxy, {
+    id: null,
+    name: 'private.proxy:1080',
+    label: null,
+    host: 'private.proxy',
+    port: 1080,
+    scheme: 'socks5',
+    kind: 'socks5',
+    available: true,
+  })
+  assert.equal(JSON.stringify(data).includes('private-user'), false)
+  assert.equal(JSON.stringify(data).includes('private-password'), false)
+})
+
+test('proxy summaries use the current pool label and safe address after rename or label removal', () => {
+  const raw = {
+    id: 'px-a',
+    label: '新出口',
+    host: '2001:db8::1',
+    port: 1080,
+    username: 'private-user',
+    password: 'private-password',
+  }
+  const proxyPool = {
+    state: { proxies: [raw] },
+    publicProxy: (proxy) => ({ ...proxy, url: 'socks5://private-user:private-password@private.proxy:1080' }),
+  }
+  const vms = [{ id: 'slot', proxy: { id: 'px-a', name: '旧出口', host: 'old.proxy', port: 1080 } }]
+  const manager = { view: () => ({ ...VIEW, account_id: 'account' }) }
+  const read = () => buildOpenaiApiKeyList(vms, manager, null, null, { proxyPool }).items[0].proxy
+  assert.equal(read().name, '新出口')
+  raw.label = '已改名'
+  assert.equal(read().name, '已改名')
+  raw.label = ''
+  assert.deepEqual(read(), {
+    id: 'px-a',
+    name: '[2001:db8::1]:1080',
+    label: null,
+    host: '2001:db8::1',
+    port: 1080,
+    scheme: 'socks5',
+    kind: 'socks5',
+    available: true,
+  })
+  vms[0].proxy = { id: 'px-a' }
+  assert.equal(read().name, '[2001:db8::1]:1080')
+  assert.equal(read().available, true, 'an ID-only binding uses current pool address fields')
+  assert.doesNotMatch(JSON.stringify(read()), /private-user|private-password|socks5:\/\//)
+})
+
+test('URL-only proxies expose host and port while local and missing bindings use established names', () => {
+  const manager = { view: () => ({ ...VIEW, account_id: 'account' }) }
+  const read = (vm, options) => buildOpenaiApiKeyList([vm], manager, null, null, options).items[0].proxy
+  const urlProxy = read({ id: 'slot', proxy: { url: 'socks5h://private-user:private-password@proxy.example:1081' } })
+  assert.equal(urlProxy.name, 'proxy.example:1081')
+  assert.equal(urlProxy.host, 'proxy.example')
+  assert.equal(urlProxy.port, 1081)
+  assert.doesNotMatch(JSON.stringify(urlProxy), /private-user|private-password|socks5h:\/\//)
+  assert.equal(read({ id: 'slot', proxy: { id: 'px-local', kind: 'local' } }).name, '当前VPS local代理')
+  assert.equal(
+    read(
+      { id: 'slot', proxy: { id: 'px-local-node-a', kind: 'local' } },
+      { nodes: [{ id: 'node-a', label: '美西节点' }] },
+    ).name,
+    '美西节点local代理',
+  )
+  const unnamedNode = read({ id: 'slot', proxy: { id: 'px-local-internal-node-id', kind: 'local' } })
+  assert.equal(unnamedNode.name, '当前VPS local代理')
+  assert.equal(unnamedNode.name.includes('internal-node-id'), false)
+  const missing = read({ id: 'slot', proxy: { id: 'px-deleted' } })
+  assert.equal(missing.name, '未绑定')
+  assert.equal(missing.available, false)
+  assert.equal(read({ id: 'slot' }).name, '未绑定')
 })
 
 function fixture(t) {
@@ -68,7 +144,7 @@ function handler(root, { who = ADMIN, body = {}, manager = {}, credits = {}, ...
   }
 }
 
-test('OpenAiAPIKEY aggregates only current bound keys, eligible bind choices and safe proxy summaries', async (t) => {
+test('OpenAi_api aggregates only current bound keys, eligible bind choices and safe proxy summaries', async (t) => {
   const root = fixture(t)
   for (const [id, name] of [
     ['vm-bind', '待绑定'],
@@ -91,6 +167,10 @@ test('OpenAiAPIKEY aggregates only current bound keys, eligible bind choices and
     }),
   )
   const out = await handler(root, {
+    proxyPool: {
+      state: { proxies: [{ id: 'px-a', label: '代理池最新名', host: 'current.proxy', port: 1081 }] },
+      publicProxy: (proxy) => ({ ...proxy }),
+    },
     manager: {
       view(vm) {
         return {
@@ -124,7 +204,16 @@ test('OpenAiAPIKEY aggregates only current bound keys, eligible bind choices and
   assert.equal(out.body.data.items.length, 1)
   assert.equal(out.body.data.items[0].slot_name, '主账号')
   assert.equal(out.body.data.items[0].today_requests, 2)
-  assert.deepEqual(out.body.data.items[0].proxy, { id: 'px-a', name: '账号出口', available: true })
+  assert.deepEqual(out.body.data.items[0].proxy, {
+    id: 'px-a',
+    name: '代理池最新名',
+    label: '代理池最新名',
+    host: 'current.proxy',
+    port: 1081,
+    scheme: 'socks5',
+    kind: 'socks5',
+    available: true,
+  })
   assert.deepEqual(
     out.body.data.bind_candidates.map((item) => item.vm_id),
     ['vm-bind'],

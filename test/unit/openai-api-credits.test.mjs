@@ -6,6 +6,7 @@ import path from 'node:path'
 import { createDatabase } from '../../src/lib/db/database.mjs'
 import { OpenaiApiRepo } from '../../src/lib/db/repos/openai-api-repo.mjs'
 import { OpenaiApiCreditsService } from '../../src/lib/oauth/openai-api-credits.mjs'
+import { ApiEndpointStore } from '../../src/lib/admin/api-endpoints.mjs'
 import { readCodexAccounts, writeCodexAccounts } from '../../src/lib/vm/codex-slot.mjs'
 import { atomicWriteJson } from '../../src/lib/vm/vm-file.mjs'
 
@@ -136,6 +137,35 @@ function linked(outcome = 'pending') {
     can_unlink: false,
   }
 }
+
+test('account summaries derive a twelve-character key prefix without revealing short secrets', (t) => {
+  const slot = fixture(t)
+  const store = new ApiEndpointStore({ db: slot.repo.db })
+  const endpoint = store.create({ kind: 'openai' })
+  const service = slot.service(() => assert.fail('summary must not make official requests'))
+  assert.equal(service.view(slot.vm()).key_prefix, null)
+  for (const secret of ['sk-proj-abcd-private-secret', '123456789012', 'short']) {
+    const key = store.addKey(endpoint.id, {
+      api_key: secret,
+      source_vm_id: slot.vmId,
+      source_account_id: ACCOUNT_ID,
+    })
+    slot.repo.upsertAccount(ACCOUNT_ID, { vm_id: slot.vmId, key_id: key.id })
+    const view = service.view(slot.vm())
+    assert.equal(view.has_key, true)
+    assert.equal(view.key_prefix, secret.length > 12 ? secret.slice(0, 12) : null)
+    assert.equal(view.key_suffix, secret.slice(-4), 'legacy suffix stays compatible')
+    assert.equal(JSON.stringify(view).includes(secret), false)
+  }
+  const other = store.addKey(endpoint.id, {
+    api_key: 'sk-proj-other-private-secret',
+    source_vm_id: 'other-slot',
+    source_account_id: ACCOUNT_ID,
+  })
+  slot.repo.upsertAccount(ACCOUNT_ID, { key_id: other.id })
+  assert.equal(service.view(slot.vm()).key_prefix, null)
+  assert.equal(service.view(slot.vm()).key_suffix, null)
+})
 
 test('only the six normalized Pro plan values can query promo eligibility', async (t) => {
   for (const plan of ['prolite', 'chatgptprolite', 'pro', 'chatgptpro', 'promax', 'chatgptpromax']) {

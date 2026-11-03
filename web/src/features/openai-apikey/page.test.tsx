@@ -3,7 +3,7 @@ import type { OpenaiApiKeyEntry } from '@/types/panel-openai-apikey'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiKeyBindDialog } from './bind-dialog'
-import { ApiKeyDetailSheet } from './detail-sheet'
+import { ApiKeyDetailDialog } from './detail-dialog'
 import { OpenaiApiKeyPage } from './index'
 
 const controls = vi.hoisted(() => ({
@@ -32,16 +32,6 @@ vi.mock('@tanstack/react-query', () => ({
   useMutation: () => ({ isPending: false, mutate: vi.fn() }),
   useQueryClient: () => ({ invalidateQueries: vi.fn() }),
 }))
-vi.mock('@/components/ui/sheet', () => {
-  const Part = ({ children }: PropsWithChildren) => <div>{children}</div>
-  return {
-    Sheet: Part,
-    SheetContent: Part,
-    SheetHeader: Part,
-    SheetTitle: Part,
-    SheetDescription: Part,
-  }
-})
 vi.mock('@/components/ui/dialog', () => {
   const Part = ({ children }: PropsWithChildren) => <div>{children}</div>
   return {
@@ -69,11 +59,14 @@ beforeEach(() => {
     enabled: true,
     has_key: true,
     key_suffix: '1234',
+    key_prefix: 'sk-proj-abcd',
     setup_status: 'needs_login',
     balance: '-1.239',
     paid_balance: '37.000',
     balance_refresh_interval_minutes: 0,
     balance_error: 'Billing 需要登录',
+    balance_refresh_status: 'needs_login',
+    balance_refresh_message: '请在账号浏览器完成登录',
     last_error: '请补充登录',
     quota_blocked: true,
     call_status: 'quota_blocked',
@@ -82,7 +75,13 @@ beforeEach(() => {
       message: '官方配额不足',
       at: '2026-11-03T12:00:00Z',
     },
-    proxy: { id: 'proxy-one', name: '账号绑定代理', available: true },
+    proxy: {
+      id: 'proxy-one',
+      name: '账号绑定代理',
+      host: 'proxy.example.test',
+      port: 1080,
+      available: true,
+    },
     today_requests: 12,
     today_cost: null,
     last_used_at: null,
@@ -90,12 +89,16 @@ beforeEach(() => {
   }
 })
 
-describe('OpenAiAPIKEY management surface', () => {
+describe('OpenAi_api management surface', () => {
   it('renders account state, precise balance and masked key without fetching secrets', () => {
     const html = renderToStaticMarkup(<OpenaiApiKeyPage />)
-    expect(html).toContain('OpenAiAPIKEY')
+    expect(html).toContain('OpenAi_api')
     expect(html).toContain('one@example.test')
-    expect(html).toContain('•••• 1234')
+    expect(html).toContain('sk-proj-abcd…')
+    expect(html).not.toContain('•••• 1234')
+    expect(html).toContain('账号绑定代理 · proxy.example.test:1080')
+    expect(html).not.toContain('proxy-one')
+    expect(html).toContain('需要登录')
     expect(html).toContain('$-1.23')
     expect(html).toContain('额度阻断')
     expect(html).toContain('仅手动刷新')
@@ -118,7 +121,7 @@ describe('OpenAiAPIKEY management surface', () => {
   it('keeps invocation errors and management login separate and exposes account-filtered logs', () => {
     const noop = () => {}
     const html = renderToStaticMarkup(
-      <ApiKeyDetailSheet
+      <ApiKeyDetailDialog
         item={controls.item}
         busy={false}
         onClose={noop}
@@ -133,7 +136,10 @@ describe('OpenAiAPIKEY management surface', () => {
     expect(html).toContain('需要补充 Platform 登录')
     expect(html).toContain('余额刷新不会自动解除阻断')
     expect(html).toContain('官方 key 内容')
-    expect(html).toContain('•••• 1234')
+    expect(html).toContain('sk-proj-abcd…')
+    expect(html).toContain('代理地址')
+    expect(html).toContain('proxy.example.test:1080')
+    expect(html).toContain('请在账号浏览器完成登录')
     expect(html).toContain('source_account_id=account-a')
     expect(html).toContain('保留领取、余额和历史日志，不撤销官方 key')
     expect(controls.api).not.toHaveBeenCalled()

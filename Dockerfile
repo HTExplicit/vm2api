@@ -40,7 +40,8 @@ RUN npx playwright-core install-deps firefox \
 COPY src ./src
 COPY scripts ./scripts
 RUN node scripts/smoke-platform-browser.mjs \
-  && node scripts/smoke-platform-setup.mjs
+  && node scripts/smoke-platform-setup.mjs \
+  && node scripts/smoke-platform-balance.mjs
 COPY VERSION CHANGELOG.md ./
 COPY docker/kin-os ./docker/kin-os
 COPY docker/kin-kvm ./docker/kin-kvm

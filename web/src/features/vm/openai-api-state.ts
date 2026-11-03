@@ -18,6 +18,30 @@ export function isOpenaiApiBalancePending(
   return !Number.isFinite(checkedAt) || now - checkedAt >= interval * 60_000
 }
 
+export function openaiApiBalanceStatusText(
+  state?: OpenaiApiView | null,
+  now = Date.now()
+): string {
+  if (!state) return ''
+  const labels = {
+    queued: '排队中',
+    refreshing: '刷新中',
+    needs_login: '需要登录',
+    error: '刷新失败',
+  }
+  const status = state.balance_refresh_status
+  if (status && status !== 'idle') return labels[status]
+  if (state.balance_error) return '刷新失败'
+  if (state.balance_refresh_interval_minutes === 0) return ''
+  return isOpenaiApiBalancePending(state, now) ? '等待刷新' : ''
+}
+
+export function openaiApiBalanceStatusMessage(
+  state?: OpenaiApiView | null
+): string {
+  return state?.balance_refresh_message || state?.balance_error || ''
+}
+
 const PRO_PLANS = new Set([
   'prolite',
   'pro',

@@ -21,7 +21,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import {
-  isOpenaiApiBalancePending,
+  openaiApiBalanceStatusText,
   isOpenaiApiKeyCandidate,
 } from '@/features/vm/openai-api-state'
 import { openaiApiAccountChoices } from './key-account-choices'
@@ -379,8 +379,8 @@ export function KeyLimitsDialog({
                               {vm.openai_api?.balance != null
                                 ? `API $${formatBalanceAmount(vm.openai_api.balance)}`
                                 : 'API 余额未知'}
-                              {isOpenaiApiBalancePending(vm.openai_api)
-                                ? ' · 待刷新'
+                              {openaiApiBalanceStatusText(vm.openai_api)
+                                ? ` · ${openaiApiBalanceStatusText(vm.openai_api)}`
                                 : ''}
                               {vm.openai_api?.quota_blocked
                                 ? ' · 上游额度阻断'

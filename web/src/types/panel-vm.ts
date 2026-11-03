@@ -53,6 +53,7 @@ export type OpenaiApiView = {
   organization_name?: string | null
   enabled: boolean
   has_key: boolean
+  key_prefix?: string | null
   key_suffix?: string | null
   setup_status: 'idle' | 'needs_login' | 'configuring' | 'ready' | 'error'
   balance: string | null
@@ -65,6 +66,9 @@ export type OpenaiApiView = {
   offer_stale?: boolean
   balance_checked_at?: string | null
   balance_refresh_interval_minutes?: number
+  balance_refresh_status?:
+    'idle' | 'queued' | 'refreshing' | 'needs_login' | 'error'
+  balance_refresh_message?: string | null
   balance_error?: string | null
   quota_blocked?: boolean
   last_error?: string | null

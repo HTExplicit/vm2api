@@ -191,7 +191,7 @@ describe('Codex quota readings after a quota error', () => {
     const html = renderToStaticMarkup(<CodexCreditSummary vm={base} />)
     expect(html).toContain('API $12.34')
     expect(html).not.toContain('12.345678901')
-    expect(html).toContain('待刷新')
+    expect(html).toContain('刷新失败')
     expect(html).not.toContain('点数不可用')
     const unknown = renderToStaticMarkup(
       <CodexCreditSummary

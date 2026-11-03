@@ -5,7 +5,7 @@ import { withTransaction } from '../db/database.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
 import { hasBoundExit } from '../vm/egress.mjs'
 import { createPlatformBrowserSession } from './platform-browser.mjs'
-import { PlatformAdapter } from './platform-adapter.mjs'
+import { PlatformAdapter, navigatePlatformForObservation } from './platform-adapter.mjs'
 import { fetchBillingBalance } from './billing-client.mjs'
 import { balanceRefreshIntervalMinutes } from './config.mjs'
 import { accountApiKeyState, QUOTA_BLOCK } from './key-state.mjs'
@@ -88,6 +88,7 @@ export class OpenaiApiManager {
     const key = this.repo.getKey(record?.key_id)
     const endpoint = key ? this.apiEndpointStore.getRaw(key.endpoint_id) : null
     const state = accountApiKeyState({ vm, accountId: context?.accountId, record, key, endpoint, now: this.now() })
+    const refresh = this.balanceRefreshView(vm.id, context?.accountId, record, view)
     return {
       ...view,
       vm_id: vm.id,
@@ -102,8 +103,30 @@ export class OpenaiApiManager {
       cooldown_until: key?.cooldown_until || null,
       browser_active: !!this.browserManager.state(vm.id).active,
       balance_refresh_interval_minutes: balanceRefreshIntervalMinutes(this.getRouting()),
+      balance_refresh_status: refresh.status,
+      balance_refresh_message: refresh.message,
       quota_blocked: key?.cooldown_until === QUOTA_BLOCK,
     }
+  }
+
+  balanceRefreshView(vmId, accountId, record, view) {
+    const job = this.jobs.get(vmId)
+    if (job?.accountId === accountId && !job.abort.signal.aborted)
+      return { status: job.phase || 'queued', message: job.phaseMessage || '余额刷新已排队' }
+    const error = view.balance_error || (record?.setup_status === 'error' ? record.last_error : null)
+    if (record?.setup_status === 'needs_login')
+      return { status: 'needs_login', message: record.last_error || 'Platform 会话需要补充登录，请连接 Platform' }
+    if (error) return { status: 'error', message: error }
+    const profile = this.profileRepo.get(vmId)
+    const session = profile?.billing_session
+    if (
+      profile?.account_id === accountId &&
+      session?.organization_id === record?.organization_id &&
+      session?.recovery_attempted &&
+      !session.headers
+    )
+      return { status: 'error', message: 'Billing 会话恢复尚未完成，请手动刷新或连接 Platform' }
+    return { status: 'idle', message: null }
   }
 
   assertAccountIdentity(vmId, expectedAccountId) {
@@ -322,6 +345,8 @@ export class OpenaiApiManager {
       accountId: context.accountId,
       kind,
       interactive,
+      phase: 'queued',
+      phaseMessage: kind === 'setup' ? 'API 配置任务已排队' : '余额刷新已排队',
       ready: new Promise((resolve) => {
         ready = resolve
       }),
@@ -423,10 +448,13 @@ export class OpenaiApiManager {
     })
     this.balanceTail = previous.then(() => finished)
     try {
+      job.phase = 'queued'
+      job.phaseMessage = '等待前序余额刷新任务完成'
       await waitForJob(previous, job.abort.signal)
       while (true) {
         const manual = [...this.browserManager.jobs.values()].find((live) => live.retained)
         if (!manual) break
+        job.phaseMessage = '等待正在操作的账号浏览器关闭'
         await waitForJob(manual.closed, job.abort.signal)
       }
       if (!job.interactive && !balanceRefreshIntervalMinutes(this.getRouting())) return
@@ -444,6 +472,8 @@ export class OpenaiApiManager {
       let authenticationError
       if (matching && session.headers) {
         try {
+          job.phase = 'refreshing'
+          job.phaseMessage = '正在通过 Billing 会话刷新余额'
           const { summary, cookies } = await this.fetchBalance({
             session,
             storageState: profile.storage_state,
@@ -491,6 +521,8 @@ export class OpenaiApiManager {
   async runBrowser(job) {
     const context = this.assertCurrent(job)
     job.proxyUrl = hostProxyUrlForVm(context.vm)
+    job.phase = 'queued'
+    job.phaseMessage = '等待账号浏览器就绪'
     const live = await this.browserManager.acquire(job.vmId, {
       purpose: 'platform',
       interactive: job.interactive,
@@ -508,6 +540,8 @@ export class OpenaiApiManager {
     live.inputLocked = true
     this.sessions.set(job.vmId, live)
     job.resolveReady(live)
+    job.phase = 'refreshing'
+    job.phaseMessage = '正在连接 Platform 以更新余额'
     this.browserManager.setStatus(live, 'opening', '正在打开 OpenAI Platform')
     const adapter = new this.Adapter({
       page: browser.page,
@@ -516,11 +550,12 @@ export class OpenaiApiManager {
       organizationId: context.record?.organization_id,
     })
     live.adapter = adapter
-    await browser.page.goto('https://platform.openai.com/settings/organization/general', {
-      waitUntil: 'domcontentloaded',
+    const browserSignal = AbortSignal.any([job.abort.signal, live.closeSignal])
+    await navigatePlatformForObservation(browser.page, 'https://platform.openai.com/settings/organization/general', {
       timeout: 45_000,
+      signal: browserSignal,
     })
-    let identity = await adapter.inspect({ timeout: 30_000, signal: job.abort.signal })
+    let identity = await adapter.inspect({ timeout: 30_000, signal: browserSignal })
     if (!identity.authenticated) {
       if (!job.interactive) throw problem('platform_login_required', 'Platform 会话已失效，请补充登录')
       this.repo.upsertAccount(job.accountId, { setup_status: 'needs_login', last_error: null })
@@ -627,7 +662,10 @@ export class OpenaiApiManager {
 
   async updateBalance(live, organizationId) {
     this.assertCurrent(live.job)
-    const result = await live.adapter.readBalance({ organizationId })
+    live.job.phase = 'refreshing'
+    live.job.phaseMessage = '正在读取当前组织的官方 Billing 余额'
+    const signal = AbortSignal.any([live.job.abort.signal, live.closeSignal])
+    const result = await live.adapter.readBalance({ organizationId, signal })
     const billingSession = live.adapter.billingSessionFor(organizationId)
     if (!billingSession)
       throw problem('platform_billing_session_missing', '官方 Billing 尚未返回可复用会话，请重试连接 Platform', 409)
@@ -665,6 +703,8 @@ export class OpenaiApiManager {
 
   async waitForLogin(live) {
     live.waiting = true
+    live.job.phase = 'needs_login'
+    live.job.phaseMessage = '请在账号浏览器中完成 Platform 登录'
     return new Promise((resolve, reject) => {
       let inspecting = false
       const finish = (value, error) => {
@@ -673,6 +713,10 @@ export class OpenaiApiManager {
         live.waiting = false
         live.checkLogin = null
         live.cancel = null
+        if (!error) {
+          live.job.phase = 'refreshing'
+          live.job.phaseMessage = '正在核对 Platform 登录及组织'
+        }
         error ? reject(error) : resolve(value)
       }
       live.cancel = () => finish(null, problem('platform_login_required', '登录尚未完成，可继续配置'))

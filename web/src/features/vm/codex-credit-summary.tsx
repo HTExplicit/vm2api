@@ -11,7 +11,8 @@ import {
 import { openaiApiCreditDetailRows } from '@/features/vm/openai-api-credit-details'
 import {
   hasOpenaiApiFeature,
-  isOpenaiApiBalancePending,
+  openaiApiBalanceStatusMessage,
+  openaiApiBalanceStatusText,
 } from '@/features/vm/openai-api-state'
 
 /** Balance credits are separate from the reset vouchers below the quota windows. */
@@ -68,7 +69,8 @@ export function CodexCreditSummary({
     .join('\n')
   const apiState = vm.openai_api
   const apiLabel = `API ${apiState?.balance != null ? `$${formatBalanceAmount(apiState.balance)}` : '未知'}`
-  const apiPending = isOpenaiApiBalancePending(apiState)
+  const apiStatus = openaiApiBalanceStatusText(apiState)
+  const apiMessage = openaiApiBalanceStatusMessage(apiState)
   const apiFacts = [
     apiLabel,
     apiState?.organization_name ? `组织：${apiState.organization_name}` : '',
@@ -79,9 +81,8 @@ export function CodexCreditSummary({
     apiState?.balance_checked_at
       ? `最近刷新：${fmtExpiresAt(apiState.balance_checked_at)}`
       : '尚无 API 余额样本',
-    apiPending
-      ? `待刷新${apiState?.balance_error ? `：${apiState.balance_error}` : ''}`
-      : '',
+    apiStatus ? `${apiStatus}${apiMessage ? `：${apiMessage}` : ''}` : '',
+    apiState?.balance_refresh_interval_minutes === 0 ? '仅手动刷新' : '',
     apiState?.benefit
       ? `每${apiState.benefit.cadence === 'annual' ? '年' : '月'}权益：$${formatBalanceAmount(apiState.benefit.period_credit_amount_usd)}`
       : '',
@@ -133,8 +134,10 @@ export function CodexCreditSummary({
               className='flex min-w-0 cursor-help items-baseline gap-1 text-[11px] text-muted-foreground'
             >
               <span className='tabular-nums'>{apiLabel}</span>
-              {apiPending ? (
-                <span className='text-[color:var(--status-warn)]'>待刷新</span>
+              {apiStatus ? (
+                <span className='text-[color:var(--status-warn)]'>
+                  {apiStatus}
+                </span>
               ) : null}
             </div>
           </TooltipTrigger>

@@ -26,6 +26,113 @@ function problem(code, message, status = 409) {
   return Object.assign(new Error(message), { code, status })
 }
 
+function expectedPlatformNavigation(value, target) {
+  const url = new URL(value)
+  return (
+    (url.origin === target.origin && url.pathname.replace(/\/$/, '') === target.pathname.replace(/\/$/, '')) ||
+    ['https://auth.openai.com', 'https://auth0.openai.com'].includes(url.origin) ||
+    (url.origin === PLATFORM_ORIGIN && /^\/(?:auth|login)(?:\/|$)/.test(url.pathname))
+  )
+}
+
+/** A Firefox navigation abort is provisional only when this window actually continues. */
+export async function navigatePlatformForObservation(page, url, { timeout = 30_000, signal, observed } = {}) {
+  signal?.throwIfAborted()
+  if (page.isClosed?.()) throw problem('platform_browser_closed', '账号浏览器已关闭')
+  const initialUrl = page.url()
+  const target = new URL(url)
+  return new Promise((resolve, reject) => {
+    let finished = false
+    let abortedNavigation = false
+    let continued = false
+    let observationComplete = false
+    const finish = (error) => {
+      if (finished) return
+      finished = true
+      clearTimeout(timer)
+      page.off('framenavigated', navigated)
+      page.off('close', closed)
+      signal?.removeEventListener('abort', aborted)
+      error === undefined ? resolve() : reject(error)
+    }
+    const navigated = (frame) => {
+      if (frame !== page.mainFrame()) return
+      if (expectedPlatformNavigation(frame.url(), target)) continued = true
+      if (abortedNavigation && !observed && continued) finish()
+    }
+    const closed = () => finish(problem('platform_browser_closed', '账号浏览器已关闭'))
+    const aborted = () => finish(signal.reason)
+    const timer = setTimeout(
+      () => finish(problem('platform_navigation_timeout', '等待官方页面接续导航超时，请在账号浏览器核对页面。')),
+      timeout,
+    )
+    page.on('framenavigated', navigated)
+    page.on('close', closed)
+    signal?.addEventListener('abort', aborted, { once: true })
+    if (observed) {
+      observed.then(
+        () => {
+          observationComplete = true
+          if (abortedNavigation) finish()
+        },
+        (error) => finish(error),
+      )
+    }
+    Promise.resolve()
+      .then(() => {
+        if (!finished) return page.goto(url, { waitUntil: 'domcontentloaded', timeout })
+      })
+      .then(
+        () => finish(),
+        (error) => {
+          if (finished) return
+          if (!/NS_BINDING_ABORTED/.test(error?.message || '')) return finish(error)
+          abortedNavigation = true
+          if (
+            observed
+              ? observationComplete
+              : continued || (page.url() !== initialUrl && expectedPlatformNavigation(page.url(), target))
+          )
+            finish()
+        },
+      )
+  })
+}
+
+async function withinBillingRead(page, signal, read) {
+  signal?.throwIfAborted()
+  if (page.isClosed?.()) throw problem('platform_browser_closed', '账号浏览器已关闭')
+  const controller = new AbortController()
+  const deadline = Date.now() + 30_000
+  const abort = () => controller.abort(signal.reason)
+  const closed = () => controller.abort(problem('platform_browser_closed', '账号浏览器已关闭'))
+  const timer = setTimeout(
+    () =>
+      controller.abort(
+        problem('platform_balance_unavailable', '等待当前组织的官方 Billing 余额超时，请在登录窗口核对页面。'),
+      ),
+    30_000,
+  )
+  page.on('close', closed)
+  signal?.addEventListener('abort', abort, { once: true })
+  let cancelled
+  const cancellation = new Promise((resolve, reject) => {
+    cancelled = () => reject(controller.signal.reason)
+    controller.signal.addEventListener('abort', cancelled, { once: true })
+  })
+  try {
+    return await Promise.race([
+      read({ signal: controller.signal, remaining: () => Math.max(1, deadline - Date.now()) }),
+      cancellation,
+    ])
+  } finally {
+    clearTimeout(timer)
+    page.off('close', closed)
+    signal?.removeEventListener('abort', abort)
+    controller.signal.removeEventListener('abort', cancelled)
+  }
+}
+
 function text(value) {
   return typeof value === 'string' ? value.trim() : ''
 }
@@ -252,6 +359,7 @@ export class PlatformAdapter {
     this.billingSessions = new Map()
     this.creditSequences = new Map()
     this.creditSequence = 0
+    this.creditRequests = new WeakMap()
     this.createdKey = null
     this.keySave = null
     this.keyCallback = null
@@ -265,6 +373,8 @@ export class PlatformAdapter {
     page.on('response', this.responseHandler)
     this.requestHandler = (request) => {
       try {
+        if (request.url().split('?')[0] === BILLING_CREDIT_GRANTS_URL && request.method() === 'GET')
+          this.creditRequests.set(request, ++this.creditSequence)
         this.observeKeyRequest(request)
       } catch (error) {
         this.keySetup?.reject(error)
@@ -300,7 +410,9 @@ export class PlatformAdapter {
     if (url.origin === 'https://api.openai.com' && url.pathname === '/v1/dashboard/billing/credit_grants') {
       const organizationId = headers['openai-organization']
       if (request.method() !== 'GET' || !ORGANIZATION_ID.test(text(organizationId))) return
-      const sequence = ++this.creditSequence
+      const sequence = this.creditRequests.get(request)
+      // A response to a request started before this adapter attached is not a new sample.
+      if (!sequence) return
       const summary = parsePlatformCreditSummary(await response.text(), this.now())
       const allHeaders = request.allHeaders ? await request.allHeaders() : headers
       if (sequence > (this.creditSequences.get(organizationId) || 0)) {
@@ -907,37 +1019,70 @@ export class PlatformAdapter {
   }
 
   async readBalance({ organizationId = this.organizationId, signal } = {}) {
-    await this.requireLogin({ signal })
-    // Onboarding can identify the user before the selected organization is observed.
-    // The Billing GET below must itself confirm the exact organization.
-    if (this.identity.organizationId && this.identity.organizationId !== organizationId)
-      await this.selectOrganization(organizationId, { signal })
-    this.creditSummaries.delete(organizationId)
-    const observed = this.page.waitForResponse(
-      (response) => {
-        const request = response.request()
-        return (
-          response.url().split('?')[0] === BILLING_CREDIT_GRANTS_URL &&
-          response.ok() &&
-          request.method() === 'GET' &&
-          request.headers()['openai-organization'] === organizationId
-        )
-      },
-      { timeout: 15_000 },
-    )
-    // Register before navigation; the Billing request can finish before DOMContentLoaded.
-    observed.catch(() => {})
-    await this.goto(BILLING_URL)
-    await observed
-    await this.settled()
-    const state = await this.requireLogin()
-    const summary = this.creditSummaries.get(organizationId)
-    if (summary?.balance == null) {
-      throw problem('platform_balance_unavailable', '尚未取得当前组织的官方 Billing 余额，请在登录窗口核对页面。')
-    }
-    return {
-      ...summary,
-      displayName: state.organizations.find((row) => row.id === organizationId)?.name || organizationId,
-    }
+    return withinBillingRead(this.page, signal, async ({ signal: readSignal, remaining }) => {
+      await this.requireLogin({ signal: readSignal })
+      // Onboarding can identify the user before the selected organization is observed.
+      // Only a GET started during this read can confirm the exact Billing organization.
+      if (this.identity.organizationId && this.identity.organizationId !== organizationId)
+        await this.selectOrganization(organizationId, { signal: readSignal })
+      readSignal.throwIfAborted()
+      const requestFloor = this.creditSequence
+      this.creditSummaries.delete(organizationId)
+      this.billingSessions.delete(organizationId)
+      let responseListener
+      let aborted
+      const unavailable = () =>
+        problem('platform_balance_unavailable', '尚未取得当前组织的官方 Billing 余额，请在登录窗口核对页面。')
+      const observed = new Promise((resolve, reject) => {
+        responseListener = async (response) => {
+          const request = response.request()
+          if (
+            response.url().split('?')[0] !== BILLING_CREDIT_GRANTS_URL ||
+            !response.ok() ||
+            request.method() !== 'GET' ||
+            request.headers()['openai-organization'] !== organizationId ||
+            !(this.creditRequests.get(request) > requestFloor)
+          )
+            return
+          try {
+            await this.settled()
+            readSignal.throwIfAborted()
+            if (
+              !(this.creditSequences.get(organizationId) > requestFloor) ||
+              this.creditSummaries.get(organizationId)?.balance == null
+            )
+              throw unavailable()
+            resolve()
+          } catch (error) {
+            reject(error)
+          }
+        }
+        aborted = () => reject(readSignal.reason)
+        this.page.on('response', responseListener)
+        readSignal.addEventListener('abort', aborted, { once: true })
+      })
+      // Register before navigation; the Billing request can finish before DOMContentLoaded.
+      observed.catch(() => {})
+      try {
+        await navigatePlatformForObservation(this.page, BILLING_URL, {
+          timeout: remaining(),
+          signal: readSignal,
+          observed,
+        })
+        await observed
+        await this.settled()
+        const state = await this.requireLogin({ signal: readSignal })
+        if (state.organizationId && state.organizationId !== organizationId)
+          throw problem('platform_organization_unconfirmed', '当前 Platform 组织已变化，请核对后重试余额刷新。')
+        readSignal.throwIfAborted()
+        return {
+          ...this.creditSummaries.get(organizationId),
+          displayName: state.organizations.find((row) => row.id === organizationId)?.name || organizationId,
+        }
+      } finally {
+        this.page.off('response', responseListener)
+        readSignal.removeEventListener('abort', aborted)
+      }
+    })
   }
 }

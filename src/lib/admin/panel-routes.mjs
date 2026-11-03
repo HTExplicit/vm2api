@@ -1557,6 +1557,7 @@ export function createPanelHandler(ctx) {
                   openaiApiManager,
                   requestLog?.repo,
                   url.searchParams.get('timezone'),
+                  { proxyPool, nodes: clusterNodesOf(ctx) },
                 ),
               ),
             )
@@ -2143,7 +2144,7 @@ export function createPanelHandler(ctx) {
             ok: false,
             error: {
               code: 'account_api_endpoint_managed',
-              message: '该上游包含账号托管 key，请在 OpenAiAPIKEY 管理；普通 key 可单独删除',
+              message: '该上游包含账号托管 key，请在 OpenAi_api 管理；普通 key 可单独删除',
             },
           })
         const ok = apiEndpointStore.remove(id)
@@ -2161,7 +2162,7 @@ export function createPanelHandler(ctx) {
             ok: false,
             error: {
               code: 'account_api_key_managed',
-              message: '账号托管 API key 使用现有 OpenAI 模型列表，请在 OpenAiAPIKEY 管理',
+              message: '账号托管 API key 使用现有 OpenAI 模型列表，请在 OpenAi_api 管理',
             },
           })
         const key = (ep.api_key_entries || []).find(
@@ -2173,7 +2174,7 @@ export function createPanelHandler(ctx) {
             error: hasAccountApiKeys(ep)
               ? {
                   code: 'account_api_key_managed',
-                  message: '账号托管 API key 使用现有 OpenAI 模型列表，请在 OpenAiAPIKEY 管理',
+                  message: '账号托管 API key 使用现有 OpenAI 模型列表，请在 OpenAi_api 管理',
                 }
               : { message: '需要上游 key 才能获取模型', code: 'key_required' },
           })
@@ -2228,7 +2229,7 @@ export function createPanelHandler(ctx) {
         if (isAccountApiKey(apiEndpointStore.getKey(kid)))
           return json(res, 400, {
             ok: false,
-            error: { code: 'account_api_key_managed', message: '账号托管 API key 请在 OpenAiAPIKEY 页面删除' },
+            error: { code: 'account_api_key_managed', message: '账号托管 API key 请在 OpenAi_api 页面删除' },
           })
         const ok = apiEndpointStore.removeKey(kid)
         if (!ok) return json(res, 404, { ok: false, error: { message: 'key not found' } })

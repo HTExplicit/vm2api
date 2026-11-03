@@ -7,17 +7,26 @@ import { fmtExpiresAt, fmtUsd } from '@/lib/format'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet'
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
 import { OpenaiApiCreditDetails } from '@/features/vm/openai-api-credit-details'
-import { isOpenaiApiBalancePending } from '@/features/vm/openai-api-state'
+import {
+  openaiApiBalanceStatusMessage,
+  openaiApiBalanceStatusText,
+} from '@/features/vm/openai-api-state'
 import { revealApiKey } from './key-api'
-import { balanceText, CALL_STATUS_LABELS, maskedKey } from './key-display'
+import {
+  balanceText,
+  CALL_STATUS_LABELS,
+  maskedKey,
+  proxyAddress,
+  proxyName,
+} from './key-display'
 
 const MANAGEMENT_STATUS = {
   idle: '尚未配置',
@@ -27,7 +36,7 @@ const MANAGEMENT_STATUS = {
   error: '管理任务失败',
 }
 
-export function ApiKeyDetailSheet({
+export function ApiKeyDetailDialog({
   item,
   busy,
   onClose,
@@ -48,6 +57,8 @@ export function ApiKeyDetailSheet({
 }) {
   const [secret, setSecret] = useState<string | null>(null)
   const [reading, setReading] = useState(false)
+  const balanceStatus = openaiApiBalanceStatusText(item)
+  const balanceMessage = openaiApiBalanceStatusMessage(item)
   async function readSecret(copy: boolean) {
     setReading(true)
     try {
@@ -64,15 +75,15 @@ export function ApiKeyDetailSheet({
     }
   }
   return (
-    <Sheet open onOpenChange={(open) => !open && onClose()}>
-      <SheetContent className='w-full overflow-y-auto sm:w-[580px] sm:max-w-[580px]'>
-        <SheetHeader className='pe-12'>
-          <SheetTitle>账号 API key</SheetTitle>
-          <SheetDescription className='break-all'>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className='flex max-h-[92vh] flex-col gap-4 sm:max-w-3xl'>
+        <DialogHeader className='pe-8'>
+          <DialogTitle>账号 API key</DialogTitle>
+          <DialogDescription className='break-all'>
             {item.email}
-          </SheetDescription>
-        </SheetHeader>
-        <div className='space-y-6 px-4 pb-6'>
+          </DialogDescription>
+        </DialogHeader>
+        <div className='-me-3 min-h-0 flex-1 space-y-6 overflow-y-auto pe-3'>
           <section className='space-y-3' aria-label='调用状态'>
             <div className='flex items-center justify-between gap-3'>
               <label htmlFor='account-api-use' className='text-sm font-medium'>
@@ -132,7 +143,7 @@ export function ApiKeyDetailSheet({
                 className='font-mono text-xs break-all'
                 aria-label='官方 key 内容'
               >
-                {secret || maskedKey(item.key_suffix)}
+                {secret || maskedKey(item.key_prefix)}
               </p>
             </div>
             <div className='flex flex-wrap gap-2'>
@@ -176,7 +187,10 @@ export function ApiKeyDetailSheet({
                   item.organization_name || item.organization_id || '未知',
                 ],
                 ['组织 ID', item.organization_id || '未知'],
-                ['绑定代理', item.proxy?.name || item.proxy?.id || '未绑定'],
+                ['绑定代理', proxyName(item.proxy)],
+                ...(proxyAddress(item.proxy)
+                  ? [['代理地址', proxyAddress(item.proxy)] as [string, string]]
+                  : []),
               ]}
             />
             <Button size='sm' variant='outline' asChild>
@@ -199,9 +213,10 @@ export function ApiKeyDetailSheet({
             <p className='text-2xl font-semibold tabular-nums'>
               {balanceText(item.balance)}
             </p>
-            {isOpenaiApiBalancePending(item) ? (
+            {balanceStatus ? (
               <p className='text-sm text-muted-foreground'>
-                待刷新，当前为最后成功查询值
+                {balanceStatus}
+                {item.balance != null ? '，保留最后成功查询值' : ''}
               </p>
             ) : null}
             <DetailRows
@@ -221,9 +236,9 @@ export function ApiKeyDetailSheet({
               ]}
             />
             <OpenaiApiCreditDetails state={item} />
-            {item.balance_error ? (
+            {balanceMessage ? (
               <p className='text-sm break-words text-muted-foreground'>
-                {item.balance_error}
+                {balanceMessage}
               </p>
             ) : null}
           </section>
@@ -289,8 +304,8 @@ export function ApiKeyDetailSheet({
             </p>
           </div>
         </div>
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </Dialog>
   )
 }
 
