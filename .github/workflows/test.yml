@@ -45,6 +45,10 @@ jobs:
           for file in \
             test/unit/forced-tool-choice.test.mjs \
             test/unit/sonnet-55-policy.test.mjs \
+            test/unit/between-tools.test.mjs \
+            test/unit/between-tools-ingress.test.mjs \
+            test/unit/between-tools-outbound.test.mjs \
+            test/unit/claude-code-betas.test.mjs \
             test/unit/auto-mode-reminder.test.mjs \
             test/unit/auto-mode-api.test.mjs \
             test/unit/claude-auth-login.test.mjs \
@@ -67,11 +71,18 @@ jobs:
             test/unit/kernel-health-thread.test.mjs \
             test/unit/panel-vm-health.test.mjs \
             test/unit/panel-vm-start.test.mjs \
+            test/unit/panel-vm-deactivate.test.mjs \
             test/unit/codex-start-ready.test.mjs \
             test/unit/runtime-state.test.mjs \
             test/unit/slot-engine-runtime.test.mjs \
             test/unit/slot-recovery.test.mjs \
             test/unit/rust-kernel-health.test.mjs \
+            test/unit/kernel-watchdog.test.mjs \
+            test/unit/kernel-watchdog-node-slot.test.mjs \
+            test/unit/kernel-router.test.mjs \
+            test/unit/cluster-local-status.test.mjs \
+            test/unit/cluster-node-host.test.mjs \
+            test/unit/proxy-probe-tunnel.test.mjs \
             test/unit/panel-upgrade-script.test.mjs \
             test/unit/fleet-services.test.mjs \
             test/unit/billing-aggregation.test.mjs \
@@ -100,11 +111,14 @@ jobs:
             test/unit/panel-openai-api.test.mjs \
             test/unit/api-account-routing.test.mjs \
             test/unit/api-scheduler.test.mjs \
+            test/unit/failover-runner.test.mjs \
+            test/unit/pool-scheduler.test.mjs \
             test/unit/api-endpoints.test.mjs \
             test/unit/key-scope.test.mjs \
             test/unit/api-backend.test.mjs \
             test/unit/codex-convert.test.mjs \
             test/unit/codex-image-tool.test.mjs \
+            test/unit/image-model-turn.test.mjs \
             test/unit/codex-model-mapping.test.mjs \
             test/unit/gpt-model-policy.test.mjs \
             test/unit/image-tool-models.test.mjs \
@@ -135,6 +149,8 @@ jobs:
             test/unit/vm-package.test.mjs; do
             node --test "$file"
           done
+      - name: Inline tool beta reaches the final CLI hop
+        run: node --test --test-name-pattern='^cli-hop appends inline-tools when a message carries a tool_definition$' test/unit/go-worker-client.test.mjs
       - name: OAuth exchange uses the VM egress
         run: node --test --test-name-pattern='^OAuth exchange reuses VM egress without a host-side proxy hop$' test/e2e/panel-api.e2e.test.mjs
       - name: synthetic billing benchmark
@@ -162,6 +178,7 @@ jobs:
           pnpm exec vitest run src/features/vm/codex-browser-finish.test.ts src/features/vm/codex-credential-browser-completion.test.tsx
           pnpm exec vitest run src/features/openai-apikey src/features/logs/account-api-logs.test.tsx src/components/layout/data/sidebar-data.test.ts
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx
+          pnpm exec vitest run src/features/cluster/model.test.ts src/features/cluster/connection-rows.test.ts
           pnpm build
       - name: Platform configuration retry UI
         run: node scripts/smoke-platform-retry-ui.mjs

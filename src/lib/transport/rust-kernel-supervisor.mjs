@@ -16,6 +16,7 @@ import {
 import { maxRequestBytes, streamIdleTimeoutMs } from '../core/config.mjs'
 import { profileForPreset } from '../identity/official-profiles.mjs'
 import { cacheTtlFromRouting, normalizeCacheTtl } from '../protocol/cache-ttl.mjs'
+import { thinkingDisplayMode } from '../protocol/thinking.mjs'
 import { getModelPolicy } from '../protocol/model-policy.mjs'
 import { ccEntrypointFromRouting } from '../identity/crs-persona.mjs'
 import { setVmSchedulable, listVms, getVm } from '../vm/vm-registry.mjs'
@@ -291,7 +292,13 @@ async function waitForHealthOrExit(exec, { timeoutMs, container, runDockerExec, 
 
 export async function ensureRustKernel(
   exec,
-  { timeoutMs = 30000, runDockerExec = runDocker, force = false, allowMissingCredential = false } = {},
+  {
+    timeoutMs = 30000,
+    healthTimeoutMs = 800,
+    runDockerExec = runDocker,
+    force = false,
+    allowMissingCredential = false,
+  } = {},
 ) {
   const vmId = exec?.vmId || exec?.vm?.id || 'unknown'
   const pending = starts.get(vmId)
@@ -302,7 +309,15 @@ export async function ensureRustKernel(
   }
   const control = { cancelled: false }
   const run = slotRunner(exec, runDockerExec)
-  const promise = startRustKernel(exec, { timeoutMs, vmId, control, runDockerExec: run, force, allowMissingCredential })
+  const promise = startRustKernel(exec, {
+    timeoutMs,
+    healthTimeoutMs,
+    vmId,
+    control,
+    runDockerExec: run,
+    force,
+    allowMissingCredential,
+  })
   const start = { promise, control }
   starts.set(vmId, start)
   try {
@@ -616,7 +631,7 @@ async function startNativeKernel(exec, { timeoutMs, control, host }) {
 
 async function startRustKernel(
   exec,
-  { timeoutMs, control, runDockerExec, force = false, allowMissingCredential = false },
+  { timeoutMs, healthTimeoutMs = 800, control, runDockerExec, force = false, allowMissingCredential = false },
 ) {
   if (exec?.homeDir) {
     const ids = slotUidGidFromHomeDir(exec.homeDir)
@@ -627,7 +642,7 @@ async function startRustKernel(
   }
   const paths = rustKernelPaths(exec)
   if (!paths.socketPath) return { ok: false, reason: 'socket_missing' }
-  const existing = await rustKernelHealth(exec, { timeoutMs: 800 })
+  const existing = await rustKernelHealth(exec, { timeoutMs: healthTimeoutMs })
   if (!startCurrent(control)) return { ok: false, reason: 'start_cancelled' }
   const staleWrap = wrapNewerThanKernel(exec)
   const slotMismatch =
@@ -792,6 +807,12 @@ export function writeKernelConfig(
   const claudeBin = envBin || (dataplane === 'wrap' ? host.bins.cli : host.bins.cc)
   const tz = String(timezone || vm.timezone || previous.timezone || '').trim()
   const defaultCacheTtl = routing != null ? cacheTtlFromRouting(routing) : normalizeCacheTtl(previous.default_cache_ttl)
+  const thinkingDisplay =
+    routing != null
+      ? thinkingDisplayMode(routing)
+      : previous.thinking_display === 'passthrough'
+        ? 'passthrough'
+        : 'summarized'
   const previousIdleSeconds = Number(previous.idle_timeout_seconds)
   const idleMs = routing == null && previousIdleSeconds > 0 ? previousIdleSeconds * 1000 : streamIdleTimeoutMs(routing)
   const previousMax = Number(previous.max_request_bytes)
@@ -842,6 +863,7 @@ export function writeKernelConfig(
     // cli-node hot-reads this per job: UA, billing cc_version and CCH input follow the slot's profile.
     cli_version: profileForPreset(resolveSlotPersonaPreset(vm, routing || {})).cliVersion,
     default_cache_ttl: defaultCacheTtl,
+    thinking_display: thinkingDisplay,
     cc_entrypoint:
       routing == null ? (previous.cc_entrypoint === 'sdk-cli' ? 'sdk-cli' : 'cli') : ccEntrypointFromRouting(routing),
     cch_enabled: cchEnabled,

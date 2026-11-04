@@ -634,12 +634,32 @@ test('writeKernelConfig separates container paths from host socket paths', () =>
   assert.equal(doc.https_proxy, undefined)
   assert.equal(doc.slots_per_worker, WRAP_SLOT_MAX)
   assert.equal(doc.default_cache_ttl, '1h')
+  assert.equal(doc.thinking_display, 'summarized')
   assert.equal(doc.auto_compact_window, null)
   assert.match(written.socketPath.replace(/\\/g, '/'), /vms\/vm-09\/run\/kernel\.sock$/)
   assert.equal(fs.readFileSync(written.tokenPath, 'utf8').trim(), 'tok')
   const exec = { vmId: 'vm-09', homeDir: path.join(root, 'vms', 'vm-09', 'cli-home'), vm: { id: 'vm-09' } }
   assert.equal(rustKernelPaths(exec).socketPath, written.socketPath)
   fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('writeKernelConfig projects thinking display and preserves it only without routing', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-thinking-cfg-'))
+  const vm = { id: 'vm-09' }
+  const displayOf = (options = {}) => {
+    const written = writeKernelConfig(root, vm, { token: 'tok', ...options })
+    return JSON.parse(fs.readFileSync(written.configPath, 'utf8')).thinking_display
+  }
+  try {
+    assert.equal(displayOf(), 'summarized')
+    assert.equal(displayOf({ routing: { compatibility: { thinking_display: 'passthrough' } } }), 'passthrough')
+    assert.equal(displayOf(), 'passthrough')
+    assert.equal(displayOf({ routing: {} }), 'summarized')
+    assert.equal(displayOf({ routing: { compatibility: { thinking_display: 'invalid' } } }), 'summarized')
+    assert.equal(displayOf(), 'summarized')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('model effort changes rewrite kernel.json without a routing save or restart', () => {
@@ -1183,6 +1203,43 @@ unixTest('Rust supervisor does not recycle a busy CLI with ready_slots=0', async
     assert.equal(ready.ok, true, JSON.stringify(ready))
     assert.equal(ready.reason, 'busy')
     assert.equal(restarts, 0)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+unixTest('Rust supervisor honors a longer preflight timeout for a slow kernel response', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-slow-remote-'))
+  const vm = { id: 'vm-slow-remote' }
+  const written = writeKernelConfig(root, vm, { token: 'tok', proxyUrl: '', proxyRequired: false })
+  const homeDir = path.join(root, 'vms', vm.id, 'cli-home')
+  const exec = {
+    vmId: vm.id,
+    homeDir,
+    vm: {
+      ...vm,
+      runtime: { container: 'kin-slow-remote', kernel_socket: written.socketPath },
+    },
+  }
+  const server = http.createServer((_req, res) => {
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, engine: 'rust', ready_slots: 1, worker_version: 'fixture' }))
+    }, 900)
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(written.socketPath, resolve)
+  })
+  try {
+    const ready = await ensureRustKernel(exec, {
+      timeoutMs: 3000,
+      healthTimeoutMs: 2000,
+      runDockerExec: async () => ({ ok: true }),
+    })
+    assert.equal(ready.ok, true, JSON.stringify(ready))
+    assert.equal(ready.reason, 'already_up')
   } finally {
     await new Promise((resolve) => server.close(resolve))
     fs.rmSync(root, { recursive: true, force: true })

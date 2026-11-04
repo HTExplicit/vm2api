@@ -5,7 +5,7 @@
 import { applyIntercept } from '../core/intercept.mjs'
 import { resolveStreamIdleTimeoutMs, inboundBodyLimit, queueKeepaliveDelayMs } from '../core/config.mjs'
 import { applyEagerToolStreaming } from './eager-tool-streaming.mjs'
-import { validateToolChoice } from './model-policy.mjs'
+import { validateBetweenToolsThinking, validateToolChoice } from './model-policy.mjs'
 import {
   inboundRefusalDeviceId,
   isRefusalGuardEnabled,
@@ -45,6 +45,8 @@ import { readRawBody } from '../http/respond.mjs'
 import { disjointOpenaiUsage } from './openai-usage.mjs'
 import { costColumnsFromUsage } from '../admin/pricing.mjs'
 import { detectInboundPlatform } from './platform-detect.mjs'
+import { canonicalImageToolModel } from './image-tool-models.mjs'
+import { imageModelAnswer, imageModelStreamError, imagesRequestFromTurn } from './image-model-bridge.mjs'
 import { normalizeCodexRouting } from './codex-route.mjs'
 import { applyCodexInboundModelRewrite } from './codex-model-mapping.mjs'
 import { hasClaudeCode1mSuffix } from './context-1m.mjs'
@@ -897,7 +899,9 @@ export function createHandleProtocol(deps) {
     }
     // Account API models are validated by the selected accounts' API catalog,
     // including official o-series models and aliases, rather than the OAuth names.
-    const platform = accountApiBackend ? { ok: true, platform: 'openai' } : detectInboundPlatform(ctx.body?.model)
+    const imageModel = accountApiBackend ? null : canonicalImageToolModel(ctx.body?.model)
+    const platform =
+      accountApiBackend || imageModel ? { ok: true, platform: 'openai' } : detectInboundPlatform(ctx.body?.model)
     if (!platform.ok) {
       stats.errors++
       const errorResult = makeError({
@@ -937,6 +941,7 @@ export function createHandleProtocol(deps) {
       logBag.error_message = errorResult.body?.error?.message || null
       return json(res, 403, errorResult.body)
     }
+    if (imageModel) return serveImageModelTurn({ req, res, protocol, body: ctx.body, logBag })
     // Codex returns before conversion. Distill does not apply to OpenAI platform models; the rest
     // of the gate scans them only when jev.openai_platform_enabled is on.
     if (
@@ -1140,6 +1145,7 @@ export function createHandleProtocol(deps) {
       inboundToolReverse = standard.reverse
     }
     try {
+      validateBetweenToolsThinking(ctx.body)
       validateToolChoice(ctx.body)
     } catch (error) {
       if (!error.body?.error) throw error
@@ -1275,11 +1281,12 @@ export function createHandleProtocol(deps) {
     // After OpenAI→Anthropic conversion so function tools already have input_schema;
     // leftover OpenAI-shaped tools are still marked (rewrite / mixed inbound).
     ctx.body = applyEagerToolStreaming(ctx.body, getRouting())
-    // #850: rewritten official traffic. Claude Code leaves cache markers
-    // without a TTL to mean "not chosen"; resolve them to this conversation's
-    // TTL before rendering, so the template budgets against the real value and
-    // no caller marker reaches Anthropic as implicit 5m. Explicit TTLs stay.
-    if (!requestContext && officialTraffic && !officialPassthrough) {
+    // #850: every rewritten inbound. A cache marker without a TTL means "not
+    // chosen", for Claude Code and third-party callers alike; resolve it to this
+    // conversation's TTL before rendering, so the template budgets against the
+    // real value and no caller marker reaches Anthropic as implicit 5m. Explicit
+    // TTLs stay. Passthrough keeps the caller body untouched.
+    if (!requestContext && !officialPassthrough) {
       ctx.body = fillMissingCacheTtl(ctx.body, requestedCacheTtl)
     }
     const personaIn = ctx.body
@@ -2056,6 +2063,106 @@ export function createHandleProtocol(deps) {
       images: Array.isArray(body.images) ? body.images.length : body.image ? 1 : 0,
       mask: body.mask != null,
     }
+  }
+
+  /**
+   * Chat Completions / Responses turn on an image model: one Images call (generation, or edit
+   * when the last user message carries images) answered in the caller's protocol. The row is
+   * an Images row, so it bills image usage alone like /v1/images.
+   */
+  async function serveImageModelTurn({ req, res, protocol, body, logBag }) {
+    const turn = imagesRequestFromTurn(protocol, body)
+    if (!turn.ok) {
+      stats.errors++
+      logBag.error_code = turn.code
+      logBag.error_message = turn.message
+      return json(
+        res,
+        400,
+        makeError({
+          type: ErrorType.INVALID_REQUEST,
+          code: turn.code,
+          message: turn.message,
+          status: 400,
+          param: turn.param,
+        }).body,
+      )
+    }
+    logBag.protocol = 'openai.images'
+    logBag.inbound_summary = summarizeImagesBody(turn.body)
+    const stream = isClientStream(body, req.headers)
+    const streamKeepaliveMs = Number(
+      getRouting()?.failover?.stream_keepalive_ms ?? cfg.limits.stream_keepalive_ms ?? 15_000,
+    )
+    // Generation takes minutes: past the queue delay a stream commits SSE and pings so a
+    // proxy in front does not time out. Before that, failures keep their HTTP status.
+    const keepalive =
+      stream && streamKeepaliveMs > 0
+        ? createDownstreamKeepalive({
+            intervalMs: streamKeepaliveMs,
+            protocol,
+            write: (chunk) => {
+              if (responseClosed(res)) return
+              if (!res.headersSent) writeSSEHeaders(res)
+              res.write(chunk)
+            },
+          })
+        : null
+    let reply = null
+    try {
+      await runWithCodexKey(req, res, logBag, () => {
+        keepalive?.armAfter(queueKeepaliveDelayMs(getRouting(), cfg.limits?.queue_keepalive_delay_ms))
+        return handleCodexImages({
+          req,
+          res,
+          kind: turn.kind,
+          body: turn.body,
+          logBag,
+          stats,
+          json: (_res, status, payload) => {
+            reply = { status, payload }
+          },
+          routing: getRouting() || {},
+          projectRoot: cfg.paths.project,
+          stickyRouter,
+          ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
+          ops: deps.codexOps || {},
+        })
+      })
+    } finally {
+      keepalive?.stop()
+    }
+    if (responseClosed(res)) return
+    if (!reply) {
+      // Client gone (cancelled) or the key gate already answered.
+      if (res.headersSent && !res.writableEnded) res.end()
+      return
+    }
+    let { status, payload } = reply
+    if (status < 400) {
+      const answer = imageModelAnswer(protocol, payload, {
+        model: body.model,
+        stream,
+        includeUsage: body.stream_options?.include_usage === true,
+      })
+      if (answer.ok) {
+        if (!stream) return json(res, 200, answer.body)
+        if (!res.headersSent) writeSSEHeaders(res)
+        res.write(answer.sse)
+        return res.end()
+      }
+      stats.errors++
+      logBag.final_state = 'upstream_error'
+      logBag.error_code = answer.code
+      logBag.error_message = answer.message
+      status = 502
+      payload = { error: { type: 'api_error', code: answer.code, message: answer.message } }
+    } else if (!logBag.error_message) {
+      logBag.error_message = payload?.error?.message || null
+    }
+    if (!res.headersSent) return json(res, status, payload)
+    res.write(imageModelStreamError(protocol, payload))
+    return res.end()
   }
 
   /** POST /v1/images/{generations,edits}: same logging and auth as search; edits also take multipart. */

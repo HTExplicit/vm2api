@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+## 1.4.3801 — 2026-11-04
+
+- 合入官方 1.4.037–1.4.038（b0f72b49），保留 1.4.3602–1.4.3604 的 GPT 登录显式开机收尾、OpenAi_api 管理、共用聊天模型目录、有限切号与 Billing 修复。
+- Sonnet 5.5 支持 between_tools thinking，普通请求与 auto 分类器保留合法模式及签名历史；不兼容模型、字段、effort 或强制工具调用在选号前明确报错。按需补 inline-tools beta，并将面板 thinking_display 投影到 kernel.json，不更换 CLI。
+- Claude 重写路径为官方及第三方客户端的缺失缓存 TTL 统一补会话值，默认 1h；保留显式 TTL、断点顺序与官方透传例外。
+- 已启用的图像模型支持 Chat/Responses：仅取最后一条 user 的文字与图片，按 Images 通道生成或编辑，分别返回 Markdown 图片或 image_generation_call。沿用现有图像开关、Free 排除、槽位及 key 范围和计费；OpenAI(apikey) 仍不支持图像模型，返回原 404 model_not_found，不转入 OAuth Images。
+- 合入设备亲和会话迁移、SSE 提交后的 Retry-After 修复、远端内核瞬时健康抖动处理、本地代理真实 CONNECT 检测及集群机器视图。支持取消默认管理槽，保持启停与调度独立。
+
+使用正常面板升级，无新增数据库迁移、依赖或 payload 变更；不重放旧迁移，不额外执行 wrap-cli/sync。保留配置、凭据、身份、代理及实时启停/调度意图；Fast 默认关闭，图像开关与透传配置不因升级改变。
+
+## 1.4.038 — 2026-11-04
+
+- #882：放行 Sonnet 5.5 的 `thinking: {"type":"between_tools"}`，修复 Claude Code auto 模式分类器被本地 400 拒绝。分类器与普通 Messages 保留该模式及签名 thinking 历史；不支持的模型、`xhigh` / `max` effort 或额外 thinking 字段仍在分配账号前拒绝。
+- #886：`kernel.json` 写出面板的 `compatibility.thinking_display`（缺省 `summarized`，显式 `passthrough` 才保留调用方 display）；没传 routing 时保留已写入的 `passthrough`。本版只补配置投影，不更换 CRAG / CLI payload。
+- #878 / #883：本地转发代理的健康探测改为真实 SOCKS CONNECT，鉴权拒绝（`0xff`）或无法连接目标不再误算健康。
+- #876：远端 kernel 的短暂健康探测超时不再立即将槽位置为故障，避免瞬时抖动中断可用槽。
+- #869：集群页统一展示本机和节点的链路、槽位与机器余量；“还能放”按虚拟机内存和实测开销估算。
+- #871：允许清空当前激活 VM 选择。
+- #873：修复 `/v1/models` 已列出的 GPT Image 模型（`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`、`gpt-image-2` 及快照）在 `/v1/chat/completions`、`/v1/responses` 上被 400 `model_not_supported` 拒绝、无法出图。现在这类请求走网关内置 Images 通道：最后一条 user 消息文本作 prompt，带图即 `/images/edits`，否则 `/images/generations`；Chat 回 Markdown 图片，Responses 回 `image_generation_call`，流式等待期间保活。模型开关、Free 槽排除与计费沿用 `/v1/images`。
+- #874：第三方客户端入站不带 `ttl` 的缓存断点不再以隐式 5m 出站：与 #850 的官方 Claude Code 一样，渲染前按会话 TTL（请求头 → 入站显式值 → 协议页默认，缺省 1h）补齐。只有调用方显式写 `5m` 才发 5m；前面已有 5m 时补 5m，保持 1h 在 5m 前。官方透传打开时不经过这一步。依赖隐式 5m 的调用方需改为显式 `ttl: "5m"` 或带 `x-kin-cache-ttl: 5m`。
+- #872：设备亲和把已有会话分到另一账号 / VM 时，实际拿到会话席位的请求会迁移跨账号 sticky 绑定并持久化新出站 session，同一入站对话不再逐请求变号。`slot_busy` 临时借用仍保留原绑定，晚到的结果不能覆盖新绑定。
+
+已部署机升级：更新 Node 控制面与 `web/dist` 后重启。不必 `wrap-cli/sync`，不必换 payload。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
+## 1.4.037 — 2026-11-03
+
+- #866：协议改写按请求体补 `inline-tools-2026-09-15`：`messages` 里出现 `tool_addition.tool.type=tool_definition` 时写入 cli-hop 的 `betas` 和直连 `anthropic-beta`。没有该块不加。修复上游 400 `a tool_definition requires anthropic-beta: inline-tools-2026-09-15`。
+
+已部署机升级：只更新 Node 控制面后重启。不必 `wrap-cli/sync`，不必换 payload。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
 ## 1.4.3604 — 2026-11-04
 
 - 账号 key 管理页可见名称统一为 OpenAi_api，详情改用居中弹窗；遮罩显示 key 前 12 位，异常短值保持完全遮罩。当前代理显示池内最新名称或安全地址，不展示内部 ID 或认证信息。
@@ -19,7 +51,6 @@
 
 使用正常面板升级，新增 051／052 数据库迁移，无依赖或 payload 变更。升级前保全最新数据库及槽位资料；不自动新建／替换官方 key、不重复领取、不新增付费模型请求。
 
-## Unreleased
 
 ## 1.4.3602 — 2026-11-03
 
