@@ -7,7 +7,7 @@
 - 合入官方 1.4.037–1.4.038（b0f72b49），保留 1.4.3602–1.4.3604 的 GPT 登录显式开机收尾、OpenAi_api 管理、共用聊天模型目录、有限切号与 Billing 修复。
 - Sonnet 5.5 支持 between_tools thinking，普通请求与 auto 分类器保留合法模式及签名历史；不兼容模型、字段、effort 或强制工具调用在选号前明确报错。按需补 inline-tools beta，并将面板 thinking_display 投影到 kernel.json，不更换 CLI。
 - Claude 重写路径为官方及第三方客户端的缺失缓存 TTL 统一补会话值，默认 1h；保留显式 TTL、断点顺序与官方透传例外。
-- 已启用的图像模型支持 Chat/Responses：仅取最后一条 user 的文字与图片，按 Images 通道生成或编辑，分别返回 Markdown 图片或 image_generation_call。沿用现有图像开关、Free 排除、槽位及 key 范围和计费；OpenAI(apikey) 仍不支持图像模型，返回原 404 model_not_found，不转入 OAuth Images。
+- 已启用的图像模型支持 Chat/Responses：仅取最后一条 user 的文字与图片，按 Images 通道生成或编辑，分别返回 Markdown 图片或 image_generation_call。沿用现有图像开关、Free 排除、槽位及 key 范围和计费；OpenAI(apikey) 仍不支持图像模型，不转入 OAuth Images；目录未提供的模型保持 404，客户端错误码补齐为 model_not_found，与内部日志一致。
 - 合入设备亲和会话迁移、SSE 提交后的 Retry-After 修复、远端内核瞬时健康抖动处理、本地代理真实 CONNECT 检测及集群机器视图。支持取消默认管理槽，保持启停与调度独立。
 
 使用正常面板升级，无新增数据库迁移、依赖或 payload 变更；不重放旧迁移，不额外执行 wrap-cli/sync。保留配置、凭据、身份、代理及实时启停/调度意图；Fast 默认关闭，图像开关与透传配置不因升级改变。

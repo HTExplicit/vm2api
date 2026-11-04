@@ -314,6 +314,15 @@ export function createHandleProtocol(deps) {
       mapUpstreamError(result?.status || 503, result?.body, result?.headers || {}),
       result?.body,
     )
+    // A catalog miss has no selected endpoint and never reaches the upstream.
+    if (
+      result?.via === 'api-kernel' &&
+      result?.status === 404 &&
+      originalCode === 'model_not_found' &&
+      !result.endpointId
+    ) {
+      mapped.body.error.code = originalCode
+    }
     const summary = formatPoolSelectionSummary(details)
     const mappedCode = mapped.body?.error?.code
     if (mappedCode === ErrorCode.REFUSAL_GUARD) {
