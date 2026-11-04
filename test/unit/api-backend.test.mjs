@@ -1924,6 +1924,22 @@ test('an unknown account API model is rejected by its scoped API catalog without
   assert.equal(run.logs[0].via, 'api-kernel')
 })
 
+for (const [protocol, route, content] of [
+  ['openai.chat', '/v1/chat/completions', { messages: [{ role: 'user', content: 'Draw a cat.' }] }],
+  ['openai.responses', '/v1/responses', { input: 'Draw a cat.' }],
+]) {
+  test(`account API ${protocol} image model stays in its API catalog without an OAuth Images call`, async () => {
+    const run = await runAccountApiProtocol({ model: 'gpt-image-2.5-flare', ...content }, protocol, { path: route })
+    assert.equal(run.response.statusCode, 404)
+    assert.equal(run.response.body.error.code, 'model_not_found')
+    assert.equal(run.sent.length, 0)
+    assert.equal(run.billed.length, 0)
+    assert.equal(run.logs[0].via, 'api-kernel')
+    assert.equal(run.logs[0].protocol, protocol)
+    assert.equal(run.logs[0].error_code, 'model_not_found')
+  })
+}
+
 for (const [category, groupType, model] of [
   ['oauth', 'anthropic', 'gpt-4.1-nano'],
   ['oauth', 'openai', 'claude-haiku-4-5'],

@@ -43,7 +43,7 @@
 
 ## 本 fork 的发布来源
 
-本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，维护分支为 `maint`，当前版本见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随 main 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始，合入 031 后从 3101 开始，合入 032 后从 3201 开始，合入 036 后从 3601 开始。
+本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，维护分支为 `maint`，当前版本见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随 main 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始，合入 031 后从 3101 开始，合入 032 后从 3201 开始，合入 036 后从 3601 开始，合入 038 后从 3801 开始。
 
 上游归属、[LICENSE](LICENSE)、鸣谢与历史文档保留；下方旧版说明和评测为上游历史内容，具体版本以对应记录为准。
 
