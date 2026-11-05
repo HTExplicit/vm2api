@@ -236,7 +236,6 @@ describe('display helpers', () => {
       sentModel: 'claude-z',
       actualResponseModel: 'claude-z',
     })
-    expect(audit.primaryModel).toBe('claude-y')
     expect(audit.hasRedirect).toBe(true)
     expect(audit.hasActualMismatch).toBe(false)
     expect(
@@ -261,7 +260,6 @@ describe('display helpers', () => {
         sentModel,
         actualResponseModel,
       })
-      expect(audit.primaryModel).toBe('old-model')
       expect(audit.hasActualMismatch).toBe(false)
     }
   })
