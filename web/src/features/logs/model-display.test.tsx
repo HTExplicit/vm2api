@@ -1,7 +1,7 @@
 import type { UsageLogRow } from '@/types/panel-usage-logs'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { UpstreamModelDisplay } from './log-cells'
+import { RequestResponseModelDisplay } from './log-cells'
 import { SummaryTab } from './log-detail/summary-tab'
 
 const historicalRow: UsageLogRow = {
@@ -73,32 +73,41 @@ const historicalRow: UsageLogRow = {
 
 function cell(overrides: Partial<UsageLogRow> = {}) {
   return renderToStaticMarkup(
-    <UpstreamModelDisplay row={{ ...historicalRow, ...overrides }} />
+    <RequestResponseModelDisplay row={{ ...historicalRow, ...overrides }} />
   )
 }
 
-describe('separate sent and returned model display', () => {
-  it('keeps historical observations unknown without reusing the primary model or old mismatch', () => {
-    const html = cell()
+describe('requested and returned model display', () => {
+  it('uses the historical model only for a missing request name and keeps the upstream return unknown', () => {
+    const html = cell({ originalModel: null })
+    expect(html).toContain('legacy-model')
     expect(html).toContain('未知')
-    expect(html).not.toContain('legacy-model')
     expect(html).not.toContain('client-alias')
     expect(html).not.toContain('发送')
+    expect(html.match(/legacy-model/g)).toHaveLength(1)
   })
 
-  it('shows the returned model once when both observations are equal', () => {
-    const html = cell({ sentModel: 'model-a', actualResponseModel: 'model-a' })
+  it('keeps both lines when the request and upstream return names are equal', () => {
+    const html = cell({
+      originalModel: 'model-a',
+      sentModel: 'model-a',
+      actualResponseModel: 'model-a',
+    })
     expect(html).toContain('model-a')
     expect(html).not.toContain('发送')
-    expect(html.match(/model-a/g)).toHaveLength(1)
+    expect(html.match(/model-a/g)).toHaveLength(2)
   })
 
-  it('shows only the upstream declaration when requested and sent models differ', () => {
-    const html = cell({ sentModel: 'model-a', actualResponseModel: 'model-b' })
-    expect(html).toContain('model-b')
-    expect(html).not.toContain('model-a')
+  it('shows the request alias and upstream return while omitting the sent target', () => {
+    const html = cell({
+      originalModel: 'alias-a',
+      sentModel: 'sent-model-b',
+      actualResponseModel: 'returned-model-c',
+    })
+    expect(html).toContain('alias-a')
+    expect(html).toContain('returned-model-c')
+    expect(html).not.toContain('sent-model-b')
     expect(html).not.toContain('legacy-model')
-    expect(html).not.toContain('client-alias')
     expect(html).not.toContain('发送')
     expect(html).not.toContain('计费仍然基于')
   })

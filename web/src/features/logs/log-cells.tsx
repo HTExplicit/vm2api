@@ -85,19 +85,36 @@ export function ThinkingEffortDisplay({ effort }: { effort: string | null }) {
   )
 }
 
-export function UpstreamModelDisplay({ row }: { row: UsageLogRow }) {
-  const model = row.actualResponseModel
+export function RequestResponseModelDisplay({ row }: { row: UsageLogRow }) {
+  const requestedModel = row.originalModel ?? row.model
   return (
-    <div className='flex min-w-0 items-center gap-1.5'>
-      {model ? <ModelVendorIcon modelId={model} /> : null}
+    <div className='flex min-w-0 flex-col leading-4'>
+      <div className='flex min-w-0 items-center gap-1.5'>
+        {requestedModel ? <ModelVendorIcon modelId={requestedModel} /> : null}
+        <span
+          className={cn(
+            'truncate',
+            requestedModel && 'cursor-pointer hover:underline'
+          )}
+          onClick={(event) => {
+            event.stopPropagation()
+            if (requestedModel) void copyText(requestedModel)
+          }}
+        >
+          请求：{requestedModel ?? '未知'}
+        </span>
+      </div>
       <span
-        className={cn('truncate', model && 'cursor-pointer hover:underline')}
+        className={cn(
+          'truncate text-muted-foreground',
+          row.actualResponseModel && 'cursor-pointer hover:underline'
+        )}
         onClick={(event) => {
           event.stopPropagation()
-          if (model) void copyText(model)
+          if (row.actualResponseModel) void copyText(row.actualResponseModel)
         }}
       >
-        {model ?? '未知'}
+        上游返回：{row.actualResponseModel ?? '未知'}
       </span>
     </div>
   )

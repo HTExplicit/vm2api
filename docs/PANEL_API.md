@@ -410,7 +410,7 @@ attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终
 | `stop_reason` | 流式来自 `message_delta` |
 | 费用列 | 官方价 input/output/cache 5m·1h·read；上海日切 |
 
-面板 `/usage-logs` DTO 新增 `sentModel`，`actualResponseModel` 仅映射 `upstream_response_model`；界面将 null 显示为“未知”。列表仅显示上游返回模型，发送／请求保留详情。两字段仅用于日志，不改变路由、客户端输出、计价或扣减。历史记录不回填。
+面板 `/usage-logs` DTO 新增 `sentModel`，`actualResponseModel` 仅映射 `upstream_response_model`；界面将 null 显示为“未知”。列表分两行显示请求模型与上游返回模型，仅隐藏发送模型；详情保留三个来源。两字段仅用于日志，不改变路由、客户端输出、计价或扣减。历史记录不回填。
 
 `response_model_mismatch=1` 筛选发送模型与上游返回模型均已知且名称不同的记录，列表和导出使用同一条件；旧 `model_mismatch=1` 保持原义。CSV/JSONL 在既有列末尾追加 `requested_model`、`sent_model`、`upstream_response_model`，未知分别为空单元格/null。
 

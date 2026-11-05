@@ -21,7 +21,7 @@ import {
 import type { LogsTableColumn } from './column-visibility'
 import { CostTooltipContent } from './cost-tooltip'
 import {
-  UpstreamModelDisplay,
+  RequestResponseModelDisplay,
   StatusBadge,
   ThinkingEffortDisplay,
 } from './log-cells'
@@ -202,11 +202,12 @@ function LogRow({
         <Tooltip>
           <TooltipTrigger asChild>
             <div className='flex min-w-0 cursor-help items-center gap-1 truncate'>
-              <UpstreamModelDisplay row={row} />
+              <RequestResponseModelDisplay row={row} />
             </div>
           </TooltipTrigger>
           <TooltipContent>
             <div className='space-y-1 text-xs'>
+              <p>请求模型：{row.originalModel ?? row.model ?? '未知'}</p>
               <p>上游返回模型：{row.actualResponseModel ?? '未知'}</p>
             </div>
           </TooltipContent>
@@ -484,9 +485,7 @@ export function VirtualizedLogsTable({
               {isHidden('provider') ? null : (
                 <HeadCell className='min-w-[100px] flex-[1.5]'>供应商</HeadCell>
               )}
-              <HeadCell className='min-w-[100px] flex-[1.3]'>
-                上游返回模型
-              </HeadCell>
+              <HeadCell className='min-w-[100px] flex-[1.3]'>模型</HeadCell>
               {isHidden('reasoningEffort') ? null : (
                 <HeadCell
                   className='min-w-[64px] flex-[0.6]'
