@@ -451,6 +451,40 @@ test('withTransaction only runs inline for a real outer transaction', () => {
   assert.equal(called, false)
 })
 
+test('migration 054 upgrades a 053 database with risk review off and does not replay on reopen', () => {
+  const src = path.resolve('src/lib/db/migrations')
+  const oldDir = path.join(tmp, 'before054')
+  fs.mkdirSync(oldDir)
+  for (const file of fs.readdirSync(src)) {
+    if (file.endsWith('.sql') && file < '054') fs.copyFileSync(path.join(src, file), path.join(oldDir, file))
+  }
+  const dbPath = path.join(tmp, 'risk054.db')
+  let db = new DatabaseSync(dbPath)
+  try {
+    applyMigrations(db, { migrationsDir: oldDir })
+    assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, '053')
+    db.prepare(`INSERT INTO api_endpoints (id, name, base_url, created_at, updated_at)
+      VALUES ('legacy', 'Legacy', 'https://api.anthropic.com', '2026-11-01', '2026-11-01')`).run()
+    const before = { ...db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy') }
+    assert.deepEqual(applyMigrations(db, { migrationsDir: src }), ['054_api_endpoint_risk_review.sql'])
+    const { risk_review_enabled, ...after } = db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy')
+    assert.equal(risk_review_enabled, 0)
+    assert.deepEqual(after, before)
+    assert.throws(() => db.prepare('UPDATE api_endpoints SET risk_review_enabled = 2').run(), /CHECK/)
+    assert.throws(() => db.prepare('UPDATE api_endpoints SET risk_review_enabled = NULL').run(), /NOT NULL/)
+    db.prepare('UPDATE api_endpoints SET risk_review_enabled = 1 WHERE id = ?').run('legacy')
+    db.close()
+    db = new DatabaseSync(dbPath)
+    assert.deepEqual(applyMigrations(db, { migrationsDir: src }), [])
+    assert.equal(
+      db.prepare('SELECT risk_review_enabled FROM api_endpoints WHERE id = ?').get('legacy').risk_review_enabled,
+      1,
+    )
+  } finally {
+    db.close()
+  }
+})
+
 test('migration 042 adds image generation columns; old rows and prompt totals stay the same', () => {
   const src = path.join(process.cwd(), 'src/lib/db/migrations')
   const migSrc = path.join(tmp, 'mig042')

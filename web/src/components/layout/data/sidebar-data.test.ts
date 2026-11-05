@@ -27,6 +27,21 @@ describe('sidebar permissions', () => {
     ])
   })
 
+  it('keeps API endpoint setup separate from account API management', () => {
+    const items = navGroupsFor(['api', 'openai-apikey']).flatMap(
+      (group) => group.items
+    )
+    expect(items).toEqual([
+      expect.objectContaining({ title: 'API', url: '/api' }),
+      expect.objectContaining({ title: 'OpenAi_api', url: '/openai-apikey' }),
+    ])
+    expect(
+      navGroupsFor(['api']).flatMap((group) =>
+        group.items.map((item) => item.url)
+      )
+    ).not.toContain('/openai-apikey')
+  })
+
   it('keeps the monitoring pages together in hub order', () => {
     // A stale `usage` capability from an older server must not resurrect the removed page.
     const groups = navGroupsFor([

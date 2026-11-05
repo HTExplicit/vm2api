@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.4.4201 — 2026-11-05
+
+- 合入官方 1.4.042（1bcafc19），统一普通 API 配置页至 `#/api`，保留独立 OpenAi_api 账号管理及普通端点与账号 key 的隔离；保存和获取模型保留已有别名与高级配置。
+- 普通 API 按端点协议转发；账号 API 保留独立目录、当前代理、有限切号、原生 Responses/Lite、namespace、custom 工具、加密推理和三个模型来源日志。
+- 普通及账号 OpenAI API 出站统一 `store: false`。Chat/Responses 在转发前拒绝账户资源引用及 MCP 等禁用工具，返回 400 `api_shared_resource_forbidden`；namespace 与 Lite additional_tools 内的实际工具遵守相同限制，函数业务 schema 不作资源扫描。
+- 普通 Anthropic API 端点新增 `risk_review_enabled`，新旧端点默认关闭；启用后仅预审一次。账号 OpenAI、普通 OpenAI 与 OAuth 的既有审查路径保持。
+
+使用正常面板升级，仅新增 054 迁移；已有 048–053 不重放。无依赖或 payload 变更，不额外执行 wrap-cli/sync。保留个人 key 归属、第三方计费拒绝不缓存提示词、浏览器关闭回收和图像模型 404 边界。
+
+## 1.4.042 — 2026-11-05
+
+- API 配置页统一到 `#/api`，旧 `#/anthropic` 自动跳转；提供 Anthropic / OpenAI 两套默认地址和认证，支持获取模型、连通性测试及保存。获取的模型由服务端合并，不覆盖已有模型别名。
+- 渠道选择 `api` 的密钥按配置端点协议调用上游，不再误入 OAuth / Codex 槽位。OpenAI 原生 Responses 输入和推理设置保持不变，不注入 Claude persona；修复非流式回复转换。
+- 共享 OpenAI API 凭证强制 `store: false`，拒绝上游对话、存储提示词、文件/向量库引用及 MCP 等账户资源工具；调用方需发送完整的无状态历史，可保留加密推理内容和普通函数工具，避免不同密钥跨读运营方账户资源。
+- Anthropic API 端点新增独立的“风控前置审查”开关，默认关闭，旧端点迁移后也保持关闭。开启并保存后，推理请求先按风险审计中启用的规则和决策模型审查，再调用上游；不依赖 OAuth 账号范围，单请求只审查一次。本页连通性测试仍为直连诊断。
+
+已部署机升级：更新 Node 控制面与 `web/dist` 后重启，启动时自动迁移端点开关字段。不更换 CRAG / CLI payload，不必 `wrap-cli/sync`。不要覆盖 `routing.json`、`vms/`、`data/`、`.env`。
+
 ## 1.4.4101 — 2026-11-05
 
 - 合入官方 1.4.041（d6ad7a6c），保留 1.4.3802–1.4.3804 的浏览器临时目录回收、关闭失败重试，以及请求/发送/上游返回三个模型来源的独立采集和请求/返回两行列表。

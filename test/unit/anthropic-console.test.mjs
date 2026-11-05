@@ -12,6 +12,7 @@ import {
   buildAnthropicConsoleRequest,
   resolveConsoleProxyUrl,
   runAnthropicConsole,
+  savedEndpointKey,
 } from '../../src/lib/admin/anthropic-console.mjs'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { authorizePanelRoute, canViewPage } from '../../src/lib/admin/panel-acl.mjs'
@@ -34,6 +35,119 @@ const endpoint = {
   ],
 }
 
+test('OpenAI console uses Responses, bearer auth and returns output text', async () => {
+  const result = await runAnthropicConsole({
+    input: { protocol: 'openai', api_key: 'sk-openai', model: 'gpt-test', message: 'Hi' },
+    forward: async (request) => {
+      assert.equal(request.url, 'https://api.openai.com/v1/responses')
+      assert.equal(request.headers.authorization, 'Bearer sk-openai')
+      assert.equal(request.headers['x-api-key'], undefined)
+      assert.equal(request.headers['anthropic-version'], undefined)
+      assert.deepEqual(request.body, {
+        model: 'gpt-test',
+        input: 'Hi',
+        stream: false,
+        store: false,
+        max_output_tokens: 256,
+      })
+      return Object.assign(
+        Readable.from([
+          Buffer.from(JSON.stringify({ output: [{ content: [{ type: 'output_text', text: 'pong' }] }] })),
+        ]),
+        { statusCode: 200 },
+      )
+    },
+  })
+  assert.equal(result.text, 'pong')
+  assert.equal(result.protocol, 'openai')
+  assert.equal(result.ok, true)
+})
+
+test('stored OpenAI key retains its protocol for testing without exposing its secret', async () => {
+  const result = await runAnthropicConsole({
+    store: {
+      listRaw: () => [
+        {
+          protocol: 'openai',
+          base_url: 'https://relay.example/v1',
+          api_key_entries: [{ id: 'ek-openai', api_key: 'sk-stored-openai' }],
+        },
+      ],
+    },
+    input: { model: 'gpt-test', message: 'Hi', keys: [{ key_id: 'ek-openai' }] },
+    forward: async (request) => {
+      assert.equal(request.url, 'https://relay.example/v1/responses')
+      assert.equal(request.headers.authorization, 'Bearer sk-stored-openai')
+      return Object.assign(Readable.from([Buffer.from('{"output":[]}')]), { statusCode: 200 })
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.doesNotMatch(JSON.stringify(result), /sk-stored-openai/)
+})
+
+test('saving fetched models merges against current endpoint aliases on the server', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'api-model-merge-'))
+  const store = new ApiEndpointStore({ dataDir: dir })
+  const endpoint = store.create({
+    name: 'Operator endpoint',
+    base_url: 'https://relay.example',
+    prefix: 'saved',
+    priority: 7,
+    headers: { 'x-custom': 'retained' },
+    models: [{ name: 'm1', alias: 'custom-alias' }],
+  })
+  const response = {}
+  const scheduler = new ApiScheduler()
+  const handlePanel = createPanelHandler({
+    cfg: { paths: { project: dir } },
+    readBody,
+    apiEndpointStore: store,
+    apiScheduler: scheduler,
+    requireAuth(req) {
+      req.panelUser = 'admin'
+      req.panelRole = 'admin'
+      return true
+    },
+    json(_res, status, body) {
+      response.status = status
+      response.body = body
+    },
+  })
+  const req = Readable.from([
+    Buffer.from(
+      JSON.stringify({
+        fetched_models: [
+          { name: 'm1', alias: 'm1' },
+          { name: 'm2', alias: 'm2' },
+        ],
+      }),
+    ),
+  ])
+  req.method = 'PATCH'
+  try {
+    await handlePanel(req, {}, new URL(`http://localhost/api/panel/api-endpoints/${endpoint.id}`))
+    assert.equal(response.status, 200)
+    assert.equal(response.body.item.name, 'Operator endpoint')
+    assert.equal(response.body.item.prefix, 'saved')
+    assert.equal(response.body.item.priority, 7)
+    assert.equal(response.body.item.headers['x-custom'], 'retained')
+    assert.equal(response.body.item.risk_review_enabled, false)
+    assert.deepEqual(
+      response.body.item.models.map(({ name, alias }) => ({ name, alias })),
+      [
+        { name: 'm1', alias: 'custom-alias' },
+        { name: 'm2', alias: 'm2' },
+      ],
+    )
+    assert.deepEqual(
+      scheduler.catalog().data.map((item) => item.id),
+      ['custom-alias', 'saved/custom-alias', 'm2', 'saved/m2'],
+    )
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('direct console defaults to official x-api-key and keeps the key out of metadata', () => {
   const request = buildAnthropicConsoleRequest({
     api_key: 'sk-ant-direct',
@@ -48,6 +162,7 @@ test('direct console defaults to official x-api-key and keeps the key out of met
   assert.equal(request.body.model, 'claude-sonnet-4-5')
   assert.deepEqual(request.meta, {
     mode: 'direct',
+    protocol: 'anthropic',
     auth_scheme: 'x_api_key',
     endpoint_id: null,
     endpoint_name: null,
@@ -399,19 +514,28 @@ test('anthropic console is admin-only', () => {
   assert.equal(canViewPage('super', 'anthropic'), false)
   assert.equal(authorizePanelRoute('POST', '/api/panel/anthropic/messages', 'user').ok, false)
   assert.equal(authorizePanelRoute('POST', '/api/panel/anthropic/messages', 'admin').ok, true)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/api/messages', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/api/messages', 'admin').ok, true)
 })
 
-test('direct Anthropic console rejects account-owned OpenAI keys before any request', async () => {
+test('API console rejects account-owned OpenAI keys on both route names before any request', async () => {
   const accountEndpoint = {
     ...endpoint,
+    protocol: 'openai',
     api_key_entries: [
       { id: 'ek-account', api_key: 'sk-account-fixture', source_vm_id: 'vm-api', source_account_id: 'account-api' },
     ],
   }
+  const store = { listRaw: () => [accountEndpoint] }
+  const saved = savedEndpointKey(store, 'ek-account')
+  assert.equal(saved.id, 'ek-account')
+  assert.equal(saved.source_vm_id, 'vm-api')
+  assert.equal(saved.source_account_id, 'account-api')
+  assert.equal(saved.protocol, 'openai')
   let forwarded = false
   await assert.rejects(
     runAnthropicConsole({
-      store: { listRaw: () => [accountEndpoint] },
+      store,
       input: { key_id: 'ek-account', model: 'claude-sonnet-4-5', message: 'Hi', proxy_id: '' },
       forward: async () => {
         forwarded = true
@@ -419,6 +543,34 @@ test('direct Anthropic console rejects account-owned OpenAI keys before any requ
     }),
     { code: 'account_key_not_supported', status: 400 },
   )
+  const response = {}
+  const handlePanel = createPanelHandler({
+    cfg: { paths: { project: os.tmpdir() } },
+    readBody,
+    apiEndpointStore: store,
+    forwardApi: async () => {
+      forwarded = true
+    },
+    requireAuth(req) {
+      req.panelUser = 'admin'
+      req.panelRole = 'admin'
+      return true
+    },
+    json(_res, status, body) {
+      response.status = status
+      response.body = body
+    },
+  })
+  for (const name of ['api', 'anthropic']) {
+    const req = Readable.from([
+      Buffer.from(JSON.stringify({ key_id: 'ek-account', model: 'gpt-test', message: 'Hi' })),
+    ])
+    req.method = 'POST'
+    await handlePanel(req, {}, new URL(`http://localhost/api/panel/${name}/messages`))
+    assert.equal(response.status, 400)
+    assert.equal(response.body.error.code, 'account_key_not_supported')
+    assert.doesNotMatch(JSON.stringify(response.body), /sk-account-fixture/)
+  }
   assert.equal(forwarded, false)
 })
 test('saved Anthropic row reloads its proxy and can test or fetch models without retyping the key', async () => {

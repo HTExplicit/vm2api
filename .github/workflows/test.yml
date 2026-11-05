@@ -123,6 +123,8 @@ jobs:
             test/unit/failover-runner.test.mjs \
             test/unit/pool-scheduler.test.mjs \
             test/unit/api-endpoints.test.mjs \
+            test/unit/api-channel-routing.test.mjs \
+            test/unit/anthropic-console.test.mjs \
             test/unit/key-scope.test.mjs \
             test/unit/panel-tenant-guards.test.mjs \
             test/unit/api-backend.test.mjs \
@@ -167,6 +169,8 @@ jobs:
         run: node --test --test-name-pattern='^oversized protocol body returns 413 before scheduling$' test/unit/respond-sse.test.mjs
       - name: Personal API keys stay within authenticated owners
         run: node --test --test-name-pattern='^real admin and user sessions cannot list or operate each other personal keys$' test/e2e/api-keys.e2e.test.mjs
+      - name: Configured API endpoints support both protocols
+        run: node --test --test-name-pattern='^generated API key lists configured models and calls both protocols through API endpoints$' test/e2e/api-channel.e2e.test.mjs
       - name: OAuth exchange uses the VM egress
         run: node --test --test-name-pattern='^OAuth exchange reuses VM egress without a host-side proxy hop$' test/e2e/panel-api.e2e.test.mjs
       - name: synthetic billing benchmark
@@ -194,6 +198,7 @@ jobs:
           pnpm exec vitest run src/features/vm/codex-browser-finish.test.ts src/features/vm/codex-credential-browser-completion.test.tsx
           pnpm exec vitest run src/features/openai-apikey src/features/logs/account-api-logs.test.tsx src/components/layout/data/sidebar-data.test.ts
           pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx
+          pnpm exec vitest run src/features/anthropic/endpoint-save.test.ts
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx
           pnpm exec vitest run src/features/cluster/model.test.ts src/features/cluster/connection-rows.test.ts
           pnpm build
