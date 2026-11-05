@@ -1,5 +1,4 @@
 import type { UsageLogRow } from '@/types/panel-usage-logs'
-import { ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -10,7 +9,6 @@ import {
 import { ModelVendorIcon } from '@/components/model-vendor-icon'
 import {
   copyText,
-  resolveModelAuditDisplay,
   statusBadgeClass,
   statusBadgeTooltip,
   thinkingEffortBadgeClass,
@@ -87,55 +85,20 @@ export function ThinkingEffortDisplay({ effort }: { effort: string | null }) {
   )
 }
 
-export function ModelDisplayWithRedirect({
-  row,
-  onRedirectClick,
-}: {
-  row: UsageLogRow
-  onRedirectClick: () => void
-}) {
-  const audit = resolveModelAuditDisplay(row)
-  const model = audit.primaryModel
+export function UpstreamModelDisplay({ row }: { row: UsageLogRow }) {
+  const model = row.actualResponseModel
   return (
-    <div className='flex min-w-0 flex-col leading-4'>
-      <div className='flex min-w-0 items-center gap-1.5'>
-        {model ? <ModelVendorIcon modelId={model} /> : null}
-        <span
-          className='cursor-pointer truncate hover:underline'
-          onClick={(event) => {
-            event.stopPropagation()
-            if (model) void copyText(model)
-          }}
-        >
-          {model || '-'}
-        </span>
-        {audit.hasRedirect ? (
-          <Badge
-            variant='outline'
-            className='shrink-0 cursor-pointer border-blue-300 px-1 text-xs text-blue-700 dark:border-blue-700 dark:text-blue-300'
-            onClick={(event) => {
-              event.stopPropagation()
-              onRedirectClick()
-            }}
-          >
-            <ArrowRight className='h-3 w-3' />
-          </Badge>
-        ) : null}
-      </div>
-      <div className='truncate text-xs text-muted-foreground'>
-        发送：{row.sentModel ?? '未知'}
-      </div>
-      <div
-        className={cn(
-          'truncate text-xs text-muted-foreground',
-          audit.hasActualMismatch && 'text-orange-700 dark:text-orange-300'
-        )}
-        title={
-          audit.hasActualMismatch ? '发送与上游返回的模型名称不同' : undefined
-        }
+    <div className='flex min-w-0 items-center gap-1.5'>
+      {model ? <ModelVendorIcon modelId={model} /> : null}
+      <span
+        className={cn('truncate', model && 'cursor-pointer hover:underline')}
+        onClick={(event) => {
+          event.stopPropagation()
+          if (model) void copyText(model)
+        }}
       >
-        上游返回：{row.actualResponseModel ?? '未知'}
-      </div>
+        {model ?? '未知'}
+      </span>
     </div>
   )
 }

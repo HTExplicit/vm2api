@@ -179,8 +179,6 @@ export function multiplierBadgeClass(multiplier: number): string {
 // ---------- 模型 ----------
 
 export type ModelAuditDisplay = {
-  /** 列表主显示，沿用既有日志模型。 */
-  primaryModel: string | null
   hasRedirect: boolean
   hasActualMismatch: boolean
 }
@@ -198,7 +196,6 @@ export function resolveModelAuditDisplay(row: {
     row.actualResponseModel !== row.sentModel
   )
   return {
-    primaryModel: row.model ?? row.originalModel,
     hasRedirect: Boolean(
       row.originalModel && row.model && row.originalModel !== row.model
     ),

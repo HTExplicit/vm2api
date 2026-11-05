@@ -21,7 +21,7 @@ import {
 import type { LogsTableColumn } from './column-visibility'
 import { CostTooltipContent } from './cost-tooltip'
 import {
-  ModelDisplayWithRedirect,
+  UpstreamModelDisplay,
   StatusBadge,
   ThinkingEffortDisplay,
 } from './log-cells'
@@ -30,7 +30,7 @@ import { ProviderCell } from './provider-chain-popover'
 import { usageLogsBatchQueryOptions } from './queries'
 import { RelativeTime } from './relative-time'
 
-const ROW_HEIGHT = 64
+const ROW_HEIGHT = 52
 const SCROLL_TOP_THRESHOLD = 500
 
 export type DetailTab = 'summary' | 'logic-trace' | 'performance' | 'raw'
@@ -202,19 +202,12 @@ function LogRow({
         <Tooltip>
           <TooltipTrigger asChild>
             <div className='flex min-w-0 cursor-help items-center gap-1 truncate'>
-              <ModelDisplayWithRedirect
-                row={row}
-                onRedirectClick={() =>
-                  onOpenDetail(row, { scrollToRedirect: true })
-                }
-              />
+              <UpstreamModelDisplay row={row} />
             </div>
           </TooltipTrigger>
           <TooltipContent>
             <div className='space-y-1 text-xs'>
-              <p>请求：{row.originalModel ?? '未知'}</p>
-              <p>发送：{row.sentModel ?? '未知'}</p>
-              <p>上游返回：{row.actualResponseModel ?? '未知'}</p>
+              <p>上游返回模型：{row.actualResponseModel ?? '未知'}</p>
             </div>
           </TooltipContent>
         </Tooltip>
@@ -491,7 +484,9 @@ export function VirtualizedLogsTable({
               {isHidden('provider') ? null : (
                 <HeadCell className='min-w-[100px] flex-[1.5]'>供应商</HeadCell>
               )}
-              <HeadCell className='min-w-[100px] flex-[1.3]'>模型</HeadCell>
+              <HeadCell className='min-w-[100px] flex-[1.3]'>
+                上游返回模型
+              </HeadCell>
               {isHidden('reasoningEffort') ? null : (
                 <HeadCell
                   className='min-w-[64px] flex-[0.6]'

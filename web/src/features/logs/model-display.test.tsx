@@ -1,7 +1,7 @@
 import type { UsageLogRow } from '@/types/panel-usage-logs'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { ModelDisplayWithRedirect } from './log-cells'
+import { UpstreamModelDisplay } from './log-cells'
 import { SummaryTab } from './log-detail/summary-tab'
 
 const historicalRow: UsageLogRow = {
@@ -73,34 +73,33 @@ const historicalRow: UsageLogRow = {
 
 function cell(overrides: Partial<UsageLogRow> = {}) {
   return renderToStaticMarkup(
-    <ModelDisplayWithRedirect
-      row={{ ...historicalRow, ...overrides }}
-      onRedirectClick={() => {}}
-    />
+    <UpstreamModelDisplay row={{ ...historicalRow, ...overrides }} />
   )
 }
 
 describe('separate sent and returned model display', () => {
   it('keeps historical observations unknown without reusing the primary model or old mismatch', () => {
     const html = cell()
-    expect(html).toContain('legacy-model')
-    expect(html).toContain('发送：未知')
-    expect(html).toContain('上游返回：未知')
-    expect(html).not.toContain('发送与上游返回的模型名称不同')
+    expect(html).toContain('未知')
+    expect(html).not.toContain('legacy-model')
+    expect(html).not.toContain('client-alias')
+    expect(html).not.toContain('发送')
   })
 
-  it('shows both observations even when they are equal', () => {
+  it('shows the returned model once when both observations are equal', () => {
     const html = cell({ sentModel: 'model-a', actualResponseModel: 'model-a' })
-    expect(html).toContain('发送：model-a')
-    expect(html).toContain('上游返回：model-a')
-    expect(html).not.toContain('发送与上游返回的模型名称不同')
+    expect(html).toContain('model-a')
+    expect(html).not.toContain('发送')
+    expect(html.match(/model-a/g)).toHaveLength(1)
   })
 
-  it('shows the upstream declaration and names the difference without making a billing claim', () => {
+  it('shows only the upstream declaration when requested and sent models differ', () => {
     const html = cell({ sentModel: 'model-a', actualResponseModel: 'model-b' })
-    expect(html).toContain('发送：model-a')
-    expect(html).toContain('上游返回：model-b')
-    expect(html).toContain('发送与上游返回的模型名称不同')
+    expect(html).toContain('model-b')
+    expect(html).not.toContain('model-a')
+    expect(html).not.toContain('legacy-model')
+    expect(html).not.toContain('client-alias')
+    expect(html).not.toContain('发送')
     expect(html).not.toContain('计费仍然基于')
   })
 
