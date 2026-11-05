@@ -56,6 +56,8 @@ jobs:
             test/unit/anthropic-policy.test.mjs \
             test/unit/cache-ttl.test.mjs \
             test/unit/cache-prefix.test.mjs \
+            test/unit/tool-result-prune-cache.test.mjs \
+            test/unit/tool-result-prune-protocol.test.mjs \
             test/unit/persona-outbound-contract.test.mjs \
             test/unit/persona-settings-switch.test.mjs \
             test/unit/upstream-error-policy.test.mjs \
@@ -122,6 +124,7 @@ jobs:
             test/unit/pool-scheduler.test.mjs \
             test/unit/api-endpoints.test.mjs \
             test/unit/key-scope.test.mjs \
+            test/unit/panel-tenant-guards.test.mjs \
             test/unit/api-backend.test.mjs \
             test/unit/codex-convert.test.mjs \
             test/unit/codex-image-tool.test.mjs \
@@ -158,6 +161,12 @@ jobs:
           done
       - name: Inline tool beta reaches the final CLI hop
         run: node --test --test-name-pattern='^cli-hop appends inline-tools when a message carries a tool_definition$' test/unit/go-worker-client.test.mjs
+      - name: Persisted kernel restart pending
+        run: node --test --test-name-pattern='^unchanged wrap payload reconciles persisted restart pending \((check|success|failure|throw|stopped)\)$' test/unit/panel-wrap-sync.test.mjs
+      - name: Oversized protocol body stops before scheduling
+        run: node --test --test-name-pattern='^oversized protocol body returns 413 before scheduling$' test/unit/respond-sse.test.mjs
+      - name: Personal API keys stay within authenticated owners
+        run: node --test --test-name-pattern='^real admin and user sessions cannot list or operate each other personal keys$' test/e2e/api-keys.e2e.test.mjs
       - name: OAuth exchange uses the VM egress
         run: node --test --test-name-pattern='^OAuth exchange reuses VM egress without a host-side proxy hop$' test/e2e/panel-api.e2e.test.mjs
       - name: synthetic billing benchmark
