@@ -50,6 +50,12 @@ OpenAI 模型页的 Fast 开关只对已同步、已启用且目录明确声明 
 
 别名路径（无 `/v1` 前缀）与上表相同处理函数。
 
+## OpenAI API 无状态请求
+
+普通 OpenAI API 端点与 `OpenAI(apikey)` 账号 API 均强制出站 `store: false`。Chat/Responses 在取用托管 key 和转发前校验，拒绝账户资源引用与 MCP、file_search、code_interpreter 等工具，返回 HTTP 400、`invalid_request_error`、`api_shared_resource_forbidden`。Responses 只接受公开字段，不接受 `previous_response_id`、`conversation`、存储 `prompt`、`background` 或未知顶层字段；调用方应发送完整历史。
+
+完整工具调用/结果、调用 ID、namespace 内的 function/custom、加密 reasoning 与 Responses Lite 继续支持。namespace 及 Lite `additional_tools` 中的实际工具同样校验；function/custom 的业务参数 schema 不作资源扫描。文件 ID、向量库、容器与远程 MCP 服务器等账户资源不能通过历史或 hosted tool 引用。本节不改变 OAuth Codex 的协议契约。
+
 ## Responses WebSocket
 
 用相同 Bearer API key 对 `GET /v1/responses` 发起标准 WebSocket Upgrade，然后发送文本帧：

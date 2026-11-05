@@ -59,7 +59,12 @@ import {
   formatHealthSse,
   healthUnavailableError,
 } from '../admin/health-probe.mjs'
-import { resolveInferenceBackend, runApiInference } from '../pool/api-protocol.mjs'
+import {
+  resolveInferenceBackend,
+  runApiInference,
+  normalizeApiOpenAIRequestBody,
+  validateApiOpenAIRequest,
+} from '../pool/api-protocol.mjs'
 import { classifyClaudeRequestPurpose, prepareClassifierBody, classifierRequestSummary } from './request-purpose.mjs'
 import { agentSummarySession } from './agent-summary.mjs'
 import { summarizeBody, redactHeaders, presentedApiKeyForLog } from '../admin/request-log.mjs'
@@ -375,7 +380,17 @@ export function createHandleProtocol(deps) {
     return jevScopeWaits(jev, 'claude')
   }
 
-  async function applyProtocolIntercept({ req, inbound, body, fp, logBag, requestId, res, account = null }) {
+  async function applyProtocolIntercept({
+    req,
+    inbound,
+    body,
+    fp,
+    logBag,
+    requestId,
+    res,
+    account = null,
+    scopeMatched = false,
+  }) {
     const official =
       isOfficialClaudeCodeTraffic(req.headers, inbound) ||
       isOfficialClaudeClient(fp.client_class) ||
@@ -400,6 +415,7 @@ export function createHandleProtocol(deps) {
       devices: deviceRepo(),
       requestId,
       account,
+      scopeMatched,
     })
     if (!decision || decision.action !== 'block') {
       if (decision?.intercept) logBag.intercept = decision.intercept
@@ -565,24 +581,14 @@ export function createHandleProtocol(deps) {
     logCtx,
     converted,
     nativeResponsesBody = null,
+    apiInbound = inbound,
+    picked = null,
     personaHideTokens = false,
     requestContext = null,
     passthrough = false,
     toolNames = {},
   }) {
-    // API 直连走平台端点，不经过槽位；门禁与 api-kernel hop 同位，勿提前于 credential/intercept 链
-    if (ownerScopeFromRequest(req, apiKeyStore?.users).type !== 'platform') {
-      stats.errors++
-      const errorResult = makeError({
-        type: ErrorType.PERMISSION,
-        code: ErrorCode.API_BACKEND_FORBIDDEN,
-        message: '租户密钥只能调用自己名下的槽位',
-        status: 403,
-      })
-      logBag.error_code = ErrorCode.API_BACKEND_FORBIDDEN
-      logBag.error_message = errorResult.body?.error?.message || null
-      return json(res, 403, errorResult.body)
-    }
+    // API endpoints use managed-key admission without entering OAuth scheduling.
     const managedKey = req.apiKeyRecord || null
     if (managedKey) {
       const gate = apiKeyStore.acquire(managedKey)
@@ -610,9 +616,10 @@ export function createHandleProtocol(deps) {
         res,
         cfg,
         scheduler: apiScheduler,
+        picked,
         store: apiEndpointStore,
         protocol,
-        inbound,
+        inbound: apiInbound,
         convertedBody: ctx.body,
         nativeResponsesBody,
         clientStream,
@@ -915,8 +922,22 @@ export function createHandleProtocol(deps) {
     const inferenceBackend = resolveInferenceBackend(req)
     const keyScope = keyScopeFromRequest(req)
     const accountApiBackend = inferenceBackend === 'api' && keyScope.group_type === 'openai_apikey'
+    const poolDenial = vmPoolDenial(keyScope)
+    if (inferenceBackend === 'api' && ownerScopeFromRequest(req, apiKeyStore?.users).type !== 'platform') {
+      stats.errors++
+      const errorResult = makeError({
+        type: ErrorType.PERMISSION,
+        code: ErrorCode.API_BACKEND_FORBIDDEN,
+        message: '租户密钥只能调用自己名下的槽位',
+        status: 403,
+      })
+      logBag.error_code = ErrorCode.API_BACKEND_FORBIDDEN
+      logBag.error_message = errorResult.body?.error?.message || null
+      return json(res, 403, errorResult.body)
+    }
     let want1m = hasClaudeCode1mSuffix(inbound?.model) || hasClaudeCode1mSuffix(ctx.body?.model)
-    const modelRewrite = accountApiBackend ? { ok: true } : applyCodexInboundModelRewrite(ctx.body, getRouting() || {})
+    const modelRewrite =
+      inferenceBackend === 'api' ? { ok: true } : applyCodexInboundModelRewrite(ctx.body, getRouting() || {})
     if (!modelRewrite.ok) {
       stats.errors++
       const errorResult = makeError({
@@ -934,11 +955,46 @@ export function createHandleProtocol(deps) {
       ctx = { ...ctx, body: modelRewrite.body }
       logBag.upstream_model = modelRewrite.upstreamModel || null
     }
-    // Account API models are validated by the selected accounts' API catalog,
-    // including official o-series models and aliases, rather than the OAuth names.
-    const imageModel = accountApiBackend ? null : canonicalImageToolModel(ctx.body?.model)
-    const platform =
-      accountApiBackend || imageModel ? { ok: true, platform: 'openai' } : detectInboundPlatform(ctx.body?.model)
+    // Pick through the caller's catalog before validating protocol-specific fields.
+    // Account retries reuse this first choice and reselect within the same scope.
+    if (inferenceBackend === 'api') ctx = applyIntercept(cfg.intercept.rules, 'before_upstream', ctx)
+    const apiPicked =
+      inferenceBackend === 'api' && !poolDenial ? apiScheduler.pick(ctx.body?.model, Date.now(), keyScope) : null
+    if (apiPicked && !apiPicked.ok) {
+      stats.errors++
+      logBag.via = 'api-kernel'
+      logBag.attempt_count = 0
+      logBag.final_state = 'exhausted'
+      logBag.upstream_status = apiPicked.code === 'model_not_found' ? 404 : 503
+      logBag.error_code = apiPicked.code
+      logBag.error_message = apiPicked.message
+      return json(res, apiPicked.code === 'model_not_found' ? 404 : 503, {
+        type: 'error',
+        error: { type: 'api_error', code: apiPicked.code, message: apiPicked.message },
+      })
+    }
+    const imageModel = inferenceBackend === 'api' ? null : canonicalImageToolModel(ctx.body?.model)
+    const platform = accountApiBackend
+      ? { ok: true, platform: 'openai' }
+      : apiPicked
+        ? { ok: true, platform: apiPicked.endpoint.protocol === 'openai' ? 'openai' : 'anthropic' }
+        : imageModel
+          ? { ok: true, platform: 'openai' }
+          : detectInboundPlatform(ctx.body?.model)
+    const apiOpenAI = inferenceBackend === 'api' && platform.platform === 'openai'
+    if (apiOpenAI && protocol === 'openai.responses') {
+      ctx = { ...ctx, body: normalizeApiOpenAIRequestBody(ctx.body) }
+    }
+    const apiInbound = inferenceBackend === 'api' ? ctx.body : null
+    const apiInputError = apiOpenAI ? validateApiOpenAIRequest(protocol, apiInbound) : null
+    if (apiInputError) {
+      stats.errors++
+      logBag.error_code = apiInputError.code
+      logBag.error_message = apiInputError.message
+      return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', ...apiInputError } })
+    }
+    const apiRiskReview = !!apiPicked && !apiOpenAI && apiPicked.endpoint.risk_review_enabled === true
+    const preReviewEnabled = !apiPicked || apiOpenAI || apiRiskReview
     if (!platform.ok) {
       stats.errors++
       const errorResult = makeError({
@@ -952,7 +1008,6 @@ export function createHandleProtocol(deps) {
       logBag.error_message = errorResult.body?.error?.message || null
       return json(res, errorResult.status, errorResult.body)
     }
-    const poolDenial = vmPoolDenial(keyScope)
     if (poolDenial) {
       stats.errors++
       const errorResult = makeError({
@@ -983,6 +1038,7 @@ export function createHandleProtocol(deps) {
     // of the gate scans them only when jev.openai_platform_enabled is on.
     if (
       platform.platform !== 'openai' &&
+      inferenceBackend !== 'api' &&
       protocol === 'anthropic.messages' &&
       getHealthMonitor()?.getConfig?.()?.intercept_warmup === true
     ) {
@@ -1004,10 +1060,22 @@ export function createHandleProtocol(deps) {
         return json(res, 200, mock)
       }
     }
-    if (await applyProtocolIntercept({ req, inbound, body: ctx.body, fp, logBag, requestId: logCtx.request_id, res })) {
+    if (
+      preReviewEnabled &&
+      (await applyProtocolIntercept({
+        req,
+        inbound,
+        body: ctx.body,
+        fp,
+        logBag,
+        requestId: logCtx.request_id,
+        res,
+        scopeMatched: apiRiskReview,
+      }))
+    ) {
       return
     }
-    if (platform.platform === 'openai' && !accountApiBackend) {
+    if (platform.platform === 'openai' && inferenceBackend !== 'api') {
       const routing = getRouting() || {}
       const codexSticky = {
         cfg,
@@ -1082,7 +1150,7 @@ export function createHandleProtocol(deps) {
         }),
       )
     }
-    if (protocol === 'openai.responses' && !accountApiBackend) {
+    if (protocol === 'openai.responses' && inferenceBackend !== 'api') {
       stats.errors++
       logBag.error_code = 'protocol_not_allowed'
       return json(
@@ -1110,15 +1178,12 @@ export function createHandleProtocol(deps) {
       ctx.body = { ...ctx.body, model: modelCheck.model }
     }
 
-    if (accountApiBackend && protocol === 'openai.responses') {
+    if (apiOpenAI && protocol === 'openai.responses') {
       // Codex tools and their call history are native Responses structures.
       // A Messages round trip loses namespaces, custom tools, and call IDs.
       stats.requests++
       stats.by_route[protocol] = (stats.by_route[protocol] || 0) + 1
       stats.passthrough++
-      ctx = applyIntercept(cfg.intercept.rules, 'before_upstream', ctx)
-      if (await applyProtocolIntercept({ req, inbound, body: ctx.body, fp, logBag, requestId: logCtx.request_id, res }))
-        return
       return runApiBackend({
         req,
         res,
@@ -1129,6 +1194,8 @@ export function createHandleProtocol(deps) {
         logCtx,
         converted: { mode: 'passthrough' },
         nativeResponsesBody: ctx.body,
+        apiInbound,
+        picked: apiPicked,
       })
     }
 
@@ -1151,11 +1218,10 @@ export function createHandleProtocol(deps) {
     else if (converted.mode === 'rewrite') stats.rewrite++
     else stats.convert++
 
-    ctx = applyIntercept(cfg.intercept.rules, 'before_upstream', { ...ctx, body: converted.claude })
-    if (accountApiBackend) {
-      if (await applyProtocolIntercept({ req, inbound, body: ctx.body, fp, logBag, requestId: logCtx.request_id, res }))
-        return
-      return runApiBackend({ req, res, protocol, inbound, ctx, logBag, logCtx, converted })
+    ctx = { ...ctx, body: converted.claude }
+    if (inferenceBackend !== 'api') ctx = applyIntercept(cfg.intercept.rules, 'before_upstream', ctx)
+    if (apiOpenAI) {
+      return runApiBackend({ req, res, protocol, inbound, ctx, logBag, logCtx, converted, apiInbound, picked: apiPicked })
     }
     const officialTraffic = officialInbound
     const requestContext = classifyClaudeRequestPurpose(inbound, { officialTraffic })
@@ -1226,7 +1292,12 @@ export function createHandleProtocol(deps) {
         }
       }
     }
-    if (await applyProtocolIntercept({ req, inbound, body: ctx.body, fp, logBag, requestId: logCtx.request_id, res })) {
+    // API endpoint opt-in is checked once before conversion, including when dedup is disabled.
+    if (
+      !apiRiskReview &&
+      preReviewEnabled &&
+      (await applyProtocolIntercept({ req, inbound, body: ctx.body, fp, logBag, requestId: logCtx.request_id, res }))
+    ) {
       return
     }
     const officialClient = isOfficialClaudeClient(fp.client_class)
@@ -1391,6 +1462,8 @@ export function createHandleProtocol(deps) {
         logBag,
         logCtx,
         converted,
+        apiInbound,
+        picked: apiPicked,
         personaHideTokens,
         requestContext,
         passthrough: officialPassthrough,

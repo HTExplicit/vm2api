@@ -1651,6 +1651,7 @@ async function runAccountApiProtocol(inbound, protocol, options = {}) {
   const sent = [],
     billed = [],
     logs = []
+  let acquired = 0
   const kernel = http.createServer((request, response) => {
     let raw = ''
     request.on('data', (chunk) => {
@@ -1789,7 +1790,10 @@ async function runAccountApiProtocol(inbound, protocol, options = {}) {
       },
     ),
     apiKeyStore: {
-      acquire: () => options.keyGate || { ok: true },
+      acquire: () => {
+        acquired++
+        return options.keyGate || { ok: true }
+      },
       release() {},
       recordUsage: (...args) => billed.push(args),
       users: { getById: () => ({ role: options.ownerRole || 'admin' }) },
@@ -1816,7 +1820,7 @@ async function runAccountApiProtocol(inbound, protocol, options = {}) {
   })
   try {
     await handler.handleProtocol(request, response, protocol, request.url)
-    return { response, sent, billed, logs }
+    return { response, sent, billed, logs, acquired }
   } finally {
     kernel.closeAllConnections()
     await new Promise((resolve) => kernel.close(resolve))
@@ -1870,7 +1874,7 @@ for (const [protocol, route, inbound, answer] of [
       'OAuth/Claude minimum budgets must not inflate the API request',
     )
     assert.equal(JSON.stringify(run.sent[0].body).includes('MUST_NOT_BE_IN_ACCOUNT_API'), false)
-    if (protocol === 'openai.responses') assert.equal(Object.hasOwn(run.sent[0].body, 'store'), false)
+    assert.equal(run.sent[0].body.store, false)
     assert.equal(run.billed.length, 1)
     assert.equal(run.billed[0][0].id, 'managed-a')
     assert.equal(run.logs[0].via, 'api-kernel')
@@ -1929,14 +1933,47 @@ for (const [protocol, route, content] of [
   ['openai.responses', '/v1/responses', { input: 'Draw a cat.' }],
 ]) {
   test(`account API ${protocol} image model stays in its API catalog without an OAuth Images call`, async () => {
-    const run = await runAccountApiProtocol({ model: 'gpt-image-2.5-flare', ...content }, protocol, { path: route })
+    const run = await runAccountApiProtocol(
+      { model: 'gpt-image-2.5-flare', ...content, size: '1024x1024', quality: 'high' },
+      protocol,
+      { path: route },
+    )
     assert.equal(run.response.statusCode, 404)
     assert.equal(run.response.body.error.code, 'model_not_found')
     assert.equal(run.sent.length, 0)
     assert.equal(run.billed.length, 0)
+    assert.equal(run.acquired, 0)
     assert.equal(run.logs[0].via, 'api-kernel')
     assert.equal(run.logs[0].protocol, protocol)
     assert.equal(run.logs[0].error_code, 'model_not_found')
+  })
+}
+
+for (const [name, fields] of [
+  ['stored response', { previous_response_id: 'resp_other_key' }],
+  ['file reference', { input: [{ role: 'user', content: [{ type: 'input_file', file_id: 'file_other_key' }] }] }],
+  ['namespace MCP', { tools: [{ type: 'namespace', name: 'remote', tools: [{ type: 'mcp' }] }] }],
+  [
+    'Lite MCP',
+    {
+      input: [
+        {
+          type: 'additional_tools',
+          role: 'developer',
+          tools: [{ type: 'namespace', name: 'remote', tools: [{ type: 'mcp' }] }],
+        },
+      ],
+      client_metadata: { 'x-openai-internal-codex-responses-lite': 'true' },
+    },
+  ],
+]) {
+  test(`account API rejects ${name} before key admission or forwarding`, async () => {
+    const run = await runAccountApiProtocol({ model: 'o3', input: 'hello', ...fields }, 'openai.responses')
+    assert.equal(run.response.statusCode, 400)
+    assert.equal(run.response.body.error.code, 'api_shared_resource_forbidden')
+    assert.equal(run.acquired, 0)
+    assert.equal(run.sent.length, 0)
+    assert.equal(run.billed.length, 0)
   })
 }
 
@@ -2108,6 +2145,7 @@ function nativeToolResponse() {
 
 test('account API native Responses preserves Codex tools, history, parameters, and before-upstream changes', async () => {
   const inbound = nativeToolsRequest()
+  inbound.store = true
   const officialResponse = nativeToolResponse()
   const run = await runAccountApiProtocol(inbound, 'openai.responses', {
     path: '/v1/responses',
@@ -2126,6 +2164,7 @@ test('account API native Responses preserves Codex tools, history, parameters, a
     instructions: 'Changed by configured intercept',
     max_output_tokens: 19,
     stream: true,
+    store: false,
   })
   assert.deepEqual(run.response.body, officialResponse)
   assert.equal(run.sent[0].proxy_url, 'socks5h://bound-current:1080')

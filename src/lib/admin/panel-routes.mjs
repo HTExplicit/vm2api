@@ -2079,17 +2079,15 @@ export function createPanelHandler(ctx) {
           if (isAccountApiKey(saved)) throw accountApiManagedError()
           const result = await fetchUpstreamModels({
             cfg,
-            ...{
-              kind: body?.kind,
-              protocol: body?.protocol,
-              base_url: body?.base_url || saved?.base_url,
-              api_key: body?.api_key || saved?.api_key,
-              proxy_url: Object.prototype.hasOwnProperty.call(body || {}, 'proxy_id')
-                ? resolveConsoleProxyUrl(proxyPool, body.proxy_id)
-                : saved?.proxy_url || body?.proxy_url,
-              headers: body?.headers,
-              auth_scheme: body?.auth_scheme || body?.authScheme || saved?.auth_scheme,
-            },
+            kind: body?.kind,
+            protocol: body?.protocol || saved?.protocol,
+            base_url: body?.base_url || saved?.base_url,
+            api_key: body?.api_key || saved?.api_key,
+            proxy_url: Object.prototype.hasOwnProperty.call(body || {}, 'proxy_id')
+              ? resolveConsoleProxyUrl(proxyPool, body.proxy_id)
+              : saved?.proxy_url || body?.proxy_url,
+            headers: body?.headers,
+            auth_scheme: body?.auth_scheme || body?.authScheme || saved?.auth_scheme,
             forward: ctx.forwardApi,
           })
           return json(res, 200, { ok: true, ...result })
@@ -2149,6 +2147,7 @@ export function createPanelHandler(ctx) {
           const proxyUrl = body?.proxy_id ? resolveConsoleProxyUrl(proxyPool, body.proxy_id) : ''
           const rec = apiEndpointStore.update(id, body || {})
           if (!rec) return json(res, 404, { ok: false, error: { message: 'endpoint not found' } })
+          if (Array.isArray(body?.fetched_models)) apiEndpointStore.mergeFetchedModels(id, body.fetched_models)
           if (keyId) {
             apiEndpointStore.updateKey(keyId, {
               ...(apiKey ? { api_key: apiKey } : {}),
@@ -2283,7 +2282,7 @@ export function createPanelHandler(ctx) {
         const item = publicEndpointView(ep)?.api_key_entries?.find((k) => k.id === kid)
         return json(res, 200, { ok: true, item })
       }
-      if (req.method === 'POST' && p === '/api/panel/anthropic/messages') {
+      if (req.method === 'POST' && /^\/api\/panel\/(?:api|anthropic)\/messages$/.test(p)) {
         const body = await readBody(req, 64 * 1024).catch(() => ({}))
         try {
           const result = await runAnthropicConsole({

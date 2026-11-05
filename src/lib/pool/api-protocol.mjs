@@ -16,6 +16,7 @@ import {
   responsesSseToAnthropicEvents,
   isToolArgumentsError,
   responsesSseToChatChunk,
+  chatToCodexResponses,
 } from '../protocol/codex-convert.mjs'
 import { usageFromSseLine } from '../protocol/handle-codex.mjs'
 import { BETA_CONTEXT_1M } from '../protocol/claude-code-betas.mjs'
@@ -35,6 +36,94 @@ export function resolveInferenceBackend(req) {
 }
 
 export { messagesUrl, responsesUrl } from './api-presets.mjs'
+
+const STATELESS_RESPONSES_FIELDS = new Set([
+  'model',
+  'input',
+  'instructions',
+  'max_output_tokens',
+  'max_tool_calls',
+  'parallel_tool_calls',
+  'reasoning',
+  'text',
+  'tool_choice',
+  'tools',
+  'truncation',
+  'temperature',
+  'top_p',
+  'stream',
+  'stream_options',
+  'store',
+  'metadata',
+  'service_tier',
+  'user',
+  'safety_identifier',
+  'prompt_cache_key',
+  'prompt_cache_retention',
+  'include',
+])
+const STATELESS_OPENAI_TOOLS = new Set(['function', 'custom', 'web_search', 'web_search_preview', 'image_generation'])
+
+export function normalizeApiOpenAIRequestBody(body = {}) {
+  const { client_metadata: _transportMetadata, ...publicBody } = body
+  if (Array.isArray(publicBody.input)) {
+    publicBody.input = publicBody.input.map((item) => {
+      if (!item || !Object.hasOwn(item, 'internal_chat_message_metadata_passthrough')) return item
+      const { internal_chat_message_metadata_passthrough: _itemMetadata, ...publicItem } = item
+      return publicItem
+    })
+  }
+  return publicBody
+}
+
+// Endpoint credentials are shared across managed keys; never resolve caller-supplied account resources.
+export function validateApiOpenAIRequest(protocol, body = {}) {
+  if (!['openai.responses', 'openai.chat'].includes(protocol)) return null
+  const invalid = (field) => ({
+    code: 'api_shared_resource_forbidden',
+    message: `Shared API endpoints require stateless input; unsupported field or resource: ${field}`,
+  })
+  if (protocol === 'openai.responses') {
+    for (const field of Object.keys(body)) {
+      if (!STATELESS_RESPONSES_FIELDS.has(field)) return invalid(field)
+    }
+  }
+  const pending = [body.input]
+  const validateTools = (tools) => {
+    if (tools == null) return null
+    if (!Array.isArray(tools)) return invalid('tools')
+    for (const tool of tools) {
+      if (tool?.type === 'namespace') {
+        const error = validateTools(tool.tools)
+        if (error) return error
+      } else if (!STATELESS_OPENAI_TOOLS.has(tool?.type)) return invalid('tools.type')
+      else if (!['function', 'custom'].includes(tool.type)) pending.push(tool)
+    }
+    return null
+  }
+  const toolsError = validateTools(body.tools)
+  if (toolsError) return toolsError
+  while (pending.length) {
+    const value = pending.pop()
+    if (!value || typeof value !== 'object') continue
+    if (Array.isArray(value)) {
+      for (const child of value) pending.push(child)
+      continue
+    }
+    if (value.type === 'item_reference' || (value.id && !value.type && !value.role))
+      return invalid('input.item_reference')
+    if (value.type === 'additional_tools') {
+      const error = validateTools(value.tools)
+      if (error) return error
+    }
+    for (const [field, child] of Object.entries(value)) {
+      if (value.type === 'additional_tools' && field === 'tools') continue
+      if (['file_id', 'file_ids', 'vector_store_ids', 'container', 'server_url'].includes(field)) return invalid(field)
+      pending.push(child)
+    }
+  }
+  return null
+}
 
 function joinHeaderMap(headers = {}) {
   const out = {}
@@ -283,7 +372,10 @@ export async function runApiInference(options = {}) {
   for (let hop = 0; hop < limits.attempts; hop++) {
     if (options.signal?.aborted) return { ...clientCancelledResult(lastResult), attemptCount }
     if (hop > 0 && Date.now() - startedAt >= limits.deadlineMs) break
-    const picked = options.scheduler.pick(model, Date.now(), scope, { excludedAccountIds, excludedKeyIds })
+    const picked =
+      hop === 0 && options.picked
+        ? options.picked
+        : options.scheduler.pick(model, Date.now(), scope, { excludedAccountIds, excludedKeyIds })
     if (!picked.ok) {
       if (lastResult) break
       return { ...(await runApiAttempt({ ...options, picked })), attemptCount }
@@ -431,22 +523,23 @@ async function runApiAttempt({
   }
   const body = isOpenAI
     ? {
-        ...(nativeResponses ? nativeResponsesBody : claudeToOpenAIResponsesRequest(canonical)),
+        ...(nativeResponses
+          ? normalizeApiOpenAIRequestBody(nativeResponsesBody)
+          : protocol === 'openai.chat'
+            ? chatToCodexResponses(inbound)
+            : claudeToOpenAIResponsesRequest(canonical)),
         model: picked.upstream_model,
         stream: true,
+        store: false,
       }
     : { ...canonical, model: picked.upstream_model, stream: true }
-  if (nativeResponses) {
-    // Codex Lite's additional_tools items are public Responses input. Keep
-    // their position and remove only metadata from Codex's internal transport.
-    delete body.client_metadata
-    if (Array.isArray(body.input)) {
-      body.input = body.input.map((item) => {
-        if (!item || !Object.hasOwn(item, 'internal_chat_message_metadata_passthrough')) return item
-        const publicItem = { ...item }
-        delete publicItem.internal_chat_message_metadata_passthrough
-        return publicItem
-      })
+  if (isOpenAI && protocol === 'openai.chat') {
+    for (const name of ['temperature', 'top_p', 'parallel_tool_calls']) {
+      if (inbound?.[name] != null) body[name] = inbound[name]
+    }
+    if (body.reasoning_effort != null) {
+      body.reasoning = { ...body.reasoning, effort: body.reasoning?.effort ?? body.reasoning_effort }
+      delete body.reasoning_effort
     }
   }
   if (requestContext) Object.assign(body, prepareClassifierBody(body))
