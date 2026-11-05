@@ -265,6 +265,7 @@ export class SlotBrowserManager {
       page: live.page,
       assertCurrent: () => this.assertCurrent(live),
       onInput: (input) => {
+        if (live.status === 'closing' || live.status === 'close_failed') return false
         live.touchedAt = this.now()
         return !live.inputLocked || input.type === 'close' || input.type === 'continue'
       },
@@ -318,15 +319,14 @@ export class SlotBrowserManager {
     }
     if (live.closing) return live.closing
     live.forget ||= forget
+    this.beginClose(live)
     live.closing = (async () => {
       if (!live.forget && !live.persistAttempted) {
         live.persistAttempted = true
         try {
           await this.persist(live)
         } catch {
-          live.warning = [live.warning, '浏览器已关闭，但本次会话保存失败，可能需要重新登录。']
-            .filter(Boolean)
-            .join(' ')
+          live.warning = [live.warning, '本次浏览器会话保存失败，可能需要重新登录。'].filter(Boolean).join(' ')
         }
       }
       live.controller.abort(reason)
@@ -347,12 +347,28 @@ export class SlotBrowserManager {
     }
   }
 
+  beginClose(live) {
+    live.inputLocked = true
+    clearInterval(live.watchdog)
+    for (const [ticket, grant] of this.tickets) if (grant.liveId === live.id) this.tickets.delete(ticket)
+    if (live.status !== 'closing') {
+      live.status = 'closing'
+      live.message = '正在关闭浏览器…'
+      live.statusDetails = {}
+      this.send(live, {
+        type: 'status',
+        status: 'closing',
+        purpose: live.purpose,
+        message: live.message,
+        ...(live.warning ? { warning: live.warning } : {}),
+      })
+    }
+    live.stream?.close()
+  }
+
   async finishClose(live, reason, error = null) {
     live.controller.abort(reason)
-    clearInterval(live.watchdog)
-    live.inputLocked = true
-    for (const [ticket, grant] of this.tickets) if (grant.liveId === live.id) this.tickets.delete(ticket)
-    live.stream?.close()
+    this.beginClose(live)
     try {
       if (live.pendingCloseError) {
         const failure = live.pendingCloseError
@@ -413,6 +429,7 @@ export class SlotBrowserManager {
     const live = this.jobs.get(vmId)
     if (live?.status === 'close_failed')
       throw problem('browser_close_failed', live.message || '浏览器清理未完成，请重试关闭')
+    if (live?.closing || live?.status === 'closing') throw problem('browser_closed', '浏览器正在关闭，请稍后重试')
     if (!live || live.closeSignal.aborted) throw problem('browser_closed', '浏览器正在关闭，请稍后重试')
     live.retained = true
     const ticket = crypto.randomBytes(24).toString('hex')

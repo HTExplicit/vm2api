@@ -34,6 +34,7 @@ function fixture(t, options = {}) {
       this.clients.add(ws)
     }
     close() {
+      this.closed = true
       for (const ws of this.clients) ws.close()
     }
   }
@@ -241,9 +242,17 @@ test('WebSocket tickets work while queued, accept legacy paths, are one use, and
   assert.equal(response.statusCode, 401)
   repeated.terminate()
   const pending = f.manager.browserTicket('b')
-  const finalStatus = once(ws, 'message')
+  let closingStatus
+  const finalStatus = new Promise((resolve) =>
+    ws.on('message', (raw) => {
+      const status = JSON.parse(String(raw))
+      if (status.status === 'closing') closingStatus = status
+      if (status.status === 'closed') resolve(status)
+    }),
+  )
   await f.manager.close('b')
-  assert.equal(JSON.parse(String((await finalStatus)[0])).status, 'closed')
+  assert.equal((await finalStatus).status, 'closed')
+  assert.equal(closingStatus.status, 'closing')
   assert.equal(f.manager.tickets.has(pending.ticket), false)
   await f.manager.close('a')
 })
@@ -340,6 +349,44 @@ test('concurrent close requests share one cleanup and persist the session once',
   release()
   await Promise.all([first, repeated])
   assert.equal(f.manager.state('a').active, false)
+})
+
+test('closing stops input, screenshots and tickets before waiting for session persistence', async (t) => {
+  let save
+  let saves = 0
+  let closes = 0
+  const f = fixture(t, {
+    sessionOverrides: {
+      async storageState() {
+        if (++saves === 1)
+          await new Promise((resolve) => {
+            save = resolve
+          })
+        return { cookies: [], origins: [] }
+      },
+      async close() {
+        closes += 1
+      },
+    },
+  })
+  const live = await f.manager.acquire('a', { interactive: true })
+  const next = f.manager.acquire('b')
+  const ticket = f.manager.browserTicket('a')
+  const closing = f.manager.close('a')
+  assert.equal(f.manager.state('a').status, 'closing')
+  assert.equal(live.inputLocked, true)
+  assert.equal(live.stream.closed, true)
+  assert.equal(live.stream.config.onInput({ type: 'continue' }), false)
+  assert.equal(f.manager.tickets.has(ticket.ticket), false)
+  assert.throws(() => f.manager.browserTicket('a'), { code: 'browser_closed' })
+  assert.equal(live.closeSignal.aborted, false)
+  assert.equal(f.calls.launched.length, 1)
+  assert.equal(closes, 0)
+  save()
+  await closing
+  assert.equal(closes, 1)
+  assert.equal(f.manager.state('a').status, 'closed')
+  assert.equal((await next).vmId, 'b')
 })
 
 test('an initialization cleanup failure retains its pending session for a later close retry', async (t) => {
