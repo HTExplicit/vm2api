@@ -540,36 +540,26 @@ export function SummaryTab({
                 <InfoIcon className='h-3.5 w-3.5 text-muted-foreground' />
               </TooltipTrigger>
               <TooltipContent className='max-w-xs'>
-                上游供应商实际返回的模型与请求的模型不一致。计费仍然基于请求模型。
+                发送与上游返回的模型名称不同。
               </TooltipContent>
             </Tooltip>
           ) : null}
         </h4>
         <div className='space-y-2 rounded-lg border bg-card p-3'>
-          {audit.hasActualMismatch ? (
-            <>
-              <div className='flex items-center gap-2'>
-                <span className='min-w-[6rem] text-xs text-muted-foreground'>
-                  请求模型
-                </span>
-                <code className='rounded bg-slate-100 px-1.5 py-0.5 text-xs dark:bg-slate-800'>
-                  {audit.effectiveRequestModel}
-                </code>
-              </div>
-              <div className='flex items-center gap-2'>
-                <span className='min-w-[6rem] text-xs text-muted-foreground'>
-                  实际响应模型
-                </span>
-                <code className='rounded bg-slate-100 px-1.5 py-0.5 text-xs dark:bg-slate-800'>
-                  {audit.secondaryActualModel}
-                </code>
-              </div>
-            </>
-          ) : (
-            <code className='rounded bg-slate-100 px-1.5 py-0.5 text-xs dark:bg-slate-800'>
-              {audit.effectiveRequestModel ?? '-'}
-            </code>
-          )}
+          {[
+            ['请求模型', row.originalModel],
+            ['发送模型', row.sentModel],
+            ['上游返回模型', row.actualResponseModel],
+          ].map(([label, value]) => (
+            <div key={label} className='flex items-start gap-2'>
+              <span className='min-w-[6rem] shrink-0 text-xs text-muted-foreground'>
+                {label}
+              </span>
+              <code className='min-w-0 rounded bg-slate-100 px-1.5 py-0.5 text-xs break-all dark:bg-slate-800'>
+                {value ?? '未知'}
+              </code>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -588,7 +578,6 @@ export function SummaryTab({
                 {row.model}
               </code>
             </div>
-            <p className='mt-2 text-xs text-muted-foreground'>计费: 实际</p>
           </div>
         </div>
       ) : null}

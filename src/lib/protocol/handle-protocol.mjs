@@ -625,6 +625,10 @@ export function createHandleProtocol(deps) {
         getRouting,
         attemptsRepo: deps.getAttemptsRepo?.(),
         requestId: logCtx.request_id,
+        onModels({ sentModel, upstreamResponseModel }) {
+          logBag.sent_model = sentModel
+          logBag.upstream_response_model = upstreamResponseModel
+        },
         converters: {
           createClaudeMessageAssembler,
           applyClaudeSSELineToMessage,
@@ -657,6 +661,8 @@ export function createHandleProtocol(deps) {
     logBag.upstream_status = result?.status ?? null
     logBag.usage = usageForLog(result?.usage || result?.body?.usage || null, { cacheTtl })
     logBag.upstream_model = result?.model || null
+    logBag.sent_model = result?.sentModel || null
+    logBag.upstream_response_model = result?.upstreamResponseModel || null
     // TTFT is generated content; the upstream window also includes hidden reasoning.
     logBag.first_token_ms = Number.isFinite(result?.firstTokenAt)
       ? Math.max(0, result.firstTokenAt - logCtx.t0)
@@ -731,6 +737,8 @@ export function createHandleProtocol(deps) {
       final_account_id: null,
       requested_model: null,
       upstream_model: null,
+      sent_model: null,
+      upstream_response_model: null,
       first_token_ms: null,
       stop_reason: null,
       session_id: null,
@@ -1433,6 +1441,8 @@ export function createHandleProtocol(deps) {
     // Keep the envelope separately; only the CLI send boundary owns final headers.
     // Clear each attempt so a failed retry cannot retain the previous hop's snapshot.
     const noteOutboundEnvelope = (envelope) => {
+      logBag.sent_model = envelope?.body?.model || null
+      logBag.upstream_response_model = null
       if (logCtx.capture_outbound) logBag.outbound_body = envelope?.body ?? null
       if (envelope?.body) logBag.reasoning_effort = loggedReasoningEffort(envelope.body)
       logBag.worker_envelope_headers = envelope?.headers ? redactHeaders(envelope.headers) : null
@@ -1868,6 +1878,7 @@ export function createHandleProtocol(deps) {
       requestedSpeed: wantsFastMode(ctx.body) ? 'fast' : null,
     })
     logBag.upstream_model = result?.body?.model || result?.model || null
+    logBag.upstream_response_model = result?.upstreamResponseModel || null
     // Kernel stream firstTokenAt is generated content; include admission/setup via t0.
     logBag.first_token_ms = Number.isFinite(result?.firstTokenAt)
       ? Math.max(0, result.firstTokenAt - logCtx.t0)

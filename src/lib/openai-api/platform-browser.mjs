@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
 import { createProxyAgent } from '../vm/proxy-agent.mjs'
+import { createBrowserTempCleanup } from '../browser/temp-cleanup.mjs'
 
 // The launcher and browser are paired by the pinned npm release. Resolve an
 // installed build explicitly: account work must never start a browser download.
@@ -222,10 +223,70 @@ export async function createPlatformBrowserSession(
   signal?.throwIfAborted()
   const resources = await (overrides.runtime || runtime)()
   signal?.throwIfAborted()
+  const temporary = overrides.tempCleanup || createBrowserTempCleanup({ executablePath: resources.executable })
+  const recovered = await temporary.cleanup()
+  let warning = recovered.warning || null
   const location = await (overrides.proxyLocation || proxyLocation)(proxy, signal)
   signal?.throwIfAborted()
   const relay = await (overrides.createRelay || createBoundProxyRelay)(proxy)
   let browser
+  let beforeLaunch
+  let temporaryPaths = []
+  let temporaryCaptured = false
+  let temporaryCleared = false
+  let browserClosed = false
+  let relayClosed = false
+  let closing
+  const captureTemporaryPaths = () => {
+    if (beforeLaunch && !temporaryCaptured) {
+      temporaryPaths = temporary.createdSince(beforeLaunch)
+      temporaryCaptured = true
+    }
+  }
+  const closeResources = () => {
+    if (closing) return closing
+    if (browserClosed && relayClosed && temporaryCleared) return Promise.resolve()
+    closing = (async () => {
+      let failure
+      if (!browserClosed) {
+        try {
+          await browser?.close()
+          browserClosed = true
+        } catch (error) {
+          failure = Object.assign(problem('browser_close_failed', '浏览器退出未完成，请重试关闭。'), { cause: error })
+        }
+      }
+      if (!relayClosed) {
+        try {
+          await relay.close()
+          relayClosed = true
+        } catch (error) {
+          failure ||= Object.assign(problem('browser_close_failed', '浏览器代理连接关闭未完成，请重试关闭。'), {
+            cause: error,
+          })
+        }
+      }
+      // Never remove a profile while browser exit is still unconfirmed.
+      if (!failure && !temporaryCleared) {
+        captureTemporaryPaths()
+        const report = await temporary.cleanup({ paths: temporaryPaths })
+        if (temporary.enabled && (report.failed.length || report.skipped.length)) {
+          throw Object.assign(
+            problem('browser_temp_cleanup_failed', report.warning || '浏览器临时目录清理未完成，请重试关闭。'),
+            {
+              cleanupReport: report,
+            },
+          )
+        }
+        if (report.warning) warning = [warning, report.warning].filter(Boolean).join(' ')
+        temporaryCleared = true
+      }
+      if (failure) throw failure
+    })().finally(() => {
+      closing = null
+    })
+    return closing
+  }
   try {
     let saved = fingerprint
     if (!saved) {
@@ -248,6 +309,7 @@ export async function createPlatformBrowserSession(
       : saved.config['navigator.userAgent']?.includes('Macintosh')
         ? 'mac'
         : 'lin'
+    beforeLaunch = temporary.snapshot()
     browser = await resources.Camoufox({
       from_options: {
         executablePath: resources.executable,
@@ -262,6 +324,7 @@ export async function createPlatformBrowserSession(
         proxy: { server: relay.url },
       },
     })
+    captureTemporaryPaths()
     signal?.throwIfAborted()
     const { sessionStorage: savedSessionStorage = {}, ...playwrightStorage } = storageState || {}
     const context = await browser.newContext({
@@ -285,12 +348,14 @@ export async function createPlatformBrowserSession(
       })
     }, savedSessionStorage)
     const page = await context.newPage()
-    let closed = false
     return {
       browser,
       context,
       page,
       fingerprint: saved,
+      get warning() {
+        return warning
+      },
       async storageState() {
         const state = await context.storageState({ indexedDB: true })
         const sessionStorage = { ...sessions }
@@ -304,21 +369,21 @@ export async function createPlatformBrowserSession(
         }
         return Object.keys(sessionStorage).length ? { ...state, sessionStorage } : state
       },
-      async close() {
-        if (closed) return
-        closed = true
-        try {
-          await browser.close()
-        } finally {
-          await relay.close()
-        }
-      },
+      close: closeResources,
     }
   } catch (error) {
     try {
-      await browser?.close()
-    } finally {
-      await relay.close()
+      captureTemporaryPaths()
+      await closeResources()
+    } catch (closeError) {
+      closeError.pendingSession = {
+        close: closeResources,
+        get warning() {
+          return warning
+        },
+      }
+      closeError.startupError = error
+      throw closeError
     }
     throw error
   }

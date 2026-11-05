@@ -115,13 +115,15 @@ export type UsageLogRow = {
   sourceEmail?: string | null
   vmId: string | null
   vmName: string | null
-  /** 计费/生效模型。 */
+  /** 既有日志的生效模型。 */
   model: string | null
   /** 客户端请求的模型（重定向前，`requested_model`）。 */
   originalModel: string | null
-  /** 上游回报的模型（`upstream_model`）。 */
+  /** 实际发给上游的模型（`sent_model`）；历史未记录时为 null。 */
+  sentModel: string | null
+  /** 上游响应声明的模型（`upstream_response_model`）；未返回或历史未记录时为 null。 */
   actualResponseModel: string | null
-  /** 0 | 1 | null（null = 上游未声明模型）。 */
+  /** 旧 requested_model / upstream_model 比较结果，保留历史口径。 */
   modelMismatch: number | null
   /** 入站路径，例如 `/v1/messages`。 */
   endpoint: string | null
@@ -240,8 +242,10 @@ export type UsageLogFilters = {
   statusCode?: number
   /** (`exclude_status_200=1`) 只看非 2xx；与 statusCode 互斥，后者优先。 */
   excludeStatus200?: boolean
-  /** (`model_mismatch=1`) */
+  /** 旧 (`model_mismatch=1`)，保留原有筛选口径。 */
   modelMismatch?: boolean
+  /** (`response_model_mismatch=1`) 发送与上游返回模型均已知且名称不同。 */
+  responseModelMismatch?: boolean
   /** (`min_attempt_count`) 只看 `attempt_count >= n`，「有重试」= 2。 */
   minAttemptCount?: number
   /** (`error_class`) */

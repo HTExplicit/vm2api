@@ -20,7 +20,7 @@ export type LogsSearch = {
   /** 精确状态码或 `!200`（= 只看非 2xx）。 */
   statusCode?: number | '!200'
   model?: string
-  /** 计费/实际模型不一致。 */
+  /** 发送与上游返回模型均已知且名称不同。 */
   mismatch?: boolean
   endpoint?: string
   protocol?: string
@@ -167,7 +167,7 @@ export function filtersToApi(
   if (filters.protocol) out.protocol = filters.protocol
   if (filters.statusCode != null) out.statusCode = filters.statusCode
   else if (filters.excludeStatus200) out.excludeStatus200 = true
-  if (filters.mismatch) out.modelMismatch = true
+  if (filters.mismatch) out.responseModelMismatch = true
   if (filters.minRetry != null && filters.minRetry > 0)
     out.minAttemptCount = filters.minRetry + 1
   if (filters.errorClass) out.errorClass = filters.errorClass
@@ -200,6 +200,7 @@ export function usageLogFiltersQuery(
   set('status_code', filters.statusCode)
   if (filters.excludeStatus200) qs.set('exclude_status_200', '1')
   if (filters.modelMismatch) qs.set('model_mismatch', '1')
+  if (filters.responseModelMismatch) qs.set('response_model_mismatch', '1')
   set('min_attempt_count', filters.minAttemptCount)
   set('error_class', filters.errorClass)
   set('exclude_error_class', filters.excludeErrorClass)

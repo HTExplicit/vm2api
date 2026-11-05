@@ -64,7 +64,11 @@ test('search posts to the Codex backend as the slot and returns the backend JSON
   const calls = []
   const fetchImpl = async (url, init) => {
     calls.push({ url, init })
-    return upstream(200, { output: 'found it', results: [{ type: 'text_result', ref_id: 'turn0search0' }] })
+    return upstream(200, {
+      model: 'gpt-search-returned',
+      output: 'found it',
+      results: [{ type: 'text_result', ref_id: 'turn0search0' }],
+    })
   }
   const { res, logBag, stats } = await search(root, {
     body: {
@@ -95,6 +99,9 @@ test('search posts to the Codex backend as the slot and returns the backend JSON
   assert.equal(logBag.via, 'codex-search')
   assert.equal(logBag.vm_id, 'vm-gpt-a')
   assert.equal(logBag.final_state, 'verified')
+  assert.equal(logBag.sent_model, payload.model)
+  assert.equal(logBag.upstream_response_model, 'gpt-search-returned')
+  assert.equal(res.body.model, 'gpt-search-returned')
   assert.equal(stats.by_route['openai.search'], 1)
   fs.rmSync(root, { recursive: true, force: true })
 })
@@ -122,6 +129,8 @@ test('search moves to the next GPT slot on a usage-limit 429 and parks the first
   assert.equal(seen.length, 2)
   assert.equal(seen.at(-1), 'vm-gpt-b')
   assert.equal(logBag.attempt_count, 2)
+  assert.equal(logBag.sent_model, 'gpt-6.1-sol')
+  assert.equal(logBag.upstream_response_model, null)
   assert.equal(logBag.vm_id, 'vm-gpt-b')
   assert.ok(getVm(root, seen[0]).codex.extra.codex_limited_until)
   fs.rmSync(root, { recursive: true, force: true })

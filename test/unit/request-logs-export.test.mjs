@@ -44,10 +44,24 @@ function seed(rows) {
 }
 
 seed([
-  { session_id: 's1', status: 200 },
+  {
+    session_id: 's1',
+    status: 200,
+    requested_model: 'alias-A',
+    sent_model: 'sent-B',
+    upstream_response_model: 'sent-B',
+    model_mismatch: 1,
+  },
   { session_id: 's1', status: 500, error_code: 'upstream_error' },
   { session_id: 's1', status: 500, error_code: 'upstream_error', path: '/v1/chat/completions' },
-  { session_id: 's2', status: 500, error_code: 'upstream_error' },
+  {
+    session_id: 's2',
+    status: 500,
+    error_code: 'upstream_error',
+    requested_model: 'request-A',
+    sent_model: 'sent-B',
+    upstream_response_model: 'returned-C',
+  },
   { session_id: 's1', status: 200, attempt_count: 3, log_mode: 'debug' },
   { session_id: 's1', status: 401, error_code: 'invalid_api_key', vm_id: null },
   { session_id: 's9', user_id: 'u2', api_key_id: 'k2', status: 500, error_code: 'upstream_error' },
@@ -107,6 +121,21 @@ test('export honours non-2xx, retry, debug and model filters like the list', asy
   assert.deepEqual(ids((await exportLogs('session_id=s1&exclude_status_200=1')).rows), ['req-3', 'req-2'])
   assert.deepEqual(ids((await exportLogs('min_attempt_count=2&log_mode=debug')).rows), ['req-5'])
   assert.deepEqual(ids((await exportLogs('model=claude-sonnet-4&session_id=s2')).rows), ['req-4'])
+})
+
+test('response model mismatch filter agrees between the panel list and export without changing the legacy filter', async () => {
+  const { rows, headers } = await exportLogs('response_model_mismatch=1')
+  const listed = new UsageLogsView(db).listBatch({ response_model_mismatch: true }).logs
+  assert.deepEqual(ids(rows), ['req-4'])
+  assert.deepEqual(
+    ids(rows),
+    listed.map((r) => r.requestId),
+  )
+  assert.equal(headers['x-kin-export-total'], '1')
+  assert.equal(rows[0].requested_model, 'request-A')
+  assert.equal(rows[0].sent_model, 'sent-B')
+  assert.equal(rows[0].upstream_response_model, 'returned-C')
+  assert.deepEqual(ids((await exportLogs('model_mismatch=1')).rows), ['req-1'])
 })
 
 test('default muting hides auth errors unless include_muted is sent', async () => {

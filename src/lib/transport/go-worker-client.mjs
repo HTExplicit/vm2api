@@ -640,6 +640,7 @@ export async function streamGoWorker({
   onEnvelope = null,
   onOutboundHeaders = null,
 } = {}) {
+  let upstreamResponseModel = null
   if (isCrsMock()) {
     const { body: outboundBody, headers } = finalizeWorkerPayload({
       body,
@@ -666,6 +667,7 @@ export async function streamGoWorker({
           headers: {},
           terminalState: 'incomplete',
           committed: false,
+          upstreamResponseModel,
         }
       }
       if (typeof onCommit === 'function') onCommit()
@@ -688,6 +690,7 @@ export async function streamGoWorker({
         headers: {},
         terminalState: 'incomplete',
         committed: true,
+        upstreamResponseModel,
       }
     }
     const payload = mockCrsPayload({ scenario })
@@ -697,13 +700,17 @@ export async function streamGoWorker({
         via: 'go-worker-mock-stream',
         terminalState: 'rejected',
         committed: false,
+        upstreamResponseModel,
       }
     }
     const mockTiming = createStreamTiming(mockStartedAt)
     await emitMockSse(async (line) => {
       if (line.startsWith('data:')) {
         try {
-          mockTiming.observe(JSON.parse(line.slice(5)))
+          const event = JSON.parse(line.slice(5))
+          mockTiming.observe(event)
+          if (typeof event.message?.model === 'string' && event.message.model.trim())
+            upstreamResponseModel = event.message.model
         } catch {}
         if (typeof onCommit === 'function') onCommit()
       }
@@ -716,6 +723,7 @@ export async function streamGoWorker({
       committed: !!payload.ok,
       usage: payload.body?.usage || null,
       model: payload.body?.model || null,
+      upstreamResponseModel,
       stopReason: payload.body?.stop_reason || null,
       ...mockTiming.snapshot(),
     }
@@ -756,16 +764,20 @@ export async function streamGoWorker({
     const headers = mergeRateLimitHeaders(publicHeaders(response.headers))
     if ((response.statusCode || 0) < 200 || (response.statusCode || 0) >= 300) {
       const data = await readAll(response, 1024 * 1024)
+      const parsedBody = parseJson(data, response.statusCode)
+      const responseModel = parsedBody?.response?.model || parsedBody?.model
+      if (typeof responseModel === 'string' && responseModel.trim()) upstreamResponseModel = responseModel
       return restoreKernelErrorStatus({
         ok: false,
         status: response.statusCode || 0,
         via: 'go-worker-stream',
-        body: parseJson(data, response.statusCode),
+        body: parsedBody,
         headers,
         committed: false,
         terminalState: headers['x-terminal-state'] || 'error',
         transportError: false,
         threadBetas: prepared.thread,
+        upstreamResponseModel,
       })
     }
     let buffer = ''
@@ -815,6 +827,8 @@ export async function streamGoWorker({
       const evUsage = usageFromSseEvent(event)
       if (evUsage) sseUsage = mergeUsage(sseUsage, evUsage)
       if (event.message?.model) sseModel = event.message.model
+      const responseModel = event.message?.model || event.response?.model
+      if (typeof responseModel === 'string' && responseModel.trim()) upstreamResponseModel = responseModel
       const stop = event.message?.stop_reason || event.delta?.stop_reason
       if (stop) sseStop = stop
       return event
@@ -934,6 +948,7 @@ export async function streamGoWorker({
         // Merge so SSE `input_tokens_details` / cache breakdown survives instead of being short-circuited.
         usage: mergeUsage(mergeUsage(assembled?.usage || null, sseUsage), meta.usage),
         model: meta.model || sseModel || assembled?.model || null,
+        upstreamResponseModel,
         stopReason,
         sawMessageStop,
         ...timing.snapshot(),
@@ -951,6 +966,7 @@ export async function streamGoWorker({
         via: 'go-worker-stream',
         ...timing.snapshot(),
         committed,
+        upstreamResponseModel,
       })
     }
     return {
@@ -971,6 +987,7 @@ export async function streamGoWorker({
       committed,
       terminalState: committed ? 'incomplete' : error.status === 413 ? 'rejected' : 'transport_error',
       transportError: error.status !== 413,
+      upstreamResponseModel,
     }
   } finally {
     stopCancel()

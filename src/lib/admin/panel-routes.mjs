@@ -408,6 +408,7 @@ function usageLogFilters(req, u) {
     status_code: get('status_code'),
     exclude_status_200: get('exclude_status_200') === '1',
     model_mismatch: get('model_mismatch') === '1',
+    response_model_mismatch: get('response_model_mismatch') === '1',
     min_attempt_count: get('min_attempt_count'),
     error_class: get('error_class'),
     exclude_error_class: get('exclude_error_class'),
@@ -1514,6 +1515,11 @@ export function createPanelHandler(ctx) {
           else if (req.method === 'POST' && action === 'open') {
             const body = await readBody(req, 4096)
             const purpose = body?.purpose || 'oauth'
+            if (purpose === 'oauth' || purpose === 'platform') {
+              const currentBrowser = slotBrowserManager.state(vmId)
+              if (['closing', 'close_failed'].includes(currentBrowser.status))
+                return json(res, 200, panel.ok(currentBrowser))
+            }
             if (purpose === 'oauth') {
               await openaiApiManager.cancel(vmId, { closeBrowser: false })
               result = codexBrowserLogin.start(vmId)

@@ -799,6 +799,83 @@ function codexArgs(root, ops, extras = {}) {
   }
 }
 
+for (const stream of [false, true]) {
+  for (const declared of [[], ['gpt-returned'], ['gpt-initial', 'gpt-returned']]) {
+    test(`Codex logs raw response models separately (stream=${stream}, declarations=${declared.length})`, async (t) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-model-log-'))
+      t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+      writeGptVm(root, 'vm-gpt-a')
+      const logBag = { model: 'client-alias', requested_model: 'client-alias' }
+      const sent = []
+      const args = codexArgs(
+        root,
+        {
+          ensureCodexKernel: async () => ({ ok: true }),
+          streamCodexKernel: async ({ body, onEvent }) => {
+            sent.push(body)
+            for (const model of declared) {
+              await onEvent(`data: ${JSON.stringify({ type: 'response.created', response: { model } })}`)
+            }
+            await onEvent('data: {"type":"response.output_text.delta","delta":"ok"}')
+            await onEvent('data: {"type":"response.completed","response":{"status":"completed","output":[]}}')
+            return { ok: true, status: 200, terminalState: 'verified', usage: { input_tokens: 11, output_tokens: 2 } }
+          },
+        },
+        { body: { model: 'gpt-5.5', input: 'hi', stream }, logBag },
+      )
+      args.inbound = { stream }
+      const written = []
+      args.res.write = (chunk) => written.push(chunk)
+      const result = await handleCodexProtocol(args)
+      assert.equal(sent.length, 1)
+      assert.equal(sent[0].model, 'gpt-5.5')
+      assert.equal(logBag.model, 'client-alias')
+      assert.equal(logBag.requested_model, 'client-alias')
+      assert.equal(logBag.upstream_model, 'gpt-5.5')
+      assert.equal(logBag.sent_model, 'gpt-5.5')
+      assert.equal(logBag.upstream_response_model, declared.at(-1) || null)
+      assert.equal(logBag.input_tokens, 11)
+      assert.equal(logBag.output_tokens, 2)
+      if (stream) {
+        assert.ok(written.join('').includes('response.completed'))
+        if (declared.length) assert.ok(written.join('').includes(declared.at(-1)))
+      } else {
+        assert.equal(result.status, 200)
+        assert.equal(result.body.model ?? null, declared.at(-1) || null)
+      }
+    })
+  }
+}
+
+test('Codex clears model state for every transport attempt without using result metadata', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-model-retry-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeGptVm(root, 'vm-gpt-a')
+  const logBag = { upstream_response_model: 'stale-model' }
+  let calls = 0
+  const args = codexArgs(
+    root,
+    {
+      ensureCodexKernel: async () => ({ ok: true }),
+      streamCodexKernel: async ({ onEvent }) => {
+        calls += 1
+        assert.equal(logBag.upstream_response_model, null)
+        if (calls === 1) {
+          return { ok: false, status: 502, body: { model: 'metadata-only', error: { code: 'upstream_transport' } } }
+        }
+        await onEvent('data: {"type":"response.completed","response":{"output":[]}}')
+        return { ok: true, status: 200, terminalState: 'verified' }
+      },
+    },
+    { logBag },
+  )
+  const result = await handleCodexProtocol(args)
+  assert.equal(result.status, 200)
+  assert.equal(calls, 2)
+  assert.equal(logBag.sent_model, 'gpt-5.5')
+  assert.equal(logBag.upstream_response_model, null)
+})
+
 test('#A07: two admissions racing through kernel init never exceed a cap of 1', async () => {
   const rt = await import('../../src/lib/pool/openai-account-runtime.mjs')
   rt.resetOpenAIAccountRuntime()

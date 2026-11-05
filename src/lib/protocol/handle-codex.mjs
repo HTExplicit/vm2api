@@ -877,6 +877,8 @@ export async function handleCodexProtocol({
           const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
           if (blocked) return blockedCodexResult(blocked)
           const auth = captureOpenaiAuth(projectRoot, vm.id)
+          logBag.sent_model = args.body.model || null
+          logBag.upstream_response_model = null
           const result = await hop(args)
           recordOpenaiAuthResult(auth, {
             status: result?.status,
@@ -913,6 +915,10 @@ export async function handleCodexProtocol({
             },
             onEvent: async (line) => {
               hopEmitted = true
+              if (line.startsWith('data:')) {
+                const model = reportedModel(parseJson(line.slice(5)))
+                if (model) logBag.upstream_response_model = model
+              }
               if (conversionError) return
               const tier = serviceTierFromSseLine(line)
               if (tier) responseServiceTier = tier
@@ -1327,6 +1333,11 @@ function parseJson(text) {
   }
 }
 
+function reportedModel(payload) {
+  const model = payload?.response?.model || payload?.model
+  return typeof model === 'string' && model.trim() ? model.trim() : null
+}
+
 /**
  * POST /v1/alpha/search for Codex web search. Not inference: no session window, sticky bind
  * or latency report, but the call holds a seat on the slot it runs on. Auth/quota/rate-limit
@@ -1398,6 +1409,8 @@ export async function handleCodexSearch({
         logBag.vm_id = vm.id
         logBag.account_id = vm.id
         logBag.attempt_count = attempts
+        logBag.sent_model = outbound.model || null
+        logBag.upstream_response_model = null
         last = await post({
           projectRoot,
           vm,
@@ -1407,6 +1420,8 @@ export async function handleCodexSearch({
           refresh: ops.refresh,
           routing,
         })
+        const responsePayload = parseJson(last.text)
+        logBag.upstream_response_model = reportedModel(responsePayload)
         logBag.upstream_status = last.status || null
         ingestCodexHop(
           projectRoot,
@@ -1415,7 +1430,7 @@ export async function handleCodexSearch({
             ok: last.status >= 200 && last.status < 300,
             status: last.status,
             headers: last.headers || {},
-            body: parseJson(last.text),
+            body: responsePayload,
             admissionBlocked: last.admissionBlocked,
           },
           Date.now(),
@@ -1567,6 +1582,8 @@ export async function handleCodexImages({
         logBag.vm_id = vm.id
         logBag.account_id = vm.id
         logBag.attempt_count = attempts
+        logBag.sent_model = body.model || null
+        logBag.upstream_response_model = null
         last = await post({
           url: CODEX_IMAGES_URLS[kind] || CODEX_IMAGE_GENERATIONS_URL,
           timeoutMs: CODEX_IMAGES_TIMEOUT_MS,
@@ -1579,6 +1596,8 @@ export async function handleCodexImages({
           refresh: ops.refresh,
           routing,
         })
+        const responsePayload = parseJson(last.text)
+        logBag.upstream_response_model = reportedModel(responsePayload)
         logBag.upstream_status = last.status || null
         ingestCodexHop(
           projectRoot,
@@ -1587,7 +1606,7 @@ export async function handleCodexImages({
             ok: last.status >= 200 && last.status < 300,
             status: last.status,
             headers: last.headers || {},
-            body: parseJson(last.text),
+            body: responsePayload,
             admissionBlocked: last.admissionBlocked,
           },
           Date.now(),

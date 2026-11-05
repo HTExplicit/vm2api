@@ -294,11 +294,16 @@ export async function runApiInference(options = {}) {
     let dispatched = false
     let dispatchAt
     let sourceKey = picked.key
+    let models = { sentModel: null, upstreamResponseModel: null }
     let result
     try {
       result = await runApiAttempt({
         ...options,
         picked,
+        onModels(value) {
+          models = value
+          options.onModels?.(value)
+        },
         onDispatch(key) {
           dispatched = true
           sourceKey = key
@@ -320,6 +325,7 @@ export async function runApiInference(options = {}) {
     } catch (error) {
       result = {
         ...apiResultIdentity(picked, sourceKey),
+        ...models,
         ok: false,
         status: 502,
         via: 'api-kernel',
@@ -387,6 +393,7 @@ async function runApiAttempt({
   toolNames = {},
   picked: selected = null,
   onDispatch = null,
+  onModels = null,
 } = {}) {
   const model = (nativeResponsesBody || convertedBody)?.model
   const scope = keyScopeFromRequest(req)
@@ -496,6 +503,7 @@ async function runApiAttempt({
     }
     onDispatch?.(currentKey)
     dispatched = true
+    onModels?.({ sentModel: body.model, upstreamResponseModel: null })
     upstream = await forwardImpl({
       cfg,
       url: isOpenAI ? responsesUrl(preset.base_url) : messagesUrl(preset.base_url),
@@ -521,6 +529,8 @@ async function runApiAttempt({
       },
       terminalState: 'transport_error',
       transportError: true,
+      sentModel: body.model,
+      upstreamResponseModel: null,
     }
     return signal?.aborted ? clientCancelledResult(failure) : failure
   }
@@ -531,11 +541,18 @@ async function runApiAttempt({
     status,
     via: 'api-kernel',
     ...apiResultIdentity(picked, dispatchedKey),
+    sentModel: body.model,
+    upstreamResponseModel: null,
     headers: { ...upstream.headers },
   }
 
   if (status >= 400) {
     const payload = await readApiJson(upstream).catch(() => ({}))
+    const responseModel = payload?.response?.model || payload?.model
+    if (typeof responseModel === 'string' && responseModel.trim()) {
+      resultBase.upstreamResponseModel = responseModel
+      onModels?.({ sentModel: resultBase.sentModel, upstreamResponseModel: responseModel })
+    }
     const message = payload?.error?.message || payload?.message || `upstream ${status}`
     const upstreamCode = String(payload?.error?.code || payload?.code || '').trim()
     const contentCode = isContentPolicyErrorCode(upstreamCode) ? upstreamCode.toLowerCase() : ''
@@ -580,6 +597,7 @@ async function runApiAttempt({
       body,
       timing,
       nativeResponses,
+      onModels,
     })
     if (!result.ok) {
       recordApiKeyFailure(
@@ -606,6 +624,10 @@ async function runApiAttempt({
       await readLines(upstream, async (line, receivedAt) => {
         line = restoreToolNamesInSSELine(line, toolNames)
         const event = consumeClaudeSSEData(line, classifierSseState)
+        if (typeof event?.message?.model === 'string' && event.message.model.trim()) {
+          resultBase.upstreamResponseModel = event.message.model
+          onModels?.({ sentModel: resultBase.sentModel, upstreamResponseModel: resultBase.upstreamResponseModel })
+        }
         timing.observe(event, receivedAt)
         streamedUsage = mergeUsage(streamedUsage, event?.message?.usage || event?.usage)
         if (requestContext) {
@@ -781,6 +803,7 @@ async function runOpenAIResponsesUpstream({
   body,
   timing,
   nativeResponses = false,
+  onModels = null,
 }) {
   const chunks = []
   const anthropicSse = protocol === 'anthropic.messages' ? createAnthropicSseState() : null
@@ -847,6 +870,10 @@ async function runOpenAIResponsesUpstream({
       if (conversionError) return
       const raw = String(line || '')
       const event = openAIResponsesSseEvent(raw)
+      if (typeof event?.response?.model === 'string' && event.response.model.trim()) {
+        resultBase.upstreamResponseModel = event.response.model
+        onModels?.({ sentModel: resultBase.sentModel, upstreamResponseModel: resultBase.upstreamResponseModel })
+      }
       timing.observe(event, receivedAt)
       const failure = openAIResponsesFailure(event)
       if (failure) terminalFailure = failure

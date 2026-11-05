@@ -138,7 +138,7 @@ unixTest('debug log uses final CLI headers, hides internal events and never subs
       paths: { data: kernel.root, project: kernel.root },
     },
     requestLog: {
-      start: () => ({ request_id: 'outbound-log', mode: 'debug', capture_outbound: true }),
+      start: () => ({ request_id: 'outbound-log', mode: 'debug', capture_outbound: finished.length < 2 }),
       finish: (_ctx, extra) => finished.push(extra),
     },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
@@ -202,10 +202,16 @@ unixTest('debug log uses final CLI headers, hides internal events and never subs
     assert.equal(finished.length, 4)
     for (const [i, extra] of finished.entries()) {
       const sent = kernel.posted[i]
-      assert.deepEqual(JSON.parse(JSON.stringify(extra.outbound_body)), sent.body)
-      // cli-hop 在传输层才补的字段：betas 与 cch 占位；billing 由 cli-hop 末段补上。
-      assert.ok(Array.isArray(extra.outbound_body.betas))
-      assert.match(extra.outbound_body.system[0].text, /^x-anthropic-billing-header: .*\bcch=00000;/)
+      assert.equal(extra.sent_model, sent.body.model)
+      assert.equal(extra.upstream_response_model, 'claude-haiku-4-5')
+      if (i < 2) {
+        assert.deepEqual(JSON.parse(JSON.stringify(extra.outbound_body)), sent.body)
+        // cli-hop 在传输层才补的字段：betas 与 cch 占位；billing 由 cli-hop 末段补上。
+        assert.ok(Array.isArray(extra.outbound_body.betas))
+        assert.match(extra.outbound_body.system[0].text, /^x-anthropic-billing-header: .*\bcch=00000;/)
+      } else {
+        assert.equal(extra.outbound_body == null, true)
+      }
       assert.deepEqual(extra.worker_envelope_headers, sent.headers)
       if (i < 2) {
         assert.deepEqual(extra.outbound_headers, {

@@ -95,9 +95,9 @@ export function ModelDisplayWithRedirect({
   onRedirectClick: () => void
 }) {
   const audit = resolveModelAuditDisplay(row)
-  const model = audit.primaryBillingModel
+  const model = audit.primaryModel
   return (
-    <div className='flex min-w-0 flex-col'>
+    <div className='flex min-w-0 flex-col leading-4'>
       <div className='flex min-w-0 items-center gap-1.5'>
         {model ? <ModelVendorIcon modelId={model} /> : null}
         <span
@@ -122,18 +122,20 @@ export function ModelDisplayWithRedirect({
           </Badge>
         ) : null}
       </div>
-      {audit.secondaryActualModel ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div className='flex cursor-help items-center gap-1 truncate text-xs text-muted-foreground'>
-              ↳ {audit.secondaryActualModel}
-            </div>
-          </TooltipTrigger>
-          <TooltipContent className='max-w-xs'>
-            上游供应商实际返回的模型与请求的模型不一致。计费仍然基于请求模型。
-          </TooltipContent>
-        </Tooltip>
-      ) : null}
+      <div className='truncate text-xs text-muted-foreground'>
+        发送：{row.sentModel ?? '未知'}
+      </div>
+      <div
+        className={cn(
+          'truncate text-xs text-muted-foreground',
+          audit.hasActualMismatch && 'text-orange-700 dark:text-orange-300'
+        )}
+        title={
+          audit.hasActualMismatch ? '发送与上游返回的模型名称不同' : undefined
+        }
+      >
+        上游返回：{row.actualResponseModel ?? '未知'}
+      </div>
     </div>
   )
 }

@@ -6,6 +6,7 @@ import { WebSocket } from 'ws'
 import { SlotBrowserManager } from '../../src/lib/browser/slot-browser-manager.mjs'
 
 function fixture(t, options = {}) {
+  const sessionOverrides = options.sessionOverrides
   const records = new Map()
   const vms = new Map(
     ['a', 'b', 'c'].map((id) => [id, { id, proxy: { url: `socks5h://127.0.0.1:${id === 'a' ? 1080 : 1081}` } }]),
@@ -33,6 +34,7 @@ function fixture(t, options = {}) {
       this.clients.add(ws)
     }
     close() {
+      this.closed = true
       for (const ws of this.clients) ws.close()
     }
   }
@@ -62,6 +64,7 @@ function fixture(t, options = {}) {
         async close() {
           calls.closed.push(options.proxyUrl)
         },
+        ...sessionOverrides,
       }
     },
     ...options,
@@ -239,9 +242,17 @@ test('WebSocket tickets work while queued, accept legacy paths, are one use, and
   assert.equal(response.statusCode, 401)
   repeated.terminate()
   const pending = f.manager.browserTicket('b')
-  const finalStatus = once(ws, 'message')
+  let closingStatus
+  const finalStatus = new Promise((resolve) =>
+    ws.on('message', (raw) => {
+      const status = JSON.parse(String(raw))
+      if (status.status === 'closing') closingStatus = status
+      if (status.status === 'closed') resolve(status)
+    }),
+  )
   await f.manager.close('b')
-  assert.equal(JSON.parse(String((await finalStatus)[0])).status, 'closed')
+  assert.equal((await finalStatus).status, 'closed')
+  assert.equal(closingStatus.status, 'closing')
   assert.equal(f.manager.tickets.has(pending.ticket), false)
   await f.manager.close('a')
 })
@@ -257,4 +268,167 @@ test('malformed browser path is rejected without throwing from the HTTP upgrade 
   assert.equal(f.manager.handleUpgrade({ url: '/api/panel/vms/%ZZ/browser?ticket=bad' }, socket, Buffer.alloc(0)), true)
   assert.match(response, /^HTTP\/1.1 400/)
   assert.equal(f.calls.launched.length, 0)
+})
+
+test('a failed close retains its live record and queue until an administrator retries successfully', async (t) => {
+  let attempts = 0
+  const f = fixture(t, {
+    sessionOverrides: {
+      async close() {
+        if (++attempts === 1) throw new Error('exit not confirmed')
+      },
+    },
+  })
+  const live = await f.manager.acquire('a', { interactive: true })
+  const next = f.manager.acquire('b')
+  const ticket = f.manager.browserTicket('a')
+  await assert.rejects(f.manager.close('a', { forget: true }), { code: 'browser_close_failed' })
+  assert.equal(f.manager.state('a').status, 'close_failed')
+  assert.equal(f.manager.state('a').active, true)
+  assert.equal(f.manager.jobs.get('a'), live)
+  assert.equal(f.manager.state('b').status, 'queued')
+  assert.equal(f.calls.launched.length, 1)
+  assert.equal(f.records.has('a'), true)
+  assert.equal(f.manager.tickets.has(ticket.ticket), false)
+  await assert.rejects(f.manager.acquire('a', { interactive: true }), { code: 'browser_close_failed' })
+  assert.equal(f.manager.open('a').status, 'close_failed')
+  await f.manager.close('a')
+  assert.equal(attempts, 2)
+  assert.equal(f.records.has('a'), false)
+  assert.equal((await next).vmId, 'b')
+})
+
+test('session save failure remains a warning after resources close and the queue advances', async (t) => {
+  let closes = 0
+  const f = fixture(t, {
+    sessionOverrides: {
+      warning: '启动时有旧临时目录未回收。',
+      async storageState() {
+        throw new Error('database unavailable')
+      },
+      async close() {
+        closes += 1
+      },
+    },
+  })
+  await f.manager.acquire('a', { interactive: true })
+  const next = f.manager.acquire('b')
+  const result = await f.manager.close('a')
+  assert.equal(result.status, 'closed')
+  assert.equal(result.active, false)
+  assert.match(result.warning, /会话保存失败/)
+  assert.match(result.warning, /旧临时目录/)
+  assert.equal(closes, 1)
+  assert.equal((await next).vmId, 'b')
+})
+
+test('concurrent close requests share one cleanup and persist the session once', async (t) => {
+  let release
+  let saves = 0
+  let closes = 0
+  const f = fixture(t, {
+    sessionOverrides: {
+      async storageState() {
+        saves += 1
+        return { cookies: [], origins: [] }
+      },
+      async close() {
+        closes += 1
+        await new Promise((resolve) => {
+          release = resolve
+        })
+      },
+    },
+  })
+  await f.manager.acquire('a', { interactive: true })
+  const first = f.manager.close('a')
+  const repeated = f.manager.close('a')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(closes, 1)
+  assert.equal(saves, 1)
+  release()
+  await Promise.all([first, repeated])
+  assert.equal(f.manager.state('a').active, false)
+})
+
+test('closing stops input, screenshots and tickets before waiting for session persistence', async (t) => {
+  let save
+  let saves = 0
+  let closes = 0
+  const f = fixture(t, {
+    sessionOverrides: {
+      async storageState() {
+        if (++saves === 1)
+          await new Promise((resolve) => {
+            save = resolve
+          })
+        return { cookies: [], origins: [] }
+      },
+      async close() {
+        closes += 1
+      },
+    },
+  })
+  const live = await f.manager.acquire('a', { interactive: true })
+  const next = f.manager.acquire('b')
+  const ticket = f.manager.browserTicket('a')
+  const closing = f.manager.close('a')
+  assert.equal(f.manager.state('a').status, 'closing')
+  assert.equal(live.inputLocked, true)
+  assert.equal(live.stream.closed, true)
+  assert.equal(live.stream.config.onInput({ type: 'continue' }), false)
+  assert.equal(f.manager.tickets.has(ticket.ticket), false)
+  assert.throws(() => f.manager.browserTicket('a'), { code: 'browser_closed' })
+  assert.equal(live.closeSignal.aborted, false)
+  assert.equal(f.calls.launched.length, 1)
+  assert.equal(closes, 0)
+  save()
+  await closing
+  assert.equal(closes, 1)
+  assert.equal(f.manager.state('a').status, 'closed')
+  assert.equal((await next).vmId, 'b')
+})
+
+test('an initialization cleanup failure retains its pending session for a later close retry', async (t) => {
+  let attempts = 0
+  let starts = 0
+  const pendingSession = {
+    close: async () => {
+      attempts += 1
+    },
+  }
+  const f = fixture(t, {
+    async createSession() {
+      starts += 1
+      throw Object.assign(Error('initialization failed'), { pendingSession })
+    },
+  })
+  await assert.rejects(f.manager.acquire('a'), { code: 'browser_close_failed' })
+  assert.equal(f.manager.state('a').status, 'close_failed')
+  assert.equal(starts, 1)
+  assert.equal(f.manager.jobs.get('a').browser, pendingSession)
+  assert.equal(attempts, 0)
+  await f.manager.close('a')
+  assert.equal(attempts, 1)
+  assert.equal(f.manager.state('a').active, false)
+})
+
+test('shutdown continues closing queued sessions while reporting an active cleanup failure', async (t) => {
+  let fail = true
+  const f = fixture(t, {
+    sessionOverrides: {
+      close: async () => {
+        if (fail) throw Error('exit failed')
+      },
+    },
+  })
+  await f.manager.acquire('a', { interactive: true })
+  const queued = f.manager.acquire('b')
+  const rejected = assert.rejects(queued, { code: 'browser_closed' })
+  await assert.rejects(f.manager.stop(), { code: 'browser_close_failed' })
+  await rejected
+  assert.equal(f.manager.jobs.has('b'), false)
+  assert.equal(f.manager.state('a').status, 'close_failed')
+  fail = false
+  await f.manager.close('a')
 })

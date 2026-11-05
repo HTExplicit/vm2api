@@ -229,15 +229,41 @@ describe('display helpers', () => {
     expect(formatShortDistance(ago(8 * 86400_000), now)).toBe('1周前')
   })
 
-  it('resolves redirect and actual-model mismatch', () => {
+  it('compares the returned model with the sent model independently of the primary model', () => {
     const audit = resolveModelAuditDisplay({
       originalModel: 'claude-x',
       model: 'claude-y',
+      sentModel: 'claude-z',
       actualResponseModel: 'claude-z',
     })
-    expect(audit.primaryBillingModel).toBe('claude-y')
+    expect(audit.primaryModel).toBe('claude-y')
     expect(audit.hasRedirect).toBe(true)
-    expect(audit.secondaryActualModel).toBe('claude-z')
+    expect(audit.hasActualMismatch).toBe(false)
+    expect(
+      resolveModelAuditDisplay({
+        originalModel: 'alias',
+        model: 'claude-y',
+        sentModel: 'claude-y',
+        actualResponseModel: 'claude-z',
+      }).hasActualMismatch
+    ).toBe(true)
+  })
+
+  it('keeps response-model differences unknown when either observation is missing', () => {
+    for (const [sentModel, actualResponseModel] of [
+      [null, null],
+      ['sent-model', null],
+      [null, 'returned-model'],
+    ]) {
+      const audit = resolveModelAuditDisplay({
+        originalModel: 'old-request',
+        model: 'old-model',
+        sentModel,
+        actualResponseModel,
+      })
+      expect(audit.primaryModel).toBe('old-model')
+      expect(audit.hasActualMismatch).toBe(false)
+    }
   })
 })
 
@@ -273,6 +299,19 @@ describe('logs search', () => {
 
   it('counts a time range as one active filter', () => {
     expect(activeFilterCount({ startTime: 1, endTime: 2, model: 'm' })).toBe(2)
+  })
+
+  it('uses the response mismatch filter while keeping the old API filter available', () => {
+    const filters = searchToFilters(validateLogsSearch({ mismatch: '1' }))
+    const api = filtersToApi(filters, [])
+    expect(api.responseModelMismatch).toBe(true)
+    expect(api.modelMismatch).toBeUndefined()
+    expect(usageLogFiltersQuery(api).toString()).toBe(
+      'response_model_mismatch=1'
+    )
+    expect(usageLogFiltersQuery({ modelMismatch: true }).toString()).toBe(
+      'model_mismatch=1'
+    )
   })
 })
 

@@ -91,6 +91,7 @@ export class SlotBrowserManager {
         status: live.status,
         purpose: live.purpose,
         message: live.message,
+        ...(live.warning ? { warning: live.warning } : {}),
         ...live.statusDetails,
       }
     return this.states.get(vmId) || { vm_id: vmId, active: false, status: 'closed', purpose: null, message: null }
@@ -101,7 +102,14 @@ export class SlotBrowserManager {
     live.status = status
     live.message = message
     live.statusDetails = details
-    this.send(live, { type: 'status', status, purpose: live.purpose, ...(message ? { message } : {}), ...details })
+    this.send(live, {
+      type: 'status',
+      status,
+      purpose: live.purpose,
+      ...(message ? { message } : {}),
+      ...(live.warning ? { warning: live.warning } : {}),
+      ...details,
+    })
   }
 
   send(live, message) {
@@ -118,6 +126,12 @@ export class SlotBrowserManager {
     if (this.stopped) throw problem('browser_stopped', '浏览器服务正在关闭')
     const current = this.currentVm(vmId)
     let live = this.jobs.get(vmId)
+    if (live && (live.closing || live.closeSignal.aborted)) {
+      if (interactive) throw problem('browser_close_failed', live.message || '浏览器清理尚未完成，请重试关闭')
+      await abortable(live.closed, signal)
+      signal?.throwIfAborted()
+      return this.acquire(vmId, { purpose, interactive, retain, signal })
+    }
     if (live && !live.closeSignal.aborted) {
       // A balance refresh must not navigate away from an administrator's login.
       if (!interactive && live.retained) {
@@ -166,7 +180,7 @@ export class SlotBrowserManager {
     else this.queue.push(live)
     void this.drain()
     return abortable(live.ready, signal, () => {
-      if (this.jobs.get(vmId) === live) void this.close(vmId, { reason: 'cancelled' })
+      if (this.jobs.get(vmId) === live) void this.close(vmId, { reason: 'cancelled' }).catch(() => {})
     })
   }
 
@@ -182,12 +196,15 @@ export class SlotBrowserManager {
         try {
           await live.starting
         } catch (error) {
-          if (!live.closeSignal.aborted) {
+          if (live.closing) await live.closing.catch(() => {})
+          else if (!live.closeSignal.aborted) {
             this.setStatus(live, 'error', safeMessage(error))
-            await this.finishClose(live, 'error', error)
+            await this.finishClose(live, 'error', error).catch(() => {})
           }
         }
-        if (!live.closeSignal.aborted) await live.closed
+        // Aborting input does not prove that the browser or its files exited.
+        // A failed close keeps this slot occupied until a successful retry.
+        await live.closed
         if (this.active === live) this.active = null
       }
     } finally {
@@ -210,22 +227,29 @@ export class SlotBrowserManager {
     const { vm } = this.assertCurrent(live)
     const profile = this.profileRepo.get(live.vmId)
     this.setStatus(live, 'starting', '正在启动槽位浏览器')
-    const browser = await this.createSession({
-      fingerprint: profile?.fingerprint,
-      storageState: profile?.storage_state,
-      proxyUrl: live.proxyUrl,
-      locale: vm.locale,
-      signal: live.closeSignal,
-      onFingerprint: (fingerprint) => {
-        this.assertCurrent(live)
-        this.profileRepo.upsert(live.vmId, { fingerprint })
-      },
-    })
-    if (live.closeSignal.aborted) {
-      await browser.close()
-      return
+    let browser
+    try {
+      browser = await this.createSession({
+        fingerprint: profile?.fingerprint,
+        storageState: profile?.storage_state,
+        proxyUrl: live.proxyUrl,
+        locale: vm.locale,
+        signal: live.closeSignal,
+        onFingerprint: (fingerprint) => {
+          this.assertCurrent(live)
+          this.profileRepo.upsert(live.vmId, { fingerprint })
+        },
+      })
+    } catch (error) {
+      if (error.pendingSession) {
+        live.browser = error.pendingSession
+        live.pendingCloseError = error
+      }
+      throw error
     }
     live.browser = browser
+    live.warning = browser.warning || null
+    if (live.closeSignal.aborted) return
     live.page = browser.page
     live.context = browser.context
     await browser.context.route?.('**/*', async (route) => {
@@ -234,13 +258,14 @@ export class SlotBrowserManager {
         await route.continue()
       } catch {
         await route.abort().catch(() => {})
-        void this.close(live.vmId, { reason: 'identity_changed' })
+        void this.close(live.vmId, { reason: 'identity_changed' }).catch(() => {})
       }
     })
     live.stream = new this.Stream({
       page: live.page,
       assertCurrent: () => this.assertCurrent(live),
       onInput: (input) => {
+        if (live.status === 'closing' || live.status === 'close_failed') return false
         live.touchedAt = this.now()
         return !live.inputLocked || input.type === 'close' || input.type === 'continue'
       },
@@ -254,16 +279,16 @@ export class SlotBrowserManager {
     live.watchdog = setInterval(() => {
       try {
         this.assertCurrent(live)
-        if (this.now() - live.touchedAt > IDLE_TIMEOUT) void this.close(live.vmId, { reason: 'idle' })
+        if (this.now() - live.touchedAt > IDLE_TIMEOUT) void this.close(live.vmId, { reason: 'idle' }).catch(() => {})
       } catch {
-        void this.close(live.vmId, { reason: 'identity_changed' })
+        void this.close(live.vmId, { reason: 'identity_changed' }).catch(() => {})
       }
     }, 2_000)
     live.watchdog.unref?.()
   }
 
   async persist(live) {
-    if (!live.browser || live.closeSignal.aborted || live.persistable === false) return
+    if (!live.browser?.storageState || live.closeSignal.aborted || live.persistable === false) return
     this.assertCurrent(live)
     this.profileRepo.upsert(live.vmId, {
       storage_state: await live.browser.storageState(),
@@ -290,37 +315,105 @@ export class SlotBrowserManager {
         this.profileRepo.remove(vmId)
         this.states.delete(vmId)
       }
-      return
+      return this.state(vmId)
     }
     if (live.closing) return live.closing
+    live.forget ||= forget
+    this.beginClose(live)
     live.closing = (async () => {
-      if (!forget) await this.persist(live).catch(() => {})
+      if (!live.forget && !live.persistAttempted) {
+        live.persistAttempted = true
+        try {
+          await this.persist(live)
+        } catch {
+          live.warning = [live.warning, '本次浏览器会话保存失败，可能需要重新登录。'].filter(Boolean).join(' ')
+        }
+      }
       live.controller.abort(reason)
       live.cancel?.()
       if (live.starting) await live.starting.catch(() => {})
       await this.finishClose(live, reason)
-      if (forget) {
+      if (live.forget) {
         this.profileRepo.remove(vmId)
         this.states.delete(vmId)
       }
+      return this.state(vmId)
     })()
-    return live.closing
+    try {
+      return await live.closing
+    } finally {
+      // A failed close must remain retryable rather than caching a rejected promise.
+      live.closing = null
+    }
+  }
+
+  beginClose(live) {
+    live.inputLocked = true
+    clearInterval(live.watchdog)
+    for (const [ticket, grant] of this.tickets) if (grant.liveId === live.id) this.tickets.delete(ticket)
+    if (live.status !== 'closing') {
+      live.status = 'closing'
+      live.message = '正在关闭浏览器…'
+      live.statusDetails = {}
+      this.send(live, {
+        type: 'status',
+        status: 'closing',
+        purpose: live.purpose,
+        message: live.message,
+        ...(live.warning ? { warning: live.warning } : {}),
+      })
+    }
+    live.stream?.close()
   }
 
   async finishClose(live, reason, error = null) {
     live.controller.abort(reason)
-    clearInterval(live.watchdog)
+    this.beginClose(live)
+    try {
+      if (live.pendingCloseError) {
+        const failure = live.pendingCloseError
+        live.pendingCloseError = null
+        throw failure
+      }
+      await live.browser?.close()
+      if (live.browser?.warning && !live.warning?.includes(live.browser.warning))
+        live.warning = [live.warning, live.browser.warning].filter(Boolean).join(' ')
+    } catch (closeError) {
+      live.status = 'close_failed'
+      live.message = safeMessage(closeError)
+      this.send(live, {
+        type: 'status',
+        status: 'close_failed',
+        purpose: live.purpose,
+        message: live.message,
+        ...(live.warning ? { warning: live.warning } : {}),
+      })
+      const failure = problem(closeError.code || 'browser_close_failed', live.message, 502)
+      live.rejectReady(failure)
+      throw failure
+    }
     const status = reason === 'error' ? 'error' : 'closed'
     const message = error ? safeMessage(error) : null
-    this.send(live, { type: 'status', status, purpose: live.purpose, ...(message ? { message } : {}) })
-    live.stream?.close()
-    await live.browser?.close().catch(() => {})
+    this.send(live, {
+      type: 'status',
+      status,
+      purpose: live.purpose,
+      ...(message ? { message } : {}),
+      ...(live.warning ? { warning: live.warning } : {}),
+    })
     for (const ws of live.clients) ws.close()
     live.clients.clear()
     if (this.jobs.get(live.vmId) === live) this.jobs.delete(live.vmId)
     this.queue = this.queue.filter((item) => item !== live)
     for (const [ticket, grant] of this.tickets) if (grant.liveId === live.id) this.tickets.delete(ticket)
-    this.states.set(live.vmId, { vm_id: live.vmId, active: false, status, purpose: live.purpose, message })
+    this.states.set(live.vmId, {
+      vm_id: live.vmId,
+      active: false,
+      status,
+      purpose: live.purpose,
+      message,
+      ...(live.warning ? { warning: live.warning } : {}),
+    })
     live.rejectReady(error || problem('browser_closed', '浏览器已关闭'))
     live.resolveClosed({ reason })
     void this.drain()
@@ -334,7 +427,10 @@ export class SlotBrowserManager {
     this.currentVm(vmId)
     if (!this.jobs.has(vmId)) this.open(vmId, { purpose, interactive: true })
     const live = this.jobs.get(vmId)
-    if (!live || live.closeSignal.aborted) throw problem('browser_closed', '浏览器正在关闭，请重新打开')
+    if (live?.status === 'close_failed')
+      throw problem('browser_close_failed', live.message || '浏览器清理未完成，请重试关闭')
+    if (live?.closing || live?.status === 'closing') throw problem('browser_closed', '浏览器正在关闭，请稍后重试')
+    if (!live || live.closeSignal.aborted) throw problem('browser_closed', '浏览器正在关闭，请稍后重试')
     live.retained = true
     const ticket = crypto.randomBytes(24).toString('hex')
     for (const [key, grant] of this.tickets) if (grant.expires < this.now()) this.tickets.delete(key)
@@ -377,7 +473,7 @@ export class SlotBrowserManager {
       ws.on('message', (raw) => {
         if (live.stream) return
         try {
-          if (JSON.parse(String(raw)).type === 'close') void this.close(vmId)
+          if (JSON.parse(String(raw)).type === 'close') void this.close(vmId).catch(() => {})
         } catch {}
       })
       live.stream?.attach(ws)
@@ -387,6 +483,7 @@ export class SlotBrowserManager {
           status: live.status,
           purpose: live.purpose,
           message: live.message,
+          ...(live.warning ? { warning: live.warning } : {}),
           ...live.statusDetails,
         }),
       )
@@ -396,8 +493,19 @@ export class SlotBrowserManager {
 
   async stop() {
     this.stopped = true
-    await Promise.all([...this.jobs.keys()].map((id) => this.close(id, { reason: 'shutdown' })))
+    const results = await Promise.allSettled([...this.jobs.keys()].map((id) => this.close(id, { reason: 'shutdown' })))
     this.tickets.clear()
+    const failures = results.filter((result) => result.status === 'rejected')
+    if (failures.length)
+      throw Object.assign(
+        new AggregateError(
+          failures.map((result) => result.reason),
+          '部分浏览器清理未完成',
+        ),
+        {
+          code: 'browser_close_failed',
+        },
+      )
   }
 
   start() {

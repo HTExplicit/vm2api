@@ -31,7 +31,7 @@ describe('log export query', () => {
       session_id: 's1',
       status_code: '502',
       endpoint: '/v1/messages',
-      model_mismatch: '1',
+      response_model_mismatch: '1',
       min_attempt_count: '2',
       log_mode: 'debug',
       key_id: 'k1',
