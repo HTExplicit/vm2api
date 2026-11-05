@@ -19,7 +19,11 @@ const controls = vi.hoisted(() => ({
   changeOpen: vi.fn(),
   purpose: 'platform' as 'oauth' | 'platform',
   vmId: 'slot-a',
+  open: true,
   dialogChange: null as null | ((open: boolean) => void),
+  content: null as null | Record<string, (...args: never[]) => void>,
+  toastError: vi.fn(),
+  toastWarning: vi.fn(),
 }))
 
 // Exercise the component's real effects and event handlers with explicit renders;
@@ -70,6 +74,9 @@ vi.mock('react', async (original) => {
 
 vi.mock('@/lib/api', () => ({ api: controls.api }))
 vi.mock('@/lib/session', () => ({ apiBase: () => 'https://panel.example' }))
+vi.mock('sonner', () => ({
+  toast: { error: controls.toastError, warning: controls.toastWarning },
+}))
 vi.mock('@/components/ui/dialog', () => {
   const Content = ({ children }: PropsWithChildren) => <div>{children}</div>
   return {
@@ -80,7 +87,10 @@ vi.mock('@/components/ui/dialog', () => {
       controls.dialogChange = onOpenChange
       return <div>{children}</div>
     },
-    DialogContent: Content,
+    DialogContent: (props: PropsWithChildren<Record<string, unknown>>) => {
+      controls.content = props as typeof controls.content
+      return <div>{props.children}</div>
+    },
     DialogDescription: Content,
     DialogHeader: Content,
     DialogTitle: Content,
@@ -138,7 +148,7 @@ function render() {
     controls.purpose === 'platform' ? (
       <OpenaiPlatformBrowserDialog
         vmId={controls.vmId}
-        open
+        open={controls.open}
         onOpenChange={controls.changeOpen}
         onComplete={controls.complete}
       />
@@ -146,7 +156,7 @@ function render() {
       <SlotBrowserDialog
         vmId={controls.vmId}
         purpose='oauth'
-        open
+        open={controls.open}
         onOpenChange={controls.changeOpen}
         onCredentialsSaved={controls.saved}
         onComplete={controls.complete}
@@ -190,8 +200,11 @@ beforeEach(() => {
   controls.complete.mockReset()
   controls.saved.mockReset()
   controls.changeOpen.mockReset()
+  controls.toastError.mockReset()
+  controls.toastWarning.mockReset()
   controls.purpose = 'platform'
   controls.vmId = 'slot-a'
+  controls.open = true
   Socket.instances = []
   vi.stubGlobal('WebSocket', Socket)
 })
@@ -326,6 +339,7 @@ describe('OAuth browser login completion', () => {
     expect(controls.complete).not.toHaveBeenCalled()
     button('完成')!.onClick!({} as never)
     button('完成')!.onClick!({} as never)
+    await settle()
     expect(controls.complete).toHaveBeenCalledExactlyOnceWith(savedResult)
     expect(controls.changeOpen).toHaveBeenCalledExactlyOnceWith(false)
   })
@@ -393,6 +407,7 @@ describe('OAuth browser login completion', () => {
     socket.status('oauth_complete')
     render()
     controls.dialogChange!(false)
+    await settle()
     expect(controls.saved).toHaveBeenCalledTimes(1)
     expect(controls.complete).not.toHaveBeenCalled()
     expect(controls.changeOpen).toHaveBeenCalledExactlyOnceWith(false)
@@ -486,5 +501,197 @@ describe('OAuth browser login completion', () => {
     expect(html).toContain('网页会话保存失败')
     expect(button('开机并完成')?.disabled).toBe(false)
     expect(controls.complete).not.toHaveBeenCalled()
+  })
+})
+
+describe('browser close lifecycle', () => {
+  it.each(['button', 'icon', 'escape', 'outside'])(
+    'keeps the dialog after a failed %s close and releases it after retry',
+    async (gesture) => {
+      const socket = await mount()
+      let attempts = 0
+      controls.api.mockImplementation(async (path: string) => {
+        if (path.endsWith('/close')) {
+          attempts++
+          if (attempts === 1) throw new Error('临时文件清理失败 (EACCES)')
+          return { active: false, status: 'closed' }
+        }
+        return { active: true }
+      })
+      if (gesture === 'button') button('关闭浏览器')!.onClick!({} as never)
+      else if (gesture === 'icon')
+        button('关闭浏览器窗口')!.onClick!({} as never)
+      else {
+        const name =
+          gesture === 'escape' ? 'onEscapeKeyDown' : 'onPointerDownOutside'
+        const preventDefault = vi.fn()
+        controls.content![name]({ preventDefault } as never)
+        expect(preventDefault).toHaveBeenCalledOnce()
+      }
+      await settle()
+      expect(attempts).toBe(1)
+      expect(controls.changeOpen).not.toHaveBeenCalled()
+      expect(socket.close).toHaveBeenCalled()
+      const html = render()
+      expect(html).toContain('临时文件清理失败')
+      expect(button('重试关闭')?.disabled).toBe(false)
+      expect(button('重新连接')?.disabled).toBe(true)
+      button('重试关闭')!.onClick!({} as never)
+      await settle()
+      expect(attempts).toBe(2)
+      expect(controls.changeOpen).toHaveBeenCalledExactlyOnceWith(false)
+    }
+  )
+
+  it('deduplicates closing gestures while the server is still releasing resources', async () => {
+    await mount()
+    let done!: (value: unknown) => void
+    controls.api.mockImplementation((path: string) =>
+      path.endsWith('/close')
+        ? new Promise((resolve) => {
+            done = resolve
+          })
+        : Promise.resolve({ active: true })
+    )
+    button('关闭浏览器')!.onClick!({} as never)
+    controls.dialogChange!(false)
+    button('关闭浏览器窗口')!.onClick!({} as never)
+    await settle()
+    expect(
+      controls.api.mock.calls.filter(([path]) => path.endsWith('/close'))
+    ).toHaveLength(1)
+    render()
+    expect(button('正在关闭…')?.disabled).toBe(true)
+    expect(controls.changeOpen).not.toHaveBeenCalled()
+    done({ active: false, status: 'closed' })
+    await settle()
+    expect(controls.changeOpen).toHaveBeenCalledExactlyOnceWith(false)
+  })
+
+  it('does not dismiss when Escape is used to cancel Chinese input composition', async () => {
+    await mount()
+    const before = controls.api.mock.calls.length
+    const preventDefault = vi.fn()
+    controls.content!.onEscapeKeyDown({
+      preventDefault,
+      isComposing: true,
+    } as never)
+    await settle()
+    expect(preventDefault).toHaveBeenCalledOnce()
+    expect(controls.api).toHaveBeenCalledTimes(before)
+    expect(controls.changeOpen).not.toHaveBeenCalled()
+  })
+
+  it('shows a session-save warning without keeping a released browser open', async () => {
+    await mount()
+    controls.api.mockResolvedValue({
+      active: false,
+      status: 'closed',
+      warning: '浏览器已关闭，但会话保存失败',
+    })
+    button('关闭浏览器')!.onClick!({} as never)
+    await settle()
+    expect(controls.toastWarning).toHaveBeenCalledExactlyOnceWith(
+      '浏览器已关闭，但会话保存失败'
+    )
+    expect(controls.changeOpen).toHaveBeenCalledExactlyOnceWith(false)
+  })
+
+  it('does not send another close when a successfully dismissed dialog unmounts', async () => {
+    await mount()
+    controls.api.mockResolvedValue({ active: false, status: 'closed' })
+    button('关闭浏览器')!.onClick!({} as never)
+    await settle()
+    controls.open = false
+    render()
+    for (const effect of controls.effects.splice(0)) effect()
+    await settle()
+    expect(
+      controls.api.mock.calls.filter(([path]) => path.endsWith('/close'))
+    ).toHaveLength(1)
+  })
+
+  it('joins an in-progress close when leaving the page instead of posting twice', async () => {
+    await mount()
+    let done!: (value: unknown) => void
+    controls.api.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          done = resolve
+        })
+    )
+    button('关闭浏览器')!.onClick!({} as never)
+    await settle()
+    for (const cleanup of controls.effectCleanup) cleanup?.()
+    done({ active: false, status: 'closed' })
+    await settle()
+    expect(
+      controls.api.mock.calls.filter(([path]) => path.endsWith('/close'))
+    ).toHaveLength(1)
+    expect(controls.changeOpen).not.toHaveBeenCalled()
+  })
+
+  it('retains the OAuth completion intent while retrying a failed final close', async () => {
+    controls.purpose = 'oauth'
+    controls.api.mockImplementation(async (path: string) => loginRequests(path))
+    const socket = await mount()
+    socket.status('oauth_complete')
+    render()
+    button('开机并完成')!.onClick!({} as never)
+    await settle()
+    render()
+    let attempts = 0
+    controls.api.mockImplementation(async () => {
+      if (++attempts === 1) throw Error('进程尚未退出')
+      return { active: false, status: 'closed' }
+    })
+    button('完成')!.onClick!({} as never)
+    await settle()
+    expect(controls.complete).not.toHaveBeenCalled()
+    render()
+    button('重试关闭')!.onClick!({} as never)
+    await settle()
+    expect(controls.complete).toHaveBeenCalledOnce()
+    expect(controls.changeOpen).toHaveBeenCalledExactlyOnceWith(false)
+  })
+
+  it('reads a retained close failure before opening a new browser or issuing a ticket', async () => {
+    controls.api.mockResolvedValue({
+      active: true,
+      status: 'close_failed',
+      message: '浏览器进程尚未退出',
+    })
+    render()
+    for (const effect of controls.effects.splice(0)) effect()
+    await settle()
+    expect(Socket.instances).toHaveLength(0)
+    expect(controls.api.mock.calls.map(([path]) => path)).toEqual([
+      '/api/panel/vms/slot-a/browser',
+    ])
+    expect(render()).toContain('浏览器进程尚未退出')
+    expect(button('重试关闭')?.disabled).toBe(false)
+  })
+
+  it('reports a failed close after leaving the page through a global toast', async () => {
+    await mount()
+    controls.api.mockRejectedValue(new Error('浏览器进程尚未退出'))
+    for (const cleanup of controls.effectCleanup) cleanup?.()
+    await settle()
+    expect(controls.toastError).toHaveBeenCalledWith(
+      '账号浏览器未能关闭：浏览器进程尚未退出'
+    )
+    expect(controls.changeOpen).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a cleanup warning received over the browser status stream', async () => {
+    const socket = await mount()
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'status',
+        status: 'ready',
+        warning: '有 1 项临时目录待清理',
+      }),
+    })
+    expect(render()).toContain('有 1 项临时目录待清理')
   })
 })

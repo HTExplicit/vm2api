@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent } from 'react'
-import { ExternalLink, RefreshCw } from 'lucide-react'
+import { ExternalLink, RefreshCw, X } from 'lucide-react'
+import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { apiBase } from '@/lib/session'
 import { Button } from '@/components/ui/button'
@@ -36,6 +37,41 @@ type BrowserStatus = {
   message?: string
   purpose?: BrowserPurpose
   result?: CommitResult
+  warning?: string | null
+}
+
+type BrowserState = {
+  active: boolean
+  status?: string
+  message?: string | null
+  warning?: string | null
+}
+
+function closeBrowser(
+  requests: Map<string, Promise<BrowserState>>,
+  vmId: string,
+  base: string,
+  starting?: Promise<unknown>
+) {
+  const existing = requests.get(vmId)
+  if (existing) return existing
+  const request = Promise.resolve(starting)
+    .catch(() => {})
+    .then(() => api<BrowserState>(`${base}/close`, { method: 'POST' }))
+  requests.set(vmId, request)
+  const clear = () => {
+    if (requests.get(vmId) === request) requests.delete(vmId)
+  }
+  void request.then(clear, clear)
+  return request
+}
+
+function isCloseFailure(reason: unknown) {
+  return [
+    'browser_close_failed',
+    'browser_cleanup_failed',
+    'browser_temp_cleanup_failed',
+  ].includes((reason as { code?: string })?.code || '')
 }
 
 type SlotBrowserDialogProps = {
@@ -100,7 +136,12 @@ export function SlotBrowserDialog({
   const purposeRef = useRef(purpose)
   const finishing = useRef(false)
   const finishReported = useRef(false)
+  const completeOnClose = useRef(false)
   const finishRef = useRef<OauthFinish>(emptyOauthFinish())
+  const closeRequests = useRef(new Map<string, Promise<BrowserState>>())
+  const released = useRef<{ vmId: string; epoch: number } | null>(null)
+  const closingRequested = useRef(false)
+  const stopTransport = useRef<(() => void) | null>(null)
   const [finish, setFinish] = useState<OauthFinish>(emptyOauthFinish)
   const [frame, setFrame] = useState<DisplayedBrowserFrame | null>(null)
   const [currentPurpose, setCurrentPurpose] = useState(purpose)
@@ -112,6 +153,10 @@ export function SlotBrowserDialog({
   const [originalSize, setOriginalSize] = useState(false)
   const [quality, setQuality] = useState<BrowserQuality>('smooth')
   const [switching, setSwitching] = useState(false)
+  const [closing, setClosing] = useState(false)
+  const [warning, setWarning] = useState('')
+  const closeFailed = status === 'close_failed'
+  const inputBlocked = closing || closeFailed
   const updateFinish = (next: OauthFinish) => {
     finishRef.current = next
     setFinish(next)
@@ -173,7 +218,10 @@ export function SlotBrowserDialog({
     if (!element || !open) return
     const wheel = (event: WheelEvent) => {
       event.preventDefault()
-      if (socket.current?.readyState === WebSocket.OPEN)
+      if (
+        !closingRequested.current &&
+        socket.current?.readyState === WebSocket.OPEN
+      )
         socket.current.send(
           JSON.stringify({
             type: 'scroll',
@@ -188,11 +236,17 @@ export function SlotBrowserDialog({
   }, [open])
 
   useEffect(() => {
+    const requests = closeRequests.current
     const epoch = lifecycle.current.epoch + 1
     lifecycle.current = { vmId: open ? vmId : '', epoch }
     retrying.current = false
     finishing.current = false
     finishReported.current = false
+    completeOnClose.current = false
+    closingRequested.current = false
+    released.current = null
+    setClosing(false)
+    setWarning('')
     updateFinish(emptyOauthFinish())
     setSwitching(false)
     if (!open) {
@@ -201,20 +255,44 @@ export function SlotBrowserDialog({
       return
     }
     return () => {
+      if (released.current?.vmId === vmId && released.current.epoch === epoch)
+        return
       if (lifecycle.current.vmId === vmId && lifecycle.current.epoch === epoch)
         lifecycle.current = { vmId: '', epoch: epoch + 1 }
       // Reconnecting the transport keeps the browser alive. Closing the dialog
       // or leaving this slot releases it, including during an in-flight start.
       const starting =
         opening.current?.vmId === vmId ? opening.current.promise : undefined
+      const pendingClose = requests.get(vmId)
+      if (pendingClose) {
+        void pendingClose.then(
+          (result) => {
+            if (result.warning) toast.warning(result.warning)
+          },
+          (reason: Error) =>
+            toast.error(`账号浏览器未能关闭：${reason.message}`)
+        )
+        return
+      }
       void Promise.resolve(starting)
         .catch(() => {})
         .then(() => {
           if (
+            released.current?.vmId === vmId &&
+            released.current.epoch >= epoch
+          )
+            return
+          if (
             lifecycle.current.vmId !== vmId ||
             lifecycle.current.epoch === epoch
           )
-            void api(`${base}/close`, { method: 'POST' }).catch(() => {})
+            return closeBrowser(requests, vmId, base)
+              .then((result) => {
+                if (result.warning) toast.warning(result.warning)
+              })
+              .catch((reason: Error) => {
+                toast.error(`账号浏览器未能关闭：${reason.message}`)
+              })
         })
     }
   }, [open, vmId, base])
@@ -238,8 +316,25 @@ export function SlotBrowserDialog({
     setError('')
     setMessage('正在连接槽位浏览器…')
     async function connect() {
-      const reopen = await browserNeedsOpening(vmId, opened.current, () =>
-        api<{ active: boolean }>(base)
+      await closeRequests.current.get(vmId)?.catch(() => {})
+      if (cancelled || closingRequested.current) return
+      const current = await api<BrowserState>(base)
+      if (cancelled || closingRequested.current) return
+      setWarning(current.warning || '')
+      if (current.status === 'close_failed') {
+        closingRequested.current = true
+        setStatus('close_failed')
+        setMessage(
+          current.message || browserStatusMessage('close_failed', purpose)
+        )
+        setError(current.message || '浏览器清理未完成，请重试关闭。')
+        setWarning(current.warning || '')
+        return
+      }
+      const reopen = await browserNeedsOpening(
+        vmId,
+        opened.current,
+        async () => current
       )
       if (cancelled) return
       if (reopen) {
@@ -285,7 +380,7 @@ export function SlotBrowserDialog({
       ws.binaryType = 'blob'
       socket.current = ws
       ws.onopen = () => {
-        if (cancelled || !ws) return
+        if (cancelled || closingRequested.current || !ws) return
         setConnected(true)
         setError('')
         ws.send(JSON.stringify({ type: 'quality', mode: qualityRef.current }))
@@ -293,26 +388,47 @@ export function SlotBrowserDialog({
       ws.onmessage = (event: MessageEvent<string | Blob>) => {
         if (cancelled) return
         if (typeof event.data !== 'string') {
-          frames.receive(event.data)
+          if (!closingRequested.current) frames.receive(event.data)
           return
         }
         const payload = JSON.parse(event.data) as
           BrowserFrameMetadata | BrowserStatus | { type: 'input_ack' }
         if (payload.type === 'frame') {
-          frames.describe(payload)
+          if (!closingRequested.current) frames.describe(payload)
         } else if (payload.type === 'status') {
           const nextPurpose = payload.purpose || purposeRef.current
           purposeRef.current = nextPurpose
           setCurrentPurpose(nextPurpose)
           setStatus(payload.status)
+          setWarning(payload.warning || '')
           setMessage(
             payload.message || browserStatusMessage(payload.status, nextPurpose)
           )
           if (payload.status === 'closed') {
             opened.current = ''
             opening.current = null
+            closingRequested.current = false
+            setClosing(false)
+            setConnected(false)
+            setFrame(null)
+            frames.close()
+            ws?.close()
           }
-          if (payload.status === 'error')
+          if (payload.status === 'closing') {
+            closingRequested.current = true
+            setClosing(true)
+            setConnected(false)
+            setFrame(null)
+            frames.close()
+          } else if (payload.status === 'close_failed') {
+            closingRequested.current = true
+            setClosing(false)
+            setConnected(false)
+            setFrame(null)
+            frames.close()
+            ws?.close()
+            setError(payload.message || '浏览器清理未完成，请重试关闭。')
+          } else if (payload.status === 'error')
             setError(payload.message || '浏览器任务失败，请重新连接。')
           else setError('')
           if (purpose === 'oauth' && payload.status === 'oauth_complete') {
@@ -341,26 +457,42 @@ export function SlotBrowserDialog({
         }
       }
       ws.onerror = () => {
-        if (!cancelled) setError('槽位浏览器连接失败，请重新连接。')
+        if (!cancelled && !closingRequested.current)
+          setError('槽位浏览器连接失败，请重新连接。')
       }
       ws.onclose = () => {
         if (!cancelled) setConnected(false)
       }
     }
     void connect().catch((reason: Error) => {
-      if (!cancelled) setError(reason.message)
+      if (!cancelled && !closingRequested.current) {
+        if (isCloseFailure(reason)) {
+          closingRequested.current = true
+          setStatus('close_failed')
+          setMessage('浏览器清理未完成，请重试关闭。')
+        }
+        setError(reason.message)
+      }
     })
-    return () => {
+    const stop = () => {
       cancelled = true
       pressedPointer.current = null
       frames.close()
       ws?.close()
       if (socket.current === ws) socket.current = null
     }
+    stopTransport.current = stop
+    return () => {
+      stop()
+      if (stopTransport.current === stop) stopTransport.current = null
+    }
   }, [open, vmId, purpose, attempt, base])
 
   const send = (payload: object) => {
-    if (socket.current?.readyState === WebSocket.OPEN) {
+    if (
+      !closingRequested.current &&
+      socket.current?.readyState === WebSocket.OPEN
+    ) {
       socket.current.send(
         JSON.stringify({ ...payload, seq: ++inputSeq.current })
       )
@@ -372,7 +504,9 @@ export function SlotBrowserDialog({
     finishing.current = true
     const epoch = lifecycle.current.epoch
     const isCurrent = () =>
-      lifecycle.current.epoch === epoch && lifecycle.current.vmId === vmId
+      lifecycle.current.epoch === epoch &&
+      lifecycle.current.vmId === vmId &&
+      !closingRequested.current
     setError('')
     updateFinish({ ...finishRef.current, error: '' })
     try {
@@ -399,21 +533,63 @@ export function SlotBrowserDialog({
     }
   }
 
-  const completeOauth = () => {
-    if (finishRef.current.phase !== 'ready' || finishReported.current) return
-    finishReported.current = true
-    callbacks.current.onComplete?.(finishRef.current.result)
-    callbacks.current.onOpenChange(false)
+  const dismiss = async (complete = false) => {
+    if (closeRequests.current.has(vmId)) return
+    if (
+      complete &&
+      (finishRef.current.phase !== 'ready' || finishReported.current)
+    )
+      return
+    if (complete) completeOnClose.current = true
+    const epoch = lifecycle.current.epoch
+    const isCurrent = () =>
+      lifecycle.current.vmId === vmId && lifecycle.current.epoch === epoch
+    closingRequested.current = true
+    finishing.current = false
+    setClosing(true)
+    setError('')
+    setStatus('closing')
+    setMessage('正在关闭浏览器并清理临时文件…')
+    setConnected(false)
+    setFrame(null)
+    stopTransport.current?.()
+    try {
+      const result = await closeBrowser(
+        closeRequests.current,
+        vmId,
+        base,
+        opening.current?.vmId === vmId ? opening.current.promise : undefined
+      )
+      if (!isCurrent()) return
+      if (result.warning) toast.warning(result.warning)
+      released.current = { vmId, epoch }
+      opened.current = ''
+      opening.current = null
+      if (completeOnClose.current && !finishReported.current) {
+        finishReported.current = true
+        callbacks.current.onComplete?.(finishRef.current.result)
+      }
+      lifecycle.current = { vmId: '', epoch: epoch + 1 }
+      callbacks.current.onOpenChange(false)
+    } catch (reason) {
+      if (!isCurrent()) return
+      setStatus('close_failed')
+      setMessage('浏览器清理未完成，请重试关闭。')
+      setError((reason as Error).message)
+    } finally {
+      if (isCurrent()) setClosing(false)
+    }
   }
 
+  const completeOauth = () => void dismiss(true)
+
   const changeOpen = (nextOpen: boolean) => {
-    if (!nextOpen)
-      lifecycle.current = { vmId: '', epoch: lifecycle.current.epoch + 1 }
-    callbacks.current.onOpenChange(nextOpen)
+    if (!nextOpen) void dismiss()
+    else callbacks.current.onOpenChange(true)
   }
 
   const retryPlatformSetup = async () => {
-    if (retrying.current) return
+    if (retrying.current || closingRequested.current) return
     retrying.current = true
     const epoch = lifecycle.current.epoch
     setSwitching(true)
@@ -467,7 +643,28 @@ export function SlotBrowserDialog({
 
   return (
     <Dialog open={open} onOpenChange={changeOpen}>
-      <DialogContent className='flex max-h-[94vh] flex-col gap-3 p-4 sm:max-w-6xl'>
+      <DialogContent
+        showCloseButton={false}
+        className='flex max-h-[94vh] flex-col gap-3 p-4 sm:max-w-6xl'
+        onEscapeKeyDown={(event) => {
+          event.preventDefault()
+          if (!event.isComposing) void dismiss()
+        }}
+        onPointerDownOutside={(event) => {
+          event.preventDefault()
+          void dismiss()
+        }}
+      >
+        <Button
+          variant='ghost'
+          size='icon'
+          className='absolute end-3 top-3 size-7 text-muted-foreground'
+          aria-label='关闭浏览器窗口'
+          disabled={closing}
+          onClick={() => void dismiss()}
+        >
+          <X className='size-4' aria-hidden />
+        </Button>
         <DialogHeader className='pe-6'>
           <DialogTitle className='flex items-center gap-2 text-base'>
             <ExternalLink className='size-4' aria-hidden />
@@ -480,12 +677,18 @@ export function SlotBrowserDialog({
           </DialogDescription>
         </DialogHeader>
         <p className='m-0 text-xs text-muted-foreground' role='status'>
-          {purpose === 'oauth' && finish.saved && currentPurpose === 'oauth'
+          {!inputBlocked &&
+          purpose === 'oauth' &&
+          finish.saved &&
+          currentPurpose === 'oauth'
             ? oauthMessage
             : message}
         </p>
         {purpose === 'oauth' && finish.warning ? (
           <p className='m-0 text-xs text-muted-foreground'>{finish.warning}</p>
+        ) : null}
+        {warning ? (
+          <p className='m-0 text-xs text-muted-foreground'>{warning}</p>
         ) : null}
         {finish.error || error ? (
           <p role='alert' className='m-0 text-sm text-destructive'>
@@ -496,6 +699,7 @@ export function SlotBrowserDialog({
           ref={viewport}
           role='application'
           aria-label='账号浏览器，点击网页后可输入文字、粘贴、使用 Tab 和方向键'
+          aria-disabled={inputBlocked}
           tabIndex={0}
           className='relative min-h-48 min-w-0 flex-1 overflow-auto rounded-md border bg-muted/30 outline-none focus-within:ring-2 focus-within:ring-ring focus-visible:ring-2 focus-visible:ring-ring'
           onFocus={(event) => {
@@ -504,6 +708,13 @@ export function SlotBrowserDialog({
           }}
           onKeyDown={(event) => {
             if (event.nativeEvent.isComposing) return
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              event.stopPropagation()
+              void dismiss()
+              return
+            }
+            if (closingRequested.current) return
             if (
               (event.ctrlKey || event.metaKey) &&
               event.key.toLowerCase() === 'v'
@@ -619,7 +830,7 @@ export function SlotBrowserDialog({
             />
           ) : (
             <p className='p-6 text-sm text-muted-foreground'>
-              正在加载官方网页…
+              {inputBlocked ? '画面与输入已停止。' : '正在加载官方网页…'}
             </p>
           )}
         </div>
@@ -628,7 +839,8 @@ export function SlotBrowserDialog({
             <Button
               variant='outline'
               size='sm'
-              disabled={connected}
+              aria-label='重新连接'
+              disabled={connected || inputBlocked}
               onClick={() => {
                 setAttempt((value) => value + 1)
               }}
@@ -670,7 +882,7 @@ export function SlotBrowserDialog({
                 <Button
                   size='sm'
                   variant='outline'
-                  disabled={!connected || switching}
+                  disabled={!connected || switching || inputBlocked}
                   loading={switching}
                   onClick={async () => {
                     const epoch = lifecycle.current.epoch
@@ -705,7 +917,12 @@ export function SlotBrowserDialog({
               <Button
                 size='sm'
                 aria-label={platformActionLabel}
-                disabled={!connected || platformBusy || status === 'api_ready'}
+                disabled={
+                  !connected ||
+                  platformBusy ||
+                  status === 'api_ready' ||
+                  inputBlocked
+                }
                 loading={platformBusy}
                 onClick={() => {
                   if (status === 'error') void retryPlatformSetup()
@@ -717,14 +934,19 @@ export function SlotBrowserDialog({
             )}
             {purpose === 'oauth' && finish.saved ? (
               finish.phase === 'ready' ? (
-                <Button size='sm' aria-label='完成' onClick={completeOauth}>
+                <Button
+                  size='sm'
+                  aria-label='完成'
+                  disabled={inputBlocked}
+                  onClick={completeOauth}
+                >
                   完成
                 </Button>
               ) : (
                 <Button
                   size='sm'
                   aria-label={finishActionLabel}
-                  disabled={finishBusy}
+                  disabled={finishBusy || inputBlocked}
                   loading={finishBusy}
                   onClick={() => void startAndFinish()}
                 >
@@ -732,6 +954,18 @@ export function SlotBrowserDialog({
                 </Button>
               )
             ) : null}
+            <Button
+              size='sm'
+              variant={closeFailed ? 'default' : 'outline'}
+              aria-label={
+                closing ? '正在关闭…' : closeFailed ? '重试关闭' : '关闭浏览器'
+              }
+              disabled={closing}
+              loading={closing}
+              onClick={() => void dismiss()}
+            >
+              {closing ? '正在关闭…' : closeFailed ? '重试关闭' : '关闭浏览器'}
+            </Button>
           </div>
         </div>
       </DialogContent>

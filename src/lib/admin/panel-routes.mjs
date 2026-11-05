@@ -1514,6 +1514,11 @@ export function createPanelHandler(ctx) {
           else if (req.method === 'POST' && action === 'open') {
             const body = await readBody(req, 4096)
             const purpose = body?.purpose || 'oauth'
+            if (purpose === 'oauth' || purpose === 'platform') {
+              const currentBrowser = slotBrowserManager.state(vmId)
+              if (['closing', 'close_failed'].includes(currentBrowser.status))
+                return json(res, 200, panel.ok(currentBrowser))
+            }
             if (purpose === 'oauth') {
               await openaiApiManager.cancel(vmId, { closeBrowser: false })
               result = codexBrowserLogin.start(vmId)

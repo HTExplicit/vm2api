@@ -397,27 +397,35 @@ export class OpenaiApiManager {
     } finally {
       const live = this.sessions.get(job.vmId)
       let terminal
-      if (live?.job === job) {
-        await this.persistSession(live)
-        const status = this.repo.getAccount(job.accountId)?.setup_status || 'error'
-        terminal = {
-          status: status === 'ready' ? 'api_ready' : status,
-          message: this.repo.getAccount(job.accountId)?.last_error,
+      try {
+        if (live?.job === job) {
+          await this.persistSession(live)
+          const status = this.repo.getAccount(job.accountId)?.setup_status || 'error'
+          terminal = {
+            status: status === 'ready' ? 'api_ready' : status,
+            message: this.repo.getAccount(job.accountId)?.last_error,
+          }
+          live.adapter?.dispose?.()
+          live.inputLocked = false
+          live.cancel = null
+          live.checkLogin = null
+          await this.browserManager.release(live)
         }
-        live.adapter?.dispose?.()
-        live.inputLocked = false
-        live.cancel = null
-        live.checkLogin = null
-        await this.browserManager.release(live)
-        if (this.sessions.get(job.vmId) === live) this.sessions.delete(job.vmId)
+      } catch (error) {
+        terminal = null
+        // Business work is finished; the shared browser manager retains failed
+        // cleanup ownership and exposes its retryable close_failed state.
+        console.warn('[openai-api] browser release failed', error.code || 'browser_cleanup_failed')
+      } finally {
+        if (live?.job === job && this.sessions.get(job.vmId) === live) this.sessions.delete(job.vmId)
+        job.resolveReady(null)
+        if (this.jobs.get(job.vmId) === job) this.jobs.delete(job.vmId)
+        job.resolveFinished()
+        this.running = this.jobs.size > 0
       }
-      job.resolveReady(null)
-      if (this.jobs.get(job.vmId) === job) this.jobs.delete(job.vmId)
-      job.resolveFinished()
       // A retry offered by this status must find the finished job removed.
       if (terminal) this.browserManager.setStatus(live, terminal.status, terminal.message)
     }
-    this.running = this.jobs.size > 0
   }
 
   assertCurrent(job) {

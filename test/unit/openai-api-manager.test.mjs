@@ -44,6 +44,7 @@ function fixture(t) {
     authenticated: true,
     balance: '37.000',
     balanceError: null,
+    closeError: null,
     readBalance: null,
     configure: null,
     inspect: null,
@@ -157,6 +158,7 @@ function fixture(t) {
           return { cookies: [], origins: [{ origin: options.proxyUrl }] }
         },
         async close() {
+          if (behavior.closeError) throw behavior.closeError
           if (!closed) {
             calls.closed.push(options.proxyUrl)
             calls.liveBrowsers--
@@ -277,6 +279,33 @@ function fixture(t) {
     },
   }
 }
+
+test('failed background browser release settles its API job while retaining retryable browser ownership', async (t) => {
+  const f = fixture(t)
+  const entry = f.add()
+  const key = f.installKey(entry)
+  f.behavior.closeError = Object.assign(new Error('fixture exit failed'), { code: 'browser_close_failed' })
+  try {
+    const job = f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'balance', false)
+    await f.settle()
+    await job.finished
+    await job.execution
+    assert.equal(f.manager.jobs.size, 0)
+    assert.equal(f.manager.sessions.size, 0)
+    assert.equal(f.manager.browserManager.state(entry.vm.id).status, 'close_failed')
+    assert.equal(f.manager.browserManager.state(entry.vm.id).active, true)
+    assert.equal(f.calls.liveBrowsers, 1)
+    assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
+    assert.equal(f.repo.getAccount(entry.accountId).enabled, true)
+    assert.equal(f.repo.getOrg('org-test').balance, '37.000')
+    assert.equal(f.repo.getKey(key.id).disabled, false)
+  } finally {
+    f.behavior.closeError = null
+    await f.manager.browserManager.close(entry.vm.id)
+  }
+  assert.equal(f.calls.liveBrowsers, 0)
+  assert.equal(f.manager.browserManager.state(entry.vm.id).active, false)
+})
 
 test('API resolver follows current identity and proxy, independently of OAuth lifecycle and Platform session', (t) => {
   const f = fixture(t)
@@ -790,9 +819,10 @@ test('stopping while a browser is launching closes it before any Platform operat
     release = resolve
   })
   f.manager.browserManager.createSession = async (options) => {
+    const session = await originalCreate(options)
     launching = true
     await gate
-    return originalCreate(options)
+    return session
   }
   f.manager.setup(entry.vm.id)
   await until(() => launching)

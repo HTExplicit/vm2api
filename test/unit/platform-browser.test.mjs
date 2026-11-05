@@ -406,3 +406,148 @@ test('closing relay also closes an HTTP proxy socket waiting for CONNECT respons
   await closed
   assert.equal(upstream.destroyed, true)
 })
+
+function cleanupSessionFixture({ closeBrowser, createPage, cleanup } = {}) {
+  const calls = { browser: 0, relay: 0, captures: 0, cleanup: [] }
+  const paths = ['/tmp/playwright-artifacts-abcdef', '/tmp/playwright_firefoxdev_profile-ghijkl']
+  const report = () => ({ removed: 0, reclaimed_bytes: 0, failed: [], skipped: [], warning: null })
+  const temporary = {
+    enabled: true,
+    snapshot: () => new Set(),
+    createdSince: () => {
+      calls.captures += 1
+      return [...paths]
+    },
+    async cleanup(options = {}) {
+      calls.cleanup.push(options.paths)
+      return (await cleanup?.(options)) || report()
+    },
+  }
+  const overrides = {
+    tempCleanup: temporary,
+    proxyLocation: async () => location,
+    createRelay: async () => ({
+      close: async () => {
+        calls.relay += 1
+      },
+    }),
+    runtime: async () => ({
+      executable: 'paired-browser',
+      getEnvVars: () => ({}),
+      getPrefEnvVars: () => ({}),
+      Camoufox: async () => ({
+        newContext: async () => ({
+          newPage: createPage || (async () => ({})),
+        }),
+        close: async () => {
+          calls.browser += 1
+          await closeBrowser?.()
+        },
+      }),
+    }),
+  }
+  return {
+    calls,
+    paths,
+    temporary,
+    open: () =>
+      createPlatformBrowserSession({ fingerprint: original, proxyUrl: 'socks5h://127.0.0.1:1080' }, overrides),
+  }
+}
+
+test('a browser exit failure closes its relay and permits a real exit retry without widening owned paths', async () => {
+  let failed = false
+  const f = cleanupSessionFixture({
+    closeBrowser: async () => {
+      if (!failed) {
+        failed = true
+        throw Error('private browser failure')
+      }
+    },
+  })
+  const session = await f.open()
+  f.paths.push('/tmp/playwright-artifacts-FOREIG')
+  await assert.rejects(session.close(), { code: 'browser_close_failed' })
+  assert.equal(f.calls.relay, 1)
+  assert.equal(f.calls.cleanup.length, 1)
+  await session.close()
+  await session.close()
+  assert.equal(f.calls.browser, 2)
+  assert.equal(f.calls.relay, 1)
+  assert.equal(f.calls.captures, 1)
+  assert.deepEqual(f.calls.cleanup.at(-1), [
+    '/tmp/playwright-artifacts-abcdef',
+    '/tmp/playwright_firefoxdev_profile-ghijkl',
+  ])
+  assert.equal(f.calls.cleanup.length, 2)
+})
+
+test('failed or unconfirmed owned temporary cleanup stays retryable after browser exit', async () => {
+  for (const blocked of ['failed', 'skipped']) {
+    let fail = true
+    const f = cleanupSessionFixture({
+      cleanup: ({ paths }) => {
+        if (!paths || !fail) return
+        return {
+          removed: 0,
+          reclaimed_bytes: 0,
+          failed: blocked === 'failed' ? [{ name: 'playwright-artifacts-abcdef', code: 'EACCES' }] : [],
+          skipped: blocked === 'skipped' ? [{ name: 'playwright-artifacts-abcdef', reason: 'process_reference' }] : [],
+          warning: 'temporary directory remains',
+        }
+      },
+    })
+    const session = await f.open()
+    await assert.rejects(session.close(), { code: 'browser_temp_cleanup_failed' })
+    fail = false
+    await session.close()
+    assert.equal(f.calls.browser, 1)
+    assert.equal(f.calls.relay, 1)
+    assert.equal(f.calls.cleanup.length, 3)
+  }
+})
+
+test('initialization failure carries its unfinished cleanup handle for the manager to retain', async () => {
+  let attempts = 0
+  const f = cleanupSessionFixture({
+    createPage: async () => {
+      throw Error('page initialization failed')
+    },
+    closeBrowser: async () => {
+      if (++attempts === 1) throw Error('exit failed')
+    },
+  })
+  let failure
+  try {
+    await f.open()
+  } catch (error) {
+    failure = error
+  }
+  assert.equal(failure.code, 'browser_close_failed')
+  assert.match(failure.startupError.message, /page initialization failed/)
+  assert.equal(typeof failure.pendingSession.close, 'function')
+  await failure.pendingSession.close()
+  assert.equal(f.calls.browser, 2)
+  assert.equal(f.calls.relay, 1)
+  assert.equal(f.calls.cleanup.length, 2)
+})
+
+test('non-dedicated runtime reports temporary paths without treating reporting as a close failure', async () => {
+  const f = cleanupSessionFixture({
+    cleanup: ({ paths }) =>
+      paths
+        ? {
+            removed: 0,
+            reclaimed_bytes: 0,
+            failed: [],
+            skipped: [{ name: 'playwright-artifacts-abcdef', reason: 'reported_only' }],
+            warning: null,
+          }
+        : undefined,
+  })
+  f.temporary.enabled = false
+  const session = await f.open()
+  await session.close()
+  assert.equal(f.calls.browser, 1)
+  assert.equal(f.calls.relay, 1)
+})

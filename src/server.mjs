@@ -54,6 +54,7 @@ import { OpenaiApiCreditsService } from './lib/oauth/openai-api-credits.mjs'
 import { OpenaiApiManager } from './lib/openai-api/manager.mjs'
 import { SlotBrowserRepo } from './lib/db/repos/slot-browser-repo.mjs'
 import { SlotBrowserManager } from './lib/browser/slot-browser-manager.mjs'
+import { createBrowserTempCleanup } from './lib/browser/temp-cleanup.mjs'
 import { CodexBrowserLoginService } from './lib/oauth/codex-browser-login.mjs'
 import { commitImportedCodexVm } from './lib/admin/panel-routes.mjs'
 import { resolveInferenceBackend } from './lib/pool/api-protocol.mjs'
@@ -328,6 +329,10 @@ const slotAccountIdentity = (id) => {
   } catch {
     return {}
   }
+}
+const browserTempReport = await createBrowserTempCleanup().cleanup()
+if (browserTempReport.removed || browserTempReport.skipped.length || browserTempReport.failed.length) {
+  console[browserTempReport.warning ? 'warn' : 'info']('[browser-temp-cleanup]', JSON.stringify(browserTempReport))
 }
 const slotBrowserManager = new SlotBrowserManager({
   cfg,
@@ -1333,11 +1338,18 @@ async function shutdown(signal) {
   try {
     usageProbeMonitor?.stop?.()
   } catch {}
-  try {
-    await codexBrowserLogin.stop()
-    await slotBrowserManager.stop()
-    await openaiApiManager.stop()
-  } catch {}
+  const browserStops = await Promise.allSettled([
+    codexBrowserLogin.stop(),
+    slotBrowserManager.stop(),
+    openaiApiManager.stop(),
+  ])
+  for (const [index, result] of browserStops.entries()) {
+    if (result.status === 'rejected')
+      console.warn('[shutdown] browser service cleanup failed', {
+        service: ['oauth', 'browser', 'openai-api'][index],
+        code: result.reason?.code || 'browser_cleanup_failed',
+      })
+  }
   try {
     catalogMonitor?.stop?.()
   } catch {}
@@ -1360,7 +1372,7 @@ async function shutdown(signal) {
   try {
     closeDatabase()
   } catch {}
-  process.exit(0)
+  process.exit(browserStops.some((result) => result.status === 'rejected') ? 1 : 0)
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 process.on('SIGINT', () => shutdown('SIGINT'))

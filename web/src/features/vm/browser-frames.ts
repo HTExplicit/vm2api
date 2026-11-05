@@ -135,6 +135,8 @@ export function browserStatusMessage(
       '密钥尚未保存，请保留当前窗口并点“重试保存”，无需重新创建密钥。',
     api_ready: '账号 API 配置完成，凭据已保存。',
     closed: '浏览器已关闭，可以重新连接。',
+    closing: '正在关闭浏览器并清理临时文件…',
+    close_failed: '浏览器清理未完成，请重试关闭。',
   }
   return (
     labels[status] ||

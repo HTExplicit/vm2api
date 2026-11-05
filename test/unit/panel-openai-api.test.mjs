@@ -751,6 +751,7 @@ test('slot browser routes dispatch administrator login, immediate tickets and or
   assert.equal(opened.status, 200)
   assert.deepEqual(opened.body.data, state)
   assert.deepEqual(steps, [
+    ['state', 'vm-api'],
     ['api-cancel', 'vm-api', { closeBrowser: false }],
     ['oauth-start', 'vm-api'],
   ])
@@ -804,12 +805,97 @@ test('slot Platform browser cancels OAuth first and continues claimed account se
     assert.equal(out.status, 200)
     assert.deepEqual(out.body.data, state)
     assert.deepEqual(steps, [
+      ['state', 'vm-api'],
       ['oauth-cancel', 'vm-api'],
       ['view', 'vm-api'],
       ['setup', 'vm-api'],
       ['state', 'vm-api'],
     ])
   }
+})
+
+test('browser open preserves failed close ownership and close returns failures or saved warnings', async (t) => {
+  const root = fixture(t)
+  for (const status of ['closing', 'close_failed']) {
+    const state = { vm_id: 'vm-api', active: true, status, message: '浏览器清理尚未完成' }
+    for (const purpose of ['oauth', 'platform']) {
+      const out = await handler(root, {
+        body: { purpose },
+        slotBrowserManager: { state: () => state },
+        manager: {
+          cancel() {
+            assert.fail('cannot cancel or start a second browser flow')
+          },
+        },
+        codexBrowserLogin: {
+          start() {
+            assert.fail('cannot start OAuth before cleanup')
+          },
+        },
+      })('POST', '/api/panel/vms/vm-api/browser/open')
+      assert.equal(out.status, 200)
+      assert.deepEqual(out.body.data, state)
+    }
+  }
+  const failed = await handler(root, {
+    codexBrowserLogin: { async cancel() {} },
+    manager: { async cancel() {} },
+    slotBrowserManager: {
+      async close() {
+        throw Object.assign(new Error('浏览器临时文件清理失败'), { code: 'browser_temp_cleanup_failed', status: 502 })
+      },
+      state() {
+        assert.fail('close failure must not return a successful closed view')
+      },
+    },
+  })('POST', '/api/panel/vms/vm-api/browser/close')
+  assert.equal(failed.status, 502)
+  assert.equal(failed.body.error.code, 'browser_temp_cleanup_failed')
+  const closed = { vm_id: 'vm-api', active: false, status: 'closed', warning: '已关闭，但会话保存失败' }
+  const warned = await handler(root, {
+    codexBrowserLogin: { async cancel() {} },
+    manager: { async cancel() {} },
+    slotBrowserManager: { async close() {}, state: () => closed },
+  })('POST', '/api/panel/vms/vm-api/browser/close')
+  assert.equal(warned.status, 200)
+  assert.deepEqual(warned.body.data, closed)
+})
+
+test('deleting a slot stops before identity and key cleanup when browser close fails', async (t) => {
+  const root = fixture(t)
+  const steps = []
+  const out = await handler(root, {
+    codexBrowserLogin: {
+      async cancel() {
+        steps.push('cancel-oauth')
+      },
+    },
+    manager: {
+      async cancel() {
+        steps.push('cancel-api')
+      },
+    },
+    slotBrowserManager: {
+      async close() {
+        throw Object.assign(new Error('浏览器尚未退出'), { code: 'browser_close_failed' })
+      },
+    },
+    openaiApiRepo: {
+      cleanupForVm() {
+        assert.fail('account key must remain bound')
+      },
+    },
+    slotBrowserRepo: {
+      remove() {
+        assert.fail('fingerprint and session must remain')
+      },
+    },
+  })('DELETE', '/api/panel/vms/vm-api')
+  assert.equal(out.status, 500)
+  assert.equal(out.body.error.code, 'browser_close_failed')
+  assert.deepEqual(steps, ['cancel-oauth', 'cancel-api'])
+  assert.ok(fs.existsSync(path.join(root, 'vms', 'vm-api.json')))
+  assert.ok(fs.existsSync(path.join(root, 'vms', 'vm-api')))
 })
 
 test('unlinked slot opens Platform in the same retained browser without submitting a claim', async (t) => {

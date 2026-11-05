@@ -102,6 +102,7 @@ jobs:
             test/unit/slot-browser-repo.test.mjs \
             test/unit/slot-browser-manager.test.mjs \
             test/unit/browser-stream.test.mjs \
+            test/unit/browser-temp-cleanup.test.mjs \
             test/unit/codex-browser-login.test.mjs \
             test/unit/slot-cleanup.test.mjs \
             test/unit/openai-platform-adapter.test.mjs \
@@ -184,6 +185,8 @@ jobs:
         run: node scripts/smoke-platform-retry-ui.mjs
       - name: Account API key management UI
         run: node scripts/smoke-openai-apikey-ui.mjs
+      - name: Browser close retry UI
+        run: node scripts/smoke-browser-close-ui.mjs
 
   browser-image:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
