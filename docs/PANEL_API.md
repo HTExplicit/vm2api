@@ -403,10 +403,16 @@ attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终
 |------|------|
 | `cache_read_tokens` / `cache_creation_tokens` | 提示缓存读 / 写 |
 | `cache_creation_5m_tokens` / `cache_creation_1h_tokens` | TTL 细分（无细分归 5m） |
-| `requested_model` / `upstream_model` / `model_mismatch` | 三态；null = 上游未声明 |
+| `requested_model` / `upstream_model` / `model_mismatch` | 保留原口径；`upstream_model` 含历史发送/响应混合值，仍用于原有计价，不能当作独立的上游声明 |
+| `sent_model` | 实际发送的模型；未发送或历史未采集为 null |
+| `upstream_response_model` | 协议转换前，原始上游响应明确声明的模型；未声明为 null，不用发送模型或旧字段回填 |
 | `first_token_ms` | 首个业务事件（worker 回传） |
 | `stop_reason` | 流式来自 `message_delta` |
 | 费用列 | 官方价 input/output/cache 5m·1h·read；上海日切 |
+
+面板 `/usage-logs` DTO 新增 `sentModel`，`actualResponseModel` 仅映射 `upstream_response_model`；界面将 null 显示为“未知”。两字段仅用于日志，不改变路由、客户端输出、计价或扣减。历史记录不回填。
+
+`response_model_mismatch=1` 筛选发送模型与上游返回模型均已知且名称不同的记录，列表和导出使用同一条件；旧 `model_mismatch=1` 保持原义。CSV/JSONL 在既有列末尾追加 `requested_model`、`sent_model`、`upstream_response_model`，未知分别为空单元格/null。
 
 `GET /request-logs/stats` 另返回 `window`：SLA、错误率、429/503/529、QPS/TPS、耗时与 TTFT 分位、按模型 `avg_first_token_ms`、`error_collection`。`GET /dashboard.ops` 默认近 1 小时同一形状。
 

@@ -185,7 +185,7 @@ function costColumnsForLog(usage, model, extra = {}) {
   }
 }
 
-/** Tri-state model mismatch: null = upstream did not declare a model. */
+/** Legacy request/upstream comparison; independent of the observed response model. */
 function modelMismatch(requested, upstream) {
   if (!requested || !upstream) return null
   const norm = (m) =>
@@ -574,6 +574,8 @@ export class RequestLogStore {
       web_search_requests: webSearch,
       requested_model: extra.requested_model || extra.model || null,
       upstream_model: extra.upstream_model || null,
+      sent_model: extra.sent_model || null,
+      upstream_response_model: extra.upstream_response_model || null,
       model_mismatch: modelMismatch(extra.requested_model || extra.model, extra.upstream_model),
       first_token_ms: extra.first_token_ms ?? null,
       first_byte_ms: extra.first_byte_ms ?? null,
@@ -859,6 +861,9 @@ const EXPORT_COLUMNS = [
   'total_cost',
   'api_key_id',
   'api_key_kind',
+  'requested_model',
+  'sent_model',
+  'upstream_response_model',
 ]
 
 function csvCell(v) {

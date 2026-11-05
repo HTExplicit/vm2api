@@ -8,7 +8,11 @@ export type RequestLogItem = {
   model?: string
   requested_model?: string
   upstream_model?: string
-  /** 三态：0 | 1 | null（数字，不是 boolean）。null = 上游未声明模型。 */
+  /** 新记录的实际发送模型；历史未记录时为 null。 */
+  sent_model?: string | null
+  /** 原始上游响应声明的模型；未返回或历史未记录时为 null。 */
+  upstream_response_model?: string | null
+  /** 旧 requested_model / upstream_model 比较结果，保留历史口径。 */
   model_mismatch?: number | boolean | null
   input_tokens?: number
   output_tokens?: number

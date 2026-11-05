@@ -198,7 +198,8 @@ export function toUsageLogRow(row, names, chain = []) {
     vmName: row.vm_id ? (names.vms.get(row.vm_id) ?? row.vm_id) : null,
     model: row.model ?? null,
     originalModel: row.requested_model ?? null,
-    actualResponseModel: row.upstream_model ?? null,
+    sentModel: row.sent_model ?? null,
+    actualResponseModel: row.upstream_response_model ?? null,
     modelMismatch: row.model_mismatch == null ? null : Number(row.model_mismatch),
     endpoint: row.path ?? null,
     protocol: row.protocol ?? null,
@@ -369,6 +370,9 @@ function buildFilter(filters, defaultMuted) {
     where.push('(status IS NULL OR status < 200 OR status >= 300)')
   }
   if (filters.model_mismatch) where.push('model_mismatch = 1')
+  if (filters.response_model_mismatch) {
+    where.push("sent_model <> '' AND upstream_response_model <> '' AND sent_model <> upstream_response_model")
+  }
   const minAttempts = clampInt(filters.min_attempt_count, 0, 1000, null)
   if (minAttempts != null) {
     where.push('IFNULL(attempt_count, 0) >= ?')

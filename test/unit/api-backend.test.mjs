@@ -2239,7 +2239,7 @@ test('account API native Responses streams original tool events and emits DONE o
   assert.equal(run.billed.length, 1)
 })
 
-async function runNativeResponsesFixture(events, { clientStream = false, streamError = false } = {}) {
+async function runNativeResponsesFixture(events, { clientStream = false, streamError = false, native = true, onModels } = {}) {
   const nativeResponsesBody = nativeToolsRequest()
   const sent = []
   let wire = ''
@@ -2258,9 +2258,11 @@ async function runNativeResponsesFixture(events, { clientStream = false, streamE
     cfg: {},
     protocol: 'openai.responses',
     inbound: nativeResponsesBody,
-    nativeResponsesBody,
+    nativeResponsesBody: native ? nativeResponsesBody : null,
+    convertedBody: native ? null : { model: nativeResponsesBody.model, messages: [{ role: 'user', content: 'hi' }] },
     clientStream,
     deliveryMode: 'realtime',
+    onModels,
     converters: {
       writeSSEHeaders() {
         res.headersSent = true
@@ -2308,6 +2310,153 @@ test('native Responses API replaces only endpoint model and transport stream mod
   assert.equal(run.sent[0].proxyUrl, 'socks5h://bound-current:1080')
   assert.deepEqual(run.result.nativeResponse, response)
   assert.equal(run.result.accountId, 'api-key-a')
+  assert.equal(run.result.model, 'official-upstream-model')
+  assert.equal(run.result.sentModel, 'official-upstream-model')
+  assert.equal(run.result.upstreamResponseModel, response.model)
+})
+
+for (const clientStream of [false, true]) {
+  test(`API Responses records only declared response models for ${clientStream ? 'streaming' : 'JSON'} clients`, async () => {
+    const response = nativeToolResponse()
+    delete response.model
+    const models = []
+    const run = await runNativeResponsesFixture(
+      [
+        { type: 'response.created', response: { id: response.id, model: 'reported-at-start' } },
+        { type: 'response.in_progress', response: { model: 'reported-later' } },
+        { type: 'response.completed', response },
+      ],
+      { clientStream, onModels: (value) => models.push(value) },
+    )
+    assert.equal(run.result.ok, true)
+    assert.equal(run.result.sentModel, 'official-upstream-model')
+    assert.equal(run.result.model, 'official-upstream-model')
+    assert.equal(run.result.upstreamResponseModel, 'reported-later')
+    assert.deepEqual(models, [
+      { sentModel: 'official-upstream-model', upstreamResponseModel: null },
+      { sentModel: 'official-upstream-model', upstreamResponseModel: 'reported-at-start' },
+      { sentModel: 'official-upstream-model', upstreamResponseModel: 'reported-later' },
+    ])
+
+    const missing = await runNativeResponsesFixture([{ type: 'response.completed', response }], { clientStream })
+    assert.equal(missing.result.ok, true)
+    assert.equal(missing.result.sentModel, 'official-upstream-model')
+    assert.equal(missing.result.upstreamResponseModel, null)
+  })
+
+  test(`API Anthropic records sent and declared models separately for ${clientStream ? 'streaming' : 'JSON'} clients`, async () => {
+    for (const responseModel of ['declared-claude-model', null]) {
+      const events = [
+        {
+          type: 'message_start',
+          message: {
+            type: 'message',
+            role: 'assistant',
+            content: [],
+            ...(responseModel ? { model: responseModel } : {}),
+          },
+        },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+        { type: 'message_stop' },
+      ]
+      let sentModel
+      const models = []
+      const result = await runApiInference({
+        cfg: {},
+        res: { headersSent: false, write() {} },
+        protocol: 'anthropic.messages',
+        inbound: { model: 'caller-alias' },
+        convertedBody: { model: 'caller-alias', messages: [{ role: 'user', content: 'hi' }] },
+        clientStream,
+        onModels: (value) => models.push(value),
+        converters: { createClaudeMessageAssembler, applyClaudeSSELineToMessage, writeSSEHeaders() {} },
+        scheduler: {
+          pick: () => ({
+            ok: true,
+            endpoint: { id: 'ep', kind: 'claude', protocol: 'anthropic', base_url: 'https://fixture.invalid' },
+            key: { id: 'key', api_key: 'fixture' },
+            upstream_model: 'sent-claude-model',
+          }),
+        },
+        forwardImpl: async ({ body }) => {
+          sentModel = body.model
+          return {
+            statusCode: 200,
+            headers: { 'x-model': 'header-model-must-not-be-used' },
+            async *[Symbol.asyncIterator]() {
+              for (const event of events) yield Buffer.from('data: ' + JSON.stringify(event) + '\n\n')
+            },
+          }
+        },
+      })
+      assert.equal(result.ok, true)
+      assert.equal(sentModel, 'sent-claude-model')
+      assert.equal(result.sentModel, sentModel)
+      assert.equal(result.model, 'sent-claude-model')
+      assert.equal(result.upstreamResponseModel, responseModel)
+      assert.deepEqual(models[0], { sentModel: 'sent-claude-model', upstreamResponseModel: null })
+      assert.deepEqual(models.at(-1), { sentModel: 'sent-claude-model', upstreamResponseModel: responseModel })
+    }
+  })
+}
+
+test('account API compatible Responses keeps its stream error while reporting the declared model', async () => {
+  const models = []
+  const run = await runNativeResponsesFixture(
+    [{ type: 'response.created', response: { model: 'reported-before-error' } }],
+    { native: false, streamError: true, onModels: (value) => models.push(value) },
+  )
+  assert.equal(run.result.ok, false)
+  assert.equal(run.result.status, 502)
+  assert.equal(run.result.body.error.message, 'fixture stream disconnected')
+  assert.equal(run.result.sentModel, 'official-upstream-model')
+  assert.equal(run.result.upstreamResponseModel, 'reported-before-error')
+  assert.deepEqual(models, [
+    { sentModel: 'official-upstream-model', upstreamResponseModel: null },
+    { sentModel: 'official-upstream-model', upstreamResponseModel: 'reported-before-error' },
+  ])
+})
+
+test('API HTTP errors retain declared response models without changing error mapping', async () => {
+  for (const declaration of [{ model: 'reported-error-model' }, { response: { model: 'reported-error-model' } }, {}]) {
+    const payload = {
+      ...declaration,
+      error: { code: 'bad_request', type: 'invalid_request_error', message: 'original upstream message' },
+    }
+    const models = []
+    const result = await runApiInference({
+      cfg: {},
+      protocol: 'openai.responses',
+      nativeResponsesBody: { model: 'caller-model', input: [] },
+      onModels: (value) => models.push(value),
+      scheduler: {
+        pick: () => ({
+          ok: true,
+          endpoint: { id: 'ep', kind: 'openai', protocol: 'openai', base_url: 'https://fixture.invalid' },
+          key: { id: 'key', api_key: 'fixture' },
+          upstream_model: 'sent-model',
+        }),
+      },
+      forwardImpl: async () => ({
+        statusCode: 400,
+        headers: { 'x-model': 'header-model-must-not-be-used' },
+        async *[Symbol.asyncIterator]() {
+          yield Buffer.from(JSON.stringify(payload))
+        },
+      }),
+    })
+    const expected = declaration.model || declaration.response?.model || null
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 400)
+    assert.equal(result.model, 'sent-model')
+    assert.equal(result.sentModel, 'sent-model')
+    assert.equal(result.upstreamResponseModel, expected)
+    assert.deepEqual(models.at(-1), { sentModel: 'sent-model', upstreamResponseModel: expected })
+    assert.deepEqual(result.body, {
+      type: 'error',
+      error: { upstream_code: 'bad_request', code: 'bad_request', type: 'api_error', message: payload.error.message },
+    })
+  }
 })
 
 test('native Responses API repairs a missing completed-output tool with its namespace and freeform input', async () => {
@@ -2377,14 +2526,19 @@ for (const clientStream of [false, true]) {
   })
 
   test(`native Responses API reports interrupted ${clientStream ? 'streaming' : 'JSON'} output without success`, async () => {
-    const run = await runNativeResponsesFixture([{ type: 'response.output_text.delta', delta: 'partial' }], {
-      clientStream,
-      streamError: true,
-    })
+    const run = await runNativeResponsesFixture(
+      [
+        { type: 'response.created', response: { model: 'reported-before-interruption' } },
+        { type: 'response.output_text.delta', delta: 'partial' },
+      ],
+      { clientStream, streamError: true },
+    )
     assert.equal(run.result.ok, false)
     assert.equal(run.result.status, 502)
     assert.equal(run.result.body.error.code, 'upstream_stream_interrupted')
     assert.equal(run.result.terminalState, 'incomplete')
+    assert.equal(run.result.upstreamResponseModel, 'reported-before-interruption')
+    assert.equal(run.result.sentModel, 'official-upstream-model')
     const beforeOutput = await runNativeResponsesFixture(
       [{ type: 'response.created', response: { id: 'resp_interrupted', status: 'in_progress', output: [] } }],
       { clientStream, streamError: true },
@@ -2393,5 +2547,6 @@ for (const clientStream of [false, true]) {
     assert.equal(beforeOutput.result.status, 502)
     assert.equal(beforeOutput.result.committed, false)
     assert.equal(beforeOutput.headersSent, false)
+    assert.equal(beforeOutput.result.upstreamResponseModel, null)
   })
 }

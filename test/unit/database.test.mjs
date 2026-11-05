@@ -153,6 +153,41 @@ test('pre-005 database upgrades in place and keeps old rows readable', () => {
   )
 })
 
+test('migration 053 adds unknown observed models without rewriting historical model or billing fields', () => {
+  const migrations = path.resolve('src/lib/db/migrations')
+  const oldDir = path.join(tmp, 'pre-053')
+  fs.mkdirSync(oldDir)
+  for (const file of fs.readdirSync(migrations)) {
+    if (file < '053') fs.copyFileSync(path.join(migrations, file), path.join(oldDir, file))
+  }
+  const db = new DatabaseSync(path.join(tmp, 'models053.db'))
+  try {
+    applyMigrations(db, { migrationsDir: oldDir })
+    db.exec(`
+      INSERT INTO usage_logs (
+        id, request_id, created_at, model, requested_model, upstream_model, model_mismatch,
+        input_tokens, output_tokens, pricing_model, input_cost, output_cost, total_cost, actual_cost,
+        source_account_id, source_vm_id, source_email
+      ) VALUES (
+        'log-legacy', 'req-legacy', '2026-11-01T00:00:00Z', 'request-A', 'request-A', 'legacy-B', 1,
+        10, 5, 'legacy-price', 0.001, 0.002, 0.003, 0.006,
+        'source-account', 'source-vm', 'source@example.test'
+      );
+    `)
+    const before = { ...db.prepare('SELECT * FROM usage_logs WHERE id = ?').get('log-legacy') }
+    applyMigrations(db, { migrationsDir: migrations })
+    const { sent_model, upstream_response_model, ...after } = db
+      .prepare('SELECT * FROM usage_logs WHERE id = ?')
+      .get('log-legacy')
+    assert.equal(sent_model, null)
+    assert.equal(upstream_response_model, null)
+    assert.deepEqual(after, before)
+    assert.deepEqual(applyMigrations(db, { migrationsDir: migrations }), [])
+  } finally {
+    db.close()
+  }
+})
+
 test('openDatabase is idempotent singleton; getDb throws when closed', () => {
   const a = openDatabase({ dataDir: tmp })
   const b = openDatabase({ dataDir: path.join(tmp, 'other') })

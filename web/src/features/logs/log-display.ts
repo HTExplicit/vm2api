@@ -179,37 +179,30 @@ export function multiplierBadgeClass(multiplier: number): string {
 // ---------- 模型 ----------
 
 export type ModelAuditDisplay = {
-  /** 列表主显示 / 计费模型。 */
-  primaryBillingModel: string | null
+  /** 列表主显示，沿用既有日志模型。 */
+  primaryModel: string | null
   hasRedirect: boolean
   hasActualMismatch: boolean
-  secondaryActualModel: string | null
-  effectiveRequestModel: string | null
 }
 
-/**
- * hub `resolveModelAuditDisplay`，计费口径固定为「重定向后」：vm2api 的
- * `model` 就是计价用的生效模型（`requested_model` 是客户端原值）。
- */
+/** 网关重定向与上游响应差异分开判断；未记录发送或回报时不推断。 */
 export function resolveModelAuditDisplay(row: {
   originalModel: string | null
   model: string | null
+  sentModel: string | null
   actualResponseModel: string | null
 }): ModelAuditDisplay {
-  const effectiveRequestModel = row.model ?? row.originalModel
   const hasActualMismatch = Boolean(
+    row.sentModel &&
     row.actualResponseModel &&
-    effectiveRequestModel &&
-    row.actualResponseModel !== effectiveRequestModel
+    row.actualResponseModel !== row.sentModel
   )
   return {
-    primaryBillingModel: effectiveRequestModel,
+    primaryModel: row.model ?? row.originalModel,
     hasRedirect: Boolean(
       row.originalModel && row.model && row.originalModel !== row.model
     ),
     hasActualMismatch,
-    secondaryActualModel: hasActualMismatch ? row.actualResponseModel : null,
-    effectiveRequestModel,
   }
 }
 

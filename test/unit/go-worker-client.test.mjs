@@ -633,9 +633,86 @@ unixTest('streamGoWorker accepts message_stop with usage trailers', async () => 
     assert.equal(result.terminalState, 'verified')
     assert.equal(result.usage.input_tokens, 12)
     assert.equal(result.model, 'claude-haiku-4-5-20251001')
+    assert.equal(result.upstreamResponseModel, 'claude-haiku-4-5-20251001')
     assert.equal(result.stopReason, 'end_turn')
     assert.equal(result.ttftMs, null)
     assert.equal(result.firstTokenAt, null)
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('streamGoWorker keeps raw response models separate from headers and independent between calls', async () => {
+  let call = 0
+  const fx = await fixture((req, res) => {
+    call += 1
+    res.setHeader('content-type', 'text/event-stream')
+    res.setHeader('x-model', 'legacy-header-model')
+    const message = { type: 'message', role: 'assistant', content: [] }
+    if (call === 1) message.model = 'raw-response-model'
+    writeData(res, { type: 'message_start', message })
+    writeData(res, { type: 'message_delta', delta: { stop_reason: 'end_turn' } })
+    writeData(res, { type: 'message_stop' })
+    res.end()
+  })
+  try {
+    for (const expected of ['raw-response-model', null]) {
+      const result = await streamGoWorker({
+        exec: fx.exec,
+        body: { model: 'sent-model', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+      })
+      assert.equal(result.ok, true)
+      assert.equal(result.model, 'legacy-header-model')
+      assert.equal(result.upstreamResponseModel, expected)
+    }
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('streamGoWorker retains a declared model after the upstream stream disconnects', async () => {
+  let upstream
+  const fx = await fixture((req, res) => {
+    upstream = res
+    res.setHeader('content-type', 'text/event-stream')
+    writeData(res, { type: 'message_start', message: { model: 'reported-before-disconnect', content: [] } })
+    writeData(res, { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } })
+  })
+  try {
+    const result = await streamGoWorker({
+      exec: fx.exec,
+      body: { model: 'sent-model', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+      onEvent: (line) => {
+        if (line.includes('partial')) upstream.destroy()
+      },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.transportError, true)
+    assert.equal(result.upstreamResponseModel, 'reported-before-disconnect')
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('streamGoWorker retains models declared in HTTP error JSON without changing status or body', async () => {
+  let payload
+  const fx = await fixture((req, res) => {
+    req.resume()
+    res.writeHead(400, { 'content-type': 'application/json', 'x-model': 'header-model-must-not-be-used' })
+    res.end(JSON.stringify(payload))
+  })
+  try {
+    for (const declaration of [{ model: 'reported-error-model' }, { response: { model: 'reported-error-model' } }, {}]) {
+      payload = {
+        ...declaration,
+        error: { type: 'invalid_request_error', code: 'bad_request', message: 'original upstream message' },
+      }
+      const result = await streamGoWorker({ exec: fx.exec, envelope: { body: { model: 'sent-model' } } })
+      assert.equal(result.ok, false)
+      assert.equal(result.status, 400)
+      assert.equal(result.upstreamResponseModel, declaration.model || declaration.response?.model || null)
+      assert.deepEqual(result.body, payload)
+    }
   } finally {
     await fx.close()
   }

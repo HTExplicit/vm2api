@@ -77,7 +77,7 @@ export function ActiveFiltersDisplay({
   if (filters.mismatch)
     chips.push({
       key: 'mismatch',
-      label: '计费/实际模型不一致',
+      label: '发送/上游返回名称不同',
       value: '已开启',
     })
   if (filters.endpoint)

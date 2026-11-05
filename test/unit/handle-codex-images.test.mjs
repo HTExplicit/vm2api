@@ -85,7 +85,7 @@ test('generations posts the JSON body to the Codex Images endpoint as the slot',
   const calls = []
   const fetchImpl = async (url, init) => {
     calls.push({ url, init })
-    return upstream(200, { created: 1, data: [{ b64_json: 'aGk=' }], usage: USAGE })
+    return upstream(200, { model: 'image-returned', created: 1, data: [{ b64_json: 'aGk=' }], usage: USAGE })
   }
   const { res, logBag, stats } = await images({
     headers: {
@@ -112,6 +112,9 @@ test('generations posts the JSON body to the Codex Images endpoint as the slot',
   assert.equal(logBag.vm_id, 'vm-a')
   assert.equal(logBag.final_state, 'verified')
   assert.equal(logBag.image_model, 'gpt-image-2.5-flare')
+  assert.equal(logBag.sent_model, JSON.parse(calls[0].init.body).model)
+  assert.equal(logBag.upstream_response_model, 'image-returned')
+  assert.equal(res.body.model, 'image-returned')
   assert.deepEqual(logBag.image_usage, USAGE)
   assert.equal(stats.by_route['openai.images'], 1)
 })

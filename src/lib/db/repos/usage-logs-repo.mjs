@@ -98,6 +98,8 @@ const SUMMARY_COLUMNS = [
   'cache_creation_1h_tokens',
   'requested_model',
   'upstream_model',
+  'sent_model',
+  'upstream_response_model',
   'model_mismatch',
   'first_token_ms',
   'first_byte_ms',

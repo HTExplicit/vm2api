@@ -70,6 +70,8 @@ test('normal mode writes jsonl without body', () => {
   const listed = store.listNormal({ limit: 5 })
   assert.equal(listed.length, 1)
   assert.equal(listed[0].request_id, ctx.request_id)
+  assert.equal(listed[0].sent_model, null)
+  assert.equal(listed[0].upstream_response_model, null)
   // no debug file
   assert.equal(store.listDebug({ limit: 5 }).length, 0)
 })
@@ -109,7 +111,7 @@ test('summary persists protocol usage detail (cache/model/ttft/stop_reason)', ()
     { method: 'POST', headers: {}, socket: {} },
     { protocol: 'anthropic.messages', pathName: '/v1/messages' },
   )
-  const sum = store.finish(ctx, {
+  const extra = {
     status: 200,
     model: 'sonnet',
     requested_model: 'sonnet',
@@ -123,6 +125,11 @@ test('summary persists protocol usage detail (cache/model/ttft/stop_reason)', ()
       cache_creation_input_tokens: 7,
       cache_creation: { ephemeral_5m_input_tokens: 4, ephemeral_1h_input_tokens: 3 },
     },
+  }
+  const sum = store.finish(ctx, {
+    ...extra,
+    sent_model: 'sent-model-B',
+    upstream_response_model: 'returned-model-C',
   })
   assert.equal(sum.cache_read_tokens, 3)
   assert.equal(sum.cache_creation_tokens, 7)
@@ -130,6 +137,8 @@ test('summary persists protocol usage detail (cache/model/ttft/stop_reason)', ()
   assert.equal(sum.cache_creation_1h_tokens, 3)
   assert.equal(sum.requested_model, 'sonnet')
   assert.equal(sum.upstream_model, 'claude-sonnet-5')
+  assert.equal(sum.sent_model, 'sent-model-B')
+  assert.equal(sum.upstream_response_model, 'returned-model-C')
   assert.equal(sum.model_mismatch, 1)
   assert.equal(sum.first_token_ms, 42)
   assert.equal(sum.stop_reason, 'end_turn')
@@ -139,8 +148,32 @@ test('summary persists protocol usage detail (cache/model/ttft/stop_reason)', ()
   const row = store.queryNormal({ limit: 1 }).items[0]
   assert.equal(row.cache_creation_5m_tokens, 4)
   assert.equal(row.upstream_model, 'claude-sonnet-5')
+  assert.equal(row.sent_model, 'sent-model-B')
+  assert.equal(row.upstream_response_model, 'returned-model-C')
   assert.equal(row.stop_reason, 'end_turn')
   assert.equal(row.total_cost, 0.0000926)
+  assert.equal(row.actual_cost, 0.0000926)
+  const baseline = store.finish(
+    store.start(
+      { method: 'POST', headers: {}, socket: {} },
+      { protocol: 'anthropic.messages', pathName: '/v1/messages' },
+    ),
+    extra,
+  )
+  for (const field of [
+    'input_cost',
+    'output_cost',
+    'cache_read_cost',
+    'cache_creation_cost',
+    'total_cost',
+    'actual_cost',
+    'pricing_model',
+    'price_source',
+    'price_version',
+    'model_mismatch',
+  ]) {
+    assert.equal(sum[field], baseline[field], field)
+  }
 })
 
 test('OpenAI log totals count cached input once and distinguish unknown from zero cache writes', (t) => {
@@ -1100,11 +1133,35 @@ test('exportRows + csv/jsonl keep presented key and ip', () => {
   assert.equal(total, 1)
   assert.equal(items[0].ip, '198.51.100.4')
   const csv = logsToCsv(items)
+  assert.match(csv.split('\n')[0], /,requested_model,sent_model,upstream_response_model$/)
+  assert.ok(csv.trimEnd().split('\n')[1].endsWith(',,,'))
   assert.match(csv, /api_key_presented/)
   assert.match(csv, /sk-export-plain/)
   assert.match(csv, /198\.51\.100\.4/)
   const jsonl = logsToJsonl(items)
   assert.match(jsonl, /sk-export-plain/)
+  const [exported] = jsonl.trim().split('\n').map(JSON.parse)
+  assert.equal(exported.requested_model, null)
+  assert.equal(exported.sent_model, null)
+  assert.equal(exported.upstream_response_model, null)
+})
+
+test('csv/jsonl exports keep requested, sent and upstream-returned models separate', () => {
+  const row = {
+    model: 'request-A',
+    requested_model: 'request-A',
+    upstream_model: 'legacy-billing-model',
+    sent_model: 'sent-B',
+    upstream_response_model: 'returned-C',
+  }
+  const csv = logsToCsv([row]).trimEnd().split('\n')
+  assert.ok(csv[0].endsWith(',requested_model,sent_model,upstream_response_model'))
+  assert.ok(csv[1].endsWith(',request-A,sent-B,returned-C'))
+  const exported = JSON.parse(logsToJsonl([row]))
+  assert.equal(exported.model, 'request-A')
+  assert.equal(exported.requested_model, 'request-A')
+  assert.equal(exported.sent_model, 'sent-B')
+  assert.equal(exported.upstream_response_model, 'returned-C')
 })
 
 test('finish persists caller and outbound sessions (capped) and only known reasoning efforts', () => {

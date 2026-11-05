@@ -269,6 +269,52 @@ test('filters: model/requested_model, status, attempts, session, debug, time, q'
   assert.deepEqual(ids({ start_time: rows[1].created_at, end_time: rows[3].created_at }), [rows[1].id, rows[2].id])
 })
 
+test('sent and upstream-returned models have independent DTO fields and mismatch filters', () => {
+  const db = freshDb()
+  try {
+    const [different, same, sentOnly, legacy, empty] = seed(db, [
+      {
+        model: 'request-A',
+        requested_model: 'request-A',
+        upstream_model: 'legacy-price-model',
+        sent_model: 'sent-B',
+        upstream_response_model: 'returned-C',
+      },
+      { requested_model: 'alias-A', sent_model: 'sent-B', upstream_response_model: 'sent-B', model_mismatch: 1 },
+      { sent_model: 'sent-B' },
+      { upstream_model: 'legacy-returned-model', model_mismatch: 1 },
+      { sent_model: 'sent-B', upstream_response_model: '' },
+    ])
+    const view = new UsageLogsView(db)
+    const logs = view.listBatch({}).logs
+    const row = (id) => logs.find((r) => r.id === id)
+    assert.equal(row(different.id).originalModel, 'request-A')
+    assert.equal(row(different.id).sentModel, 'sent-B')
+    assert.equal(row(different.id).actualResponseModel, 'returned-C')
+    assert.equal(row(same.id).actualResponseModel, 'sent-B')
+    assert.equal(row(sentOnly.id).actualResponseModel, null)
+    assert.equal(row(legacy.id).sentModel, null)
+    assert.equal(row(legacy.id).actualResponseModel, null)
+    assert.equal(row(empty.id).actualResponseModel, '')
+    const responseFilter = { response_model_mismatch: true }
+    assert.deepEqual(
+      view.listBatch(responseFilter).logs.map((r) => r.id),
+      [different.id],
+    )
+    assert.deepEqual(
+      view.exportRows(responseFilter).items.map((r) => r.id),
+      [different.id],
+    )
+    assert.equal(view.summary(responseFilter).totalRequests, 1)
+    assert.deepEqual(
+      view.listBatch({ model_mismatch: true }).logs.map((r) => r.id),
+      [legacy.id, same.id],
+    )
+  } finally {
+    db.close()
+  }
+})
+
 test('row badges: via only when non-default, context1m from long_context, fast/priority', () => {
   const db = freshDb()
   const [plain, special] = seed(db, [

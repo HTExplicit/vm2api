@@ -87,6 +87,12 @@ jobs:
             test/unit/fleet-services.test.mjs \
             test/unit/billing-aggregation.test.mjs \
             test/unit/usage-logs-repo.test.mjs \
+            test/unit/request-log.test.mjs \
+            test/unit/usage-logs-view.test.mjs \
+            test/unit/request-logs-export.test.mjs \
+            test/unit/database.test.mjs \
+            test/unit/go-worker-client.test.mjs \
+            test/unit/outbound-log-envelope.test.mjs \
             test/unit/panel-billing-lookup.test.mjs \
             test/unit/sqlite-pool.test.mjs \
             test/unit/write-behind.test.mjs \
@@ -178,6 +184,7 @@ jobs:
           pnpm exec vitest run src/features/vm/openai-platform-browser-dialog.test.tsx
           pnpm exec vitest run src/features/vm/codex-browser-finish.test.ts src/features/vm/codex-credential-browser-completion.test.tsx
           pnpm exec vitest run src/features/openai-apikey src/features/logs/account-api-logs.test.tsx src/components/layout/data/sidebar-data.test.ts
+          pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx
           pnpm exec vitest run src/features/cluster/model.test.ts src/features/cluster/connection-rows.test.ts
           pnpm build

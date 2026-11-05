@@ -408,6 +408,7 @@ function usageLogFilters(req, u) {
     status_code: get('status_code'),
     exclude_status_200: get('exclude_status_200') === '1',
     model_mismatch: get('model_mismatch') === '1',
+    response_model_mismatch: get('response_model_mismatch') === '1',
     min_attempt_count: get('min_attempt_count'),
     error_class: get('error_class'),
     exclude_error_class: get('exclude_error_class'),

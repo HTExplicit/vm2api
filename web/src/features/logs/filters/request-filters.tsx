@@ -80,7 +80,7 @@ export function RequestFilters({
       />
       <div className='space-y-2'>
         <Label htmlFor='actual-response-model-mismatch-filter'>
-          计费/实际模型不一致
+          发送/上游返回名称不同
         </Label>
         <div className='flex items-center justify-between gap-3 rounded-md border border-input bg-background px-3 py-2'>
           <Label
