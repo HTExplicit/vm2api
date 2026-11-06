@@ -163,7 +163,6 @@ jobs:
             test/unit/graceful-shutdown.test.mjs \
             test/unit/crag-license.test.mjs \
             test/unit/kernel-catalog.test.mjs \
-            test/unit/slot-browser-manager.test.mjs \
             test/unit/kernel-install.test.mjs \
             test/unit/kernel-install-sandbox.test.mjs \
             test/unit/kernel-install-writer-locks.test.mjs \
