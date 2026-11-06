@@ -1,4 +1,5 @@
 import { OFFICIAL_CLAUDE_CLI_UA } from '../identity/vm-identity.mjs'
+import { stripIllegalCacheControlFields } from '../protocol/cache-ttl.mjs'
 import { officialMessagesBody } from '../protocol/anthropic-messages.mjs'
 import { restoreToolNamesInSSELine } from '../protocol/anthropic-policy.mjs'
 import { prepareClassifierBody } from '../protocol/request-purpose.mjs'
@@ -532,7 +533,7 @@ async function runApiAttempt({
         stream: true,
         store: false,
       }
-    : { ...canonical, model: picked.upstream_model, stream: true }
+    : { ...stripIllegalCacheControlFields(canonical), model: picked.upstream_model, stream: true }
   if (isOpenAI && protocol === 'openai.chat') {
     for (const name of ['temperature', 'top_p', 'parallel_tool_calls']) {
       if (inbound?.[name] != null) body[name] = inbound[name]

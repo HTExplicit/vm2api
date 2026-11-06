@@ -78,9 +78,11 @@ test('account catalog and picker read policy changes live and preserve raw endpo
     ['gpt-a', 'friendly'],
   )
   assert.equal(scheduler.pick('old-model', Date.now(), scope).ok, false)
+  assert.equal(scheduler.pick('gpt-unknown', Date.now(), scope).code, 'model_not_found')
   assert.equal(raw.models[0].name, 'old-model')
   policy.models['gpt-a'].enabled = false
   assert.deepEqual(scheduler.catalog(scope).data, [])
+  assert.equal(scheduler.pick('gpt-a', Date.now(), scope).code, 'model_not_found')
   assert.equal(scheduler.pick('friendly', Date.now(), scope).ok, false)
 })
 

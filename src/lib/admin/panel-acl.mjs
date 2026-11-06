@@ -252,6 +252,14 @@ export function authorizePanelRoute(method, path, role) {
     return { ok: false, role: r, code: 'forbidden', message: '只有管理员可以管理账号 API' }
   }
 
+  if (/^\/api\/panel\/vms\/[^/]+\/migration(?:\/|$)/.test(p)) {
+    return { ok: false, role: r, code: 'forbidden', message: '只有管理员可以迁移槽位' }
+  }
+
+  // Kernel cache, license inventory and installation are operator-only, like /wrap-cli.
+  if (p === '/api/panel/kernels' || p.startsWith('/api/panel/kernels/')) {
+    return { ok: false, role: r, code: 'forbidden', message: '只有管理员可以管理内核' }
+  }
   if (p === '/api/panel/test-schedule/default' && m === 'PUT') {
     return { ok: false, role: r, code: 'forbidden', message: '当前权限无法执行此操作' }
   }

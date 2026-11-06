@@ -12,6 +12,7 @@ const stored = draftFromStored({
   base_url: 'https://relay.example.com',
   auth_scheme: 'authorization_bearer',
   api_key_entries: [{ id: 'ek_1', proxy_id: 'px_9' }],
+  models: [{ name: 'upstream-model', alias: 'operator-alias' }],
 })
 
 describe('anthropic console endpoint save', () => {
@@ -20,6 +21,8 @@ describe('anthropic console endpoint save', () => {
     expect(stored.keyId).toBe('ek_1')
     expect(stored.authScheme).toBe('authorization_bearer')
     expect(stored.riskReviewEnabled).toBe(false)
+    expect(stored.existingModels).toEqual(['upstream-model'])
+    expect(stored.fetchedModels).toBeUndefined()
   })
 
   it('saving an unchanged stored row never sends name, models or proxy', () => {

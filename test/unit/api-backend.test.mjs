@@ -225,7 +225,23 @@ async function runOfficialFullApiFixture({ input = {}, extraEvents = '' } = {}) 
   }
 }
 
-test('API backend applies the global official_full persona setting', () => runOfficialFullApiFixture())
+test('API backend applies the global official_full persona setting', async () => {
+  const { outbound } = await runOfficialFullApiFixture({
+    input: {
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral', ttl: '5m', scope: 'turn' } }],
+        },
+      ],
+    },
+  })
+  const control = outbound.messages
+    .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+    .find((block) => block.text === 'hello')?.cache_control
+  assert.equal(control?.scope, undefined)
+  assert.equal(control?.ttl, '5m')
+})
 
 test('Anthropic API direct restores a rewritten tool name in its assembled response', async () => {
   const events = [
@@ -1928,13 +1944,17 @@ test('an unknown account API model is rejected by its scoped API catalog without
   assert.equal(run.logs[0].via, 'api-kernel')
 })
 
-for (const [protocol, route, content] of [
-  ['openai.chat', '/v1/chat/completions', { messages: [{ role: 'user', content: 'Draw a cat.' }] }],
-  ['openai.responses', '/v1/responses', { input: 'Draw a cat.' }],
-]) {
-  test(`account API ${protocol} image model stays in its API catalog without an OAuth Images call`, async () => {
+for (const [protocol, route, content, model] of [
+  'gpt-image-2.5-flare',
+  'gpt-image-2.6-flare',
+  'gpt-image-2.6-sunburst',
+].flatMap((model) => [
+  ['openai.chat', '/v1/chat/completions', { messages: [{ role: 'user', content: 'Draw a cat.' }] }, model],
+  ['openai.responses', '/v1/responses', { input: 'Draw a cat.' }, model],
+])) {
+  test(`account API ${protocol} ${model} stays in its API catalog without an OAuth Images call`, async () => {
     const run = await runAccountApiProtocol(
-      { model: 'gpt-image-2.5-flare', ...content, size: '1024x1024', quality: 'high' },
+      { model, ...content, size: '1024x1024', quality: 'high' },
       protocol,
       { path: route },
     )

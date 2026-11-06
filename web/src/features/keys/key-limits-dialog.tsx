@@ -142,6 +142,7 @@ export function KeyLimitsDialog({
   const quotaOpts = mode === 'edit' ? QUOTA_EDIT : QUOTA_CREATE
   const rpmOpts = mode === 'edit' ? RPM_EDIT : RPM_CREATE
   const apiAccounts = draft.group_type === 'openai_apikey'
+  const isApi = draft.category === 'api' && !apiAccounts
   const retainedIds =
     mode === 'edit' && initial?.group_type === 'openai_apikey'
       ? initial.allowed_vms || []
@@ -150,8 +151,9 @@ export function KeyLimitsDialog({
   const listed = apiAccounts
     ? openaiApiAccountChoices(vms, retainedIds, draft.allowed_vms)
     : vmsInGroup(vms, draft.group_type)
-  const scopeBlocked =
-    draft.group_type === 'pool'
+  const scopeBlocked = isApi
+    ? false
+    : draft.group_type === 'pool'
       ? !draft.vm_pool_id
       : draft.group_type !== 'all' &&
         (draft.allowed_vms.length === 0 ||
@@ -202,9 +204,17 @@ export function KeyLimitsDialog({
                   setDraft((d) => ({
                     ...d,
                     category: v === 'api' ? 'api' : 'oauth',
-                    ...(v === 'oauth' && d.group_type === 'openai_apikey'
-                      ? { group_type: 'openai' as const }
-                      : {}),
+                    group_type:
+                      v === 'oauth' && d.group_type === 'openai_apikey'
+                        ? 'openai'
+                        : v === 'api' && d.group_type === 'pool'
+                          ? 'all'
+                          : d.group_type,
+                    allowed_vms:
+                      v === 'api' && d.group_type !== 'openai_apikey'
+                        ? []
+                        : d.allowed_vms,
+                    vm_pool_id: v === 'api' ? '' : d.vm_pool_id,
                   }))
                 }
               >
@@ -265,7 +275,7 @@ export function KeyLimitsDialog({
               />
             </Field>
           ) : null}
-          <Field label='分组'>
+          <Field label={isApi ? 'API 协议' : '分组'}>
             <Select
               value={draft.group_type}
               onValueChange={(v) => {
@@ -276,18 +286,18 @@ export function KeyLimitsDialog({
                 setDraft((d) => ({
                   ...d,
                   group_type: group,
-                  category:
-                    group === 'openai_apikey'
-                      ? 'api'
-                      : d.group_type === 'openai_apikey'
-                        ? 'oauth'
-                        : d.category,
+                  category: group === 'openai_apikey' ? 'api' : d.category,
                   allowed_vms:
-                    group === 'all' || group === 'pool'
+                    (d.category === 'api' && group !== 'openai_apikey') ||
+                    group === 'all' ||
+                    group === 'pool'
                       ? []
                       : d.allowed_vms.filter((id) => keep.has(id)),
                   ...(pools
-                    ? { vm_pool_id: group === 'pool' ? d.vm_pool_id || '' : '' }
+                    ? {
+                        vm_pool_id:
+                          !isApi && group === 'pool' ? d.vm_pool_id || '' : '',
+                      }
                     : {}),
                 }))
               }}
@@ -296,17 +306,31 @@ export function KeyLimitsDialog({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value='all'>all · 全局可调度</SelectItem>
-                {pools ? <SelectItem value='pool'>账号池</SelectItem> : null}
-                <SelectItem value='anthropic'>anthropic</SelectItem>
-                <SelectItem value='openai'>openai</SelectItem>
+                <SelectItem value='all'>
+                  {isApi ? 'all · 全部协议' : 'all · 全局可调度'}
+                </SelectItem>
+                {draft.category !== 'api' && pools ? (
+                  <SelectItem value='pool'>账号池</SelectItem>
+                ) : null}
+                <SelectItem value='anthropic'>
+                  {isApi ? 'anthropic · Anthropic 协议' : 'anthropic'}
+                </SelectItem>
+                <SelectItem value='openai'>
+                  {isApi ? 'openai · OpenAI 协议' : 'openai'}
+                </SelectItem>
                 {pools ? (
                   <SelectItem value='openai_apikey'>OpenAI(apikey)</SelectItem>
                 ) : null}
               </SelectContent>
             </Select>
           </Field>
-          {draft.group_type === 'pool' ? (
+          {isApi ? (
+            <p className='text-xs text-muted-foreground sm:col-span-2'>
+              {draft.group_type === 'all'
+                ? 'API 直连密钥，可调度所有已启用的 API 端点。'
+                : `API 直连密钥，仅调度 ${draft.group_type} 协议的 API 端点。`}
+            </p>
+          ) : draft.group_type === 'pool' ? (
             <Field label='账号池'>
               <Select
                 value={draft.vm_pool_id || ''}

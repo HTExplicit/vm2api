@@ -42,6 +42,7 @@ import {
 
 type ModelList = {
   models?: { id?: string; name?: string; alias?: string }[]
+  item?: { models?: { name: string; alias: string }[] }
 }
 
 function freshEndpoint(protocol: ApiProtocol = 'anthropic'): EndpointDraft {
@@ -85,6 +86,19 @@ export function AnthropicConsolePage() {
     setEndpoints(rows)
     setLoaded(true)
   }, [loaded, stored.data])
+
+  useEffect(() => {
+    const activeModels = allEndpoints
+      .filter((e) => (e.protocol || 'anthropic') === protocol)
+      .flatMap((e) => [...(e.existingModels || []), ...(e.fetchedModels || [])])
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const unique = [...new Set(activeModels)]
+    setModels(unique)
+    setModel((current) =>
+      unique.length && !unique.includes(current) ? unique[0] : current
+    )
+  }, [allEndpoints, protocol])
   function patchEndpoint(id: string, patch: Partial<EndpointDraft>) {
     setEndpoints((current) =>
       current.map((item) => (item.id === id ? { ...item, ...patch } : item))
@@ -147,13 +161,20 @@ export function AnthropicConsolePage() {
           (item.apiKey.trim() || item.keyId)
       )
       if (!endpoint) throw new Error('先保存或填写一把密钥')
-      return api<ModelList>('/api/panel/api-endpoints/fetch-models', {
+      const targetProtocol = endpoint.protocol || protocol
+      const targetUrl =
+        endpoint.baseUrl.trim() || API_DEFAULTS[targetProtocol].baseUrl
+      const path = endpoint.storedId
+        ? `/api/panel/api-endpoints/${encodeURIComponent(endpoint.storedId)}/fetch-models`
+        : '/api/panel/api-endpoints/fetch-models'
+      return api<ModelList>(path, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
+          apply: true,
           kind: 'custom',
-          protocol,
-          base_url: endpoint.baseUrl.trim() || defaultUrl,
+          protocol: targetProtocol,
+          base_url: targetUrl,
           api_key: endpoint.apiKey.trim(),
           key_id: endpoint.apiKey.trim() ? '' : endpoint.keyId || '',
           auth_scheme: endpoint.authScheme,
@@ -165,19 +186,29 @@ export function AnthropicConsolePage() {
       const seen: Record<string, true> = {}
       const ids: string[] = []
       for (const item of data.models || []) {
-        const id = (item.alias || item.name || item.id || '').trim()
+        const id = (item.name || item.id || item.alias || '').trim()
         if (!id || seen[id]) continue
         seen[id] = true
         ids.push(id)
       }
       setModels(ids)
-      if (ids.length) patchEndpoint(endpointId, { fetchedModels: ids })
+      if (data.item?.models) {
+        patchEndpoint(endpointId, {
+          existingModels: data.item.models
+            .map((item) => (item.name || item.alias).trim())
+            .filter(Boolean),
+          fetchedModels: undefined,
+        })
+      } else if (ids.length) patchEndpoint(endpointId, { fetchedModels: ids })
       if (!ids.includes(model) && ids[0]) setModel(ids[0])
       if (!ids.length) toast.error('上游没有返回模型')
+      else toast.success(`获取到 ${ids.length} 个模型`)
+      qc.invalidateQueries({
+        queryKey: apiEndpointsQueryOptions().queryKey,
+      })
     },
     onError: (error: Error) => toast.error(error.message),
   })
-
   const save = useMutation({
     mutationFn: async (item: EndpointDraft) => {
       const request = endpointSaveRequest(item, model)
@@ -204,6 +235,12 @@ export function AnthropicConsolePage() {
                   storedId: saved.id,
                   keyId: saved.api_key_entries?.[0]?.id || row.keyId,
                   apiKey: '',
+                  existingModels:
+                    saved.models
+                      ?.map((m) => (m.name || m.alias).trim())
+                      .filter(Boolean) ||
+                    item.existingModels ||
+                    item.fetchedModels,
                   fetchedModels: undefined,
                   stored: {
                     protocol: item.protocol,

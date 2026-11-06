@@ -1,3 +1,13 @@
+import { CLAUDE_OFFICIAL_URL, OPENAI_OFFICIAL_URL, normalizeProtocol, trimBaseUrl } from './api-presets.mjs'
+import {
+  isCatalogModelId,
+  isCodexCatalogModel,
+  listGptPublicModels,
+  listOfficialModels,
+  resolveCatalogModel,
+} from '../protocol/models.mjs'
+import { isGptSeriesId } from '../protocol/gpt-ids.mjs'
+
 /**
  * CLIProxy-shaped picker: grouped round-robin by endpoint then key.
  * Same alias across endpoints shares a model id; prefix/alias pins an endpoint.
@@ -12,6 +22,20 @@ function lower(s) {
   return norm(s).toLowerCase()
 }
 
+function isOfficialClaude(ep) {
+  if (!ep) return false
+  if (ep.kind === 'claude') return true
+  const u = trimBaseUrl(ep.base_url)
+  return u === CLAUDE_OFFICIAL_URL
+}
+
+function isOfficialOpenAI(ep) {
+  if (!ep) return false
+  if (ep.kind === 'openai') return true
+  const u = trimBaseUrl(ep.base_url)
+  return u === OPENAI_OFFICIAL_URL
+}
+
 export function stripPrefix(model, prefix) {
   const p = norm(prefix)
   if (!p) return norm(model)
@@ -21,36 +45,53 @@ export function stripPrefix(model, prefix) {
   return raw
 }
 
-export function modelIdsForEndpoint(ep, { forcePrefix = false } = {}) {
+export function modelIdsForEndpoint(ep, { forcePrefix = false, fullCatalog = true } = {}) {
   const prefix = norm(ep.prefix)
   const ids = []
   const seen = new Set()
-  for (const m of ep.models || []) {
-    const alias = norm(m.alias)
-    if (!alias) continue
+  const add = (alias) => {
+    const a = norm(alias)
+    if (!a) return
     if (!forcePrefix || !prefix) {
-      if (!seen.has(lower(alias))) {
-        seen.add(lower(alias))
-        ids.push(alias)
+      if (!seen.has(lower(a))) {
+        seen.add(lower(a))
+        ids.push(a)
       }
     }
     if (prefix) {
-      const pref = `${prefix}/${alias}`
+      const pref = `${prefix}/${a}`
       if (!seen.has(lower(pref))) {
         seen.add(lower(pref))
         ids.push(pref)
       }
     }
   }
+  for (const m of ep?.models || []) {
+    add(m.alias || m.name)
+  }
+  if (!fullCatalog) return ids
+  if (isOfficialClaude(ep)) {
+    try {
+      for (const m of listOfficialModels()) {
+        add(m.id)
+      }
+    } catch {}
+  } else if (isOfficialOpenAI(ep)) {
+    try {
+      for (const m of listGptPublicModels()) {
+        add(m.id)
+      }
+    } catch {}
+  }
   return ids
 }
 
-export function resolveUpstreamPool(ep, requestedModel) {
-  const want = lower(stripPrefix(requestedModel, ep.prefix))
+export function resolveUpstreamPool(ep, requestedModel, { fullCatalog = true } = {}) {
+  const want = lower(stripPrefix(requestedModel, ep?.prefix))
   if (!want) return []
   const out = []
   const seen = new Set()
-  for (const m of ep.models || []) {
+  for (const m of ep?.models || []) {
     if (lower(m.alias) !== want) continue
     const name = norm(m.name) || norm(m.alias)
     const key = lower(name)
@@ -58,17 +99,27 @@ export function resolveUpstreamPool(ep, requestedModel) {
     seen.add(key)
     out.push(name)
   }
-  return out
+  if (out.length > 0 || !fullCatalog) return out
+  if (isOfficialClaude(ep)) {
+    const raw = stripPrefix(requestedModel, ep?.prefix)
+    const resolved = resolveCatalogModel(raw)
+    if (resolved?.ok && resolved.model) return [resolved.model]
+    if (isCatalogModelId(raw)) return [raw]
+  } else if (isOfficialOpenAI(ep)) {
+    const raw = stripPrefix(requestedModel, ep?.prefix)
+    if (isGptSeriesId(raw) || isCodexCatalogModel(raw)) return [raw]
+  }
+  return []
 }
 
-export function endpointMatchesModel(ep, requestedModel) {
+export function endpointMatchesModel(ep, requestedModel, options) {
   if (!ep || ep.disabled) return false
   const raw = norm(requestedModel)
   const prefix = norm(ep.prefix)
   if (prefix && raw.toLowerCase().startsWith((prefix + '/').toLowerCase())) {
-    return resolveUpstreamPool(ep, raw).length > 0
+    return resolveUpstreamPool(ep, raw, options).length > 0
   }
-  return resolveUpstreamPool(ep, raw).length > 0
+  return resolveUpstreamPool(ep, raw, options).length > 0
 }
 
 function keyReady(key, now, disableCooling) {
@@ -120,8 +171,13 @@ export class ApiScheduler {
   catalog(scope = {}) {
     const data = []
     const seen = new Set()
+    const targetGroup = String(scope.group_type || 'all').toLowerCase()
+    const fullCatalog = scope.group_type !== 'openai_apikey'
     for (const ep of this.scopedEndpoints(scope)) {
       if (ep.disabled) continue
+      const proto = normalizeProtocol(ep.protocol, ep.kind)
+      if (targetGroup === 'anthropic' && proto !== 'anthropic') continue
+      if (targetGroup === 'openai' && proto !== 'openai') continue
       if (scope.group_type === 'openai_apikey' && ep.kind !== 'openai') continue
       const visibleKeys = (ep.api_key_entries || []).filter((key) => this.resolveKey(key, scope))
       if (!visibleKeys.length && (scope.group_type === 'openai_apikey' || ep.api_key_entries?.length)) continue
@@ -130,7 +186,7 @@ export class ApiScheduler {
         !visibleKeys.some((key) => keyReady(key, Date.now(), ep.disable_cooling))
       )
         continue
-      for (const id of modelIdsForEndpoint(ep, { forcePrefix: this.forcePrefix })) {
+      for (const id of modelIdsForEndpoint(ep, { forcePrefix: this.forcePrefix, fullCatalog })) {
         const k = lower(id)
         if (seen.has(k)) continue
         seen.add(k)
@@ -147,11 +203,16 @@ export class ApiScheduler {
   }
 
   pick(requestedModel, now = Date.now(), scope = {}, { excludedAccountIds, excludedKeyIds } = {}) {
+    const targetGroup = String(scope.group_type || 'all').toLowerCase()
+    const modelOptions = { fullCatalog: scope.group_type !== 'openai_apikey' }
     const parents = this.scopedEndpoints(scope)
-      .filter(
-        (ep) =>
-          endpointMatchesModel(ep, requestedModel) && (scope.group_type !== 'openai_apikey' || ep.kind === 'openai'),
-      )
+      .filter((ep) => {
+        if (ep.disabled) return false
+        const proto = normalizeProtocol(ep.protocol, ep.kind)
+        if (targetGroup === 'anthropic' && proto !== 'anthropic') return false
+        if (targetGroup === 'openai' && proto !== 'openai') return false
+        return endpointMatchesModel(ep, requestedModel, modelOptions)
+      })
       .sort((a, b) => (Number(b.priority) || 0) - (Number(a.priority) || 0))
     if (!parents.length) {
       return { ok: false, code: 'model_not_found', message: `no api endpoint serves ${requestedModel}` }
@@ -169,7 +230,7 @@ export class ApiScheduler {
       const key = keys[c % keys.length]
       this.childCursor.set(ep.id, c + 1)
       this.parentCursor = start + off + 1
-      const pool = resolveUpstreamPool(ep, requestedModel)
+      const pool = resolveUpstreamPool(ep, requestedModel, modelOptions)
       const mk = `${ep.id}:${lower(requestedModel)}`
       const mi = this.modelCursor.get(mk) || 0
       const upstreamModel = pool[mi % pool.length] || requestedModel

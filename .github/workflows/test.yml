@@ -158,9 +158,24 @@ jobs:
             test/unit/handle-codex.test.mjs \
             test/unit/handle-codex-search.test.mjs \
             test/unit/handle-codex-images.test.mjs \
+            test/unit/min-max-tokens.test.mjs \
+            test/unit/claude-code-only.test.mjs \
+            test/unit/graceful-shutdown.test.mjs \
+            test/unit/crag-license.test.mjs \
+            test/unit/kernel-catalog.test.mjs \
+            test/unit/kernel-install.test.mjs \
+            test/unit/kernel-install-sandbox.test.mjs \
+            test/unit/kernel-install-writer-locks.test.mjs \
+            test/unit/panel-kernels.test.mjs \
+            test/unit/slot-degraded-recovery.test.mjs \
+            test/unit/slot-migration.test.mjs \
+            test/unit/wrap-cli-runtime.test.mjs \
+            test/unit/slot-engine.test.mjs \
             test/unit/vm-package.test.mjs; do
             node --test "$file"
           done
+      - name: Model defaults fill missing output budgets
+        run: node --test --test-name-pattern='^officialMessagesBody keeps a caller max_tokens and fills a missing one from the model$' test/unit/crs-clean.test.mjs
       - name: Inline tool beta reaches the final CLI hop
         run: node --test --test-name-pattern='^cli-hop appends inline-tools when a message carries a tool_definition$' test/unit/go-worker-client.test.mjs
       - name: Persisted kernel restart pending
@@ -199,6 +214,7 @@ jobs:
           pnpm exec vitest run src/features/openai-apikey src/features/logs/account-api-logs.test.tsx src/components/layout/data/sidebar-data.test.ts
           pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx
           pnpm exec vitest run src/features/anthropic/endpoint-save.test.ts
+          pnpm exec vitest run src/features/settings/health-pane.test.ts src/features/cluster/slot-migration.test.ts
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx
           pnpm exec vitest run src/features/cluster/model.test.ts src/features/cluster/connection-rows.test.ts
           pnpm build
