@@ -25,7 +25,8 @@ describe('API key limit payload', () => {
       rpm: 60,
       expires_in_days: 30,
       group_type: 'anthropic',
-      allowed_vms: ['vm-01'],
+      allowed_vms: [],
+      vm_pool_id: null,
     })
   })
 
@@ -62,13 +63,27 @@ describe('API key limit payload', () => {
       allowed_vms: [],
     })
     expect(() =>
-      keyLimitsPayload({ ...draft, allowed_vms: [] }, 'create')
+      keyLimitsPayload(
+        { ...draft, category: 'oauth', allowed_vms: [] },
+        'create'
+      )
     ).toThrow('至少选择一台 VM')
+    expect(
+      keyLimitsPayload(
+        { ...draft, category: 'api', group_type: 'openai', allowed_vms: [] },
+        'create'
+      )
+    ).toMatchObject({
+      category: 'api',
+      group_type: 'openai',
+      allowed_vms: [],
+    })
   })
 
   it('handles vm_pool_id for admin and strips it for non-admin', () => {
     const pooledDraft: KeyLimitsDraft = {
       ...draft,
+      category: 'oauth',
       group_type: 'pool',
       vm_pool_id: 'pool_12345678',
     }
@@ -177,14 +192,24 @@ describe('API key limit payload', () => {
 
       expect(
         keyLimitsPayload(
-          { ...draft, group_type, allowed_vms: ['deleted', 'fresh'] },
+          {
+            ...draft,
+            category: 'oauth',
+            group_type,
+            allowed_vms: ['deleted', 'fresh'],
+          },
           'edit',
           options
         )
       ).toMatchObject({ group_type, allowed_vms: ['fresh'] })
       expect(
         keyLimitsPayload(
-          { ...draft, group_type, allowed_vms: ['deleted', 'old', 'fresh'] },
+          {
+            ...draft,
+            category: 'oauth',
+            group_type,
+            allowed_vms: ['deleted', 'old', 'fresh'],
+          },
           'edit',
           options
         )
@@ -197,7 +222,7 @@ describe('API key limit payload', () => {
     (group_type) => {
       expect(() =>
         keyLimitsPayload(
-          { ...draft, group_type, allowed_vms: ['deleted'] },
+          { ...draft, category: 'oauth', group_type, allowed_vms: ['deleted'] },
           'edit',
           { vms: [], currentAllowedVms: ['deleted'] }
         )
@@ -212,6 +237,7 @@ describe('API key limit payload', () => {
   it('preserves create scopes and edits without a supplied VM list', () => {
     const scopedDraft = {
       ...draft,
+      category: 'oauth' as const,
       allowed_vms: ['deleted', 'vm-01'],
     }
     expect(

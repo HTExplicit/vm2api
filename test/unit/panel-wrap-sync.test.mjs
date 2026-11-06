@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
+import { GITHUB_REPO } from '../../src/lib/admin/release.mjs'
 import { materializeWrapCli } from '../../src/lib/vm/wrap-cli-runtime.mjs'
 import { getVm, markKernelRestartPending } from '../../src/lib/vm/vm-registry.mjs'
 
@@ -166,22 +167,22 @@ function releaseFetch(
             {
               name: 'kin-kernel',
               size: assetBytes.length,
-              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/9',
+              url: `https://api.github.com/repos/${GITHUB_REPO}/releases/assets/9`,
             },
             {
               name: 'cli-node',
               size: cliBytes.length,
-              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/8',
+              url: `https://api.github.com/repos/${GITHUB_REPO}/releases/assets/8`,
             },
             {
               name: 'cc-node',
               size: ccBytes.length,
-              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/7',
+              url: `https://api.github.com/repos/${GITHUB_REPO}/releases/assets/7`,
             },
             {
               name: 'kin-kernel-crag',
               size: cragBytes.length,
-              url: 'https://api.github.com/repos/dofastted/vm2api/releases/assets/6',
+              url: `https://api.github.com/repos/${GITHUB_REPO}/releases/assets/6`,
             },
           ],
         }),

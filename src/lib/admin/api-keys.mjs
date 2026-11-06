@@ -246,11 +246,15 @@ export class ApiKeyStore {
       tokens_out: 0,
       category: String(input.category || 'oauth').toLowerCase() === 'api' ? 'api' : 'oauth',
       ...storedKeyScope(
-        normalizeKeyScope({
-          group_type: input.group_type,
-          allowed_vms: input.allowed_vms,
-          ...(Object.prototype.hasOwnProperty.call(input, 'vm_pool_id') ? { vm_pool_id: input.vm_pool_id } : {}),
-        }),
+        normalizeKeyScope(
+          {
+            group_type: input.group_type,
+            allowed_vms: input.allowed_vms,
+            category: String(input.category || 'oauth').toLowerCase() === 'api' ? 'api' : 'oauth',
+            ...(Object.prototype.hasOwnProperty.call(input, 'vm_pool_id') ? { vm_pool_id: input.vm_pool_id } : {}),
+          },
+          { isApi: String(input.category || 'oauth').toLowerCase() === 'api' },
+        ),
       ),
     }
     if (rec.group_type === 'openai_apikey') rec.category = 'api'
@@ -304,7 +308,7 @@ export class ApiKeyStore {
     if (patch.category != null) {
       rec.category = String(patch.category).toLowerCase() === 'api' ? 'api' : 'oauth'
     }
-    const scope = normalizeKeyScope(patch, { partial: true, current: rec })
+    const scope = normalizeKeyScope(patch, { partial: true, current: rec, isApi: rec.category === 'api' })
     if (scope) Object.assign(rec, storedKeyScope(scope))
     if (rec.group_type === 'openai_apikey') rec.category = 'api'
     rec.updated_at = nowIso()

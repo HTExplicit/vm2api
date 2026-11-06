@@ -23,6 +23,7 @@ export type StoredSnapshot = {
 export type EndpointDraft = {
   protocol?: ApiProtocol
   riskReviewEnabled?: boolean
+  existingModels?: string[]
   fetchedModels?: string[]
   id: string
   storedId?: string
@@ -41,8 +42,8 @@ type StoredItem = {
   base_url?: string
   auth_scheme?: string
   api_key_entries?: { id?: string; proxy_id?: string }[]
+  models?: { id?: string; name?: string; alias?: string }[]
 }
-
 export function draftFromStored(item: StoredItem): EndpointDraft {
   const key = item.api_key_entries?.[0]
   const stored: StoredSnapshot = {
@@ -56,11 +57,15 @@ export function draftFromStored(item: StoredItem): EndpointDraft {
         : 'x_api_key',
     proxyId: key?.proxy_id || DIRECT,
   }
+  const existingModels = (item.models || [])
+    .map((m) => (m.name || m.id || m.alias || '').trim())
+    .filter(Boolean)
   return {
     id: item.id,
     storedId: item.id,
     keyId: key?.id || '',
     apiKey: '',
+    existingModels: existingModels.length ? existingModels : undefined,
     ...stored,
     stored,
   }

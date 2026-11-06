@@ -79,13 +79,28 @@ test('a named pool is the only schedule set and a dead pool does not widen', () 
 })
 
 test('OpenAI API-key scope preserves checked accounts and cannot schedule OAuth slots', () => {
-  const scope = normalizeKeyScope({ group_type: 'openai_apikey', allowed_vms: ['vm-02', 'vm-02'] })
+  const scope = normalizeKeyScope({ category: 'api', group_type: 'openai_apikey', allowed_vms: ['vm-02', 'vm-02'] })
   assert.deepEqual(scope, { group_type: 'openai_apikey', allowed_vms: ['vm-02'], vm_pool_id: null })
   assert.deepEqual(keyScopeFromRecord({ ...scope, allowed_vms: JSON.stringify(scope.allowed_vms) }), scope)
   assert.deepEqual(keyScopeFromRequest({ apiKeyKind: 'managed', apiKeyRecord: scope }), scope)
   assert.deepEqual(assertVmScope([claude, codex], scope), ['vm-02'])
   assert.equal(keyAllowsVm(scope, codex), false)
   assert.throws(() => assertVmScope([claude], { ...scope, allowed_vms: ['vm-01'] }), /不属于该分组/)
-  assert.throws(() => normalizeKeyScope({ group_type: 'openai_apikey', allowed_vms: [] }), /至少勾选/)
-  assert.throws(() => normalizeKeyScope({ group_type: 'openai_apikey', vm_pool_id: 'pool_abcd1234' }), /直接勾选账号/)
+  assert.throws(() => normalizeKeyScope({ category: 'api', group_type: 'openai_apikey', allowed_vms: [] }), /至少勾选/)
+  assert.throws(
+    () => normalizeKeyScope({ group_type: 'openai_apikey', vm_pool_id: 'pool_abcd1234' }, { isApi: true }),
+    /直接勾选账号/,
+  )
+})
+
+test('api category allows anthropic and openai groups without VMs', () => {
+  const anthropic = normalizeKeyScope({ group_type: 'anthropic', allowed_vms: [], category: 'api' })
+  assert.deepEqual(anthropic, { group_type: 'anthropic', allowed_vms: [], vm_pool_id: null })
+
+  const openai = normalizeKeyScope({ group_type: 'openai', allowed_vms: [] }, { isApi: true })
+  assert.deepEqual(openai, { group_type: 'openai', allowed_vms: [], vm_pool_id: null })
+
+  const current = { group_type: 'all', allowed_vms: '[]', category: 'api' }
+  const patched = normalizeKeyScope({ group_type: 'openai' }, { partial: true, current })
+  assert.deepEqual(patched, { group_type: 'openai', allowed_vms: [], vm_pool_id: null })
 })

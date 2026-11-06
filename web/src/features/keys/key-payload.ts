@@ -46,10 +46,11 @@ export function keyLimitsPayload(
     rpm: nonNegative(draft.rpm, 'RPM'),
   }
   // 账号 API key 使用 API 后端，账号勾选范围仍由分组保存。
+  const isApi = draft.category === 'api' && draft.group_type !== 'openai_apikey'
   if (isAdmin)
     body.category =
       draft.group_type === 'openai_apikey' ? 'api' : draft.category
-  if (isAdmin && draft.group_type === 'pool') {
+  if (isAdmin && draft.group_type === 'pool' && !isApi) {
     const vm_pool_id = String(draft.vm_pool_id || '').trim()
     if (!vm_pool_id) throw new Error('选择一个账号池')
     body.group_type = 'all'
@@ -58,14 +59,14 @@ export function keyLimitsPayload(
   } else {
     const group_type = groupTypeOf(draft.group_type)
     let allowed_vms =
-      group_type === 'all'
+      isApi || group_type === 'all'
         ? []
         : [...new Set(draft.allowed_vms.map((id) => id.trim()).filter(Boolean))]
     if (mode === 'edit' && options.vms) {
       const liveIds = new Set(options.vms.map((vm) => vm.id))
       allowed_vms = allowed_vms.filter((id) => liveIds.has(id))
     }
-    if (group_type !== 'all' && allowed_vms.length === 0) {
+    if (!isApi && group_type !== 'all' && allowed_vms.length === 0) {
       throw new Error(
         group_type === 'openai_apikey'
           ? '至少选择一个 API 账号'
@@ -86,7 +87,7 @@ export function keyLimitsPayload(
     body.allowed_vms = allowed_vms
     if (
       isAdmin &&
-      (draft.vm_pool_id !== undefined || group_type === 'openai_apikey')
+      (isApi || draft.vm_pool_id !== undefined || group_type === 'openai_apikey')
     )
       body.vm_pool_id = null
   }
