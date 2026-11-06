@@ -175,7 +175,7 @@ for (const cleanupFails of [false, true]) {
       }),
       process: { exit: (code) => events.push(`exit:${code}`) },
       console: { warn() {} },
-      installJevUsageRecorder() {},
+      installJevUsageRecorder() { events.push('jev-recorder-off') },
       vmTestSchedule: stop('schedule'),
       backupService: { stopScheduler() {} },
       proxyPool: { stopScheduler() {} },
@@ -204,11 +204,13 @@ for (const cleanupFails of [false, true]) {
       context.shutdown.trackRequest({}, response)
       const pending = context.shutdown.shutdown()
       assert.equal(events.includes('browser'), false, 'cleanup waits for active HTTP requests')
+      assert.equal(events.includes('jev-recorder-off'), false, 'active reviews keep their usage recorder while draining')
       const row = logs.finish(logs.start({ headers: {}, socket: {} }, { protocol: 'anthropic.messages' }), { status: 200 })
       response.end()
       await pending
       for (const service of ['oauth', 'browser', 'account-api']) assert.equal(events.filter((name) => name === service).length, 1)
       assert.ok(events.indexOf('database') > events.indexOf('account-api'))
+      assert.ok(events.indexOf('jev-recorder-off') < events.indexOf('database'))
       assert.equal(events.at(-1), `exit:${cleanupFails ? 1 : 0}`)
       persisted = new DatabaseSync(path.join(dir, 'kin.db'), { readOnly: true })
       assert.equal(persisted.prepare('SELECT status FROM usage_logs WHERE request_id = ?').get(row.request_id)?.status, 200)

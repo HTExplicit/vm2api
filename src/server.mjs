@@ -1093,7 +1093,6 @@ let browserShutdownFailed = false
 const gracefulShutdown = createGracefulShutdown({
   exit: (code) => process.exit(browserShutdownFailed ? 1 : code),
   beforeDrain: async () => {
-    installJevUsageRecorder(null)
     try {
       vmTestSchedule.stop()
     } catch {}
@@ -1148,6 +1147,7 @@ const gracefulShutdown = createGracefulShutdown({
     try {
       await clusterManager.stop()
     } catch {}
+    installJevUsageRecorder(null)
     try {
       closeDatabase()
     } catch {}
