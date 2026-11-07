@@ -20,7 +20,10 @@ import { applyRefusalGuardPatch, refusalGuardPolicy } from '../core/refusal-guar
 import {
   applyJevPatch,
   buildScopeInventory,
+  keysForProbe,
   listPolicyModels as listDecisionModels,
+  probePolicyBaseline,
+  probePolicyQuota,
   publicJevConfig,
   publicJevKeys,
   readJevConfig,
@@ -429,8 +432,8 @@ function usageLogFilters(req, u) {
 }
 
 /**
- * Validated statistics params. `user` may only group by key/model: user and
- * vm groupings would reveal other tenants or the pool layout.
+ * Validated statistics params. A tenant may group by key, model, or their own
+ * VMs. Grouping by user would name other tenants.
  */
 function statsParams(req, u, dimensionKey) {
   const isUser = panelIdentity(req).role === 'user'
@@ -1075,6 +1078,31 @@ export function createPanelHandler(ctx) {
     }
   }
 
+  function withJevEndpointStatus(config) {
+    const keys = (config.endpoints || []).flatMap((endpoint) => endpoint.keys || [])
+    if (!keys.length) return config
+    try {
+      const rows = new JevUsageRepo().configuredKeys(keys)
+      const byFp = new Map(rows.map((row) => [row.key_fingerprint, row]))
+      return {
+        ...config,
+        endpoints: config.endpoints.map((endpoint) => ({
+          ...endpoint,
+          keys: endpoint.keys.map((key) => {
+            const row = byFp.get(key.key_fingerprint)
+            return {
+              ...key,
+              status: key.retired ? 'paused' : row?.status || key.status,
+              last_http_status: row?.last_http_status ?? key.last_http_status ?? null,
+            }
+          }),
+        })),
+      }
+    } catch {
+      return config
+    }
+  }
+
   function jevInterceptSnapshot() {
     let config
     try {
@@ -1083,7 +1111,10 @@ export function createPanelHandler(ctx) {
     } catch {
       config = publicJevConfig(null)
     }
-    return { ...config, account_scope: jevScopeInventory(config.account_platform_plans) }
+    return {
+      ...withJevEndpointStatus(config),
+      account_scope: jevScopeInventory(config.account_platform_plans),
+    }
   }
 
   function deactivateVmSlot(id) {
@@ -1843,6 +1874,7 @@ export function createPanelHandler(ctx) {
             role: body.role || 'user',
             enabled: body.enabled !== false,
             vm_create_quota: body.vm_create_quota,
+            concurrency: body.concurrency,
           })
           return json(res, 201, panel.ok({ item: publicUserView(rec) }))
         } catch (e) {
@@ -6213,7 +6245,7 @@ export function createPanelHandler(ctx) {
         const baseUrl = String(body?.base_url || current.base_url || '').trim()
         const typedKey = String(body?.api_key || '').trim()
         const stored = readJevConfig((key, fallback) => new SettingsRepo().get(key, fallback))
-        const apiKey = typedKey || stored.api_keys[0] || ''
+        const apiKey = typedKey || keysForProbe(stored, baseUrl).keys[0] || ''
         try {
           const listed = await listDecisionModels(baseUrl, apiKey, Number(body?.timeout_ms) || current.timeout_ms)
           return json(res, 200, panel.ok({ models: listed.models, url: listed.url }))
@@ -6224,6 +6256,32 @@ export function createPanelHandler(ctx) {
               type: 'api_error',
               code: error?.code || 'fetch_models_failed',
               message: error?.message || '获取模型失败',
+            },
+          })
+        }
+      }
+      if (req.method === 'POST' && (p === '/api/panel/jev-intercept/probe' || p === '/api/panel/jev-intercept/quota')) {
+        const body = await readBody(req, 16 * 1024).catch(() => ({}))
+        const stored = readJevConfig((key, fallback) => new SettingsRepo().get(key, fallback))
+        const run = p.endsWith('/quota') ? probePolicyQuota : probePolicyBaseline
+        try {
+          const result = await run({
+            config: stored,
+            baseUrl: body?.base_url,
+            apiKey: body?.api_key,
+            apiKeys: body?.api_keys,
+            model: Object.hasOwn(body || {}, 'model') ? body.model : undefined,
+            timeoutMs: Number(body?.timeout_ms) || stored.timeout_ms,
+          })
+          return json(res, 200, panel.ok(result))
+        } catch (error) {
+          const code = error?.code || (p.endsWith('/quota') ? 'quota_failed' : 'probe_failed')
+          return json(res, code === 'base_url_required' ? 400 : 502, {
+            ok: false,
+            error: {
+              type: 'api_error',
+              code,
+              message: error?.message || '测试失败',
             },
           })
         }

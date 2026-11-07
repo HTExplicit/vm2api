@@ -23,6 +23,8 @@ import { ApiScheduler } from '../../src/lib/pool/api-scheduler.mjs'
 import { classifierFixture } from '../fixtures/auto-mode.mjs'
 import { classifyClaudeRequestPurpose } from '../../src/lib/protocol/request-purpose.mjs'
 import { isOfficialClaudeCodeTraffic } from '../../src/lib/identity/crs-persona.mjs'
+import { normalizeRedaction } from '../../src/lib/redaction/policy.mjs'
+import { publishRedactionForTests } from '../../src/lib/redaction/runtime.mjs'
 
 const unixTest = process.platform === 'win32' ? test.skip : test
 
@@ -1662,6 +1664,7 @@ async function runAccountApiProtocol(inbound, protocol, options = {}) {
     },
     codex: { model_mappings: { o3: 'gpt-5.4', 'gpt-4.1-nano': 'gpt-5.4' } },
     failover: {},
+    ...(options.redaction ? { redaction: options.redaction } : {}),
   }
   fs.writeFileSync(routingFile, JSON.stringify(routing))
   const sent = [],
@@ -2161,6 +2164,58 @@ function nativeToolResponse() {
     error: null,
     incomplete_details: null,
   }
+}
+
+for (const stream of [false, true]) {
+  test(`account API restores redacted native Lite tools and reasoning for stream=${stream}`, async () => {
+    const secret = 'private-fixture-text'
+    const tag = '{{R_WORD_aaaaaaaaaaaaaaaaaaaaaaaaaa}}'
+    const policy = normalizeRedaction({ enabled: true, secrets: false, personal: false, words: [secret], rules: [] })
+    const scopes = []
+    publishRedactionForTests({ enabled: true, ready: true, policy, client: {
+      async mask({ body, principal, session }) {
+        scopes.push([principal, session])
+        return { body: body.replaceAll(secret, tag) }
+      },
+      async restore({ body, principal, session }) {
+        scopes.push([principal, session])
+        return { body: body.replaceAll(tag, secret) }
+      },
+    } })
+    try {
+      const standard = nativeToolsRequest()
+      const { tools, instructions, ...inbound } = standard
+      inbound.stream = stream
+      inbound.input = [
+        { type: 'additional_tools', role: 'developer', tools },
+        { type: 'message', role: 'developer', content: [{ type: 'input_text', text: secret }] },
+        ...standard.input,
+      ]
+      inbound.client_metadata = { 'x-openai-internal-codex-responses-lite': 'true' }
+      const expected = nativeToolResponse()
+      expected.output[1].arguments = JSON.stringify({ path: secret })
+      const masked = structuredClone(expected)
+      masked.output[1].arguments = JSON.stringify({ path: tag })
+      const run = await runAccountApiProtocol(inbound, 'openai.responses', {
+        redaction: policy,
+        headers: { 'x-session-id': 'client-session', 'user-agent': 'offline-api-fixture' },
+        events: () => [{ type: 'response.completed', response: masked }],
+      })
+      assert.equal(run.response.statusCode, 200, JSON.stringify(run.response.body))
+      assert.equal(run.sent.length, 1)
+      assert.equal(run.sent[0].body.input[1].content[0].text, tag)
+      assert.deepEqual(run.sent[0].body.input[0].tools, tools)
+      assert.equal(run.sent[0].body.client_metadata, undefined)
+      if (stream) assert.ok(run.response.wire.includes(secret))
+      else assert.deepEqual(run.response.body, expected)
+      assert.equal(run.logs[0].sent_model, 'o3')
+      assert.equal(run.logs[0].upstream_response_model, 'o3')
+      assert.ok(scopes.length > 1)
+      assert.ok(scopes.every(([principal, session]) => principal === 'managed-a' && session === 'client-session'))
+    } finally {
+      publishRedactionForTests(null)
+    }
+  })
 }
 
 test('account API native Responses preserves Codex tools, history, parameters, and before-upstream changes', async () => {

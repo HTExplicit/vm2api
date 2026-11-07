@@ -484,7 +484,9 @@ function VmDetailBody({
           <TabsList>
             <TabsTrigger value='overview'>概览</TabsTrigger>
             <TabsTrigger value='account'>账号</TabsTrigger>
-            <TabsTrigger value='proxy'>代理</TabsTrigger>
+            {tabs.includes('proxy') ? (
+              <TabsTrigger value='proxy'>代理</TabsTrigger>
+            ) : null}
             {tabs.includes('test') ? (
               <TabsTrigger value='test'>测试</TabsTrigger>
             ) : null}
@@ -537,71 +539,73 @@ function VmDetailBody({
               await refreshAll()
             }}
           />
-          <VmProxyTab
-            vm={vm}
-            proxy={proxy}
-            boundId={boundId}
-            free={free}
-            pool={pool}
-            bindId={bindTarget}
-            canManage={perms.admin}
-            busy={busy}
-            onBindIdChange={setBindId}
-            onUnbind={() =>
-              runJob({
-                key: 'proxy:unbind',
-                run: () =>
-                  api(`/api/panel/proxies/${boundId}/unbind`, {
-                    method: 'POST',
-                    body: JSON.stringify({ vm_id: id }),
-                  }),
-                done: () => toast.success('已解绑'),
-              })
-            }
-            onAllocate={() => act('/allocate-proxy')}
-            onBind={() =>
-              runJob({
-                key: 'proxy:bind',
-                run: () =>
-                  api(`/api/panel/proxies/${bindTarget}/bind`, {
-                    method: 'POST',
-                    body: JSON.stringify({ vm_id: id }),
-                  }),
-                done: () => toast.success('已绑定'),
-              })
-            }
-            onProbe={() =>
-              runJob({
-                key: 'proxy:probe',
-                run: () =>
-                  api(`/api/panel/proxies/${boundId}/probe`, {
-                    method: 'POST',
-                  }),
-                done: () => toast.success('探测完成'),
-              })
-            }
-            onGeo={() =>
-              runJob({
-                key: 'proxy:geo',
-                run: () =>
-                  api(`/api/panel/proxies/${boundId}/geo`, { method: 'POST' }),
-                done: (data) => {
-                  const geo = (
-                    data as {
-                      geo?: {
-                        timezone?: string | null
-                        country?: string | null
+          {perms.proxy ? (
+            <VmProxyTab
+              vm={vm}
+              proxy={proxy}
+              boundId={boundId}
+              free={free}
+              pool={pool}
+              bindId={bindTarget}
+              canManage={perms.admin}
+              busy={busy}
+              onBindIdChange={setBindId}
+              onUnbind={() =>
+                runJob({
+                  key: 'proxy:unbind',
+                  run: () =>
+                    api(`/api/panel/proxies/${boundId}/unbind`, {
+                      method: 'POST',
+                      body: JSON.stringify({ vm_id: id }),
+                    }),
+                  done: () => toast.success('已解绑'),
+                })
+              }
+              onAllocate={() => act('/allocate-proxy')}
+              onBind={() =>
+                runJob({
+                  key: 'proxy:bind',
+                  run: () =>
+                    api(`/api/panel/proxies/${bindTarget}/bind`, {
+                      method: 'POST',
+                      body: JSON.stringify({ vm_id: id }),
+                    }),
+                  done: () => toast.success('已绑定'),
+                })
+              }
+              onProbe={() =>
+                runJob({
+                  key: 'proxy:probe',
+                  run: () =>
+                    api(`/api/panel/proxies/${boundId}/probe`, {
+                      method: 'POST',
+                    }),
+                  done: () => toast.success('探测完成'),
+                })
+              }
+              onGeo={() =>
+                runJob({
+                  key: 'proxy:geo',
+                  run: () =>
+                    api(`/api/panel/proxies/${boundId}/geo`, { method: 'POST' }),
+                  done: (data) => {
+                    const geo = (
+                      data as {
+                        geo?: {
+                          timezone?: string | null
+                          country?: string | null
+                        }
                       }
-                    }
-                  )?.geo
-                  const where = [geo?.country, geo?.timezone]
-                    .filter(Boolean)
-                    .join(' · ')
-                  toast.success(where ? `出口位置 ${where}` : '已检测')
-                },
-              })
-            }
-          />
+                    )?.geo
+                    const where = [geo?.country, geo?.timezone]
+                      .filter(Boolean)
+                      .join(' · ')
+                    toast.success(where ? `出口位置 ${where}` : '已检测')
+                  },
+                })
+              }
+            />
+          ) : null}
           {perms.test ? (
             <VmTestTab
               {...test}

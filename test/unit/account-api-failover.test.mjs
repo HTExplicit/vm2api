@@ -4,6 +4,8 @@ import http from 'node:http'
 import { Readable } from 'node:stream'
 import { ApiScheduler } from '../../src/lib/pool/api-scheduler.mjs'
 import { runApiInference } from '../../src/lib/pool/api-protocol.mjs'
+import { normalizeRedaction } from '../../src/lib/redaction/policy.mjs'
+import { publishRedactionForTests } from '../../src/lib/redaction/runtime.mjs'
 
 const complete =
   'data: ' +
@@ -104,6 +106,15 @@ function fixture({ failover = {}, accountCount = 3, allowed = ['vm-a', 'vm-b', '
 
 test('local HTTP rejection switches selected account without losing native tools, history or bound proxy', async () => {
   const f = fixture({ allowed: ['vm-a', 'vm-b'] })
+  const policy = normalizeRedaction({ enabled: true, secrets: true, personal: false, words: [], rules: [] })
+  const scopes = []
+  publishRedactionForTests({ enabled: true, ready: true, policy, client: {
+    async mask({ body, principal, session }) {
+      scopes.push([principal, session])
+      return { body }
+    },
+    async restore({ body }) { return { body } },
+  } })
   const input = [
     {
       type: 'function_call',
@@ -168,6 +179,9 @@ test('local HTTP rejection switches selected account without losing native tools
     const result = await runApiInference({
       ...f.options,
       nativeResponsesBody: body,
+      routing: { redaction: policy },
+      redactionPrincipal: 'managed-fixture',
+      redactionSession: 'client-session',
       forwardImpl(request) {
         proxies.push(request.proxyUrl)
         return new Promise((resolve, reject) => {
@@ -193,6 +207,7 @@ test('local HTTP rejection switches selected account without losing native tools
     assert.equal(result.vmId, null)
     assert.equal(result.attemptCount, 2)
     assert.equal(sent.length, 2)
+    assert.deepEqual(scopes, [['managed-fixture', 'client-session'], ['managed-fixture', 'client-session']])
     assert.deepEqual(
       sent.map((entry) => entry.auth),
       ['Bearer sk-local-a', 'Bearer sk-local-b'],
@@ -217,7 +232,36 @@ test('local HTTP rejection switches selected account without losing native tools
     assert.equal(f.attempts[0].usage, undefined)
     assert.equal(f.attempts[1].usage.input_tokens, 3)
   } finally {
+    publishRedactionForTests(null)
     await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('local redaction refusal does not dispatch, switch or fault an account', async () => {
+  const f = fixture()
+  const policy = normalizeRedaction({ enabled: true, secrets: true, personal: false, words: [], rules: [] })
+  publishRedactionForTests({ enabled: true, ready: true, policy, client: {
+    async mask() {
+      throw Object.assign(new Error('signed history'), { code: 'redaction_signed_history_requires_reset', status: 409 })
+    },
+  } })
+  try {
+    const result = await runApiInference({
+      ...f.options,
+      routing: { redaction: policy },
+      redactionPrincipal: 'managed-fixture',
+      redactionSession: 'client-session',
+      forwardImpl() { assert.fail('redaction refusal must precede dispatch') },
+    })
+    assert.equal(result.status, 409)
+    assert.equal(result.body.error.code, 'redaction_signed_history_requires_reset')
+    assert.equal(result.transportError, false)
+    assert.equal(result.attemptCount, 0)
+    assert.equal(result.upstreamExecutions, 0)
+    assert.equal(f.attempts.length, 0)
+    assert.ok(f.keys.every((key) => !key.disabled && !key.cooldown_until))
+  } finally {
+    publishRedactionForTests(null)
   }
 })
 

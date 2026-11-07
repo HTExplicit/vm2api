@@ -318,10 +318,13 @@ export function createHandleProtocol(deps) {
     const originalCode = result?.body?.error?.code || fallbackCode
     const originalMessage = result?.body?.error?.message || null
     const details = result?.body?.error?.details || {}
-    const mapped = rewritePoolErrorForClient(
-      mapUpstreamError(result?.status || 503, result?.body, result?.headers || {}),
-      result?.body,
-    )
+    const mapped =
+      result?.via === 'redaction'
+        ? makeError({ type: ErrorType.API, code: originalCode, message: originalMessage, status: result.status || 503 })
+        : rewritePoolErrorForClient(
+            mapUpstreamError(result?.status || 503, result?.body, result?.headers || {}),
+            result?.body,
+          )
     // A catalog miss has no selected endpoint and never reaches the upstream.
     if (
       result?.via === 'api-kernel' &&
@@ -538,6 +541,8 @@ export function createHandleProtocol(deps) {
     noGoFallback = false,
     onEnvelope = null,
     onOutboundHeaders = null,
+    redactionPrincipal = '',
+    redactionSession = '',
   }) {
     const assembler = createClaudeMessageAssembler()
     const workerResult = await dispatchStreamInference({
@@ -558,6 +563,8 @@ export function createHandleProtocol(deps) {
       slotWaitMs: candidate.slotWaitMs,
       noGoFallback,
       ensureCredential: (exec) => ensureWorkerCredential(exec),
+      redactionPrincipal,
+      redactionSession,
       onEnvelope,
       onOutboundHeaders,
       onEvent: async (line) => {
@@ -633,6 +640,9 @@ export function createHandleProtocol(deps) {
         passthrough,
         toolNames,
         getRouting,
+        routing: getRouting(),
+        redactionPrincipal: req.apiKeyRecord?.id || (req.apiKeyKind === 'master' ? 'master' : ''),
+        redactionSession: String(req.headers?.['x-claude-code-session-id'] || req.headers?.['x-session-id'] || ''),
         attemptsRepo: deps.getAttemptsRepo?.(),
         requestId: logCtx.request_id,
         onModels({ sentModel, upstreamResponseModel }) {
@@ -1899,6 +1909,8 @@ export function createHandleProtocol(deps) {
               noGoFallback: !!pinVmId,
               onEnvelope: noteOutboundEnvelope,
               onOutboundHeaders: noteOutboundHeaders,
+              redactionPrincipal: req.apiKeyRecord?.id || (req.apiKeyKind === 'master' ? 'master' : ''),
+              redactionSession: String(req.headers?.['x-claude-code-session-id'] || ''),
             })
           }
           let state
@@ -1946,6 +1958,8 @@ export function createHandleProtocol(deps) {
               slotWaitMs: candidate.slotWaitMs,
               noGoFallback: !!pinVmId,
               ensureCredential: (exec) => ensureWorkerCredential(exec),
+              redactionPrincipal: req.apiKeyRecord?.id || (req.apiKeyKind === 'master' ? 'master' : ''),
+              redactionSession: String(req.headers?.['x-claude-code-session-id'] || ''),
               onEnvelope: noteOutboundEnvelope,
               onOutboundHeaders: noteOutboundHeaders,
               onCommit: () => {
