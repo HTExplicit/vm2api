@@ -10,6 +10,8 @@ import { createDatabase } from '../../src/lib/db/database.mjs'
 import { SlotBrowserRepo } from '../../src/lib/db/repos/slot-browser-repo.mjs'
 import { OpenaiApiRepo } from '../../src/lib/db/repos/openai-api-repo.mjs'
 import { ApiEndpointStore } from '../../src/lib/admin/api-endpoints.mjs'
+import { buildVmList } from '../../src/lib/admin/panel-api.mjs'
+import { OpenaiApiCreditsService } from '../../src/lib/oauth/openai-api-credits.mjs'
 import { OpenaiApiManager } from '../../src/lib/openai-api/manager.mjs'
 import { PlatformAdapter } from '../../src/lib/openai-api/platform-adapter.mjs'
 
@@ -241,6 +243,7 @@ function fixture(t) {
     fs.rmSync(directory, { recursive: true, force: true })
   })
   return {
+    directory,
     get manager() {
       return manager
     },
@@ -279,6 +282,38 @@ function fixture(t) {
     },
   }
 }
+
+test('an empty GPT slot without an account or balance job keeps its panel list readable', async (t) => {
+  const f = fixture(t)
+  const vm = { id: 'vm-empty', family: 'codex', status: 'stopped', schedulable: false, codex: {} }
+  fs.mkdirSync(path.join(f.directory, 'vms'))
+  fs.writeFileSync(path.join(f.directory, 'vms', `${vm.id}.json`), JSON.stringify(vm))
+  const credits = new OpenaiApiCreditsService({ projectRoot: f.directory, repo: f.repo })
+  f.manager.credits = credits
+
+  assert.throws(() => credits.accountForVm(vm.id), { code: 'api_account_required' })
+  assert.equal(credits.view(vm).claim_status, 'unknown')
+  assert.equal(f.manager.jobs.has(vm.id), false)
+  const view = f.manager.view(vm)
+  assert.equal(view.account_id, null)
+  assert.equal(view.has_key, false)
+  assert.equal(view.balance_refresh_status, 'idle')
+  assert.equal(view.balance_refresh_message, null)
+
+  const listed = await buildVmList({
+    cfg: { paths: { project: f.directory } },
+    accountQuota: { config: {}, snapshot: () => ({ accounts: [] }) },
+    openaiApiManager: f.manager,
+  })
+  assert.equal(listed.ok, true)
+  assert.equal(listed.data.items.length, 1)
+  assert.equal(listed.data.items[0].id, vm.id)
+  assert.equal(listed.data.items[0].openai_api.balance_refresh_status, 'idle')
+  assert.equal(listed.data.items[0].status, 'stopped')
+  assert.equal(listed.data.items[0].schedulable, false)
+  assert.equal(f.calls.sessions.length, 0)
+  assert.equal(f.calls.http.length, 0)
+})
 
 test('failed background browser release settles its API job while retaining retryable browser ownership', async (t) => {
   const f = fixture(t)
