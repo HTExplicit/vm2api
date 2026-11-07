@@ -212,6 +212,7 @@ export function LogsPage() {
   }
 
   const currentSummary = [
+    filters.errorsOnly ? '仅错误（含流式错误）' : null,
     filters.statusCode != null
       ? `状态码 ${filters.statusCode}`
       : filters.excludeStatus200

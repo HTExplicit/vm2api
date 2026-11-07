@@ -14,7 +14,7 @@ const ALL = '__all__'
 const NOT_200 = '!200'
 
 const COMMON_STATUS_CODES: [number, string][] = [
-  [200, '200 (成功)'],
+  [200, '200 (HTTP OK)'],
   [400, '400 (错误请求)'],
   [401, '401 (未授权)'],
   [429, '429 (限流)'],
@@ -62,7 +62,7 @@ export function StatusFilters({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={ALL}>全部状态码</SelectItem>
-            <SelectItem value={NOT_200}>非 200（全部非成功请求）</SelectItem>
+            <SelectItem value={NOT_200}>非 2xx（按 HTTP 状态码）</SelectItem>
             {COMMON_STATUS_CODES.map(([code, label]) => (
               <SelectItem key={code} value={String(code)}>
                 {label}

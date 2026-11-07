@@ -413,6 +413,7 @@ function usageLogFilters(req, u) {
     protocol: get('protocol'),
     status_code: get('status_code'),
     exclude_status_200: get('exclude_status_200') === '1',
+    errors_only: get('errors_only') === '1',
     model_mismatch: get('model_mismatch') === '1',
     response_model_mismatch: get('response_model_mismatch') === '1',
     min_attempt_count: get('min_attempt_count'),
@@ -2458,7 +2459,7 @@ export function createPanelHandler(ctx) {
           start_time: listed.start_time || legacy('since'),
           end_time: listed.end_time || legacy('until'),
           status_code: listed.status_code || (/^\d+$/.test(legacyStatus || '') ? legacyStatus : null),
-          errors_only: legacyStatus === 'error',
+          errors_only: listed.errors_only || legacyStatus === 'error',
         }
         const exported =
           (await readUsage('view', 'exportRows', [filters])) ||

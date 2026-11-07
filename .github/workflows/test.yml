@@ -92,6 +92,7 @@ jobs:
             test/unit/request-log.test.mjs \
             test/unit/usage-logs-view.test.mjs \
             test/unit/request-logs-export.test.mjs \
+            test/unit/panel-usage-logs.test.mjs \
             test/unit/database.test.mjs \
             test/unit/go-worker-client.test.mjs \
             test/unit/outbound-log-envelope.test.mjs \

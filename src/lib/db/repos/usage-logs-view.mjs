@@ -379,7 +379,8 @@ function buildFilter(filters, defaultMuted) {
     params.push(minAttempts)
   }
   if (filters.debug_only) where.push("log_mode = 'debug'")
-  // Legacy export `status=error`: the error predicate without picking a class.
+  // The error shortcut and legacy export `status=error` include stream errors
+  // even when downstream HTTP 200 was already committed.
   if (filters.errors_only) where.push(ERROR_PRED)
   const start = isoOrNull(filters.start_time)
   if (start) {

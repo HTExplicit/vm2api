@@ -44,11 +44,16 @@ export function QuickFiltersBar({
       id: 'errors-only',
       label: '仅错误',
       icon: AlertCircle,
-      active: !!filters.excludeStatus200,
+      active: !!filters.errorsOnly,
       toggle: () =>
-        filters.excludeStatus200
-          ? { ...filters, excludeStatus200: undefined }
-          : { ...filters, excludeStatus200: true, statusCode: undefined },
+        filters.errorsOnly
+          ? { ...filters, errorsOnly: undefined }
+          : {
+              ...filters,
+              errorsOnly: true,
+              excludeStatus200: undefined,
+              statusCode: undefined,
+            },
     },
     {
       id: 'show-retries',

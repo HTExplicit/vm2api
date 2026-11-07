@@ -223,9 +223,8 @@ export function isIgnoredClientCancel(row = {}) {
 export function isErrorRow(row) {
   if (isIgnoredClientCancel(row)) return false
   const status = Number(row?.status) || 0
-  // HTTP 2xx already committed to the client. leftover error_code
-  // (stream_incomplete after first-byte message_start) must not paint 超时.
-  if (status > 0 && status < 400) return false
+  // Streaming headers can commit HTTP 200 before a later transport or terminal
+  // error. Keep those failures visible just as the usage-log SQL predicates do.
   return status >= 400 || !!row?.error_code
 }
 

@@ -48,6 +48,13 @@ describe('log export query', () => {
     expect(qs.has('status')).toBe(false)
   })
 
+  it('keeps HTTP 200 streaming errors in the current errors-only export', () => {
+    const qs = exportQuery(base, { errorsOnly: true, vmId: 'vm-1' }, ['auth'])
+    expect(qs.get('errors_only')).toBe('1')
+    expect(qs.get('vm_id')).toBe('vm-1')
+    expect(qs.has('exclude_status_200')).toBe(false)
+  })
+
   it('drops muting when asked to include muted classes', () => {
     const qs = exportQuery({ ...base, includeMuted: true }, {}, ['auth'])
     expect(qs.get('include_muted')).toBe('1')
