@@ -111,7 +111,7 @@ export class OpenaiApiManager {
 
   balanceRefreshView(vmId, accountId, record, view) {
     const job = this.jobs.get(vmId)
-    if (job?.accountId === accountId && !job.abort.signal.aborted)
+    if (job && job.accountId === accountId && !job.abort.signal.aborted)
       return { status: job.phase || 'queued', message: job.phaseMessage || '余额刷新已排队' }
     const error = view.balance_error || (record?.setup_status === 'error' ? record.last_error : null)
     if (record?.setup_status === 'needs_login')
