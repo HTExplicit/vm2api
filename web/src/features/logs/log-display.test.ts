@@ -269,16 +269,37 @@ describe('logs search', () => {
   it('keeps legacy kind=error / error_class deep links working', () => {
     const search = validateLogsSearch({ kind: 'error', error_class: 'auth' })
     const filters = searchToFilters(search)
-    expect(filters.excludeStatus200).toBe(true)
+    expect(filters.errorsOnly).toBe(true)
+    expect(filters.excludeStatus200).toBeUndefined()
     expect(filters.errorClass).toBe('auth')
     expect(filtersToSearch(filters)).toEqual({
-      statusCode: '!200',
+      kind: 'error',
       error_class: 'auth',
     })
   })
 
   it('accepts a search with only sessionId', () => {
     expect(validateLogsSearch({ sessionId: ' abc ' }).sessionId).toBe('abc')
+  })
+
+  it('keeps streaming errors separate from an explicit HTTP status filter', () => {
+    const filters = searchToFilters(
+      validateLogsSearch({ kind: 'error', statusCode: 200, vmId: 'vm-1' })
+    )
+    expect(filtersToSearch(filters)).toEqual({
+      kind: 'error',
+      statusCode: 200,
+      vmId: 'vm-1',
+    })
+    const qs = usageLogFiltersQuery(filtersToApi(filters, []))
+    expect(qs.get('errors_only')).toBe('1')
+    expect(qs.get('status_code')).toBe('200')
+    expect(qs.has('exclude_status_200')).toBe(false)
+    expect(activeFilterCount(filters)).toBe(3)
+
+    const httpOnly = searchToFilters(validateLogsSearch({ statusCode: '!200' }))
+    expect(httpOnly.errorsOnly).toBeUndefined()
+    expect(filtersToSearch(httpOnly)).toEqual({ statusCode: '!200' })
   })
 
   it('maps filters onto the backend query string', () => {

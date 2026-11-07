@@ -484,3 +484,35 @@ test('tenant error collection hides other users and anonymous ingress failures',
   assert.equal(all.recent.length, 3)
   assert.deepEqual(all.ingress_hits.map((h) => h.ip).sort(), ['198.51.100.7', '203.0.113.9'])
 })
+
+test('error-only and timeout filters find committed stream failures counted in account outcomes', () => {
+  const db = freshDb()
+  try {
+    const rows = seed(db, [
+      ...Array.from({ length: 78 }, () => ({ account_id: 'acc-a' })),
+      { account_id: 'acc-a', error_code: 'ECONNRESET', error_message: '', final_state: 'incomplete' },
+      { account_id: 'acc-a', error_code: 'ECONNRESET', error_message: '', final_state: 'incomplete' },
+    ])
+    const view = new UsageLogsView(db)
+    const [account] = new UsageLogsRepo(db).costByAccount()
+    assert.deepEqual([account.requests, account.success, account.errors], [80, 78, 2])
+    const failedIds = [rows[79].id, rows[78].id]
+    for (const filters of [
+      { errors_only: true },
+      { errors_only: true, status_code: 200 },
+      { error_class: 'timeout' },
+    ]) {
+      const page = view.listBatch(filters)
+      assert.deepEqual(page.logs.map((r) => r.id), failedIds)
+      assert.ok(page.logs.every((r) => r.statusCode === 200 && r.errorClass === 'timeout'))
+      const summary = view.summary(filters)
+      assert.deepEqual([summary.totalRequests, summary.successRequests, summary.errorRequests], [2, 0, 2])
+    }
+    // An explicit HTTP status filter keeps its original meaning.
+    assert.deepEqual(view.listBatch({ exclude_status_200: true }).logs, [])
+    seed(db, [{ account_id: 'acc-a', error_code: 'client_cancelled' }])
+    assert.deepEqual(view.listBatch({ errors_only: true }).logs.map((r) => r.id), failedIds)
+  } finally {
+    db.close()
+  }
+})

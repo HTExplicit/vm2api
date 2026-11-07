@@ -27,13 +27,13 @@ export type LogsSearch = {
   /** 重试次数下限（= 尝试次数 - 1）。 */
   minRetry?: number
   error_class?: string
-  /** 旧深链：等价于 `statusCode=!200`。 */
+  /** 仅错误，包含 HTTP 200 下的流式错误。 */
   kind?: 'error'
   /** 只看 debug 采样行。 */
   debug?: boolean
 }
 
-/** 筛选面板编辑的草稿形状；`kind=error` 在这里已折叠成 `excludeStatus200`。 */
+/** 筛选面板编辑的草稿形状；请求错误与 HTTP 状态码独立筛选。 */
 export type LogsFilterState = {
   userId?: string
   keyId?: string
@@ -44,6 +44,7 @@ export type LogsFilterState = {
   endTime?: number
   statusCode?: number
   excludeStatus200?: boolean
+  errorsOnly?: boolean
   model?: string
   mismatch?: boolean
   endpoint?: string
@@ -104,7 +105,7 @@ export function validateLogsSearch(
 }
 
 export function searchToFilters(search: LogsSearch): LogsFilterState {
-  const exclude = search.statusCode === '!200' || search.kind === 'error'
+  const exclude = search.statusCode === '!200'
   return {
     userId: search.userId,
     keyId: search.keyId,
@@ -116,6 +117,7 @@ export function searchToFilters(search: LogsSearch): LogsFilterState {
     statusCode:
       typeof search.statusCode === 'number' ? search.statusCode : undefined,
     excludeStatus200: exclude || undefined,
+    errorsOnly: search.kind === 'error' || undefined,
     model: search.model,
     mismatch: search.mismatch,
     endpoint: search.endpoint,
@@ -126,7 +128,7 @@ export function searchToFilters(search: LogsSearch): LogsFilterState {
   }
 }
 
-/** 草稿 → URL。`kind` 不再写回，统一由 `statusCode=!200` 表达。 */
+/** 草稿 → URL。`kind=error` 保留流式错误，`statusCode=!200` 仅筛 HTTP 状态。 */
 export function filtersToSearch(filters: LogsFilterState): LogsSearch {
   const out: LogsSearch = {}
   if (filters.userId) out.userId = filters.userId
@@ -138,6 +140,7 @@ export function filtersToSearch(filters: LogsFilterState): LogsSearch {
   if (filters.endTime != null) out.endTime = filters.endTime
   if (filters.excludeStatus200) out.statusCode = '!200'
   else if (filters.statusCode != null) out.statusCode = filters.statusCode
+  if (filters.errorsOnly) out.kind = 'error'
   if (filters.model) out.model = filters.model
   if (filters.mismatch) out.mismatch = true
   if (filters.endpoint) out.endpoint = filters.endpoint
@@ -167,6 +170,7 @@ export function filtersToApi(
   if (filters.protocol) out.protocol = filters.protocol
   if (filters.statusCode != null) out.statusCode = filters.statusCode
   else if (filters.excludeStatus200) out.excludeStatus200 = true
+  if (filters.errorsOnly) out.errorsOnly = true
   if (filters.mismatch) out.responseModelMismatch = true
   if (filters.minRetry != null && filters.minRetry > 0)
     out.minAttemptCount = filters.minRetry + 1
@@ -199,6 +203,7 @@ export function usageLogFiltersQuery(
   set('protocol', filters.protocol)
   set('status_code', filters.statusCode)
   if (filters.excludeStatus200) qs.set('exclude_status_200', '1')
+  if (filters.errorsOnly) qs.set('errors_only', '1')
   if (filters.modelMismatch) qs.set('model_mismatch', '1')
   if (filters.responseModelMismatch) qs.set('response_model_mismatch', '1')
   set('min_attempt_count', filters.minAttemptCount)
@@ -222,6 +227,7 @@ export function activeFilterCount(filters: LogsFilterState): number {
   if (filters.sourceAccountId) count++
   if (filters.sessionId) count++
   if (filters.statusCode != null || filters.excludeStatus200) count++
+  if (filters.errorsOnly) count++
   if (filters.model) count++
   if (filters.mismatch) count++
   if (filters.endpoint) count++

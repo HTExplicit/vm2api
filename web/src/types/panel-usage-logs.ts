@@ -242,6 +242,8 @@ export type UsageLogFilters = {
   statusCode?: number
   /** (`exclude_status_200=1`) 只看非 2xx；与 statusCode 互斥，后者优先。 */
   excludeStatus200?: boolean
+  /** (`errors_only=1`) 请求错误，包含 HTTP 200 的流式失败；可叠加精确状态码。 */
+  errorsOnly?: boolean
   /** 旧 (`model_mismatch=1`)，保留原有筛选口径。 */
   modelMismatch?: boolean
   /** (`response_model_mismatch=1`) 发送与上游返回模型均已知且名称不同。 */

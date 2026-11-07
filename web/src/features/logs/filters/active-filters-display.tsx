@@ -84,6 +84,8 @@ export function ActiveFiltersDisplay({
     chips.push({ key: 'endpoint', label: '端点', value: filters.endpoint })
   if (filters.protocol)
     chips.push({ key: 'protocol', label: '协议', value: filters.protocol })
+  if (filters.errorsOnly)
+    chips.push({ key: 'errorsOnly', label: '仅错误', value: '含流式错误' })
   if (filters.excludeStatus200)
     chips.push({ key: 'status', label: '状态码', value: '!200' })
   else if (filters.statusCode != null)

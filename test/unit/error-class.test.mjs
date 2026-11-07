@@ -121,8 +121,25 @@ test('classifyRequestError maps known codes and statuses', () => {
   assert.equal(classifyRequestError({ status: 200, error_code: 'client_cancelled' }), null)
   assert.equal(classifyRequestError({ status: 499, error_code: 'client_cancelled' }), null)
   assert.equal(classifyRequestError({ status: 502, error_code: 'ECONNRESET' }).error_class, 'timeout')
-  assert.equal(classifyRequestError({ status: 200, error_code: 'stream_incomplete' }), null)
+  assert.equal(classifyRequestError({ status: 200, error_code: 'stream_incomplete' }).error_class, 'timeout')
   assert.equal(classifyRequestError({ status: 200, error_message: 'stream first-byte timeout' }), null)
+})
+
+test('committed stream errors remain classified and collected while client cancellations stay ignored', () => {
+  const failed = { status: 200, error_code: 'ECONNRESET', final_state: 'incomplete', error_message: '' }
+  assert.equal(classifyRequestError(failed).error_class, 'timeout')
+  assert.equal(classifyRequestError({ status: 200, error_code: 'upstream_error' }).error_class, 'upstream')
+  const bag = collectErrors([
+    { ...failed, request_id: 'reset-one' },
+    { ...failed, request_id: 'reset-two' },
+    { status: 200 },
+    { status: 200, error_code: 'client_cancelled' },
+    { status: 499, error_code: 'client_cancelled' },
+  ])
+  assert.equal(bag.total, 2)
+  assert.equal(bag.by_class[0].id, 'timeout')
+  assert.equal(bag.by_class[0].count, 2)
+  assert.equal(bag.by_code[0].error_code, 'ECONNRESET')
 })
 
 test('collectErrors groups by class and code', () => {
