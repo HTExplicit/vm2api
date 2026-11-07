@@ -26,6 +26,7 @@ import { createStreamTiming } from '../protocol/stream-timing.mjs'
 import { mergeUsage } from '../protocol/openai-usage.mjs'
 import { fromClaudeToOpenAICompletions } from '../protocol/convert.mjs'
 import { keyScopeFromRequest } from '../admin/key-scope.mjs'
+import { ensureRedaction, maskJson, restoreJsonValue, createSseRestorer } from '../redaction/runtime.mjs'
 
 export function resolveInferenceBackend(req) {
   if (req?.apiKeyKind !== 'managed') return 'oauth'
@@ -196,7 +197,7 @@ function mergeCallerProtocolHeaders(base = {}, caller = {}, configured = {}, mod
   return out
 }
 
-async function readLines(stream, onLine) {
+async function readLines(stream, onLine, restorer = null) {
   let buf = ''
   let receivedAt = null
   for await (const chunk of stream) {
@@ -206,10 +207,15 @@ async function readLines(stream, onLine) {
     while ((idx = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, idx)
       buf = buf.slice(idx + 1)
-      await onLine(line, receivedAt)
+      if (restorer) for (const pending of restorer.before(line)) await onLine(pending, receivedAt)
+      await onLine(restorer ? await restorer.line(line) : line, receivedAt)
     }
   }
-  if (buf) await onLine(buf, receivedAt)
+  if (buf) {
+    if (restorer) for (const pending of restorer.before(buf)) await onLine(pending, receivedAt)
+    await onLine(restorer ? await restorer.line(buf) : buf, receivedAt)
+  }
+  if (restorer) for (const line of await restorer.finish()) await onLine(line, receivedAt)
 }
 
 function openAIResponsesSseEvent(line) {
@@ -437,7 +443,7 @@ export async function runApiInference(options = {}) {
       if (options.signal?.aborted) result = clientCancelledResult(result)
     }
     if (options.signal?.aborted && !result.clientCancelled) result = clientCancelledResult(result)
-    if (!dispatched && lastResult) break
+    if (!dispatched && lastResult && result.via !== 'redaction') break
     lastResult = { ...result, attemptCount }
     const maySwitch =
       result.retryableAccountRejection === true &&
@@ -448,7 +454,11 @@ export async function runApiInference(options = {}) {
     if (dispatched)
       options.attemptsRepo?.complete(options.requestId, attemptCount, {
         upstreamStatus: result.status,
-        errorScope: result.ok ? null : result.status === 401 ? 'credential' : 'account',
+        errorScope: result.ok
+          ? null
+          : result.via === 'redaction'
+            ? 'request'
+            : result.status === 401 ? 'credential' : 'account',
         action: maySwitch ? 'next_unit' : 'return',
         downstreamCommitted: !!options.res?.headersSent || !!result.committed,
         terminalState: result.terminalState,
@@ -463,7 +473,41 @@ export async function runApiInference(options = {}) {
   return lastResult
 }
 
-async function runApiAttempt({
+async function runApiAttempt(options) {
+  let dispatched = false
+  let dispatchedKey = null
+  let models = { sentModel: null, upstreamResponseModel: null }
+  try {
+    return await runApiAttemptBody({
+      ...options,
+      onDispatch(key) {
+        dispatched = true
+        dispatchedKey = key
+        options.onDispatch?.(key)
+      },
+      onModels(value) {
+        models = value
+        options.onModels?.(value)
+      },
+    })
+  } catch (error) {
+    if (!String(error?.code || '').startsWith('redaction_') && error?.code !== 'invalid_redaction_config') throw error
+    return {
+      ...(dispatched && options.picked ? apiResultIdentity(options.picked, dispatchedKey) : {}),
+      ...models,
+      ok: false,
+      status: error.status || 503,
+      via: 'redaction',
+      body: { error: { type: 'api_error', code: error.code, message: String(error.message).slice(0, 300) } },
+      terminalState: options.res?.headersSent ? 'incomplete' : 'rejected',
+      committed: !!options.res?.headersSent,
+      transportError: false,
+      upstreamExecutions: dispatched ? 1 : 0,
+    }
+  }
+}
+
+async function runApiAttemptBody({
   req,
   res,
   cfg,
@@ -487,6 +531,9 @@ async function runApiAttempt({
   picked: selected = null,
   onDispatch = null,
   onModels = null,
+  routing = null,
+  redactionPrincipal = '',
+  redactionSession = '',
 } = {}) {
   const model = (nativeResponsesBody || convertedBody)?.model
   const scope = keyScopeFromRequest(req)
@@ -522,7 +569,7 @@ async function runApiAttempt({
       },
     }
   }
-  const body = isOpenAI
+  let body = isOpenAI
     ? {
         ...(nativeResponses
           ? normalizeApiOpenAIRequestBody(nativeResponsesBody)
@@ -544,6 +591,9 @@ async function runApiAttempt({
     }
   }
   if (requestContext) Object.assign(body, prepareClassifierBody(body))
+  const redactionState = await ensureRedaction(routing || {}, { projectRoot: cfg?.paths?.project })
+  const redaction = redactionState.enabled ? { principal: redactionPrincipal, session: redactionSession } : null
+  if (redaction) body = await maskJson(body, redaction)
   const callerProtocolHeaders = forwardAnthropicProtocolHeaders(req?.headers, protocol, protocolKind, {
     passthrough,
   })
@@ -641,7 +691,8 @@ async function runApiAttempt({
   }
 
   if (status >= 400) {
-    const payload = await readApiJson(upstream).catch(() => ({}))
+    const rawPayload = await readApiJson(upstream).catch(() => ({}))
+    const payload = redaction ? await restoreJsonValue(rawPayload, redaction) : rawPayload
     const responseModel = payload?.response?.model || payload?.model
     if (typeof responseModel === 'string' && responseModel.trim()) {
       resultBase.upstreamResponseModel = responseModel
@@ -692,6 +743,7 @@ async function runApiAttempt({
       timing,
       nativeResponses,
       onModels,
+      redaction,
     })
     if (!result.ok) {
       recordApiKeyFailure(
@@ -734,8 +786,9 @@ async function runApiAttempt({
           if (event?.type === 'message_stop') classifierStopped = true
         }
         await onLine(line)
-      })
+      }, redaction ? createSseRestorer(redaction) : null)
     } catch (error) {
+      if (String(error?.code || '').startsWith('redaction_') || error?.code === 'invalid_redaction_config') throw error
       if (!requestContext) throw error
       classifierError = {
         type: 'error',
@@ -898,6 +951,7 @@ async function runOpenAIResponsesUpstream({
   timing,
   nativeResponses = false,
   onModels = null,
+  redaction = null,
 }) {
   const chunks = []
   const anthropicSse = protocol === 'anthropic.messages' ? createAnthropicSseState() : null
@@ -991,8 +1045,9 @@ async function runOpenAIResponsesUpstream({
         return
       }
       writeStreamLine(raw)
-    })
+    }, redaction ? createSseRestorer(redaction) : null)
   } catch (error) {
+    if (String(error?.code || '').startsWith('redaction_') || error?.code === 'invalid_redaction_config') throw error
     if (!nativeResponses) throw error
     return {
       ...resultBase,

@@ -33,11 +33,18 @@ jobs:
           version: 10
           cache: true
           cache_dependency_path: web/pnpm-lock.yaml
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: redact/go.sum
       - run: npm ci
       - name: installer and upgrade shell syntax
         run: |
           bash -n deploy/install.sh
           sh -n scripts/panel-upgrade.sh
+      - name: redaction helper unit checks
+        working-directory: redact
+        run: go test ./...
       - name: focused backend regressions
         shell: bash
         run: |
@@ -172,6 +179,13 @@ jobs:
             test/unit/slot-migration.test.mjs \
             test/unit/wrap-cli-runtime.test.mjs \
             test/unit/slot-engine.test.mjs \
+            test/unit/key-self.test.mjs \
+            test/unit/panel-acl.test.mjs \
+            test/unit/panel-users.test.mjs \
+            test/unit/statistics-repo.test.mjs \
+            test/unit/official-cache-breakpoints.test.mjs \
+            test/unit/redaction-policy.test.mjs \
+            test/unit/redaction-runtime.test.mjs \
             test/unit/vm-package.test.mjs; do
             node --test "$file"
           done
@@ -187,6 +201,8 @@ jobs:
         run: node --test --test-name-pattern='^real admin and user sessions cannot list or operate each other personal keys$' test/e2e/api-keys.e2e.test.mjs
       - name: Configured API endpoints support both protocols
         run: node --test --test-name-pattern='^generated API key lists configured models and calls both protocols through API endpoints$' test/e2e/api-channel.e2e.test.mjs
+      - name: Managed keys read their own quota and usage
+        run: node --test --test-name-pattern='^managed keys read their own quota and usage; expired keys still can, disabled cannot$' test/e2e/key-self.e2e.test.mjs
       - name: OAuth exchange uses the VM egress
         run: node --test --test-name-pattern='^OAuth exchange reuses VM egress without a host-side proxy hop$' test/e2e/panel-api.e2e.test.mjs
       - name: synthetic billing benchmark
@@ -216,6 +232,7 @@ jobs:
           pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx
           pnpm exec vitest run src/features/anthropic/endpoint-save.test.ts
           pnpm exec vitest run src/features/settings/health-pane.test.ts src/features/cluster/slot-migration.test.ts
+          pnpm exec vitest run src/config/nav.test.ts src/features/auth/route-guard.test.ts src/features/users/user-concurrency.test.ts src/features/vm/vm-perms.test.ts
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx
           pnpm exec vitest run src/features/cluster/model.test.ts src/features/cluster/connection-rows.test.ts
           pnpm build

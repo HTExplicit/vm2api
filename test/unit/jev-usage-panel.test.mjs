@@ -8,7 +8,7 @@ import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
 import { SettingsRepo } from '../../src/lib/db/repos/settings-repo.mjs'
 import { JevUsageRepo } from '../../src/lib/db/repos/jev-usage-repo.mjs'
 import { normalizeJevUsage } from '../../src/lib/protocol/jev-usage.mjs'
-import { publicJevKeys } from '../../src/lib/protocol/jev-intercept.mjs'
+import { applyJevPatch, publicJevKeys } from '../../src/lib/protocol/jev-intercept.mjs'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 
 test('JEV actual panel route enforces roles, sanitization and pagination', async (t) => {
@@ -116,6 +116,49 @@ test('JEV actual panel route enforces roles, sanitization and pagination', async
   assert.equal(missing.body.data.total.requests, 2)
   passed.push('filter does not alter global totals')
   assert.equal(passed.length, 9)
+})
+
+test('model catalog keeps a keyless endpoint separate from another endpoint key', async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jev-models-panel-'))
+  t.after(() => {
+    closeDatabase()
+    fs.rmSync(tmp, { recursive: true, force: true })
+  })
+  const dataDir = path.join(tmp, 'data')
+  fs.mkdirSync(dataDir)
+  openDatabase({ dataDir })
+  assert.equal(
+    applyJevPatch(new SettingsRepo(), {
+      endpoints: [
+        { base_url: 'https://a.example/v1', api_keys: [] },
+        { base_url: 'https://b.example/v1', api_keys: ['ONLY_B_ENDPOINT_KEY'] },
+      ],
+    }).ok,
+    true,
+  )
+  const requested = []
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    requested.push({ url, authorization: init.headers.authorization })
+    return { ok: true, json: async () => ({ data: [{ id: 'jev-latest' }] }) }
+  })
+  const response = {}
+  const handler = createPanelHandler({
+    cfg: { paths: { project: tmp } },
+    routingConfig: {},
+    requireAuth(req) {
+      Object.assign(req, { panelUser: 'isolated-admin', panelRole: 'admin' })
+      return true
+    },
+    readBody: async () => ({ base_url: 'https://a.example/v1', api_key: '' }),
+    json(_res, status, body) {
+      Object.assign(response, { status, body })
+      return true
+    },
+  })
+  await handler({ method: 'POST' }, {}, new URL('http://localhost/api/panel/jev-intercept/models'))
+  assert.equal(response.status, 200)
+  assert.deepEqual(response.body.data.models, ['jev-latest'])
+  assert.deepEqual(requested, [{ url: 'https://a.example/v1/models', authorization: undefined }])
 })
 
 test('masked key labels never expose short credentials or endpoint URLs', () => {

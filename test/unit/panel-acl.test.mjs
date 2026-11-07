@@ -15,8 +15,8 @@ const serverSrc = [
   fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/server.mjs'), 'utf8'),
 ].join('\n')
 
-test('user sees vm / proxies / keys / billing / logs / statistics', () => {
-  assert.deepEqual(viewsForRole('user'), ['vm', 'proxies', 'keys', 'billing', 'logs', 'statistics'])
+test('user sees vm / keys / billing / logs / statistics', () => {
+  assert.deepEqual(viewsForRole('user'), ['vm', 'keys', 'billing', 'logs', 'statistics'])
   assert.deepEqual(viewsForRole('super'), ['overview', 'cluster', 'logs', 'statistics', 'vm'])
   assert.equal(canViewPage('admin', 'statistics'), true)
   assert.equal(canViewPage('user', 'vm'), true)
@@ -36,18 +36,23 @@ test('user sees vm / proxies / keys / billing / logs / statistics', () => {
   assert.equal(hasCapability('user', 'vm.schedule'), true)
 })
 
-test('user can manage owned vm/proxy/key surfaces and nothing else', () => {
+test('user can view owned vms and manage keys, not proxies or reauth', () => {
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01', 'user').ok, true)
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/create', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/create-options', 'user').ok, true)
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/schedulable', 'user').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/import', 'user').ok, true)
-  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/package', 'user').ok, true)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/import', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/package', 'user').ok, false)
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/package', 'user').ok, false)
   assert.equal(authorizePanelRoute('PUT', '/api/panel/vms/vm-01/package', 'user').ok, false)
   assert.equal(authorizePanelRoute('DELETE', '/api/panel/vms/vm-01', 'user').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/proxies', 'user').ok, true)
+  assert.equal(authorizePanelRoute('GET', '/api/panel/proxies', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/proxies/import', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/generate-auth-url', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/exchange-code', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/refresh', 'user').ok, false)
+  assert.equal(authorizePanelRoute('PUT', '/api/panel/vms/vm-01/oauth/credential', 'user').ok, false)
   assert.equal(authorizePanelRoute('GET', '/api/panel/api-keys', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/api-keys/key_a/stats', 'user').ok, true)
   assert.equal(authorizePanelRoute('GET', '/api/panel/request-logs', 'user').ok, true)
@@ -68,7 +73,6 @@ test('user can manage owned vm/proxy/key surfaces and nothing else', () => {
 test('user can query quota and redeem reset credits on owned vms and keys', () => {
   const allowed = [
     '/api/panel/vms/vm-01/openai-quota/refresh',
-    '/api/panel/vms/vm-01/openai-subscription/refresh',
     '/api/panel/vms/vm-01/openai-quota/reset',
     '/api/panel/vms/vm-01/claude-reset/query',
     '/api/panel/vms/vm-01/claude-reset/redeem',
@@ -84,7 +88,7 @@ test('user can query quota and redeem reset credits on owned vms and keys', () =
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/claude-reset/other', 'user').ok, false)
 })
 
-test('subscription refresh uses the existing tenant ownership boundary', async (t) => {
+test('subscription refresh is admin-only before looking up account credentials', async (t) => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-subscription-owner-'))
   t.after(() => fs.rmSync(project, { recursive: true, force: true }))
   fs.mkdirSync(path.join(project, 'vms'))
@@ -92,16 +96,22 @@ test('subscription refresh uses the existing tenant ownership boundary', async (
     path.join(project, 'vms', 'vm-owned.json'),
     JSON.stringify({ id: 'vm-owned', platform: 'openai', owner_user_id: 'owner', codex: {} }),
   )
-  for (const [userId, expectedStatus] of [
-    ['other-user', 404],
-    ['owner', 400],
+  for (const [role, userId, expectedStatus] of [
+    ['user', 'other-user', 403],
+    ['user', 'owner', 403],
+    ['super', 'owner', 403],
+    ['admin', 'owner', 400],
   ]) {
+    assert.equal(
+      authorizePanelRoute('POST', '/api/panel/vms/vm-owned/openai-subscription/refresh', role).ok,
+      role === 'admin',
+    )
     let response
     const handler = createPanelHandler({
       cfg: { paths: { project } },
       requireAuth(req) {
         req.panelUser = userId
-        req.panelRole = 'user'
+        req.panelRole = role
         req.panelUserId = userId
         return true
       },
@@ -115,8 +125,8 @@ test('subscription refresh uses the existing tenant ownership boundary', async (
       {},
       new URL('http://localhost/api/panel/vms/vm-owned/openai-subscription/refresh'),
     )
-    assert.equal(response.status, expectedStatus, userId)
-    if (userId === 'owner') assert.equal(response.body.error.code, 'no_access_token')
+    assert.equal(response.status, expectedStatus, `${role} ${userId}`)
+    assert.equal(response.body.error.code, role === 'admin' ? 'no_access_token' : 'forbidden')
   }
 })
 
@@ -162,7 +172,7 @@ test('super can schedule VMs but cannot touch credentials or delete', () => {
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/to-setup-token', 'super').ok, false)
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/oauth/credential', 'super').ok, false)
   assert.equal(authorizePanelRoute('PUT', '/api/panel/vms/vm-01/oauth/credential', 'super').ok, false)
-  assert.equal(authorizePanelRoute('GET', '/api/panel/vms/vm-01/oauth/credential', 'user').ok, false)
+  assert.equal(authorizePanelRoute('POST', '/api/panel/vms/vm-01/oauth/refresh', 'user').ok, false)
   assert.equal(authorizePanelRoute('DELETE', '/api/panel/vms/vm-01', 'super').ok, false)
   assert.equal(authorizePanelRoute('POST', '/api/panel/vms/create', 'super').ok, false)
   assert.equal(authorizePanelRoute('GET', '/api/panel/vms/create-options', 'super').ok, false)
