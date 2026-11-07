@@ -358,13 +358,13 @@ export function OnboardFlow() {
     if (backTo != null && natural <= backTo) setBackTo(null)
   }, [natural, backTo])
 
-  // 选中的槽被别处导入了凭证 / 被删了，就从选中态退出来。
-  // pinned 分支放行：换票成功的那一刻本槽正好会从 empty 里消失。
-  const stillEmpty = !!vmId && vms.some((v) => v.id === vmId && !v.has_token)
+  // 凭据保存后仍保留选中槽，让浏览器登录完成后再展示上线回执。
+  // 只有槽被删除时才退出选中态。
+  const stillExists = !!vmId && vms.some((v) => v.id === vmId)
   useEffect(() => {
     if (pinnedId) return
-    if (vmId && !stillEmpty) setVmId('')
-  }, [pinnedId, vmId, stillEmpty])
+    if (vmId && !stillExists) setVmId('')
+  }, [pinnedId, vmId, stillExists])
 
   const boot = useQuery(
     officialCcBootstrapQueryOptions(
