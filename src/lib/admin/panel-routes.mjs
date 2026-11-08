@@ -3984,7 +3984,7 @@ export function createPanelHandler(ctx) {
             await openaiApiManager?.cancel(id)
             await slotBrowserManager?.close(id)
             if (vm) {
-              const gone = await destroySlot(vm, cfg.paths.project)
+              const gone = await (ctx.destroySlot || destroySlot)(vm, cfg.paths.project)
               if (!gone.ok)
                 return json(res, 409, {
                   ok: false,

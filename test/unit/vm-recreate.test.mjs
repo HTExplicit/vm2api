@@ -216,7 +216,12 @@ test('keep rebuild retains the account, fingerprint and credential file', () => 
 })
 
 test('destroy missing container is a no-op', () => {
-  const r = destroyVmRuntime({ id: 'vm-missing-slot' })
+  const r = destroyVmRuntime(
+    { id: 'vm-missing-slot' },
+    {
+      run: () => ({ ok: false, stderr: 'Error: No such object: kin-missing-slot' }),
+    },
+  )
   assert.equal(r.ok, true)
   assert.equal(r.action, 'absent')
 })

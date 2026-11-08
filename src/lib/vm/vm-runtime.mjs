@@ -1292,17 +1292,21 @@ export async function startVmRuntime(
 }
 
 /** Explicit factory reset / delete only. Never call from Node deploy. */
-export function destroyVmRuntime(vm) {
+export function destroyVmRuntime(vm, { run = sh } = {}) {
   if (!vm?.id) return { ok: false, error: 'vm required' }
   const name = containerName(vm.id)
-  const info = inspectContainer(name)
-  if (!info) {
+  const inspected = inspectContainerOutcome(name, { run })
+  if (inspected.status === 'error') return { ok: false, error: inspected.error }
+  if (inspected.status === 'missing') {
     if (vm.runtime) vm.runtime = { ...vm.runtime, pid: null, ip: null, stopped: true, removed: true }
     return { ok: true, action: 'absent', runtime: vm.runtime || null }
   }
-  const r = sh(['docker', 'rm', '-f', name], { timeout: 60_000 })
-  if (!r.ok && inspectContainer(name)) {
-    return { ok: false, error: r.stderr || 'docker rm failed' }
+  const r = run(['docker', 'rm', '-f', name], { timeout: 60_000 })
+  if (!r.ok) {
+    const remaining = inspectContainerOutcome(name, { run })
+    if (remaining.status !== 'missing') {
+      return { ok: false, error: r.stderr || remaining.error || 'docker rm failed' }
+    }
   }
   if (vm.runtime) vm.runtime = { ...vm.runtime, pid: null, ip: null, stopped: true, removed: true }
   return { ok: true, action: 'removed', runtime: vm.runtime || null }
