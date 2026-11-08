@@ -8,6 +8,7 @@ import { reloadActiveVm } from '../../src/lib/core/config.mjs'
 import { getVm } from '../../src/lib/vm/vm-registry.mjs'
 import { readCodexAccounts, writeCodexAccounts } from '../../src/lib/vm/codex-slot.mjs'
 import { invalidateReadCache } from '../../src/lib/vm/vm-file.mjs'
+import { destroyVmRuntime } from '../../src/lib/vm/vm-runtime.mjs'
 
 function seed(root, id, { active = false } = {}) {
   const dir = path.join(root, 'vms')
@@ -19,7 +20,7 @@ function seed(root, id, { active = false } = {}) {
   if (active) fs.writeFileSync(path.join(dir, 'active.json'), JSON.stringify({ active_vm: id }))
 }
 
-function handler(project) {
+function handler(project, overrides = {}) {
   const response = {}
   const cfg = { paths: { project }, vm: { id: 'stale' } }
   const handlePanel = createPanelHandler({
@@ -36,9 +37,54 @@ function handler(project) {
     },
     readBody: async () => ({}),
     proxyPool: { unbindVm() {} },
+    destroySlot: () => ({ ok: true, action: 'absent' }),
+    ...overrides,
   })
   return { handlePanel, response, cfg }
 }
+
+test('failed container destruction preserves slot files, database and proxy binding', async () => {
+  const { openDatabase, closeDatabase, getDb } = await import('../../src/lib/db/database.mjs')
+  const { initVmDbSync, stopVmWatch } = await import('../../src/lib/vm/vm-db-sync.mjs')
+  const { setVmWriteHook } = await import('../../src/lib/vm/vm-file.mjs')
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-del-failed-'))
+  try {
+    openDatabase({ dataDir: path.join(root, 'data') })
+    seed(root, 'vm-01')
+    const record = path.join(root, 'vms', 'vm-01.json')
+    fs.mkdirSync(path.join(root, 'vms', 'vm-01'), { recursive: true })
+    writeCodexAccounts(root, 'vm-01', [{ access_token: 'fixture-secret' }])
+    const credentials = path.join(root, 'vms', 'vm-01', 'codex-credentials.json')
+    initVmDbSync(root, { watch: false })
+    const recordBefore = fs.readFileSync(record)
+    const credentialsBefore = fs.readFileSync(credentials)
+    const rowBefore = getDb().prepare('SELECT * FROM vms WHERE id = ?').get('vm-01')
+    const bound = new Set(['vm-01'])
+    const { handlePanel, response } = handler(root, {
+      destroySlot: (vm) =>
+        destroyVmRuntime(vm, {
+          run: () => ({ ok: false, stderr: 'Cannot connect to the Docker daemon' }),
+        }),
+      proxyPool: {
+        unbindVm(id) {
+          bound.delete(id)
+        },
+      },
+    })
+    await handlePanel({ method: 'DELETE' }, {}, new URL('http://localhost/api/panel/vms/vm-01'))
+    assert.equal(response.status, 409)
+    assert.equal(response.body?.error?.code, 'slot_destroy_failed')
+    assert.deepEqual(fs.readFileSync(record), recordBefore)
+    assert.deepEqual(fs.readFileSync(credentials), credentialsBefore)
+    assert.deepEqual(getDb().prepare('SELECT * FROM vms WHERE id = ?').get('vm-01'), rowBefore)
+    assert.equal(bound.has('vm-01'), true)
+  } finally {
+    stopVmWatch()
+    setVmWriteHook(null)
+    closeDatabase()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('fresh deploy can delete its only active VM', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-del-only-'))
