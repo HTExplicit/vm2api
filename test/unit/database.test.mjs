@@ -451,27 +451,49 @@ test('withTransaction only runs inline for a real outer transaction', () => {
   assert.equal(called, false)
 })
 
-test('migration 054 upgrades a 053 database with risk review off and does not replay on reopen', () => {
+test('migrations 054 and 055 preserve a published fork 054 database and do not replay on reopen', () => {
   const src = path.resolve('src/lib/db/migrations')
-  const oldDir = path.join(tmp, 'before054')
+  const oldDir = path.join(tmp, 'before055')
   fs.mkdirSync(oldDir)
   for (const file of fs.readdirSync(src)) {
     if (file.endsWith('.sql') && file < '054') fs.copyFileSync(path.join(src, file), path.join(oldDir, file))
   }
+  fs.copyFileSync(
+    path.join(src, '055_api_endpoint_risk_review.sql'),
+    path.join(oldDir, '054_api_endpoint_risk_review.sql'),
+  )
   const dbPath = path.join(tmp, 'risk054.db')
   let db = new DatabaseSync(dbPath)
   try {
     applyMigrations(db, { migrationsDir: oldDir })
-    assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, '053')
+    assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, '054')
     db.prepare(`INSERT INTO api_endpoints (id, name, base_url, created_at, updated_at)
       VALUES ('legacy', 'Legacy', 'https://api.anthropic.com', '2026-11-01', '2026-11-01')`).run()
-    const before = { ...db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy') }
-    assert.deepEqual(applyMigrations(db, { migrationsDir: src }), ['054_api_endpoint_risk_review.sql'])
+    const { risk_review_enabled: beforeRisk, ...before } = db
+      .prepare('SELECT * FROM api_endpoints WHERE id = ?')
+      .get('legacy')
+    assert.equal(beforeRisk, 0)
+    const legacyMigration = db
+      .prepare("SELECT checksum, applied_at FROM schema_migrations WHERE version = '054'")
+      .get()
+    assert.deepEqual(applyMigrations(db, { migrationsDir: src }), ['054_api_keys_allowed_models.sql'])
     const { risk_review_enabled, ...after } = db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy')
     assert.equal(risk_review_enabled, 0)
     assert.deepEqual(after, before)
     assert.throws(() => db.prepare('UPDATE api_endpoints SET risk_review_enabled = 2').run(), /CHECK/)
     assert.throws(() => db.prepare('UPDATE api_endpoints SET risk_review_enabled = NULL').run(), /NOT NULL/)
+    assert.equal(
+      db.prepare("SELECT name FROM schema_migrations WHERE version = '054'").get().name,
+      '054_api_keys_allowed_models.sql',
+    )
+    assert.equal(
+      db.prepare("SELECT name FROM schema_migrations WHERE version = '055'").get().name,
+      '055_api_endpoint_risk_review.sql',
+    )
+    assert.deepEqual(
+      db.prepare("SELECT checksum, applied_at FROM schema_migrations WHERE version = '055'").get(),
+      legacyMigration,
+    )
     db.prepare('UPDATE api_endpoints SET risk_review_enabled = 1 WHERE id = ?').run('legacy')
     db.close()
     db = new DatabaseSync(dbPath)
@@ -480,6 +502,28 @@ test('migration 054 upgrades a 053 database with risk review off and does not re
       db.prepare('SELECT risk_review_enabled FROM api_endpoints WHERE id = ?').get('legacy').risk_review_enabled,
       1,
     )
+  } finally {
+    db.close()
+  }
+})
+
+test('migration 054 gives existing API keys an empty model allowlist (no limit)', () => {
+  const src = path.resolve('src/lib/db/migrations')
+  const oldDir = path.join(tmp, 'before054')
+  fs.mkdirSync(oldDir)
+  for (const file of fs.readdirSync(src)) {
+    if (file.endsWith('.sql') && file < '054') fs.copyFileSync(path.join(src, file), path.join(oldDir, file))
+  }
+  const db = new DatabaseSync(':memory:')
+  try {
+    applyMigrations(db, { migrationsDir: oldDir })
+    db.prepare(
+      `INSERT INTO api_keys (id, name, key, created_at) VALUES ('legacy', 'Legacy', 'hmac:x', '2026-11-01')`,
+    ).run()
+    applyMigrations(db, { migrationsDir: src })
+    assert.equal(db.prepare('SELECT allowed_models FROM api_keys WHERE id = ?').get('legacy').allowed_models, '[]')
+    assert.throws(() => db.prepare('UPDATE api_keys SET allowed_models = NULL').run(), /NOT NULL/)
+    assert.doesNotThrow(() => applyMigrations(db, { migrationsDir: src }))
   } finally {
     db.close()
   }

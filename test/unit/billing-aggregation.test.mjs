@@ -349,7 +349,7 @@ function fixtureDatabase(records) {
   const db = new DatabaseSync(':memory:')
   db.exec('PRAGMA foreign_keys = ON')
   const applied = applyMigrations(db, { migrationsDir })
-  assert.equal(applied.length, 54, 'test schema must include account API state and distinct observed model names')
+  assert.equal(applied.length, 55, 'test schema must include account API state, observed model names, and key model allowlists')
   db.prepare('UPDATE schema_migrations SET applied_at = ?').run('2026-09-01T00:00:00.000Z')
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(
     'usage_logs_pruned_through',
