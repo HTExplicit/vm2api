@@ -259,8 +259,10 @@ export function pickCodexCandidates(
     })
     return { ...ordered, pin, sticky: false, sessionKey: null, stickyKeys: [] }
   }
-  // Quota sync only needs the raw records; the summarized list is built once, after it.
+  // Reconcile and summarize each record in one pass. Only a changed record
+  // needs another read, so legacy schedule migrations use their persisted fields.
   const vmDir = path.join(projectRoot, 'vms')
+  const vms = []
   for (const file of listVmRecordFiles(vmDir)) {
     let vm
     try {
@@ -268,27 +270,34 @@ export function pickCodexCandidates(
     } catch {
       continue
     }
-    if (!vm?.id || !isCodexVm(vm)) continue
-    syncCodexQuotaSchedule(projectRoot, vm, { policy: routingPolicy })
+    if (!vm?.id) continue
+    const changed = isCodexVm(vm) && syncCodexQuotaSchedule(projectRoot, vm, { policy: routingPolicy }).changed
+    try {
+      if (changed) vm = getVm(projectRoot, vm.id)
+      if (vm) vms.push(summarizeVm(vm, projectRoot, { codex: { quota: routingPolicy } }))
+    } catch {
+      // Match listVms: an unreadable record does not remove the rest of the pool.
+    }
   }
   const stickyKeys = stickyRouter?.collectPoolKeys?.(req, body || {}, { platform: 'openai' }) || []
   const sessionKey = stickyRouter?.extractPoolKey?.(req, body || {}, { platform: 'openai' }) || stickyKeys[0] || null
   const bound = sessionKey ? stickyRouter?.resolve?.(sessionKey) : null
-  const vms = listVms(projectRoot, { codex: { quota: routingPolicy } }).filter(
-    (vm) => vmMatchesOwnerScope(vm, owner) && keyAllowsVm(scope, vm),
-  )
+  const scopedVms = vms.filter((vm) => vmMatchesOwnerScope(vm, owner) && keyAllowsVm(scope, vm))
   const continuesResponse = !!body?.previous_response_id && !!bound?.vmId
-  if (scope.vm_pool_id && vms.length === 0 && !continuesResponse) {
+  if (scope.vm_pool_id && scopedVms.length === 0 && !continuesResponse) {
     return { error: 'vm_pool_unavailable', message: '账号池没有可调度的 GPT 槽位', ids: [], candidates: [] }
   }
-  const ordered = orderCodexSessionSlots(continuesResponse ? vms.filter((vm) => vm.id === bound.vmId) : vms, {
-    boundVmId: bound?.vmId || null,
-    sessionKey,
-    sessionLimit: sessions,
-    model,
-    excluded,
-    quotaPolicy: routingPolicy,
-  })
+  const ordered = orderCodexSessionSlots(
+    continuesResponse ? scopedVms.filter((vm) => vm.id === bound.vmId) : scopedVms,
+    {
+      boundVmId: bound?.vmId || null,
+      sessionKey,
+      sessionLimit: sessions,
+      model,
+      excluded,
+      quotaPolicy: routingPolicy,
+    },
+  )
   // A resting home migrates the conversation like a gone one: the next slot rebinds it.
   const boundLeft = ordered.boundState === 'gone' || ordered.boundState === 'resting'
   if (bound?.vmId && sessionKey && boundLeft) {
