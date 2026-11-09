@@ -21,6 +21,7 @@ export async function respondPelicanTest({ req, res, run, heartbeatMs = 20_000 }
     200,
     corsHeadersForRequest(req, {
       'content-type': 'application/json; charset=utf-8',
+      'content-encoding': 'identity',
       'cache-control': 'no-store, no-transform',
       'x-accel-buffering': 'no',
     }),

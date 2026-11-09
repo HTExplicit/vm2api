@@ -237,6 +237,7 @@ test('JSON whitespace heartbeat preserves the envelope and stops on completion o
     assert.equal(chunks.length, writes)
     assert.equal(res.listenerCount('close'), 0)
     assert.equal(res.headers['content-type'], 'application/json; charset=utf-8')
+    assert.equal(res.headers['content-encoding'], 'identity')
     if (!disconnect)
       assert.deepEqual(JSON.parse(chunks.join('')), { ok: true, data: { ok: true, text: '<html></html>' } })
     else assert.equal(res.writableEnded, false)
