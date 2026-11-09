@@ -76,13 +76,14 @@ test('kernel-only route returns public Rust and Codex health without billing or 
     fs.rmSync(project, { recursive: true, force: true })
   })
   const billingStats = t.mock.fn(() => ({ accounts: [] }))
+  const billingStatsAsync = t.mock.fn(async () => ({ accounts: [] }))
   const accountSnapshot = t.mock.fn(() => ({ accounts: [] }))
   const poolSnapshot = t.mock.fn(() => ({}))
   const api = handler(
     project,
     { apiKeyKind: 'master' },
     {
-      requestLog: { billingStats },
+      requestLog: { billingStats, billingStatsAsync },
       accountQuota: { snapshot: accountSnapshot },
       poolScheduler: { snapshot: poolSnapshot },
     },
@@ -113,6 +114,7 @@ test('kernel-only route returns public Rust and Codex health without billing or 
   }
   assert.equal(requests, 2, 'one health probe per slot; no additional live-credential probes')
   assert.equal(billingStats.mock.callCount(), 0)
+  assert.equal(billingStatsAsync.mock.callCount(), 0)
   assert.equal(accountSnapshot.mock.callCount(), 0)
   assert.equal(poolSnapshot.mock.callCount(), 0)
 })

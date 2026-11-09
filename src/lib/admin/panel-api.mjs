@@ -11,7 +11,6 @@ import { normalizeRedaction } from '../redaction/policy.mjs'
 import { redactionStatus } from '../redaction/runtime.mjs'
 import { readSlotProcessStatus } from '../vm/slot-process-status.mjs'
 import os from 'node:os'
-import { usagePoolEnabled, usageRead } from '../db/sqlite-pool.mjs'
 import path from 'node:path'
 import {
   listVms,
@@ -689,42 +688,16 @@ export async function buildDashboard({
 
   const billing = stampVmBilling(
     vms,
-    (() => {
-      try {
-        return attachBillingMeta(panelBillingStats(requestLog, accountQuota, vms), snap.accounts || [])
-      } catch {
-        return null
-      }
-    })(),
+    attachBillingMeta(await panelBillingStats(requestLog, accountQuota, vms), snap.accounts || []),
   )
 
-  let dbTotals = null
-  let opsWindow = null
   const opsSince = new Date(Date.now() - 3600_000).toISOString()
-  if (usagePoolEnabled()) {
-    try {
-      ;[dbTotals, opsWindow] = await Promise.all([
-        usageRead({ kind: 'repo', method: 'totals' }),
-        usageRead({ kind: 'repo', method: 'windowStats', args: [{ since: opsSince }] }),
-      ])
-    } catch (err) {
-      console.warn(`[sqlite-pool] dashboard: ${err?.message || err}`)
-    }
-  }
-  if (!dbTotals) {
-    try {
-      dbTotals = requestLog?.totals() || null
-    } catch {
-      dbTotals = null
-    }
-  }
-  if (!opsWindow) {
-    try {
-      opsWindow = requestLog?.windowStats?.({ since: opsSince }) || null
-    } catch {
-      opsWindow = null
-    }
-  }
+  const [totalsRead, windowRead] = await Promise.allSettled([
+    requestLog?.totalsAsync?.(),
+    requestLog?.windowStatsAsync?.({ since: opsSince }),
+  ])
+  const dbTotals = totalsRead.status === 'fulfilled' ? totalsRead.value || null : null
+  const opsWindow = windowRead.status === 'fulfilled' ? windowRead.value || null : null
 
   return ok({
     health: {
@@ -820,16 +793,7 @@ export async function buildVmList({
       return []
     }
   })()
-  stampVmBilling(
-    vms,
-    (() => {
-      try {
-        return attachBillingMeta(panelBillingStats(requestLog, accountQuota, vms), accounts)
-      } catch {
-        return null
-      }
-    })(),
-  )
+  stampVmBilling(vms, attachBillingMeta(await panelBillingStats(requestLog, accountQuota, vms), accounts))
   return ok({
     items: vms,
     active_vm: active,
@@ -883,17 +847,11 @@ export async function buildVmDetail({
     openaiApiManager,
   })
   const acc = findAccount(accountQuota, summary)
-  const billing = (() => {
-    try {
-      return panelBillingStats(requestLog, accountQuota, [summary])
-    } catch {
-      return null
-    }
-  })()
+  const billing = await panelBillingStats(requestLog, accountQuota, [summary])
   const cost = lookupBilling(indexBillingAccounts(billing), acc || summary)
   const gpt = isCodexVm(vm)
   applyCostFields(summary, cost, { coveredSince: billing?.log_coverage_start })
-  const detail = buildAccountBilling(cost, billing, {
+  const detail = await buildAccountBilling(cost, billing, {
     vmId: summary.id,
     accountId: acc?.account_id || summary.account_uuid,
     requestLog,
@@ -1389,16 +1347,10 @@ export async function buildProbeAll({ cfg, accountQuota, hop = true, force = tru
   return ok({ items, total: items.length })
 }
 
-export function buildUsage({ accountQuota, cfg, requestLog = null }) {
+export async function buildUsage({ accountQuota, cfg, requestLog = null }) {
   const snap = accountQuota.snapshot()
   const listed = listVms(cfg?.paths?.project)
-  const billing = (() => {
-    try {
-      return panelBillingStats(requestLog, accountQuota, listed)
-    } catch {
-      return null
-    }
-  })()
+  const billing = await panelBillingStats(requestLog, accountQuota, listed)
   const costByKey = indexBillingAccounts(billing)
   const listedById = new Map(listed.map((vm) => [vm.id, vm]))
   const accounts = liveAccounts(snap.accounts, listed).map((a) => {
@@ -1574,17 +1526,11 @@ export async function snapshotAccountPool({
   })()
   const billing = stampVmBilling(
     vms,
-    (() => {
-      try {
-        return attachBillingMeta(panelBillingStats(requestLog, accountQuota, vms), accounts)
-      } catch {
-        return null
-      }
-    })(),
+    attachBillingMeta(await panelBillingStats(requestLog, accountQuota, vms), accounts),
   )
   let today = null
   try {
-    today = requestLog?.windowStats?.({ since: shanghaiDayStartIso() }) || null
+    today = (await requestLog?.windowStatsAsync?.({ since: shanghaiDayStartIso() })) || null
   } catch {
     today = null
   }
@@ -2449,9 +2395,13 @@ function billingWindowOf(accountId, vmId, vm, q) {
   }
 }
 
-function panelBillingStats(requestLog, accountQuota, vms) {
-  if (!requestLog?.billingStats) return null
-  return requestLog.billingStats({ accountWindows: accountWindowsForBilling(accountQuota, vms) })
+async function panelBillingStats(requestLog, accountQuota, vms) {
+  if (!requestLog) return null
+  try {
+    return await requestLog.billingStatsAsync({ accountWindows: accountWindowsForBilling(accountQuota, vms) })
+  } catch {
+    return null
+  }
 }
 
 function stampVmBilling(vms, billing) {
@@ -2563,13 +2513,15 @@ function windowEstimates(quota, cost, coveredSince, codex) {
 }
 
 /** The last closed 5h / 7d window with its official spend, from the slot's window archive. */
-function closedWindowView(history, key, { vmId, accountId, requestLog }) {
+async function closedWindowView(history, key, { vmId, accountId, requestLog }) {
   const win = lastClosedWindow(history, key)
   if (!win) return null
   let row = null
   try {
     // `until` is inclusive in the log filter; stop 1 ms short so the boundary request counts once.
-    row = requestLog?.costBetween?.({ since: win.start, until: Date.parse(win.end) - 1, vmId, accountId }) || null
+    row =
+      (await requestLog?.costBetweenAsync?.({ since: win.start, until: Date.parse(win.end) - 1, vmId, accountId })) ||
+      null
   } catch {
     row = null
   }
@@ -2583,7 +2535,7 @@ function closedWindowView(history, key, { vmId, accountId, requestLog }) {
   }
 }
 
-function buildAccountBilling(
+async function buildAccountBilling(
   cost,
   billing,
   { vmId, accountId, requestLog, windowHistory = null, estimate5h = null, coveredSince = null } = {},
@@ -2631,20 +2583,22 @@ function buildAccountBilling(
   const total = periodView(cost)
   let byModel = []
   try {
-    byModel = requestLog?.costByModel?.({ vmId, accountId }) || []
+    byModel = (await requestLog?.costByModelAsync?.({ vmId, accountId })) || []
   } catch {
     byModel = []
   }
   if (!cost && !byModel.length) return null
   let usageStats = null
   try {
-    usageStats = vmId ? requestLog?.vmUsageStats?.({ vmId, days: 30 }) || null : null
+    usageStats = vmId ? (await requestLog?.vmUsageStatsAsync?.({ vmId, days: 30 })) || null : null
   } catch {
     usageStats = null
   }
   const scope = { vmId, accountId, requestLog }
-  const prev5h = closedWindowView(windowHistory, '5h', scope)
-  const prev7d = closedWindowView(windowHistory, '7d', scope)
+  const [prev5h, prev7d] = await Promise.all([
+    closedWindowView(windowHistory, '5h', scope),
+    closedWindowView(windowHistory, '7d', scope),
+  ])
   return {
     source: billing?.source || 'anthropic-official',
     currency: billing?.currency || 'USD',

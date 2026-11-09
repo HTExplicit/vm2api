@@ -1786,7 +1786,7 @@ test('a freed GPT seat wakes only a waiter that can use that account', async () 
   const waiterA = run('gpt-a')
   await tick()
   assert.equal(rt.openAIWaiterCount(), 11)
-  // Each selection round lists vms/ twice: quota sync, then the summarized pool.
+  // A selection round reconciles and summarizes the pool in one directory pass.
   const realReaddir = fs.readdirSync
   let vmDirReads = 0
   fs.readdirSync = function (dir, ...rest) {
@@ -1801,7 +1801,7 @@ test('a freed GPT seat wakes only a waiter that can use that account', async () 
     fs.readdirSync = realReaddir
   }
   // One round for the gpt-a waiter; the ten gpt-b waiters ahead of it are not woken.
-  assert.equal(vmDirReads, 2)
+  assert.equal(vmDirReads, 1)
   assert.equal(rt.openAIWaiterCount(), 10)
   opened[1]()
   const results = await Promise.all([busyB, ...waitersB])
@@ -1855,7 +1855,7 @@ test('a woken GPT waiter whose seat was taken re-parks first instead of waking t
     fs.readdirSync = realReaddir
   }
   // Only the oldest waiter re-checks; the other four stay parked.
-  assert.equal(vmDirReads, 2)
+  assert.equal(vmDirReads, 1)
   assert.equal(rt.openAIWaiterCount(), 5)
   thief.release()
   const results = await Promise.all(waiters)

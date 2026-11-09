@@ -299,27 +299,43 @@ export function persistCodexUsage(
  * Extra 5h/7d restriction, same contract as PoolScheduler.syncQuotaSchedule.
  * Never flips the operator switch. Leftover quota-off (not schedule_manual)
  * is restored to on + restriction.
+ * `changed` tells callers when their record must be re-read after persistence.
  */
 export function syncCodexQuotaSchedule(projectRoot, vm, { now = Date.now(), policy = null } = {}) {
-  if (!projectRoot || !vm?.id) return { action: 'keep', reason: null }
+  if (!projectRoot || !vm?.id) return { action: 'keep', reason: null, changed: false }
   const ev = evaluateCodexQuotaSchedule(vm, now, policy)
   const file = path.join(projectRoot, 'vms', `${vm.id}.json`)
   const leftover = isLeftoverQuotaScheduleOff(vm)
   if (ev.action === 'restrict' || ev.action === 'restore') {
     const until = ev.until
-    if (until == null && /_local$/.test(ev.reason || '')) clearVmQuotaRestriction(file)
+    const clearUntil = until == null && /_local$/.test(ev.reason || '')
+    const untilMs = Number(until) || 0
+    const sameUntil = clearUntil
+      ? vm.temp_unschedulable_until == null && vm.claude?.temp_unschedulable_until == null
+      : untilMs <= Date.now() ||
+        (vm.temp_unschedulable_until === untilMs && vm.claude?.temp_unschedulable_until === untilMs)
+    if (
+      !leftover &&
+      sameUntil &&
+      vm.temp_unschedulable_reason === ev.reason &&
+      vm.claude?.temp_unschedulable_reason === ev.reason
+    ) {
+      return { ...ev, changed: false }
+    }
+    if (clearUntil) clearVmQuotaRestriction(file)
     const next = markVmRestriction(file, { until, reason: ev.reason })
+    let changed = !!next
     if (next) {
       vm.claude = next.claude
       vm.temp_unschedulable_until = next.temp_unschedulable_until
       vm.temp_unschedulable_reason = next.temp_unschedulable_reason
     }
     if (leftover) {
-      migrateVmSchedule(projectRoot, vm.id)
+      changed = !!migrateVmSchedule(projectRoot, vm.id) || changed
       vm.schedulable = true
       vm.schedule_disabled_reason = null
     }
-    return { ...ev, action: leftover ? 'restore' : 'restrict' }
+    return { ...ev, action: leftover ? 'restore' : 'restrict', changed }
   }
   if (ev.action === 'clear' || ev.action === 'enable') {
     const next = clearVmQuotaRestriction(file)
@@ -329,20 +345,20 @@ export function syncCodexQuotaSchedule(projectRoot, vm, { now = Date.now(), poli
       delete vm.temp_unschedulable_reason
     }
     if (leftover || ev.action === 'enable') {
-      migrateVmSchedule(projectRoot, vm.id)
+      const migrated = migrateVmSchedule(projectRoot, vm.id)
       vm.schedulable = true
       vm.schedule_disabled_reason = null
-      return { ...ev, action: 'enable' }
+      return { ...ev, action: 'enable', changed: !!next || !!migrated }
     }
-    return { ...ev, action: 'clear' }
+    return { ...ev, action: 'clear', changed: !!next }
   }
   if (leftover) {
-    migrateVmSchedule(projectRoot, vm.id)
+    const migrated = migrateVmSchedule(projectRoot, vm.id)
     vm.schedulable = true
     vm.schedule_disabled_reason = null
-    return { action: 'enable', reason: null }
+    return { action: 'enable', reason: null, changed: !!migrated }
   }
-  return ev
+  return { ...ev, changed: false }
 }
 
 export function persistAllowedModels(projectRoot, vmId, models) {
