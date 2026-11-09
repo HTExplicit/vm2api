@@ -7,6 +7,15 @@ on:
   pull_request:
     branches: [maint]
   workflow_dispatch:
+    inputs:
+      performance:
+        description: 'Run offline admission A/B and billing isolation benchmarks'
+        type: boolean
+        default: false
+      performance_base:
+        description: 'Baseline commit for the same-host admission comparison'
+        type: string
+        default: '84c7e1bcb0e4a5e60d2677da1540118c6fa0d5d6'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -160,6 +169,7 @@ jobs:
             test/unit/codex-usage.test.mjs \
             test/unit/codex-credits.test.mjs \
             test/unit/codex-slot-pool.test.mjs \
+            test/unit/codex-admission-records.test.mjs \
             test/unit/codex-slot.test.mjs \
             test/unit/codex-quota-stale.test.mjs \
             test/unit/usage-probe-monitor.test.mjs \
@@ -262,6 +272,44 @@ jobs:
         run: node scripts/smoke-browser-close-ui.mjs
       - name: Import browser login flow
         run: node scripts/smoke-import-browser-flow.mjs
+
+  performance:
+    if: github.event_name == 'workflow_dispatch' && inputs.performance
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      PERFORMANCE_BASE: ${{ inputs.performance_base }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: prepare exact baseline source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PERFORMANCE_BASE" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "$PERFORMANCE_BASE^{commit}"
+          mkdir .performance-base
+          git archive "$PERFORMANCE_BASE" src package.json | tar -x -C .performance-base
+          mkdir -p "$RUNNER_TEMP/performance-results"
+      - name: run both checkouts on the same isolated Linux host
+        shell: bash
+        run: |
+          docker run --rm --network none --cpus 3 --memory 4g --memory-swap 4g \
+            -v "$GITHUB_WORKSPACE:/work:ro" -v "$RUNNER_TEMP/performance-results:/results" -w /work \
+            node:22-bookworm node scripts/compare-performance.mjs \
+            --baseline-root /work/.performance-base --output-dir /results
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: performance-comparison
+          path: ${{ runner.temp }}/performance-results
+          retention-days: 30
 
   browser-image:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
