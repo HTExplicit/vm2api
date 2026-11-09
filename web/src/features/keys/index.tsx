@@ -29,6 +29,7 @@ import { vmsListQueryOptions } from '@/features/vm/queries'
 import {
   keyExpiryText,
   keyIsDead,
+  keyModelsText,
   keyQuotaLabel,
   keyQuotaPct,
   keyStatusTone,
@@ -365,6 +366,7 @@ function KeyRow({
   const pct = keyQuotaPct(item)
   const conc = Number(item.max_concurrency || 0)
   const rpm = Number(item.rpm || 0)
+  const models = keyModelsText(item)
   return (
     <TableRow className={cn(keyIsDead(item) && 'bg-destructive/10')}>
       <TableCell>
@@ -420,6 +422,12 @@ function KeyRow({
       </TableCell>
       <TableCell className='text-xs'>
         {conc ? `${conc} 并发` : '并发不限'} · {rpm ? `RPM ${rpm}` : 'RPM 不限'}
+        <div
+          className={cn(!models.title && 'text-muted-foreground')}
+          title={models.title}
+        >
+          {models.text}
+        </div>
       </TableCell>
       <TableCell
         className={cn('text-xs', expiry.expired && 'text-destructive')}

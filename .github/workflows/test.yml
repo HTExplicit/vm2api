@@ -63,6 +63,10 @@ jobs:
             test/unit/anthropic-policy.test.mjs \
             test/unit/cache-ttl.test.mjs \
             test/unit/cache-prefix.test.mjs \
+            test/unit/request-body-context.test.mjs \
+            test/unit/routing-json-parse-cache.test.mjs \
+            test/unit/key-model-allowlist.test.mjs \
+            test/unit/panel-vm-name.test.mjs \
             test/unit/tool-result-prune-cache.test.mjs \
             test/unit/tool-result-prune-protocol.test.mjs \
             test/unit/persona-outbound-contract.test.mjs \

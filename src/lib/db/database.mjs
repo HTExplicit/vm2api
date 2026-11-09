@@ -44,6 +44,13 @@ const HISTORICAL_001_PROXY_CHECKSUMS = new Set([
   'd6769ea311718b5af91e47295f97c3bf2722ece6d26acee7e89df84b88599ae2',
 ])
 
+const LEGACY_FORK_054_NAME = '054_api_endpoint_risk_review.sql'
+const CURRENT_FORK_055_NAME = '055_api_endpoint_risk_review.sql'
+const LEGACY_FORK_054_CHECKSUMS = new Set([
+  'a8297c42387a3bf4ae9b5bd6591b8d05da0e7eaaea73675a0431e7a943a42b0e',
+  'dfbf91aa98fbd1483636b7b6ba813179c5d4ceba324ad40a5b003c74f8cb20f7',
+])
+
 function reconcileHistorical001ProxySchema(db, checksum) {
   if (!HISTORICAL_001_PROXY_CHECKSUMS.has(checksum)) return false
   const columns = new Set(
@@ -102,6 +109,42 @@ function reconcileHistorical001ProxySchema(db, checksum) {
     `)
   })
   return true
+}
+
+/**
+ * The fork published a risk-review migration as 054 before upstream used that
+ * number for key model allowlists. Re-key only that exact, already-applied
+ * migration so the normal runner can apply upstream 054 and then fork 055.
+ */
+function reconcileLegacyFork054(db, files) {
+  if (!files.includes('054_api_keys_allowed_models.sql') || !files.includes(CURRENT_FORK_055_NAME)) return
+  const legacy = db
+    .prepare('SELECT version, name, checksum FROM schema_migrations WHERE version = ?')
+    .get('054')
+  if (!legacy || legacy.name !== LEGACY_FORK_054_NAME) return
+  if (!LEGACY_FORK_054_CHECKSUMS.has(legacy.checksum)) {
+    throw new Error('migration 054 legacy fork checksum mismatch; refusing metadata re-key')
+  }
+  if (db.prepare('SELECT 1 FROM schema_migrations WHERE version = ?').get('055')) {
+    throw new Error('migration 055 already exists alongside legacy migration 054; refusing metadata re-key')
+  }
+  const riskColumn = db
+    .prepare('PRAGMA table_info(api_endpoints)')
+    .all()
+    .find((row) => row.name === 'risk_review_enabled')
+  if (!riskColumn || Number(riskColumn.notnull) !== 1 || String(riskColumn.dflt_value) !== '0') {
+    throw new Error('migration 054 legacy fork schema is missing risk_review_enabled')
+  }
+  withTransaction(db, () => {
+    const result = db
+      .prepare(
+        `UPDATE schema_migrations
+         SET version = ?, name = ?
+         WHERE version = ? AND name = ? AND checksum = ?`,
+      )
+      .run('055', CURRENT_FORK_055_NAME, legacy.version, legacy.name, legacy.checksum)
+    if (Number(result.changes) !== 1) throw new Error('migration 054 legacy fork metadata re-key changed no rows')
+  })
 }
 let _db = null
 let _dbPath = null
@@ -215,6 +258,7 @@ export function applyMigrations(db, { migrationsDir } = {}) {
         .sort()
     : []
 
+  reconcileLegacyFork054(db, files)
   const appliedRows = db.prepare('SELECT version, checksum FROM schema_migrations').all()
   const applied = new Map(appliedRows.map((r) => [r.version, r.checksum]))
   const historical001Accepted = reconcileHistorical001ProxySchema(db, applied.get('001'))

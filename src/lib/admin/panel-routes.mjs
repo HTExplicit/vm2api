@@ -173,6 +173,7 @@ import {
   bindVmProxy,
   adoptVmProxyBinding,
   patchVmRecord,
+  parseVmDisplayName,
   vmHasClaudeCredential,
   vmHasSchedulableCredential,
   persistAllowedModels,
@@ -343,6 +344,8 @@ function logsOwner(req, u) {
 }
 
 const LOCAL_PROXY_MISMATCH_MESSAGE = '本地代理只能绑定到它所在 VPS 上的槽位'
+// Room for a full allowed_models list (200 names) next to the other key fields.
+const API_KEY_BODY_MAX = 32 * 1024
 
 function clusterNodesOf(ctx) {
   try {
@@ -1986,7 +1989,7 @@ export function createPanelHandler(ctx) {
         return json(res, 200, { ok: true, item: publicKeyView(rec, { reveal: false }), usage_stats })
       }
       if (req.method === 'POST' && p === '/api/panel/api-keys') {
-        const body = await readBody(req, 8192).catch(() => ({}))
+        const body = await readBody(req, API_KEY_BODY_MAX).catch(() => ({}))
         const ident = panelIdentity(req)
         if (ident.role !== 'admin' && body?.vm_pool_id != null && String(body.vm_pool_id).trim() !== '') {
           return json(res, 403, {
@@ -2046,6 +2049,7 @@ export function createPanelHandler(ctx) {
             group_type: scope.group_type,
             allowed_vms: scope.allowed_vms,
             vm_pool_id: scope.vm_pool_id,
+            allowed_models: body?.allowed_models,
             max_concurrency: body?.max_concurrency ?? defaultConc,
             default_concurrency: defaultConc,
             quota_requests: input.quota_requests,
@@ -2076,7 +2080,7 @@ export function createPanelHandler(ctx) {
       if (req.method === 'PATCH' && /^\/api\/panel\/api-keys\/[^/]+$/.test(p)) {
         const id = p.split('/').pop()
         if (denyIfUserMissesKey(req, res, { apiKeyStore, json, keyId: id })) return true
-        const body = await readBody(req, 8192).catch(() => ({}))
+        const body = await readBody(req, API_KEY_BODY_MAX).catch(() => ({}))
         const ident = panelIdentity(req)
         if (ident.role !== 'admin' && body?.vm_pool_id != null && String(body.vm_pool_id).trim() !== '') {
           return json(res, 403, {
@@ -3395,6 +3399,7 @@ export function createPanelHandler(ctx) {
           const hasActiveHours = body && Object.prototype.hasOwnProperty.call(body, 'active_hours')
           const hasTimezone = body && Object.prototype.hasOwnProperty.call(body, 'timezone')
           const hasWeight = body && Object.prototype.hasOwnProperty.call(body, 'weight')
+          const hasName = body && Object.prototype.hasOwnProperty.call(body, 'name')
           const hasMemory =
             body &&
             (Object.prototype.hasOwnProperty.call(body, 'memory') ||
@@ -3426,6 +3431,7 @@ export function createPanelHandler(ctx) {
             !hasActiveHours &&
             !hasTimezone &&
             !hasWeight &&
+            !hasName &&
             !hasMemory &&
             !followProxyTz
           ) {
@@ -3433,9 +3439,25 @@ export function createPanelHandler(ctx) {
               ok: false,
               error: {
                 message:
-                  'max_concurrency, max_rpm, max_sessions, session_slots, quota_override, allowed_models, auth_scheme, inference_engine, persona_preset, dataplane, crag_kernel_version, schedule_level, active_hours, timezone, weight, machine.memory or timezone_follow_proxy required',
+                  'max_concurrency, max_rpm, max_sessions, session_slots, quota_override, allowed_models, auth_scheme, inference_engine, persona_preset, dataplane, crag_kernel_version, schedule_level, active_hours, timezone, weight, name, machine.memory or timezone_follow_proxy required',
               },
             })
+          }
+          let nextName = null
+          if (hasName) {
+            const parsedName = parseVmDisplayName(body.name)
+            if (!parsedName.ok) {
+              return json(res, 400, {
+                ok: false,
+                error: {
+                  type: 'invalid_request_error',
+                  code: 'invalid_name',
+                  message: parsedName.error,
+                  param: 'name',
+                },
+              })
+            }
+            nextName = parsedName.value
           }
           try {
             if (hasConcurrency && next !== null) strictInteger(next, 1, 256, 'max_concurrency')
@@ -3635,6 +3657,10 @@ export function createPanelHandler(ctx) {
               const kernel = projectSlotKernelConfig({ id })
               timezoneSync.kernel_hot = kernel?.changed === true
             }
+          }
+          if (nextName != null && nextName !== String(currentVm.name || '')) {
+            const renamed = patchVmRecord(cfg.paths.project, id, { name: nextName })
+            if (!renamed) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
           }
           if (hasWeight) {
             const nextWeight = body.weight === null ? 1 : body.weight
@@ -4799,6 +4825,22 @@ export function createPanelHandler(ctx) {
             error: { code: 'invalid_locale', message: `语言必须是 ${SLOT_LOCALES.join('、')}` },
           })
         }
+        let displayLabel = padVm(idx)
+        if (body.name != null && String(body.name).trim() !== '') {
+          const parsedName = parseVmDisplayName(body.name)
+          if (!parsedName.ok) {
+            return json(res, 400, {
+              ok: false,
+              error: {
+                type: 'invalid_request_error',
+                code: 'invalid_name',
+                message: parsedName.error,
+                param: 'name',
+              },
+            })
+          }
+          displayLabel = parsedName.value
+        }
         let generated
         try {
           generated = assignComputerFingerprint(
@@ -4823,7 +4865,7 @@ export function createPanelHandler(ctx) {
         }
         const vm = {
           id,
-          name: body.name || padVm(idx),
+          name: displayLabel,
           status: startNow ? 'running' : body.status || 'stopped',
           kernel: wantKernel,
           timezone: requestedTimezone || null,

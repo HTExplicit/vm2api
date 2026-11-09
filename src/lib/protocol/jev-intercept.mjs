@@ -10,7 +10,7 @@
  * A line may be `https://host[/v1/systemone] <key>`, or a bare URL for a keyless host.
  */
 import { ErrorCode, ErrorType, makeError } from '../core/errors.mjs'
-import { refusalUserDocument } from '../core/refusal-similarity.mjs'
+import { historyPrefixIntact, refusalUserDocument, refusalUserDocumentCache } from '../core/refusal-similarity.mjs'
 import { isNegatedExtraction, normalizeText } from '../core/distill-detect.mjs'
 import { hasAccessPresence } from '../oauth/oauth-credentials.mjs'
 import { prepareInterceptText, stripEnvironmentSection, stripReminders } from './jev-prepare.mjs'
@@ -1163,9 +1163,31 @@ function promptPieces(src) {
   return raw.map(stripOfficialPromptWhitelist).filter(Boolean)
 }
 
+// The message-prefix cache is valid only while caller-authored prompt fields
+// stay the same. Message identities alone cannot detect a changed system or
+// developer instruction between turns.
+function promptIdentity(inbound, body = inbound) {
+  const seen = new Set()
+  const pieces = []
+  for (const src of [inbound, body]) {
+    for (const piece of promptPieces(src)) {
+      const norm = normalizeText(piece)
+      if (!norm || seen.has(norm)) continue
+      seen.add(norm)
+      pieces.push(norm)
+    }
+  }
+  return JSON.stringify(pieces)
+}
+
 /** Hard regex sees user turns and caller prompts. Official prompts and tool results are not scanned. */
-export function jevDocument(inbound, body = inbound) {
-  const users = refusalUserDocument(inbound, body, { includeToolResults: false, clean: cleanUserAsk })
+export function jevDocument(inbound, body = inbound, { interceptSession = null, ctx = null } = {}) {
+  const users = refusalUserDocument(inbound, body, {
+    includeToolResults: false,
+    clean: cleanUserAsk,
+    interceptSession,
+    ctx,
+  })
   const seen = new Set()
   const prompts = []
   for (const src of [inbound, body]) {
@@ -1206,9 +1228,16 @@ export function jevCurrentAsk(document) {
  * The current ask stays the last user turn when one exists. Assistant and tool
  * turns stay out.
  */
-export function jevModelDocument(inbound, body = inbound) {
-  const seen = new Set()
-  const parts = []
+function buildJevModelParts(inbound, body = inbound, { interceptSession = null, ctx = null } = {}) {
+  const seen = new Set(interceptSession?.modelSeen || [])
+  const prefixIntact =
+    !!interceptSession?.modelParts?.length && historyPrefixIntact(body, interceptSession, ctx)
+  const promptsIntact =
+    prefixIntact &&
+    (!interceptSession.promptIdentity || interceptSession.promptIdentity === promptIdentity(inbound, body))
+  const parts = promptsIntact ? [...interceptSession.modelParts] : []
+  const messageStart = promptsIntact ? interceptSession.messageIds.length : 0
+  if (!parts.length) seen.clear()
   const push = (source, text) => {
     const norm = normalizeText(text)
     // Deduplicate repeated copies from inbound/body, but keep each message/input
@@ -1219,16 +1248,20 @@ export function jevModelDocument(inbound, body = inbound) {
     parts.push(`[${source}]\n${norm}`)
   }
   for (const src of [inbound, body]) {
-    promptPieces(src).forEach((piece, index) => {
-      push(`system prompt ${index + 1}`, piece)
-    })
+    if (!messageStart) {
+      promptPieces(src).forEach((piece, index) => {
+        push(`system prompt ${index + 1}`, piece)
+      })
+    }
     const messages = Array.isArray(src?.messages) ? src.messages : []
-    messages.forEach((message, index) => {
+    messages.slice(messageStart).forEach((message, offset) => {
+      const index = messageStart + offset
       const role = String(message?.role || 'unknown').toLowerCase()
       if (role !== 'user') return
       push(`user message ${index + 1}`, jevModelContentText(message?.content))
     })
     const input = typeof src?.input === 'string' ? [src.input] : Array.isArray(src?.input) ? src.input : []
+    if (messageStart > 0) continue
     input.forEach((item, index) => {
       if (typeof item === 'string') {
         push(`user input ${index + 1}`, cleanUserAsk(item))
@@ -1239,9 +1272,27 @@ export function jevModelDocument(inbound, body = inbound) {
       push(`user input ${index + 1}`, jevModelContentText(item?.content ?? item))
     })
   }
-  if (!parts.length) return ''
+  if (!parts.length) return { parts, seen: [...seen], text: '' }
   const current = parts[parts.length - 1]
-  return parts.length === 1 ? current : `${parts.join('\n')}\n[current ask]\n${current}`
+  const text = parts.length === 1 ? current : `${parts.join('\n')}\n[current ask]\n${current}`
+  return { parts, seen: [...seen], text }
+}
+
+export function jevModelDocument(inbound, body = inbound, options = {}) {
+  return buildJevModelParts(inbound, body, options).text
+}
+
+export function jevInterceptSessionCache(inbound, body = inbound, { ctx = null } = {}) {
+  const user = refusalUserDocumentCache(inbound, body, { includeToolResults: false, clean: cleanUserAsk, ctx })
+  const model = buildJevModelParts(inbound, body, { ctx })
+  return {
+    messageIds: user.messageIds,
+    parts: user.parts,
+    seen: user.seen,
+    modelParts: model.parts,
+    modelSeen: model.seen,
+    promptIdentity: promptIdentity(inbound, body),
+  }
 }
 
 /** Explicit model wins. Otherwise Jev uses jev-latest, ModernBERT uses english, Laya lets the router choose. */

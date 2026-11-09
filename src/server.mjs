@@ -1275,7 +1275,7 @@ const server = http.createServer(async (req, res) => {
       if (!requireAuth(req, res)) return
       const groupType = keyScopeFromRequest(req).group_type
       if (resolveInferenceBackend(req) === 'api') {
-        return json(res, 200, apiScheduler.catalog(keyScopeFromRequest(req)))
+        return json(res, 200, filterModelCatalogForKey(apiScheduler.catalog(keyScopeFromRequest(req)), req))
       }
       const result = await fetchWorkerModels({ groupType })
       return json(res, 200, result)
