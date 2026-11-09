@@ -78,6 +78,7 @@ GPT 订阅主动刷新仅管理员，普通 user 不可调用；其他普通租�
 | POST | `/vms/:id/schedulable` | 操作员开关 `{ schedulable }`，不改容器。`false` = 调度关；`true` = 调度开，同时清除不可调度。凭证已失效或吊销时开启返回 409 `credential_unavailable`（先重新导入凭证） |
 | POST | `/vms/:id/cooldown/clear` | 清账号/模型冷却、粘性钉和 `/usage` 429 旗标；GPT 槽同时清除可恢复的 `codex.extra.codex_limited_until`，再重算调度，重新入池 |
 | POST | `/vms/:id/test-chat` | loopback `POST /v1/messages`，master 可钉槽；官方 CC 入站 + 4 块 system。默认 prompt `hello` |
+| POST | `/vms/:id/pelican-test` | 仅 admin/master，GPT/Codex 账号鹈鹕动画测试，参数和完整结果见「虚拟机测试」 |
 | GET/PUT/DELETE | `/vms/:id/test-schedule` | 每 VM 一条真实对话定时计划，回 `{ schedule }`。PUT 保存结构化调度 `{ enabled?, frequency, minute?, time?, weekdays?, timezone, model, prompt, max_tokens?, reasoning_effort? }`（`frequency`=`hourly`/`daily`/`weekly`；服务端内部编译五字段 cron，响应不回 `cron` 字符串）。`enabled` 缺省 `false`；Claude 用 `max_tokens`，Codex 用 `reasoning_effort`。GET/PUT 含最近结果、下次运行时间与运行状态；到点 `runVmTestChat` 并计用量；重启恢复计划但不补跑停机错过；删 VM 时清计划。租户可读写自己槽的计划 |
 | GET/PUT | `/test-schedule/default` | 全局默认调度模板（仅调度时间结构）。GET 所有已登录角色可读；**PUT 仅 admin/master**（body `{ schedule: { frequency, … } }`，`schedule: null` 清除） |
 | POST | `/test-schedule/sync` | 覆盖写调度时间：`{ scope: "all" \| "ids", vm_ids?, schedule }`。MVP **只**同步 `frequency`/时刻/星期/分钟/`timezone`，**不同步** prompt、模型、token·effort、`enabled`。无计划槽创建且 `enabled=false`（模型/Prompt 取该槽已有计划或 test-chat 默认 `hello` + 首个可测模型）。租户 `scope=all` 仅自己的槽；逐槽权限同 test-schedule |
@@ -501,7 +502,8 @@ attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/test-models` | 可测模型。`vm_id` 按槽位平台过滤：GPT/Codex 只返回 `gpt-*`/`codex-*`，Claude 槽不含 GPT。`platform=openai|anthropic` 无 `vm_id` 时同样过滤。GPT 槽 `refresh=1` 经该槽 SOCKS 拉 ChatGPT `/backend-api/models` 并入矩阵，401 不换票。回包带 `platform`、`protocol`（`openai.responses` / `anthropic.messages`）、`inbound_path`。 |
+| GET | `/test-models` | 可测模型。`vm_id` 按槽位平台过滤：GPT/Codex 只返回 `gpt-*`/`codex-*`，Claude 槽不含 GPT。`platform=openai|anthropic` 无 `vm_id` 时同样过滤。GPT 槽 `refresh=1` 经该槽 SOCKS 拉 ChatGPT `/backend-api/models` 并入矩阵，401 不换票。回包带 `platform`、`protocol`（`openai.responses` / `anthropic.messages`）、`inbound_path`；GPT 模型项如已有目录事实，另含 `supported_reasoning_levels`、`default_reasoning_level`。 |
+| POST | `/vms/:id/pelican-test` | 仅 admin/master。Body `{ model, reasoning_effort }`；只支持已开启调度、正在运行的 GPT/Codex 账号，重读工作时段、凭证、出口、模型允许范围及额度准入。固定提示词原文「创建一个HTML，内容是SVG绘制一个鹈鹕骑自行车的2D动画，你不需要任何测试」。通过 master 定向 loopback `/v1/responses` 计入现有用量与日志，不换账号，不启动或重启内核；实际内核健康失败也拒绝。整个操作共享 600 秒期限（包含认证恢复和重试），每 20 秒发送 JSON 空白保活，最终仍为 `data: { ok, vm_id, model, reasoning_effort, text, duration_ms, usage, stop_reason, error }`，`text` 不做 4000 字符截断；业务失败看 `data.ok`。超时只请求取消，不宣称上游已终止；关闭页面清理保活，不声称取消当前调用。旧 test-chat 的 90 秒默认/180 秒上限不变。 |
 
 Claude 槽测试走官方 CC 入站（`/v1/messages`）。GPT/Codex 槽测试走 `/v1/responses`。
 

@@ -244,7 +244,7 @@ export function makeProxyFetch(proxyUrl, timeoutMs = 15000, { maxMs = 30000 } = 
     const agent = px ? createProxyAgent(px) : undefined
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(), ms)
-    const opts = { ...init, signal: ac.signal }
+    const opts = { ...init, signal: init.signal ? AbortSignal.any([init.signal, ac.signal]) : ac.signal }
     if (agent) opts.agent = agent
     return fetch(url, opts).finally(() => clearTimeout(timer))
   }
@@ -267,6 +267,7 @@ export async function refreshCodexAccessToken(opts = {}) {
   try {
     const res = await fetchFn(CODEX_OAUTH_TOKEN_URL, {
       method: 'POST',
+      ...(opts.signal ? { signal: opts.signal } : {}),
       headers: {
         accept: 'application/json',
         'content-type': 'application/x-www-form-urlencoded',

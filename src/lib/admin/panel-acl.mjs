@@ -14,6 +14,7 @@ export const PANEL_VIEWS = [
   'specs',
   'proxies',
   'models',
+  'pelican',
   'risk',
   'system',
   'keys',

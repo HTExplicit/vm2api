@@ -147,6 +147,7 @@ jobs:
             test/unit/codex-image-tool.test.mjs \
             test/unit/image-model-turn.test.mjs \
             test/unit/codex-model-mapping.test.mjs \
+            test/unit/pelican-test.test.mjs \
             test/unit/gpt-model-policy.test.mjs \
             test/unit/image-tool-models.test.mjs \
             test/unit/models.test.mjs \
@@ -228,6 +229,7 @@ jobs:
         working-directory: web
         run: |
           pnpm install --frozen-lockfile
+          pnpm exec vitest run src/features/pelican/pelican.test.ts
           pnpm exec vitest run src/config/repo.test.ts src/features/settings/about-pane.test.ts
           pnpm exec vitest run src/lib/vm-status.test.ts -t 'GPT plan label follows OpenAI plan_type'
           pnpm exec vitest run src/features/vm/usage-windows.test.tsx src/features/vm/vm-rack-model.test.ts

@@ -24,6 +24,7 @@ import { Route as AuthenticatedLogsRouteImport } from './routes/_authenticated/l
 import { Route as AuthenticatedModelsRouteImport } from './routes/_authenticated/models'
 import { Route as AuthenticatedOpenaiApikeyRouteImport } from './routes/_authenticated/openai-apikey'
 import { Route as AuthenticatedOverviewRouteImport } from './routes/_authenticated/overview'
+import { Route as AuthenticatedPelicanRouteImport } from './routes/_authenticated/pelican'
 import { Route as AuthenticatedProxiesRouteImport } from './routes/_authenticated/proxies'
 import { Route as AuthenticatedRiskRouteImport } from './routes/_authenticated/risk'
 import { Route as AuthenticatedSpecsRouteImport } from './routes/_authenticated/specs'
@@ -111,6 +112,11 @@ const AuthenticatedOverviewRoute = AuthenticatedOverviewRouteImport.update({
   path: '/overview',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedPelicanRoute = AuthenticatedPelicanRouteImport.update({
+  id: '/pelican',
+  path: '/pelican',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 const AuthenticatedProxiesRoute = AuthenticatedProxiesRouteImport.update({
   id: '/proxies',
   path: '/proxies',
@@ -184,6 +190,7 @@ export interface FileRoutesByFullPath {
   '/models': typeof AuthenticatedModelsRoute
   '/openai-apikey': typeof AuthenticatedOpenaiApikeyRoute
   '/overview': typeof AuthenticatedOverviewRoute
+  '/pelican': typeof AuthenticatedPelicanRoute
   '/proxies': typeof AuthenticatedProxiesRoute
   '/risk': typeof AuthenticatedRiskRoute
   '/specs': typeof AuthenticatedSpecsRoute
@@ -210,6 +217,7 @@ export interface FileRoutesByTo {
   '/models': typeof AuthenticatedModelsRoute
   '/openai-apikey': typeof AuthenticatedOpenaiApikeyRoute
   '/overview': typeof AuthenticatedOverviewRoute
+  '/pelican': typeof AuthenticatedPelicanRoute
   '/proxies': typeof AuthenticatedProxiesRoute
   '/risk': typeof AuthenticatedRiskRoute
   '/specs': typeof AuthenticatedSpecsRoute
@@ -239,6 +247,7 @@ export interface FileRoutesById {
   '/_authenticated/models': typeof AuthenticatedModelsRoute
   '/_authenticated/openai-apikey': typeof AuthenticatedOpenaiApikeyRoute
   '/_authenticated/overview': typeof AuthenticatedOverviewRoute
+  '/_authenticated/pelican': typeof AuthenticatedPelicanRoute
   '/_authenticated/proxies': typeof AuthenticatedProxiesRoute
   '/_authenticated/risk': typeof AuthenticatedRiskRoute
   '/_authenticated/specs': typeof AuthenticatedSpecsRoute
@@ -269,6 +278,7 @@ export interface FileRouteTypes {
     | '/models'
     | '/openai-apikey'
     | '/overview'
+    | '/pelican'
     | '/proxies'
     | '/risk'
     | '/specs'
@@ -295,6 +305,7 @@ export interface FileRouteTypes {
     | '/models'
     | '/openai-apikey'
     | '/overview'
+    | '/pelican'
     | '/proxies'
     | '/risk'
     | '/specs'
@@ -323,6 +334,7 @@ export interface FileRouteTypes {
     | '/_authenticated/models'
     | '/_authenticated/openai-apikey'
     | '/_authenticated/overview'
+    | '/_authenticated/pelican'
     | '/_authenticated/proxies'
     | '/_authenticated/risk'
     | '/_authenticated/specs'
@@ -450,6 +462,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedOverviewRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/pelican': {
+      id: '/_authenticated/pelican'
+      path: '/pelican'
+      fullPath: '/pelican'
+      preLoaderRoute: typeof AuthenticatedPelicanRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/proxies': {
       id: '/_authenticated/proxies'
       path: '/proxies'
@@ -542,6 +561,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedModelsRoute: typeof AuthenticatedModelsRoute
   AuthenticatedOpenaiApikeyRoute: typeof AuthenticatedOpenaiApikeyRoute
   AuthenticatedOverviewRoute: typeof AuthenticatedOverviewRoute
+  AuthenticatedPelicanRoute: typeof AuthenticatedPelicanRoute
   AuthenticatedProxiesRoute: typeof AuthenticatedProxiesRoute
   AuthenticatedRiskRoute: typeof AuthenticatedRiskRoute
   AuthenticatedSpecsRoute: typeof AuthenticatedSpecsRoute
@@ -568,6 +588,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedModelsRoute: AuthenticatedModelsRoute,
   AuthenticatedOpenaiApikeyRoute: AuthenticatedOpenaiApikeyRoute,
   AuthenticatedOverviewRoute: AuthenticatedOverviewRoute,
+  AuthenticatedPelicanRoute: AuthenticatedPelicanRoute,
   AuthenticatedProxiesRoute: AuthenticatedProxiesRoute,
   AuthenticatedRiskRoute: AuthenticatedRiskRoute,
   AuthenticatedSpecsRoute: AuthenticatedSpecsRoute,

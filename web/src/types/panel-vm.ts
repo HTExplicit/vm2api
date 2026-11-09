@@ -912,9 +912,17 @@ export type OfficialCcBootstrapPayload = {
   status?: OfficialCcStatus
 }
 
+export type TestModel = {
+  id: string
+  label?: string
+  family?: string
+  supported_reasoning_levels?: string[]
+  default_reasoning_level?: string | null
+}
+
 export type TestModelsPayload = {
-  items?: { id: string; label?: string; family?: string }[]
-  models?: { id: string; label?: string; family?: string }[]
+  items?: TestModel[]
+  models?: TestModel[]
   platform?: 'openai' | 'anthropic' | 'all'
   protocol?: 'openai.responses' | 'anthropic.messages' | null
   inbound_path?: '/v1/responses' | '/v1/messages' | null

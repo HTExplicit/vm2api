@@ -104,6 +104,7 @@ import {
 } from '../protocol/seed-policy.mjs'
 
 import { runVmTestChat, resolveTestModels, syncCodexCatalog } from './vm-test-chat.mjs'
+import { respondPelicanTest, runPelicanTest } from './pelican-test.mjs'
 import { VmTestScheduleError } from './vm-test-schedule.mjs'
 import { readCatalogSync, syncClaudeCatalog, syncGptCatalog } from './catalog-monitor.mjs'
 import { setPriceOverride, listPriceOverrides, syncModelsDev } from './price-catalog.mjs'
@@ -3819,6 +3820,24 @@ export function createPanelHandler(ctx) {
         return await handleVmTestScheduleSync(req, res)
       }
 
+      // POST /api/panel/vms/:id/pelican-test — one explicit, pinned GPT generation.
+      if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/pelican-test$/.test(p)) {
+        const body = await readBody(req, 8192)
+        return await respondPelicanTest({
+          req,
+          res,
+          run: () =>
+            runPelicanTest({
+              projectRoot: cfg.paths.project,
+              vmId: p.split('/')[4],
+              model: body.model,
+              reasoning_effort: body.reasoning_effort,
+              baseUrl: `http://127.0.0.1:${cfg.port}`,
+              apiKey: cfg.api_key,
+              accountQuota,
+            }),
+        })
+      }
       // POST /api/panel/vms/:id/test-chat — sub2api-style model connectivity test
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/test-chat$/.test(p)) {
         const id = p.split('/')[4]

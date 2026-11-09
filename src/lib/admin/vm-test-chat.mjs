@@ -102,6 +102,10 @@ export function listTestableModels(platform) {
     label: m.label || m.display_name || m.id,
     family: m.family || (isGptSeriesId(m.id) ? 'codex' : ''),
     source,
+    ...(m.catalog?.supported_reasoning_levels
+      ? { supported_reasoning_levels: m.catalog.supported_reasoning_levels }
+      : {}),
+    ...(m.catalog?.default_reasoning_level ? { default_reasoning_level: m.catalog.default_reasoning_level } : {}),
   })
   if (kind === 'openai') {
     return listGptPolicyModels()
@@ -693,7 +697,7 @@ async function consumeMessagesResponse(res) {
   }
 }
 
-function extractResponsesText(body) {
+export function extractResponsesText(body) {
   if (!body || typeof body !== 'object') return ''
   if (typeof body.output_text === 'string' && body.output_text) return body.output_text
   const out = Array.isArray(body.output) ? body.output : []
@@ -844,9 +848,10 @@ function freshLoopbackRequest(rawUrl, init = {}) {
   })
 }
 
-async function postV1Loopback({ path, baseUrl, apiKey, inbound, headers, vmId, timeoutMs, extraHeaders = {} }) {
+async function postV1Loopback({ path, baseUrl, apiKey, inbound, headers, vmId, timeoutMs, signal, extraHeaders = {} }) {
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), timeoutMs)
+  const requestSignal = signal ? AbortSignal.any([signal, ac.signal]) : ac.signal
   const endpoint = path === '/v1/responses' ? '/v1/responses' : '/v1/messages'
   try {
     const res = await freshLoopbackRequest(`${baseUrl}${endpoint}`, {
@@ -861,11 +866,11 @@ async function postV1Loopback({ path, baseUrl, apiKey, inbound, headers, vmId, t
         ...extraHeaders,
       },
       body: JSON.stringify(inbound),
-      signal: ac.signal,
+      signal: requestSignal,
     })
     return endpoint === '/v1/responses' ? await consumeResponsesResponse(res) : await consumeMessagesResponse(res)
   } catch (e) {
-    const aborted = ac.signal.aborted
+    const aborted = requestSignal.aborted
     return {
       ok: false,
       status: 0,
@@ -1154,9 +1159,11 @@ export async function runVmTestChat(opts = {}) {
   )
   push('info', `loopback POST ${v1Path} pin=x-kin-vm:${vmId}（站点用户路径，不直调 worker）`)
 
-  const timeoutMs = Math.min(Math.max(Number(opts.timeoutMs) || 90000, 10000), 180000)
+  const timeoutCapMs = Math.min(Number(opts.timeoutCapMs) || 180000, 600000)
+  const timeoutMs = Math.min(Math.max(Number(opts.timeoutMs) || 90000, 10000), timeoutCapMs)
   let result
   try {
+    opts.signal?.throwIfAborted()
     result = await (codex ? postV1Responses : postV1Messages)({
       baseUrl,
       apiKey,
@@ -1164,6 +1171,7 @@ export async function runVmTestChat(opts = {}) {
       headers,
       vmId,
       timeoutMs,
+      signal: opts.signal,
       extraHeaders: opts.extraHeaders || {},
     })
     if (codex && !result?.ok && looksLikeCodexUnauthorized(result)) {
@@ -1176,7 +1184,9 @@ export async function runVmTestChat(opts = {}) {
           refreshToken,
           proxyUrl: hostProxyUrlForVm(vm),
           fetchImpl: opts.fetchImpl,
+          signal: opts.signal,
         })
+        opts.signal?.throwIfAborted()
         if (tok.ok && isOpenaiCredentialCurrent(auth)) {
           const saved = persistRefreshedCodexAccount(
             projectRoot,
@@ -1197,6 +1207,7 @@ export async function runVmTestChat(opts = {}) {
               headers,
               vmId,
               timeoutMs,
+              signal: opts.signal,
               extraHeaders: opts.extraHeaders || {},
             })
           } else {
@@ -1221,7 +1232,9 @@ export async function runVmTestChat(opts = {}) {
       ok: false,
       vm_id: vmId,
       model,
-      error: { code: 'loopback_error', message: String(e.message || e).slice(0, 400) },
+      error: opts.signal?.aborted
+        ? { code: 'aborted', message: '测试已到操作期限，上游结束状态未确认' }
+        : { code: 'loopback_error', message: String(e.message || e).slice(0, 400) },
       log,
       duration_ms: Date.now() - started,
     })
