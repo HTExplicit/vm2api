@@ -17,7 +17,11 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 const baseline = path.resolve(values['baseline-root'])
 const output = path.resolve(values['output-dir'])
 fs.mkdirSync(output, { recursive: true })
-const median = (numbers) => [...numbers].sort((a, b) => a - b)[Math.floor(numbers.length / 2)]
+const median = (numbers) => {
+  const ordered = [...numbers].sort((a, b) => a - b)
+  const middle = Math.floor(ordered.length / 2)
+  return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2
+}
 const rounded = (value) => Math.round(value * 1000) / 1000
 const reduction = (before, after) => rounded((1 - after / before) * 100)
 
