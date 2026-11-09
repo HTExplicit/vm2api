@@ -16,7 +16,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-import { startSqlitePool, stopSqlitePool } from './sqlite-pool.mjs'
+import { startSqlitePool, stopSqlitePool, usagePoolEnabled } from './sqlite-pool.mjs'
 import { armWriteBehind, flushWrites } from './write-behind.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -217,6 +217,11 @@ export function getDb() {
 
 export function isDbOpen() {
   return !!_db
+}
+
+/** Only the current singleton connection shares the global read pool. */
+export function hasReadPool(database) {
+  return database === _db && usagePoolEnabled()
 }
 
 export function getDbPath() {

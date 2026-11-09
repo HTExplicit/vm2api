@@ -18,7 +18,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { redactSecrets } from '../core/security.mjs'
-import { resolveStoreDb } from '../db/database.mjs'
+import { hasReadPool, resolveStoreDb } from '../db/database.mjs'
+import { usageRead } from '../db/sqlite-pool.mjs'
 import { enqueueWrite, writeBehindArmed } from '../db/write-behind.mjs'
 import { UsageLogsRepo } from '../db/repos/usage-logs-repo.mjs'
 import { classifyRequestError, resolveMutedErrorClasses } from './error-class.mjs'
@@ -714,6 +715,10 @@ export class RequestLogStore {
     return this.repo.totals()
   }
 
+  async totalsAsync() {
+    return this._readStats('totals', {})
+  }
+
   hasSuccessfulRequest(opts = {}) {
     return this.repo.hasSuccessfulRequest(opts)
   }
@@ -722,20 +727,42 @@ export class RequestLogStore {
     return this.repo.billingStats(opts)
   }
 
+  async billingStatsAsync(opts = {}) {
+    if (!hasReadPool(this.db)) return this.billingStats(opts)
+    this.repo.maintainBillingCosts()
+    return usageRead({ kind: 'repo', method: 'billingStatsReadOnly', args: [opts] })
+  }
+
   ownerBilling(opts = {}) {
     return this.repo.ownerBilling(opts)
+  }
+
+  async ownerBillingAsync(opts = {}) {
+    return this._readStats('ownerBilling', opts)
   }
 
   costByModel(opts = {}) {
     return this.repo.costByModel(opts)
   }
 
+  async costByModelAsync(opts = {}) {
+    return this._readStats('costByModel', opts)
+  }
+
   vmUsageStats(opts = {}) {
     return this.repo.vmUsageStats(opts)
   }
 
+  async vmUsageStatsAsync(opts = {}) {
+    return this._readStats('vmUsageStats', opts)
+  }
+
   costBetween(opts = {}) {
     return this.repo.costBetween(opts)
+  }
+
+  async costBetweenAsync(opts = {}) {
+    return this._readStats('costBetween', opts)
   }
 
   keyUsageStats(opts = {}) {
@@ -745,6 +772,15 @@ export class RequestLogStore {
   /** Windowed SLA / QPS / TTFT snapshot for overview + log analysis. */
   windowStats(opts = {}) {
     return this.repo.windowStats(opts)
+  }
+
+  async windowStatsAsync(opts = {}) {
+    return this._readStats('windowStats', opts)
+  }
+
+  _readStats(method, opts) {
+    if (!hasReadPool(this.db)) return this.repo[method](opts)
+    return usageRead({ kind: 'repo', method, args: [opts] })
   }
 
   protocolEntryStats(opts = {}) {

@@ -23,7 +23,19 @@ const VIEW_METHODS = new Set([
   'sessionSuggestions',
   'exportRows',
 ])
-const REPO_METHODS = new Set(['totals', 'aggregate', 'windowStats', 'keyUsagePeriods', 'keyRecentRequests'])
+const REPO_METHODS = new Set([
+  'totals',
+  'aggregate',
+  'windowStats',
+  'keyUsagePeriods',
+  'keyRecentRequests',
+  'billingStatsReadOnly',
+  'ownerBilling',
+  'costBetween',
+  'costByModel',
+  'vmUsageStats',
+])
+const SNAPSHOT_METHODS = new Set(['billingStatsReadOnly', 'ownerBilling', 'vmUsageStats'])
 
 const cache = new Map()
 
@@ -52,6 +64,17 @@ function call(msg) {
   }
   if (msg.kind === 'repo') {
     if (!REPO_METHODS.has(msg.method)) throw new Error(`usage repo method not readable: ${msg.method}`)
+    if (SNAPSHOT_METHODS.has(msg.method)) {
+      repo.db.exec('BEGIN')
+      try {
+        const result = repo[msg.method](...(msg.args || []))
+        repo.db.exec('COMMIT')
+        return result
+      } catch (err) {
+        repo.db.exec('ROLLBACK')
+        throw err
+      }
+    }
     return repo[msg.method](...(msg.args || []))
   }
   throw new Error('unknown sqlite worker op')

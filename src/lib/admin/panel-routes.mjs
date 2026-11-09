@@ -2690,7 +2690,7 @@ export function createPanelHandler(ctx) {
         const groupBy = u.searchParams.get('group_by') === 'key' ? 'key' : 'vm'
         const since = u.searchParams.get('from') || u.searchParams.get('since') || null
         const until = u.searchParams.get('until') || null
-        return json(res, 200, panel.ok(requestLog.ownerBilling({ ownerUserId, since, until, groupBy })))
+        return json(res, 200, panel.ok(await requestLog.ownerBillingAsync({ ownerUserId, since, until, groupBy })))
       }
 
       // ---- Backups (local auto/manual, download, restore) ----
@@ -5905,7 +5905,7 @@ export function createPanelHandler(ctx) {
       }
       // GET /api/panel/usage
       if (req.method === 'GET' && p === '/api/panel/usage') {
-        return json(res, 200, panel.buildUsage({ accountQuota, cfg, requestLog }))
+        return json(res, 200, await panel.buildUsage({ accountQuota, cfg, requestLog }))
       }
       // GET /api/panel/models
       if (req.method === 'GET' && p === '/api/panel/models') {

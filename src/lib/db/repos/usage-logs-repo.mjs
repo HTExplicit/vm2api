@@ -1188,6 +1188,23 @@ export class UsageLogsRepo {
 
   /** Official-standard totals: all-time + Shanghai calendar today + per account. */
   billingStats(opts = {}) {
+    return this._billingStats(opts, true)
+  }
+
+  /** Same cached snapshot without historical cost writes (read-only workers). */
+  billingStatsReadOnly(opts = {}) {
+    return this._billingStats(opts, false)
+  }
+
+  maintainBillingCosts(now = Date.now()) {
+    if (now - this._billingBackfillAt < BILLING_BACKFILL_INTERVAL_MS) return
+    this._billingBackfillAt = now
+    try {
+      this.backfillMissingCosts()
+    } catch {}
+  }
+
+  _billingStats(opts, maintain) {
     const { accountWindows = null, now = Date.now() } = opts
     const cacheable = !Object.hasOwn(opts, 'now')
     const cacheNow = Date.now()
@@ -1199,12 +1216,7 @@ export class UsageLogsRepo {
     // Historical cost repair is maintenance, not part of rendering a panel.
     // Limit it independently so several panel endpoints cannot repeat the same
     // synchronous scan in a single refresh.
-    if (cacheNow - this._billingBackfillAt >= BILLING_BACKFILL_INTERVAL_MS) {
-      this._billingBackfillAt = cacheNow
-      try {
-        this.backfillMissingCosts()
-      } catch {}
-    }
+    if (maintain) this.maintainBillingCosts(cacheNow)
 
     const value = this._computeBillingStats({ accountWindows, now, cacheable })
     if (this._billingStatsCache.size > 32) {

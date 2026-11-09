@@ -1,8 +1,8 @@
 /**
  * Read-only worker pool for panel scans.
  *
- * The main thread keeps the single writer DatabaseSync (transactions stay
- * there). These workers only run the usage-log reads that were blocking
+ * The main thread keeps the single writer DatabaseSync. These workers only
+ * run the usage-log reads that were blocking
  * /logs behind a 31-byte response. Round-robin spreads one refresh across
  * the pool; each worker handles one query at a time.
  */
@@ -100,15 +100,21 @@ function failWorker(worker, err) {
 }
 
 async function claim() {
-  if (!ready) throw new Error('sqlite pool is not started')
-  await ready
-  if (!readers.length) throw new Error('sqlite pool is not started')
-  const worker = readers[rr % readers.length]
-  rr = (rr + 1) % readers.length
+  const opening = ready
+  const currentReaders = readers
+  const currentFile = file
+  if (!opening) throw new Error('sqlite pool is not started')
+  await opening
+  if (ready !== opening || readers !== currentReaders || file !== currentFile)
+    throw new Error('sqlite pool changed while waiting')
+  const worker = currentReaders[rr % currentReaders.length]
+  rr = (rr + 1) % currentReaders.length
   return worker.worker
 }
 
 function call(worker, body) {
+  if (!readers.some((reader) => reader.worker === worker))
+    return Promise.reject(new Error('sqlite pool changed before query'))
   const id = ++seq
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject, worker })
