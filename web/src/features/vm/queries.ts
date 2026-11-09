@@ -99,11 +99,23 @@ export function vmCredentialQueryOptions(id: string, enabled = true) {
 }
 
 export function testModelsQueryOptions(vmId: string) {
-  const q = vmId ? `?vm_id=${encodeURIComponent(vmId)}` : ''
   return queryOptions({
     queryKey: ['panel', 'test-models', vmId || ''] as const,
-    queryFn: () => api<TestModelsPayload>(`/api/panel/test-models${q}`),
+    queryFn: () =>
+      api<TestModelsPayload>(
+        `/api/panel/test-models${vmId ? `?vm_id=${encodeURIComponent(vmId)}` : ''}`
+      ),
     enabled: !!vmId,
+  })
+}
+
+export function testChatDefaultsQueryOptions(enabled = true) {
+  return queryOptions({
+    queryKey: ['panel', 'test-chat', 'defaults'] as const,
+    queryFn: ({ signal }) =>
+      api<{ prompt: string }>('/api/panel/test-chat/defaults', { signal }),
+    enabled,
+    refetchOnMount: 'always',
   })
 }
 

@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
+import { pelicanPreviewDocument } from './preview-fit'
 
 /** Every result uses the same canvas, so card density never changes the artwork. */
 export function PelicanPreview({
@@ -13,6 +14,7 @@ export function PelicanPreview({
 }) {
   const container = useRef<HTMLDivElement>(null)
   const [scale, setScale] = useState(0)
+  const preview = useMemo(() => pelicanPreviewDocument(html), [html])
 
   useEffect(() => {
     const observer = new ResizeObserver(([entry]) => {
@@ -32,7 +34,7 @@ export function PelicanPreview({
     >
       <iframe
         title={title}
-        srcDoc={html}
+        srcDoc={preview}
         sandbox='allow-scripts'
         referrerPolicy='no-referrer'
         width={960}

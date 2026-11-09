@@ -41,7 +41,10 @@ function fixture(t) {
 }
 
 test('pelican loopback pins the selected account, sends the exact prompt and returns full HTML', async (t) => {
-  const { root } = fixture(t)
+  const { root, write } = fixture(t)
+  write({ schedule_off: true, schedule_manual: true, schedulable: false })
+  const recordPath = path.join(root, 'vms', 'vm-gpt.json')
+  const before = fs.readFileSync(recordPath, 'utf8')
   const html = '<!doctype html><html><body><svg>' + '<!-- animation -->'.repeat(400) + '</svg></body></html>'
   const calls = []
   const server = http.createServer(async (req, res) => {
@@ -81,12 +84,30 @@ test('pelican loopback pins the selected account, sends the exact prompt and ret
   assert.deepEqual(calls[0].body.reasoning, { effort: 'high' })
   assert.equal(result.body, undefined)
   assert.equal(result.log, undefined)
+  assert.equal(fs.readFileSync(recordPath, 'utf8'), before)
 })
 
 test('pelican rejects disabled, stopped and wrong-platform accounts before loopback; page and route are admin-only', async (t) => {
   const { root, write } = fixture(t)
   for (const [patch, code] of [
-    [{ schedule_off: true }, 'vm_unschedulable'],
+    [{ schedulable: false }, 'vm_unschedulable'],
+    [{ schedule_off: true, unschedulable: { reason: 'credential_blocked' } }, 'vm_unschedulable'],
+    [{ schedule_off: true, schedule_hold: { reason: 'maintenance' } }, 'vm_unschedulable'],
+    [{ schedule_off: true, policy: { allowed_models: ['gpt-6-sol'] } }, 'model_not_allowed'],
+    [
+      {
+        schedule_off: true,
+        policy: {
+          active_hours: {
+            start: '00:00',
+            end: '23:59',
+            timezone: 'UTC',
+            days: [(new Date().getUTCDay() + 1) % 7],
+          },
+        },
+      },
+      'pool_resting',
+    ],
     [{ runtime: { stopped: true } }, 'vm_stopped'],
     [{ platform: 'anthropic', family: 'claude' }, 'platform_mismatch'],
   ]) {

@@ -32,7 +32,6 @@ import { PageHeader } from '@/components/page-header'
 import { errorMessage } from '@/components/query-gate'
 import { meQueryOptions } from '@/features/auth/queries'
 import { vmsListQueryOptions } from '@/features/vm/queries'
-import { vmSchedulableProps } from '@/features/vm/schedulable-switch'
 import { PelicanAccountPicker } from './account-picker'
 import { PelicanResultCard, type PelicanView } from './result-card'
 import { PelicanResultViewer } from './result-viewer'
@@ -99,7 +98,10 @@ function PelicanWorkspace({ scope }: { scope: string }) {
   const accounts = useMemo(
     () =>
       (vms.data?.items || []).filter(
-        (vm) => isCodexVm(vm) && vmSchedulableProps(vm).schedulable
+        (vm) =>
+          isCodexVm(vm) &&
+          vm.status === 'running' &&
+          vm.runtime?.stopped !== true
       ),
     [vms.data?.items]
   )
@@ -356,7 +358,7 @@ function PelicanWorkspace({ scope }: { scope: string }) {
                 把每个账号的动画放在一起看
               </h3>
               <p className='text-sm leading-relaxed text-muted-foreground'>
-                选择调度已开启的 GPT
+                选择已开机的 GPT
                 账号、模型和推理强度，开始后每个账号会生成一份鹈鹕骑车动画。
               </p>
             </div>

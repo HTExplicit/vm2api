@@ -9,6 +9,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
+import { vmSchedulableProps } from '@/features/vm/schedulable-switch'
 
 export function PelicanAccountPicker({
   accounts,
@@ -80,7 +81,7 @@ export function PelicanAccountPicker({
           </div>
           <div className='flex items-center justify-between gap-2'>
             <span className='text-xs text-muted-foreground'>
-              仅列出调度已开启的 GPT 账号
+              已开机的 GPT 账号，含调度关闭
             </span>
             <div className='flex gap-1'>
               <Button
@@ -139,18 +140,22 @@ export function PelicanAccountPicker({
                       ? 'shrink-0 text-xs text-[color:var(--status-warn)]'
                       : 'shrink-0 text-xs text-muted-foreground'
                   }
-                  title={vm.restriction_text || undefined}
+                  title={
+                    vm.restriction_text || vm.unschedulable_text || undefined
+                  }
                 >
                   {vm.schedule_state === 'restricted'
                     ? vm.restriction_text || '暂时受限'
-                    : '调度开'}
+                    : vmSchedulableProps(vm).schedulable
+                      ? '调度开'
+                      : '调度关'}
                 </span>
               </label>
             )
           })}
           {!visible.length ? (
             <p className='px-4 py-8 text-center text-sm text-muted-foreground'>
-              {term ? '没有匹配的账号' : '暂无调度已开启的 GPT 账号'}
+              {term ? '没有匹配的账号' : '暂无已开机的 GPT 账号'}
             </p>
           ) : null}
         </div>

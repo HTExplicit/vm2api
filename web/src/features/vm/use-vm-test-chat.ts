@@ -4,7 +4,10 @@ import type { TestModelsPayload, Vm } from '@/types/panel-vm'
 import { toast } from 'sonner'
 import { api, isApiError } from '@/lib/api'
 import { isCodexVm } from '@/lib/vm-kind'
-import { testModelsQueryOptions } from '@/features/vm/queries'
+import {
+  testChatDefaultsQueryOptions,
+  testModelsQueryOptions,
+} from '@/features/vm/queries'
 import type { TestChatResult } from '@/features/vm/test-chat-types'
 import { useVmPerms } from '@/features/vm/vm-perms'
 
@@ -12,7 +15,9 @@ import { useVmPerms } from '@/features/vm/vm-perms'
 export function useVmTestChat(vm: Vm) {
   const id = vm.id
   const qc = useQueryClient()
-  const canTest = useVmPerms().testModels
+  const permissions = useVmPerms()
+  const canTest = permissions.testModels
+  const defaults = useQuery(testChatDefaultsQueryOptions(permissions.test))
   const testModels = useQuery({
     ...testModelsQueryOptions(id),
     enabled: canTest && !!id,
@@ -32,6 +37,12 @@ export function useVmTestChat(vm: Vm) {
     () => testModels.data?.items || testModels.data?.models || [],
     [testModels.data]
   )
+
+  useEffect(() => {
+    if (defaults.data && !edited.current.prompt) {
+      setPrompt(defaults.data.prompt)
+    }
+  }, [defaults.data])
 
   useEffect(() => {
     if (!models.length) return
@@ -64,7 +75,6 @@ export function useVmTestChat(vm: Vm) {
       reasoning_effort: string | null
     }) => {
       if (!edited.current.model) setModel(schedule.model)
-      if (!edited.current.prompt) setPrompt(schedule.prompt)
       if (isCodexVm(vm)) {
         if (!edited.current.reasoningEffort) {
           setReasoningEffort(schedule.reasoning_effort || 'medium')
@@ -75,6 +85,19 @@ export function useVmTestChat(vm: Vm) {
     },
     [vm]
   )
+
+  const savePromptDefault = useMutation({
+    mutationFn: () =>
+      api<{ prompt: string }>('/api/panel/test-chat/defaults', {
+        method: 'PUT',
+        body: JSON.stringify({ prompt }),
+      }),
+    onSuccess: (data) => {
+      qc.setQueryData(testChatDefaultsQueryOptions().queryKey, data)
+      toast.success('已保存全局默认提示词')
+    },
+    onError: (error: Error) => toast.error(error.message),
+  })
 
   const send = useMutation({
     mutationFn: () =>
@@ -147,6 +170,11 @@ export function useVmTestChat(vm: Vm) {
     running: send.isPending,
     modelsRefreshing: testModels.isFetching || refreshModels.isPending,
     canRefreshModels: canTest,
+    canSavePromptDefault: permissions.admin,
+    savingPromptDefault: savePromptDefault.isPending,
+    promptDefaultsLoading: defaults.isPending,
+    promptDefaultsError: defaults.error?.message,
+    onSavePromptDefault: () => savePromptDefault.mutate(),
     onModelChange,
     onPromptChange,
     onMaxTokensChange,

@@ -105,6 +105,7 @@ import {
 
 import { runVmTestChat, resolveTestModels, syncCodexCatalog } from './vm-test-chat.mjs'
 import { respondPelicanTest, runPelicanTest } from './pelican-test.mjs'
+import { readVmTestChatDefaults, saveVmTestChatDefaults, resolveVmTestChatPrompt } from './vm-test-chat-defaults.mjs'
 import { VmTestScheduleError } from './vm-test-schedule.mjs'
 import { readCatalogSync, syncClaudeCatalog, syncGptCatalog } from './catalog-monitor.mjs'
 import { setPriceOverride, listPriceOverrides, syncModelsDev } from './price-catalog.mjs'
@@ -3838,6 +3839,18 @@ export function createPanelHandler(ctx) {
             }),
         })
       }
+      if (req.method === 'GET' && p === '/api/panel/test-chat/defaults') {
+        return json(res, 200, panel.ok(readVmTestChatDefaults()))
+      }
+      if (req.method === 'PUT' && p === '/api/panel/test-chat/defaults') {
+        const body = await readBody(req, 128 * 1024)
+        try {
+          return json(res, 200, panel.ok(saveVmTestChatDefaults(body)))
+        } catch (error) {
+          if (error.code !== 'invalid_test_chat_defaults') throw error
+          return json(res, 400, { ok: false, error: { code: error.code, message: error.message } })
+        }
+      }
       // POST /api/panel/vms/:id/test-chat — sub2api-style model connectivity test
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/test-chat$/.test(p)) {
         const id = p.split('/')[4]
@@ -3846,7 +3859,7 @@ export function createPanelHandler(ctx) {
           projectRoot: cfg.paths.project,
           vmId: id,
           model: body.model || body.model_id || '',
-          prompt: body.prompt || body.message || '',
+          prompt: resolveVmTestChatPrompt(body.prompt || body.message || ''),
           max_tokens: body.max_tokens,
           reasoning_effort: body.reasoning_effort || body.effort,
           timeoutMs: body.timeout_ms || body.timeoutMs,
