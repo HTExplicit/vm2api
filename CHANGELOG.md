@@ -75,7 +75,7 @@
 - CRAG V2 发布协议切换到原生 ELF（`runtime: native`、`entrypoint: crag-v2`）：验证实际架构、完整 SHA 成员与安全路径，原子物化并直接执行，不再复制 Node 或写出 `node_bin` / `crag_v2_root`。保留 legacy 版本选择和 Linux Docker 放置限制；真实 CLI 版本由 native worker 探测。
 - native V2 生命周期探测、停止、切换回收和 idle reload 识别新进程名；动态 runnable 上限不再被误算为占用任务。配置写入本身不触发额外热重载，沿用显式空闲重启流程。
 
-## 1.4.5401 — 2026-11-09
+## 1.4.054 — 2026-11-09（官方历史及 fork 适配）
 
 - 合入官方 1.4.054（`ba0778fa`），保留二开脱敏、账号 API scope/Responses/Lite、JEV 选择范围和槽位删除安全修复。
 - Key 级模型白名单 `api_keys.allowed_models`：模型映射前按客户端模型名判断，忽略 `[1m]` 后缀；空数组表示允许全部；面板可配置；迁移 `054_api_keys_allowed_models.sql`。[#913](https://github.com/dofastted/vm2api/pull/913)
