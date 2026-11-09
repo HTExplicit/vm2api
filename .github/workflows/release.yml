@@ -5,6 +5,19 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      recovery_tag:
+        description: 'Existing draft release tag to recover; empty uses the normal release flow'
+        required: false
+        type: string
+      recovery_digest:
+        description: 'Digest of the successful validation image for that tag commit'
+        required: false
+        type: string
+      recovery_run_id:
+        description: 'Successful CI run containing the matching browser-image build'
+        required: false
+        type: string
 
 concurrency:
   group: release-${{ github.ref }}
@@ -15,6 +28,7 @@ permissions:
 
 jobs:
   linux-amd64:
+    if: github.event_name != 'workflow_dispatch' || inputs.recovery_tag == ''
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
@@ -135,3 +149,95 @@ jobs:
           docker buildx imagetools create --prefer-index=false \
             --tag "${image}:latest" "${image}:${GITHUB_REF_NAME}"
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+
+  # Recover an existing draft from an exact, successful CI build when upstream
+  # asset downloads fail. No source tag, payload hash, or release asset is changed.
+  recovery:
+    if: github.event_name == 'workflow_dispatch' && inputs.recovery_tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RECOVERY_TAG: ${{ inputs.recovery_tag }}
+      RECOVERY_DIGEST: ${{ inputs.recovery_digest }}
+      RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+    steps:
+      - name: validate recovery inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RECOVERY_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$RECOVERY_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$RECOVERY_RUN_ID" =~ ^[0-9]+$ ]]
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.recovery_tag }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: docker/setup-buildx-action@v4
+      - name: verify tag, successful CI, and validation image
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RECOVERY_TAG" = "v$(tr -d '[:space:]' < VERSION)"
+          sha=$(git rev-parse HEAD)
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RECOVERY_RUN_ID" > "$RUNNER_TEMP/recovery-run.json"
+          jq -e --arg sha "$sha" '.conclusion == "success" and .head_sha == $sha' "$RUNNER_TEMP/recovery-run.json" >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RECOVERY_RUN_ID/jobs" > "$RUNNER_TEMP/recovery-jobs.json"
+          jq -e '.jobs | any(.name == "browser-image" and .conclusion == "success")' "$RUNNER_TEMP/recovery-jobs.json" >/dev/null
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          test "$(docker buildx imagetools inspect "$image:validation-$sha" --format '{{.Manifest.Digest}}')" = "$RECOVERY_DIGEST"
+      - name: verify existing draft and all 10 pinned assets
+        shell: bash
+        env:
+          RELEASE_JSON: ${{ runner.temp }}/recovery-release.json
+        run: |
+          set -euo pipefail
+          release_api=$(gh release view "$RECOVERY_TAG" --json apiUrl --jq .apiUrl)
+          gh api "$release_api" > "$RELEASE_JSON"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import fs from 'node:fs'
+          const manifest = JSON.parse(fs.readFileSync('deploy/payload.json', 'utf8'))
+          const expected = new Map(manifest.files.filter(file => !file.path.startsWith('share/wrap-cli/glibc239/')).map(file => [file.asset, file]))
+          const release = JSON.parse(fs.readFileSync(process.env.RELEASE_JSON, 'utf8'))
+          assert.equal(release.draft, true, 'recovery requires an unpublished draft')
+          assert.equal(release.tag_name, process.env.RECOVERY_TAG)
+          assert.equal(expected.size, 10)
+          assert.deepEqual(release.assets.map(asset => asset.name).sort(), [...expected.keys()].sort())
+          for (const asset of release.assets) {
+            const file = expected.get(asset.name)
+            assert.equal(asset.size, file.size, `${asset.name}: size mismatch`)
+            assert.equal(asset.digest, `sha256:${file.sha256}`, `${asset.name}: checksum mismatch`)
+          }
+          console.log('All 10 draft asset digests match the pinned manifest')
+          NODE
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: promote exact digest and verify anonymous access
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker buildx imagetools create --prefer-index=false \
+            --tag "$image:$RECOVERY_TAG" --tag "$image:$RECOVERY_TAG-amd64" "$image@$RECOVERY_DIGEST"
+          anonymous_config=$(mktemp -d)
+          for tag in "$RECOVERY_TAG" "$RECOVERY_TAG-amd64"; do
+            test "$(DOCKER_CONFIG="$anonymous_config" docker buildx imagetools inspect "$image:$tag" --format '{{.Manifest.Digest}}')" = "$RECOVERY_DIGEST"
+          done
+      - name: publish verified latest image and release
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker buildx imagetools create --prefer-index=false --tag "$image:latest" "$image@$RECOVERY_DIGEST"
+          gh release edit "$RECOVERY_TAG" --draft=false --latest
