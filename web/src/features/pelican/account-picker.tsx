@@ -1,6 +1,13 @@
 import { useState } from 'react'
 import type { Vm } from '@/types/panel-vm'
+import type { StatusTone } from '@/types/status'
 import { Check, ChevronsUpDown, Search, Users } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import {
+  restrictionCopy,
+  scheduleStateLabel,
+  type ScheduleStateLabel,
+} from '@/lib/vm-status'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
@@ -9,7 +16,14 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
-import { vmSchedulableProps } from '@/features/vm/schedulable-switch'
+import { StatusMark } from '@/components/status-mark'
+
+const scheduleTones: Record<ScheduleStateLabel, StatusTone> = {
+  开: { key: 'on', text: '调度开', cls: 'ok' },
+  关: { key: 'off', text: '调度关', cls: 'off' },
+  受限: { key: 'restricted', text: '暂时受限', cls: 'warn' },
+  不可调度: { key: 'unschedulable', text: '不可调度', cls: 'bad' },
+}
 
 export function PelicanAccountPicker({
   accounts,
@@ -109,12 +123,25 @@ export function PelicanAccountPicker({
         <div className='max-h-80 overflow-y-auto p-1'>
           {visible.map((vm) => {
             const checked = selected.has(vm.id)
+            const state = scheduleStateLabel(vm)
+            const reason =
+              state === '不可调度' &&
+              vm.unschedulable_reason === 'no_credential' &&
+              !vm.has_token
+                ? vm.unschedulable_text || '未导入凭据'
+                : state === '受限' || state === '不可调度'
+                  ? restrictionCopy(vm)
+                  : null
             return (
               <label
                 key={vm.id}
-                className='flex cursor-pointer items-center gap-3 rounded-md px-3 py-2.5 hover:bg-accent'
+                className={cn(
+                  'flex cursor-pointer items-start gap-3 rounded-md border border-transparent px-3 py-2.5 focus-within:ring-2 focus-within:ring-ring/50 hover:bg-muted/50',
+                  checked && 'border-border bg-muted/60 hover:bg-muted/80'
+                )}
               >
                 <Checkbox
+                  className='mt-0.5'
                   checked={checked}
                   onCheckedChange={(next) =>
                     onChange(
@@ -125,30 +152,22 @@ export function PelicanAccountPicker({
                   }
                   aria-label={`选择 ${vm.email || vm.name || vm.id}`}
                 />
-                <span className='min-w-0 flex-1'>
-                  <span className='block truncate text-sm' title={vm.email}>
-                    {vm.email || vm.name || vm.id}
+                <span className='min-w-0 flex-1 space-y-0.5'>
+                  <span className='flex items-center justify-between gap-2'>
+                    <span className='truncate text-sm' title={vm.email}>
+                      {vm.email || vm.name || vm.id}
+                    </span>
+                    <StatusMark tone={scheduleTones[state]} variant='pill' />
                   </span>
                   <span className='block truncate text-xs text-muted-foreground'>
                     {vm.name && vm.name !== vm.id ? `${vm.name} · ` : ''}
                     {vm.id}
                   </span>
-                </span>
-                <span
-                  className={
-                    vm.schedule_state === 'restricted'
-                      ? 'shrink-0 text-xs text-[color:var(--status-warn)]'
-                      : 'shrink-0 text-xs text-muted-foreground'
-                  }
-                  title={
-                    vm.restriction_text || vm.unschedulable_text || undefined
-                  }
-                >
-                  {vm.schedule_state === 'restricted'
-                    ? vm.restriction_text || '暂时受限'
-                    : vmSchedulableProps(vm).schedulable
-                      ? '调度开'
-                      : '调度关'}
+                  {reason ? (
+                    <span className='block text-xs leading-relaxed break-words text-muted-foreground'>
+                      {reason}
+                    </span>
+                  ) : null}
                 </span>
               </label>
             )
