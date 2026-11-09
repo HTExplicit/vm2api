@@ -179,6 +179,13 @@ jobs:
             test/unit/claude-code-only.test.mjs \
             test/unit/graceful-shutdown.test.mjs \
             test/unit/crag-license.test.mjs \
+            test/unit/crag-print-prompt.test.mjs \
+            test/unit/private-dir.test.mjs \
+            test/unit/cluster-placement.test.mjs \
+            test/unit/remote-slot-gpt.test.mjs \
+            test/unit/remote-slot-restart-loop.test.mjs \
+            test/unit/vm-runtime-replace.test.mjs \
+            test/unit/vm-test-chat-billing.test.mjs \
             test/unit/kernel-catalog.test.mjs \
             test/unit/kernel-install.test.mjs \
             test/unit/kernel-install-sandbox.test.mjs \
@@ -242,6 +249,7 @@ jobs:
           pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx
           pnpm exec vitest run src/features/anthropic/endpoint-save.test.ts
           pnpm exec vitest run src/features/settings/health-pane.test.ts src/features/cluster/slot-migration.test.ts
+          pnpm exec vitest run src/features/vm/engine-contract.test.ts src/features/vm/persona-contract.test.ts src/lib/wrap-health.test.ts src/features/system/compat-patch.test.ts
           pnpm exec vitest run src/config/nav.test.ts src/features/auth/route-guard.test.ts src/features/users/user-concurrency.test.ts src/features/vm/vm-perms.test.ts
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx
           pnpm exec vitest run src/features/cluster/model.test.ts src/features/cluster/connection-rows.test.ts
