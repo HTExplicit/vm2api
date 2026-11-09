@@ -9,6 +9,7 @@ export type ViewId =
   | 'billing'
   | 'proxies'
   | 'models'
+  | 'pelican'
   | 'risk'
   | 'system'
   | 'keys'
@@ -31,6 +32,7 @@ export const VIEW_TITLES: Record<ViewId, string> = {
   billing: '计费',
   proxies: '代理池',
   models: '模型',
+  pelican: '鹈鹕测试',
   risk: '风险审计',
   system: 'system提示词',
   keys: '密钥',
@@ -77,6 +79,7 @@ export const ROUTE_VIEWS = {
   '/proxies': 'proxies',
   '/billing': 'billing',
   '/models': 'models',
+  '/pelican': 'pelican',
   '/risk': 'risk',
   '/system': 'system',
   '/api': 'api',

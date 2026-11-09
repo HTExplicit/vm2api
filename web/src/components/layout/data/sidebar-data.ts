@@ -16,6 +16,7 @@ import {
   Settings,
   ShieldAlert,
   Sparkles,
+  Telescope,
 } from 'lucide-react'
 import type { NavGroup, SidebarData } from '../types'
 
@@ -44,6 +45,7 @@ const ALL_GROUPS: NavGroup[] = [
     title: '协议',
     items: [
       { title: '模型', url: '/models', icon: Sparkles },
+      { title: '鹈鹕测试', url: '/pelican', icon: Telescope },
       { title: '风险审计', url: '/risk', icon: ShieldAlert },
       { title: 'system提示词', url: '/system', icon: MessageSquareText },
       { title: 'API', url: '/api', icon: Send },

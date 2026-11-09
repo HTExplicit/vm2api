@@ -28,7 +28,8 @@ import {
   CODEX_DEFAULT_PARK_MS,
 } from './codex-usage.mjs'
 import { disjointOpenaiUsage, mergeUsage, preferUsage } from './openai-usage.mjs'
-import { streamCodexKernel } from '../transport/codex-kernel-client.mjs'
+import { codexKernelHealth, streamCodexKernel } from '../transport/codex-kernel-client.mjs'
+import { isPelicanTestRequest, pelicanTestAdmission } from '../admin/pelican-test.mjs'
 import { ensureRedaction, maskJson, restoreJsonValue } from '../redaction/runtime.mjs'
 import {
   codexKernelRequestOptions,
@@ -243,6 +244,10 @@ export function pickCodexCandidates(
   if (poolDenial) return { error: 'vm_pool_unavailable', message: poolDenial.message, ids: [], candidates: [] }
   if (scope.group_type === 'anthropic') return { error: 'key_group_mismatch', ids: [], candidates: [] }
   if (pin) {
+    if (isPelicanTestRequest(req)) {
+      const blocked = pelicanTestAdmission({ projectRoot, vmId: pin, model, routing })
+      if (blocked) return { error: blocked.code, message: blocked.message, pin, ids: [], candidates: [] }
+    }
     const vm = getVm(projectRoot, pin)
     if (!vm || !isCodexVm(vm)) return { error: 'platform_mismatch', pin, ids: [] }
     if (!keyAllowsVm(scope, vm)) return { error: 'key_group_mismatch', pin, ids: [] }
@@ -803,14 +808,21 @@ export async function handleCodexProtocol({
       let attemptKind = 'failed'
       try {
         const localExit = isLocalEgressProxy(vm.proxy)
-        const written = writeCfg(projectRoot, vm, {
-          // Same rule as slot start: a node on local egress must leave through
-          // that node's forwarder, not the control plane's deployment proxy.
-          proxyUrl: localExit && !vmNodeId(vm) ? '' : hostProxyUrlForVm(vm),
-          proxyRequired: true,
-          routing,
-        })
-        const ready = await ensure(execFor(projectRoot, vm))
+        const pelicanTest = isPelicanTestRequest(req)
+        // This page can inspect an existing kernel, but must never boot or recycle it.
+        const existingKernel = pelicanTest
+          ? await (ops.codexKernelHealth || codexKernelHealth)(execFor(projectRoot, vm), { timeoutMs: 2500 })
+          : null
+        const written =
+          (!pelicanTest || existingKernel?.ok) &&
+          writeCfg(projectRoot, vm, {
+            // Same rule as slot start: a node on local egress must leave through
+            // that node's forwarder, not the control plane's deployment proxy.
+            proxyUrl: localExit && !vmNodeId(vm) ? '' : hostProxyUrlForVm(vm),
+            proxyRequired: true,
+            routing,
+          })
+        const ready = pelicanTest ? existingKernel : await ensure(execFor(projectRoot, vm))
         if (!ready?.ok) {
           // Kernel init failed: this seat goes back and the next candidate is re-admitted.
           last = {
@@ -875,6 +887,10 @@ export async function handleCodexProtocol({
         let hopAuth = null
         const guardedHop = async (args) => {
           hopAuth = null
+          if (isPelicanTestRequest(req)) {
+            const blocked = pelicanTestAdmission({ projectRoot, vmId: vm.id, model: outboundBody.model, routing })
+            if (blocked) return blockedCodexResult({ error: blocked.code })
+          }
           const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
           if (blocked) return blockedCodexResult(blocked)
           const auth = captureOpenaiAuth(projectRoot, vm.id)

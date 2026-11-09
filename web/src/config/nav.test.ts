@@ -28,6 +28,7 @@ const PANEL_VIEWS: ViewId[] = [
   'specs',
   'proxies',
   'models',
+  'pelican',
   'risk',
   'system',
   'keys',
