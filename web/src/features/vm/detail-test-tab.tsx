@@ -41,6 +41,11 @@ type VmTestTabProps = {
   onTest: () => void
   onRefreshModels: () => void
   canRefreshModels?: boolean
+  canSavePromptDefault?: boolean
+  savingPromptDefault?: boolean
+  promptDefaultsLoading?: boolean
+  promptDefaultsError?: string
+  onSavePromptDefault?: () => void
   schedule?: React.ReactNode
 }
 
@@ -83,6 +88,11 @@ export function VmTestPanel(props: VmTestTabProps & { className?: string }) {
     onTest,
     onRefreshModels,
     canRefreshModels = true,
+    canSavePromptDefault = false,
+    savingPromptDefault = false,
+    promptDefaultsLoading = false,
+    promptDefaultsError,
+    onSavePromptDefault,
     schedule,
   } = props
 
@@ -112,11 +122,41 @@ export function VmTestPanel(props: VmTestTabProps & { className?: string }) {
             </Select>
           </div>
           <div className='space-y-1.5'>
-            <Label>Prompt</Label>
+            <div className='flex items-center justify-between gap-2'>
+              <Label htmlFor={`vm-test-prompt-${vm.id}`}>Prompt</Label>
+              {canSavePromptDefault ? (
+                <Button
+                  type='button'
+                  size='sm'
+                  variant='ghost'
+                  className='h-7 px-2 text-xs'
+                  onClick={onSavePromptDefault}
+                  loading={savingPromptDefault}
+                  disabled={
+                    savingPromptDefault ||
+                    promptDefaultsLoading ||
+                    !prompt.trim() ||
+                    prompt.length > 16000
+                  }
+                >
+                  保存为全局默认
+                </Button>
+              ) : null}
+            </div>
             <Textarea
+              id={`vm-test-prompt-${vm.id}`}
               value={prompt}
               onChange={(event) => onPromptChange(event.target.value)}
+              maxLength={16000}
+              placeholder={
+                promptDefaultsLoading ? '正在读取默认提示词…' : undefined
+              }
             />
+            {promptDefaultsError ? (
+              <p role='alert' className='text-xs text-destructive'>
+                默认提示词读取失败：{promptDefaultsError}
+              </p>
+            ) : null}
           </div>
           <div className='space-y-1.5'>
             <Label>{isCodex ? '思考档位' : '思考预算'}</Label>

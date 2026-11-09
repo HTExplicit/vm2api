@@ -47,7 +47,7 @@ export async function respondPelicanTest({ req, res, run, heartbeatMs = 20_000 }
   if (!res.destroyed && !res.writableEnded) res.end(JSON.stringify(payload))
 }
 
-/** Pinning a diagnostic normally bypasses operator gates; this test must not. */
+/** Only the operator's pool switch is ignored for this explicit diagnostic. */
 export function pelicanTestAdmission({ projectRoot, vmId, model, routing = {} }) {
   if (!isValidVmId(vmId)) return { code: 'vm_not_found', message: '账号不存在' }
   const vm = getVm(projectRoot, vmId)
@@ -56,10 +56,12 @@ export function pelicanTestAdmission({ projectRoot, vmId, model, routing = {} })
   if (vm.runtime?.stopped === true || vm.status !== 'running') {
     return { code: 'vm_stopped', message: '账号未运行，请先在账号页开机' }
   }
-  if (vm.schedule_off === true || vm.schedulable === false || vm.unschedulable || vm.schedule_hold) {
-    return { code: 'vm_unschedulable', message: '账号当前未开启调度或受限，请刷新账号状态' }
+  const manualOff = vm.schedule_off === true || (vm.schedulable === false && vm.schedule_manual === true)
+  if (vm.unschedulable || vm.schedule_hold || (vm.schedulable === false && !manualOff)) {
+    return { code: 'vm_unschedulable', message: '账号当前不可调度或受限，请刷新账号状态' }
   }
-  const summary = summarizeVm(vm, projectRoot, routing)
+  const current = summarizeVm(vm, projectRoot, routing)
+  const summary = manualOff ? { ...current, schedulable: true } : current
   if (!isCodexSlotReady(summary)) return { code: 'credential_unavailable', message: '账号凭证或出口当前不可用' }
   if (!codexSlotAllowsModel(summary, model)) return { code: 'model_not_allowed', message: '账号未允许此模型' }
   const blocked = codexAdmissionBlock(summary, Date.now(), routing.codex?.quota)

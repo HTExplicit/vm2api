@@ -91,6 +91,7 @@ const USER_EXACT_GET = new Set([
   '/api/panel/billing',
   '/api/panel/test-schedule/default',
   '/api/panel/test-models',
+  '/api/panel/test-chat/defaults',
 ])
 
 const USER_EXACT_POST = new Set(['/api/panel/vms/create', '/api/panel/test-schedule/sync'])
