@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { classifierFixture } from '../fixtures/auto-mode.mjs'
 import { runApiInference } from '../../src/lib/pool/api-protocol.mjs'
+import { OFFICIAL_CLAUDE_CLI_UA } from '../../src/lib/identity/vm-identity.mjs'
 import {
   createClaudeMessageAssembler,
   applyClaudeSSELineToMessage,
@@ -314,6 +315,6 @@ test('native Anthropic API backend keeps endpoint headers and applies the 1M pol
   // Caller UA stays off the wire unless passthrough is on.
   assert.equal((await run('claude-sonnet-5', {})).ok, true)
   assert.equal(envelope.headers['anthropic-beta'], 'oauth-2025-04-20,context-1m-2025-08-07,future-beta')
-  assert.equal(envelope.headers['user-agent'], 'claude-cli/2.1.303 (external, sdk-cli)')
+  assert.equal(envelope.headers['user-agent'], OFFICIAL_CLAUDE_CLI_UA)
   assert.doesNotMatch(String(envelope.headers['user-agent']), /2\.1\.278/)
 })
