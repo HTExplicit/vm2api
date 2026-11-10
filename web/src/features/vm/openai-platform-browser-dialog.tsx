@@ -58,6 +58,16 @@ type BrowserNavigation = {
   inputLocked?: boolean
 }
 
+type AuthDiagnostic = {
+  endpoint: string
+  status: number | null
+  errorType: string | null
+  errorCode: string | null
+  requestId: string | null
+  timestamp: string
+  transportFailure: boolean
+}
+
 function closeBrowser(
   requests: Map<string, Promise<BrowserState>>,
   vmId: string,
@@ -184,6 +194,9 @@ export function SlotBrowserDialog({
     canReturnToAuthorization: false,
   })
   const [navigationReceived, setNavigationReceived] = useState(false)
+  const [authDiagnostic, setAuthDiagnostic] = useState<AuthDiagnostic | null>(
+    null
+  )
   const closeFailed = status === 'close_failed'
   const inputBlocked = closing || closeFailed
   const navigationBlocked =
@@ -283,6 +296,7 @@ export function SlotBrowserDialog({
     released.current = null
     setClosing(false)
     setWarning('')
+    setAuthDiagnostic(null)
     addressEdited.current = false
     addressFocused.current = false
     firstNavigation.current = true
@@ -360,6 +374,7 @@ export function SlotBrowserDialog({
     )
     setConnected(false)
     setNavigationReceived(false)
+    setAuthDiagnostic(null)
     setFrame(null)
     setError('')
     setMessage('正在连接槽位浏览器…')
@@ -448,6 +463,7 @@ export function SlotBrowserDialog({
           | BrowserStatus
           | BrowserNavigation
           | { type: 'input_ack' }
+          | { type: 'auth_diagnostic'; diagnostic: AuthDiagnostic | null }
         if (payload.type === 'frame') {
           if (!closingRequested.current) frames.describe(payload)
         } else if (payload.type === 'navigation') {
@@ -461,6 +477,8 @@ export function SlotBrowserDialog({
             addressEdited.current = false
           }
           firstNavigation.current = false
+        } else if (payload.type === 'auth_diagnostic') {
+          if (!closingRequested.current) setAuthDiagnostic(payload.diagnostic)
         } else if (payload.type === 'status') {
           const nextPurpose = payload.purpose || purposeRef.current
           purposeRef.current = nextPurpose
@@ -472,6 +490,7 @@ export function SlotBrowserDialog({
               browserStatusMessage(payload.status, nextPurpose, provider)
           )
           if (payload.status === 'closed') {
+            setAuthDiagnostic(null)
             opened.current = ''
             opening.current = null
             closingRequested.current = false
@@ -482,12 +501,14 @@ export function SlotBrowserDialog({
             ws?.close()
           }
           if (payload.status === 'closing') {
+            setAuthDiagnostic(null)
             closingRequested.current = true
             setClosing(true)
             setConnected(false)
             setFrame(null)
             frames.close()
           } else if (payload.status === 'close_failed') {
+            setAuthDiagnostic(null)
             closingRequested.current = true
             setClosing(false)
             setConnected(false)
@@ -529,7 +550,10 @@ export function SlotBrowserDialog({
           setError('槽位浏览器连接失败，请重新连接。')
       }
       ws.onclose = () => {
-        if (!cancelled) setConnected(false)
+        if (!cancelled) {
+          setConnected(false)
+          setAuthDiagnostic(null)
+        }
       }
     }
     void connect().catch((reason: Error) => {
@@ -645,6 +669,7 @@ export function SlotBrowserDialog({
     closingRequested.current = true
     finishing.current = false
     setClosing(true)
+    setAuthDiagnostic(null)
     setError('')
     setStatus('closing')
     setMessage('正在关闭浏览器并清理临时文件…')
@@ -855,6 +880,37 @@ export function SlotBrowserDialog({
             </p>
           ) : null}
         </div>
+        {provider === 'anthropic' && authDiagnostic ? (
+          <div
+            role='status'
+            aria-label='Claude 登录请求诊断'
+            aria-atomic='true'
+            className='min-w-0 space-y-1 text-xs leading-relaxed'
+          >
+            <p className='m-0 break-all text-destructive'>
+              {authDiagnostic.transportFailure
+                ? 'Claude 登录请求未完成'
+                : 'Claude 登录请求失败'}
+              ：{authDiagnostic.endpoint}
+              {authDiagnostic.status !== null
+                ? ` · HTTP ${authDiagnostic.status}`
+                : ''}
+            </p>
+            <p className='m-0 break-all text-muted-foreground'>
+              {[
+                authDiagnostic.errorType &&
+                  `错误类型：${authDiagnostic.errorType}`,
+                authDiagnostic.errorCode &&
+                  `错误码：${authDiagnostic.errorCode}`,
+                authDiagnostic.requestId &&
+                  `请求编号：${authDiagnostic.requestId}`,
+                `时间：${authDiagnostic.timestamp}`,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </p>
+          </div>
+        ) : null}
         <div
           ref={viewport}
           role='application'

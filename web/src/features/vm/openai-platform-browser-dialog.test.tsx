@@ -166,6 +166,12 @@ class Socket {
     })
   }
 
+  authDiagnostic(diagnostic: Record<string, unknown> | null) {
+    this.onmessage?.({
+      data: JSON.stringify({ type: 'auth_diagnostic', diagnostic }),
+    })
+  }
+
   status(
     status: string,
     message?: string,
@@ -838,6 +844,140 @@ describe('shared browser address navigation', () => {
       ).toHaveLength(1)
     }
   )
+})
+
+describe('Claude login request diagnostics', () => {
+  const diagnostic = {
+    endpoint: '/api/auth/verify_magic_link',
+    status: 403,
+    errorType: 'permission_error',
+    errorCode: 'sign_in_not_permitted',
+    requestId: 'req_very_long_request_identifier_0123456789abcdef',
+    timestamp: '2026-11-10T12:00:00.000Z',
+    transportFailure: false,
+  }
+
+  beforeEach(() => {
+    controls.purpose = 'oauth'
+    controls.provider = 'anthropic'
+    controls.completionMode = 'preserve_state'
+  })
+
+  it('shows the failed request facts independently of the waiting status', async () => {
+    const socket = await mount()
+    socket.status('oauth_waiting', '等待 Claude 授权完成')
+    socket.authDiagnostic(diagnostic)
+    const html = render()
+    expect(html).toContain('Claude 登录请求诊断')
+    expect(html).toContain('Claude 登录请求失败')
+    expect(html).toContain('/api/auth/verify_magic_link')
+    expect(html).toContain('HTTP 403')
+    expect(html).toContain('错误类型：permission_error')
+    expect(html).toContain('错误码：sign_in_not_permitted')
+    expect(html).toContain(`请求编号：${diagnostic.requestId}`)
+    expect(html).toContain(`时间：${diagnostic.timestamp}`)
+    expect(html).toContain('等待 Claude 授权完成')
+    expect(controls.saved).not.toHaveBeenCalled()
+    expect(controls.complete).not.toHaveBeenCalled()
+  })
+
+  it('clears on null without changing the login waiting state', async () => {
+    const socket = await mount()
+    socket.status('oauth_waiting', '等待 Claude 授权完成')
+    socket.authDiagnostic(diagnostic)
+    render()
+    socket.authDiagnostic(null)
+    const html = render()
+    expect(html).not.toContain('Claude 登录请求诊断')
+    expect(html).toContain('等待 Claude 授权完成')
+    expect(controls.saved).not.toHaveBeenCalled()
+  })
+
+  it('reports an unfinished network request without inferring an HTTP status or cause', async () => {
+    const socket = await mount()
+    socket.authDiagnostic({
+      ...diagnostic,
+      status: null,
+      errorType: null,
+      errorCode: null,
+      requestId: null,
+      transportFailure: true,
+    })
+    const html = render()
+    expect(html).toContain('Claude 登录请求未完成')
+    expect(html).toContain('/api/auth/verify_magic_link')
+    expect(html).not.toContain('HTTP')
+    expect(html).not.toContain('错误类型')
+    expect(html).not.toContain('错误码')
+    expect(html).not.toContain('请求编号')
+    expect(html).not.toContain('账号被封')
+    expect(html).not.toContain('IP 被封')
+  })
+
+  it('does not replace a saved credential state or block final completion', async () => {
+    const socket = await mount()
+    socket.status('oauth_complete', undefined, {
+      oauth_email: 'claude@example.test',
+    })
+    socket.authDiagnostic(diagnostic)
+    const html = render()
+    expect(html).toContain('Claude 登录请求诊断')
+    expect(html).toContain('Claude 登录凭据已保存')
+    expect(button('完成')?.disabled).toBe(false)
+    expect(controls.saved).toHaveBeenCalledOnce()
+    button('完成')!.onClick!({} as never)
+    expect(render()).not.toContain('Claude 登录请求诊断')
+    await settle()
+    expect(controls.complete).toHaveBeenCalledOnce()
+  })
+
+  it.each(['oauth', 'platform'] as const)(
+    'does not show Claude request diagnostics in OpenAI %s',
+    async (purpose) => {
+      controls.purpose = purpose
+      controls.provider = 'openai'
+      const socket = await mount()
+      socket.authDiagnostic(diagnostic)
+      const html = render()
+      expect(html).not.toContain('Claude 登录请求诊断')
+      expect(html).not.toContain('permission_error')
+      expect(html).not.toContain('/api/auth/verify_magic_link')
+    }
+  )
+
+  it('clears stale diagnostics on disconnect and accepts the current task snapshot after reconnect', async () => {
+    const socket = await mount()
+    socket.authDiagnostic(diagnostic)
+    expect(render()).toContain('Claude 登录请求诊断')
+    socket.onclose?.()
+    expect(render()).not.toContain('Claude 登录请求诊断')
+    button('重新连接')!.onClick!({} as never)
+    render()
+    for (const effect of controls.effects.splice(0)) effect()
+    await settle()
+    const reconnected = Socket.instances[1]
+    reconnected.onopen?.()
+    expect(render()).not.toContain('Claude 登录请求诊断')
+    reconnected.authDiagnostic({
+      ...diagnostic,
+      endpoint: '/api/auth/send_magic_link',
+      status: 400,
+    })
+    const html = render()
+    expect(html).toContain('/api/auth/send_magic_link')
+    expect(html).toContain('HTTP 400')
+    expect(html).not.toContain('/api/auth/verify_magic_link')
+  })
+
+  it('clears diagnostics when switching to another OAuth task', async () => {
+    const socket = await mount()
+    socket.authDiagnostic(diagnostic)
+    expect(render()).toContain('Claude 登录请求诊断')
+    controls.flavor = 'claude_code'
+    render()
+    for (const effect of controls.effects.splice(0)) effect()
+    expect(render()).not.toContain('Claude 登录请求诊断')
+  })
 })
 
 describe('browser close lifecycle', () => {

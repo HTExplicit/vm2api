@@ -45,6 +45,11 @@ function status(patch) {
   for (const ws of sockets) ws.send(JSON.stringify(fixture.status))
 }
 
+function authDiagnostic(diagnostic) {
+  fixture.diagnostic = diagnostic
+  for (const ws of sockets) ws.send(JSON.stringify({ type: 'auth_diagnostic', diagnostic }))
+}
+
 async function until(predicate, message) {
   const deadline = Date.now() + 10000
   while (!(await predicate())) {
@@ -86,6 +91,82 @@ async function capture(page, name) {
   await page.screenshot({ path: path.join(output, `${name}.png`), fullPage: true })
 }
 
+async function checkAuthDiagnostic(page, dialog, address, { provider, width, label }) {
+  const diagnostic = dialog.getByRole('status', { name: 'Claude 登录请求诊断', exact: true })
+  const failure = {
+    endpoint: '/api/auth/verify_magic_link',
+    status: 403,
+    errorType: 'permission_error',
+    errorCode: 'sign_in_not_permitted',
+    requestId: `req_${'offline0123456789'.repeat(5)}`,
+    timestamp: '2026-11-10T12:00:00.000Z',
+    transportFailure: false,
+  }
+  authDiagnostic(failure)
+  if (provider !== 'anthropic') {
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    assert.equal(await diagnostic.count(), 0, 'GPT and Platform do not display Claude diagnostics')
+    authDiagnostic(null)
+    return
+  }
+  await diagnostic.waitFor()
+  const text = await diagnostic.innerText()
+  assert.match(text, /HTTP 403/)
+  assert.match(text, /permission_error/)
+  assert.match(text, /sign_in_not_permitted/)
+  assert.ok(failure.requestId.length <= 100, 'fixture matches the request ID length accepted by the observer')
+  assert.ok(text.includes(failure.requestId), 'complete request ID remains visible')
+  await dialog.getByText('请在此窗口完成 Claude 登录和授权，完成后会自动保存凭据。', { exact: true }).waitFor()
+  assert.equal(
+    await dialog.getByRole('button', { name: '完成', exact: true }).count(),
+    0,
+    'failed request does not finish OAuth',
+  )
+  const overflow = await diagnostic.evaluate((element) => element.scrollWidth > element.clientWidth)
+  assert.equal(overflow, false, 'long request ID wraps inside the diagnostic')
+  await capture(page, `${label}-${width}-auth-diagnostic`)
+
+  // Successful follow-up responses are represented by the server's null snapshot.
+  authDiagnostic(null)
+  await diagnostic.waitFor({ state: 'detached' })
+  await dialog.getByText('请在此窗口完成 Claude 登录和授权，完成后会自动保存凭据。', { exact: true }).waitFor()
+
+  authDiagnostic(failure)
+  await diagnostic.waitFor()
+  const reconnectDraft = 'https://mail.example.test/unsubmitted?code=offline%2Bdraft#keep'
+  await address.fill(reconnectDraft)
+  for (const ws of sockets) ws.close()
+  await until(() => sockets.size === 0, 'diagnostic case disconnected')
+  await diagnostic.waitFor({ state: 'detached' })
+  const reconnect = dialog.getByRole('button', { name: '重新连接', exact: true })
+  await until(async () => await reconnect.isEnabled(), 'reconnect action enabled')
+  await reconnect.click()
+  await until(() => fixture.connections === 2, 'same browser session reconnected')
+  await diagnostic.waitFor()
+  assert.equal(await address.inputValue(), reconnectDraft, 'reconnect preserves the unsubmitted address')
+  assert.ok(
+    (await diagnostic.innerText()).includes(failure.requestId),
+    'reconnect restores the latest diagnostic snapshot',
+  )
+  assert.equal(
+    fixture.requests.filter(({ route }) => route === `POST ${base}/browser/open`).length,
+    1,
+    'reconnect does not restart OAuth',
+  )
+
+  authDiagnostic({
+    ...failure,
+    status: null,
+    errorType: null,
+    errorCode: null,
+    requestId: null,
+    transportFailure: true,
+  })
+  await diagnostic.getByText('Claude 登录请求未完成：/api/auth/verify_magic_link', { exact: true }).waitFor()
+  authDiagnostic(null)
+  await diagnostic.waitFor({ state: 'detached' })
+}
+
 async function openCase({ provider, purpose, width }) {
   const oauth = purpose === 'oauth'
   const label = provider === 'anthropic' ? 'claude' : purpose === 'platform' ? 'platform' : 'gpt'
@@ -97,6 +178,7 @@ async function openCase({ provider, purpose, width }) {
     requests: [],
     wire: [],
     connections: 0,
+    diagnostic: null,
     authorizationUrl,
     status: { type: 'status', status: oauth ? 'oauth_waiting' : 'needs_login', purpose },
     navigation: {
@@ -138,6 +220,16 @@ async function openCase({ provider, purpose, width }) {
   )
   assert.equal(await back.count(), oauth ? 1 : 0, 'return button exists only for an active OAuth session')
   await capture(page, `${label}-${width}-address`)
+  await checkAuthDiagnostic(page, dialog, address, { provider, width, label })
+  const navigationConnections = fixture.connections
+
+  // Clear the diagnostic case's draft before testing clean-focus navigation.
+  if (provider === 'anthropic') {
+    await address.fill(authorizationUrl)
+    await address.press('Enter')
+    await until(async () => await go.isEnabled(), 'reconnected navigation is ready')
+    fixture.wire.length = 0
+  }
 
   await address.focus()
   navigation({ url: 'https://redirect.example.test/focused-without-edits', loading: false })
@@ -209,7 +301,7 @@ async function openCase({ provider, purpose, width }) {
       async () => (await address.inputValue()) === authorizationUrl,
       'return restores the unchanged authorization URL',
     )
-    assert.equal(fixture.connections, 1, 'navigation retains one WebSocket')
+    assert.equal(fixture.connections, navigationConnections, 'navigation retains its current WebSocket')
     assert.equal(
       fixture.requests.filter(({ route }) => route === `POST ${base}/browser/open`).length,
       1,
@@ -250,7 +342,8 @@ async function openCase({ provider, purpose, width }) {
     provider,
     purpose,
     width,
-    same_websocket: fixture.connections === 1,
+    navigation_preserves_socket: fixture.connections === navigationConnections,
+    diagnostic_reconnect: provider === 'anthropic',
     navigation_commands: commands.length,
   })
   await context.close()
@@ -316,6 +409,7 @@ try {
       })
       ws.send(JSON.stringify(fixture.status))
       ws.send(JSON.stringify(fixture.navigation))
+      ws.send(JSON.stringify({ type: 'auth_diagnostic', diagnostic: fixture.diagnostic }))
       ws.send(
         JSON.stringify({
           type: 'frame',
@@ -354,10 +448,11 @@ try {
     JSON.stringify({
       offline: true,
       real_shared_dialog: true,
+      claude_auth_diagnostic: true,
       cases,
       page_errors: 0,
       external_requests: 0,
-      screenshots: 16,
+      screenshots: 18,
       output,
     }),
   )

@@ -17,6 +17,7 @@ import { slotExecArgv, slotExecContainer } from '../vm/slot-exec.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
 import { inspectContainerOrNull } from '../cluster/docker-remote.mjs'
 import { applyClearHold, HOLD_MAINTENANCE } from '../pool/schedule-state.mjs'
+import { createClaudeAuthDiagnostics } from './claude-auth-diagnostics.mjs'
 
 function problem(code, message) {
   return Object.assign(new Error(message), { code, publicMessage: message })
@@ -171,6 +172,7 @@ export class ClaudeBrowserLoginService {
     stopCliLogin = stopClaudeAuthLoginSession,
     prepareOAuth = prepareSlotOAuth,
     probeIdentity = probeClaudeBrowserIdentity,
+    createDiagnostics = createClaudeAuthDiagnostics,
     stopRuntime = stopSlot,
     getRuntimeState = runtimeState,
     persistRuntime = (id, runtime) => persistVmRuntime(projectRoot, id, runtime),
@@ -198,6 +200,7 @@ export class ClaudeBrowserLoginService {
       stopCliLogin,
       prepareOAuth,
       probeIdentity,
+      createDiagnostics,
       stopRuntime,
       getRuntimeState,
       persistRuntime,
@@ -259,6 +262,12 @@ export class ClaudeBrowserLoginService {
       job.live = await this.browserManager.acquire(job.vmId, { purpose: 'oauth', interactive: true, retain: true })
       job.live.persistable = false
       let vm = this.assertCurrent(job)
+      job.diagnostics = this.createDiagnostics({
+        page: job.live.page,
+        now: this.now,
+        onDiagnostic: (diagnostic) => this.browserManager.send(job.live, { type: 'auth_diagnostic', diagnostic }),
+      })
+      job.live.authDiagnostics = job.diagnostics
       job.live.closeSignal?.addEventListener('abort', onClosed, { once: true })
       if (job.live.closeSignal?.aborted) onClosed()
       const actualRuntime = await this.getRuntimeState(vm)
@@ -345,6 +354,8 @@ export class ClaudeBrowserLoginService {
       failure = error
     } finally {
       clearTimeout(job.timer)
+      job.diagnostics?.stop()
+      if (job.diagnostics && job.live?.authDiagnostics === job.diagnostics) delete job.live.authDiagnostics
       let navigationChanged = false
       if (job.returnToAuthorization && job.live?.returnToAuthorization === job.returnToAuthorization) {
         delete job.live.returnToAuthorization

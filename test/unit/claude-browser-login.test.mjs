@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { EventEmitter } from 'node:events'
 import {
   ClaudeBrowserLoginService,
   parseClaudeBrowserCallback,
@@ -83,6 +84,7 @@ function fixture(t, options = {}) {
     cancelled: [],
     navigationUpdates: [],
     navigations: [],
+    diagnostics: [],
   }
   let routeHandler, routeMatch, rejectAcquire
   let state = { vm_id: vm.id, status: 'closed' }
@@ -90,13 +92,13 @@ function fixture(t, options = {}) {
     vmId: vm.id,
     proxyUrl: 'socks5h://bound.fixture.test:1080',
     closeSignal: closed.signal,
-    page: {
+    page: Object.assign(new EventEmitter(), {
       async goto(url, navigationOptions) {
         calls.navigation = url
         calls.navigations.push({ url, options: navigationOptions })
         if (calls.navigations.length === 1 && options.initialGotoWait) await options.initialGotoWait
       },
-    },
+    }),
     stream: {
       sendNavigation() {
         calls.navigationUpdates.push(live.canReturnToAuthorization?.() || false)
@@ -135,6 +137,9 @@ function fixture(t, options = {}) {
       state = { vm_id: vm.id, status, message, ...details }
       calls.statuses.push(state)
       calls.events.push(status)
+    },
+    send(_live, payload) {
+      if (payload.type === 'auth_diagnostic') calls.diagnostics.push(payload.diagnostic)
     },
     async bindAccount(_live, id) {
       calls.bound = id
@@ -306,6 +311,53 @@ test('standard OAuth saves through the shared commit and stops a temporarily sta
   assert.equal(f.calls.statuses.at(-1).result.vm.runtime.stopped, true)
   assert.equal(f.calls.bound, identity.account_uuid)
   assert.equal(f.calls.persisted, true)
+})
+
+test('passive Claude auth failure diagnostics preserve OAuth state and disappear after successful credential save', async (t) => {
+  const f = fixture(t)
+  await f.service.start(f.vm.id)
+  await f.waiting()
+  const request = { url: () => 'https://claude.ai/api/auth/verify_magic_link?code=private-fixture-code' }
+  f.live.page.emit('response', {
+    request: () => request,
+    url: request.url,
+    status: () => 400,
+    json: async () => ({
+      error: {
+        type: 'authentication_error',
+        message: 'fixture@example.test private-fixture-code',
+        details: { error_code: 'challenge_invalid' },
+      },
+      request_id: 'req-fixture',
+    }),
+    headers: () => ({}),
+  })
+  await until(() => f.calls.diagnostics.length)
+  assert.equal(f.calls.diagnostics.at(-1).status, 400)
+  assert.equal(f.calls.diagnostics.at(-1).errorCode, 'challenge_invalid')
+  assert.equal(f.manager.state().status, 'oauth_waiting')
+  assert.doesNotMatch(JSON.stringify(f.calls.diagnostics), /fixture@example|private-fixture-code|\?code=/)
+  assert.equal(f.live.authDiagnostics.current().status, 400)
+  await f.callback()
+  await f.settled()
+  assert.equal(f.calls.diagnostics.at(-1), null)
+  assert.equal(f.live.authDiagnostics, undefined)
+  assert.equal(f.live.page.listenerCount('response'), 0)
+  assert.equal(f.live.page.listenerCount('requestfailed'), 0)
+  assert.equal(f.calls.statuses.at(-1).status, 'oauth_complete')
+})
+
+test('cancelling Claude OAuth drops passive diagnostics and detaches response listeners', async (t) => {
+  const f = fixture(t)
+  await f.service.start(f.vm.id)
+  await f.waiting()
+  assert.equal(f.live.page.listenerCount('response'), 1)
+  await f.service.cancel(f.vm.id)
+  assert.equal(f.calls.diagnostics.at(-1), null)
+  assert.equal(f.live.authDiagnostics, undefined)
+  assert.equal(f.live.page.listenerCount('response'), 0)
+  assert.equal(f.live.page.listenerCount('requestfailed'), 0)
+  assert.equal(f.calls.committed.length, 0)
 })
 
 for (const flavor of ['cai', 'claude_code']) {
