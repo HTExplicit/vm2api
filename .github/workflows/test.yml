@@ -72,6 +72,7 @@ jobs:
             test/unit/auto-mode-reminder.test.mjs \
             test/unit/auto-mode-api.test.mjs \
             test/unit/claude-auth-login.test.mjs \
+            test/unit/claude-auth-diagnostics.test.mjs \
             test/unit/claude-browser-login.test.mjs \
             test/unit/oauth-auth-url.test.mjs \
             test/unit/oauth-credentials.test.mjs \

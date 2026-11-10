@@ -343,6 +343,71 @@ test('malformed browser path is rejected without throwing from the HTTP upgrade 
   assert.equal(f.calls.launched.length, 0)
 })
 
+test('reconnected browser sockets replay only the active in-memory auth diagnostic and close clears it', async (t) => {
+  const f = fixture(t)
+  const live = await f.manager.acquire('a', { interactive: true, purpose: 'oauth' })
+  const diagnostic = {
+    endpoint: '/api/auth/verify_magic_link',
+    status: 400,
+    errorType: 'authentication_error',
+    errorCode: 'challenge_invalid',
+    requestId: 'req-fixture',
+    timestamp: '2026-11-10T01:00:00.000Z',
+    transportFailure: false,
+  }
+  let last = diagnostic
+  let stopped = 0
+  live.authDiagnostics = {
+    current: () => last,
+    stop: () => {
+      stopped++
+      last = null
+      f.manager.send(live, { type: 'auth_diagnostic', diagnostic: null })
+    },
+  }
+  assert.deepEqual(f.manager.state('a').auth_diagnostic, diagnostic)
+  assert.equal(f.manager.state('a').status, 'ready')
+  const server = http.createServer()
+  server.on('upgrade', (req, socket, head) => f.manager.handleUpgrade(req, socket, head))
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => new Promise((resolve) => server.close(resolve)))
+  const messages = []
+  const connect = async () => {
+    const ticket = f.manager.browserTicket('a')
+    const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}${ticket.url}`)
+    t.after(() => ws.terminate())
+    const received = new Promise((resolve) =>
+      ws.on('message', (raw) => {
+        const payload = JSON.parse(String(raw))
+        messages.push(payload)
+        if (payload.type === 'auth_diagnostic') resolve(payload)
+      }),
+    )
+    await once(ws, 'open')
+    assert.deepEqual((await received).diagnostic, diagnostic)
+    return ws
+  }
+  const first = await connect()
+  const closed = once(first, 'close')
+  first.close()
+  await closed
+  const second = await connect()
+  const cleared = new Promise((resolve) =>
+    second.on('message', (raw) => {
+      const payload = JSON.parse(String(raw))
+      if (payload.type === 'auth_diagnostic' && payload.diagnostic === null) resolve()
+    }),
+  )
+  await f.manager.close('a')
+  await cleared
+  assert.equal(stopped, 1)
+  assert.equal(live.authDiagnostics, undefined)
+  assert.equal(Object.hasOwn(f.manager.state('a'), 'auth_diagnostic'), false)
+  assert.ok(messages.some((item) => item.type === 'auth_diagnostic' && item.diagnostic === null))
+  assert.equal(f.repo.get('a').authDiagnostics, undefined)
+})
+
 test('a failed close retains its live record and queue until an administrator retries successfully', async (t) => {
   let attempts = 0
   const f = fixture(t, {
