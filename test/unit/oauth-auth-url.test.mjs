@@ -4,7 +4,6 @@ import {
   generateAuthUrl,
   exchangeAuthCode,
   peekAuthUrlSession,
-  cancelAuthUrlSession,
   resetAuthUrlSessions,
   buildAuthorizationURL,
   CLIENT_ID,
@@ -56,19 +55,6 @@ test('generateAuthUrl refuses host-built claude_code links', () => {
         flavor: 'claude_code',
       }),
     (err) => err.code === 'claude_code_in_slot',
-  )
-})
-
-test('cancelling an authorization removes only that PKCE session', async () => {
-  resetAuthUrlSessions()
-  const first = generateAuthUrl({ vmId: 'vm-01', proxyUrl: '' })
-  const second = generateAuthUrl({ vmId: 'vm-02', proxyUrl: '' })
-  cancelAuthUrlSession(first.session_id)
-  assert.equal(peekAuthUrlSession(first.session_id), null)
-  assert.equal(peekAuthUrlSession(second.session_id).vmId, 'vm-02')
-  await assert.rejects(
-    exchangeAuthCode({ sessionId: first.session_id, vmId: 'vm-01', code: 'late-code' }),
-    (err) => err.code === 'session_expired',
   )
 })
 

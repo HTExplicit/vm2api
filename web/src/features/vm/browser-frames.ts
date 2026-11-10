@@ -119,18 +119,14 @@ export async function browserNeedsOpening(
 
 export function browserStatusMessage(
   status: string,
-  purpose: 'oauth' | 'platform',
-  provider: 'openai' | 'anthropic' = 'openai'
+  purpose: 'oauth' | 'platform'
 ): string {
-  const name = provider === 'anthropic' ? 'Claude' : 'OpenAI'
   const labels: Record<string, string> = {
     queued: '正在排队，等待当前浏览器任务结束…',
     starting: '正在启动槽位浏览器…',
     opening: '正在打开官方网页…',
     oauth_complete:
-      provider === 'anthropic'
-        ? 'Claude 授权成功，凭据已保存。'
-        : 'OpenAI 授权成功，凭据已保存。可以继续进入 Platform，或关闭窗口。',
+      'OpenAI 授权成功，凭据已保存。可以继续进入 Platform，或关闭窗口。',
     needs_login: '请在此窗口完成官方登录或验证码，再点“登录完成，继续配置”。',
     configuring: '正在配置账号 API，请保留此窗口…',
     awaiting_key_input:
@@ -145,7 +141,7 @@ export function browserStatusMessage(
   return (
     labels[status] ||
     (purpose === 'oauth'
-      ? `请在此窗口完成 ${name} 登录和授权，完成后会自动保存凭据。`
+      ? '请在此窗口完成 OpenAI 登录和授权，完成后会自动保存凭据。'
       : '请在此窗口完成官方登录或验证码，再点“登录完成，继续配置”。')
   )
 }

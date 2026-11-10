@@ -72,8 +72,6 @@ jobs:
             test/unit/auto-mode-reminder.test.mjs \
             test/unit/auto-mode-api.test.mjs \
             test/unit/claude-auth-login.test.mjs \
-            test/unit/claude-auth-diagnostics.test.mjs \
-            test/unit/claude-browser-login.test.mjs \
             test/unit/oauth-auth-url.test.mjs \
             test/unit/oauth-credentials.test.mjs \
             test/unit/slot-oauth.test.mjs \
@@ -275,7 +273,7 @@ jobs:
           pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx src/features/vm/openai-api-actions.test.tsx src/features/settings/openai-api-balance-section.test.tsx
           pnpm exec vitest run src/features/vm/openai-platform-browser-dialog.test.tsx
           pnpm exec vitest run src/features/vm/codex-browser-finish.test.ts src/features/vm/codex-credential-browser-completion.test.tsx
-          pnpm exec vitest run src/features/vm/claude-browser-finish.test.ts src/features/vm/claude-credential-browser.test.tsx
+          pnpm exec vitest run src/features/vm/claude-credential-panel.test.tsx
           pnpm exec vitest run src/features/openai-apikey src/features/logs/account-api-logs.test.tsx src/components/layout/data/sidebar-data.test.ts
           pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx
           pnpm exec vitest run src/features/anthropic/endpoint-save.test.ts
@@ -294,8 +292,6 @@ jobs:
         run: node scripts/smoke-browser-close-ui.mjs
       - name: Import browser login flow
         run: node scripts/smoke-import-browser-flow.mjs
-      - name: Claude browser login flow
-        run: node scripts/smoke-claude-browser-flow.mjs
       - name: Browser address navigation
         run: node scripts/smoke-browser-navigation.mjs
 
@@ -362,3 +358,9 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=vm2api-amd64
           cache-to: type=gha,scope=vm2api-amd64,mode=max
+      - name: Manual Claude OAuth helper against offline TLS and SOCKS fixtures
+        run: |
+          docker run --rm --network none --entrypoint sh \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/test,dst=/opt/vm2api/test,readonly" \
+            ghcr.io/htexplicit/vm2api:validation-${{ github.event.pull_request.head.sha || github.sha }} \
+            -c 'set -eu; command -v openssl; ln -s /opt/vm2api/image-bin/kin-oauth-auth /opt/vm2api/bin/kin-oauth-auth; node --test test/unit/oauth-binary.test.mjs'

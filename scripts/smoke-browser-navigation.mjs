@@ -45,11 +45,6 @@ function status(patch) {
   for (const ws of sockets) ws.send(JSON.stringify(fixture.status))
 }
 
-function authDiagnostic(diagnostic) {
-  fixture.diagnostic = diagnostic
-  for (const ws of sockets) ws.send(JSON.stringify({ type: 'auth_diagnostic', diagnostic }))
-}
-
 async function until(predicate, message) {
   const deadline = Date.now() + 10000
   while (!(await predicate())) {
@@ -73,6 +68,19 @@ async function mockApi(req, res) {
     data = { active: false, status: 'closed' }
   } else if (route === `POST ${base}/browser-ticket`) {
     data = { ticket: 'offline-navigation', url: '/__navigation-socket?ticket=offline-navigation' }
+  } else if (route === `POST ${base}/start`) {
+    fixture.vm = { ...fixture.vm, status: 'running', runtime: { stopped: false } }
+    data = { vm: fixture.vm, boot: { rust_ok: true } }
+  } else if (route === `GET ${base}/health`) {
+    data = {
+      id: vmId,
+      kernel: { codex_health: { vm_id: vmId, reachable: true, process_up: true, status: 200, healthy: true } },
+    }
+  } else if (route === `POST ${base}/schedulable`) {
+    fixture.vm = { ...fixture.vm, schedulable: true }
+    data = { id: vmId, schedulable: true }
+  } else if (route === `GET ${base}`) {
+    data = { vm: fixture.vm }
   } else {
     external.push(`UNMOCKED ${route}`)
     res.statusCode = 500
@@ -91,94 +99,18 @@ async function capture(page, name) {
   await page.screenshot({ path: path.join(output, `${name}.png`), fullPage: true })
 }
 
-async function checkAuthDiagnostic(page, dialog, address, { provider, width, label }) {
-  const diagnostic = dialog.getByRole('status', { name: 'Claude 登录请求诊断', exact: true })
-  const failure = {
-    endpoint: '/api/auth/verify_magic_link',
-    status: 403,
-    errorType: 'permission_error',
-    errorCode: 'sign_in_not_permitted',
-    requestId: `req_${'offline0123456789'.repeat(5)}`,
-    timestamp: '2026-11-10T12:00:00.000Z',
-    transportFailure: false,
-  }
-  authDiagnostic(failure)
-  if (provider !== 'anthropic') {
-    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
-    assert.equal(await diagnostic.count(), 0, 'GPT and Platform do not display Claude diagnostics')
-    authDiagnostic(null)
-    return
-  }
-  await diagnostic.waitFor()
-  const text = await diagnostic.innerText()
-  assert.match(text, /HTTP 403/)
-  assert.match(text, /permission_error/)
-  assert.match(text, /sign_in_not_permitted/)
-  assert.ok(failure.requestId.length <= 100, 'fixture matches the request ID length accepted by the observer')
-  assert.ok(text.includes(failure.requestId), 'complete request ID remains visible')
-  await dialog.getByText('请在此窗口完成 Claude 登录和授权，完成后会自动保存凭据。', { exact: true }).waitFor()
-  assert.equal(
-    await dialog.getByRole('button', { name: '完成', exact: true }).count(),
-    0,
-    'failed request does not finish OAuth',
-  )
-  const overflow = await diagnostic.evaluate((element) => element.scrollWidth > element.clientWidth)
-  assert.equal(overflow, false, 'long request ID wraps inside the diagnostic')
-  await capture(page, `${label}-${width}-auth-diagnostic`)
-
-  // Successful follow-up responses are represented by the server's null snapshot.
-  authDiagnostic(null)
-  await diagnostic.waitFor({ state: 'detached' })
-  await dialog.getByText('请在此窗口完成 Claude 登录和授权，完成后会自动保存凭据。', { exact: true }).waitFor()
-
-  authDiagnostic(failure)
-  await diagnostic.waitFor()
-  const reconnectDraft = 'https://mail.example.test/unsubmitted?code=offline%2Bdraft#keep'
-  await address.fill(reconnectDraft)
-  for (const ws of sockets) ws.close()
-  await until(() => sockets.size === 0, 'diagnostic case disconnected')
-  await diagnostic.waitFor({ state: 'detached' })
-  const reconnect = dialog.getByRole('button', { name: '重新连接', exact: true })
-  await until(async () => await reconnect.isEnabled(), 'reconnect action enabled')
-  await reconnect.click()
-  await until(() => fixture.connections === 2, 'same browser session reconnected')
-  await diagnostic.waitFor()
-  assert.equal(await address.inputValue(), reconnectDraft, 'reconnect preserves the unsubmitted address')
-  assert.ok(
-    (await diagnostic.innerText()).includes(failure.requestId),
-    'reconnect restores the latest diagnostic snapshot',
-  )
-  assert.equal(
-    fixture.requests.filter(({ route }) => route === `POST ${base}/browser/open`).length,
-    1,
-    'reconnect does not restart OAuth',
-  )
-
-  authDiagnostic({
-    ...failure,
-    status: null,
-    errorType: null,
-    errorCode: null,
-    requestId: null,
-    transportFailure: true,
-  })
-  await diagnostic.getByText('Claude 登录请求未完成：/api/auth/verify_magic_link', { exact: true }).waitFor()
-  authDiagnostic(null)
-  await diagnostic.waitFor({ state: 'detached' })
-}
-
-async function openCase({ provider, purpose, width }) {
+async function openCase({ purpose, width }) {
   const oauth = purpose === 'oauth'
-  const label = provider === 'anthropic' ? 'claude' : purpose === 'platform' ? 'platform' : 'gpt'
+  const label = oauth ? 'gpt' : 'platform'
   const authorizationUrl = oauth
-    ? `https://${provider === 'anthropic' ? 'claude.com/cai' : 'auth.openai.com'}/oauth/authorize?state=offline%2Bstate&code_challenge=fixture#saved`
+    ? 'https://auth.openai.com/oauth/authorize?state=offline%2Bstate&code_challenge=fixture#saved'
     : 'https://platform.openai.com/'
   fixture = {
     active: false,
     requests: [],
     wire: [],
     connections: 0,
-    diagnostic: null,
+    vm: { id: vmId, status: 'stopped', runtime: { stopped: true }, schedulable: false },
     authorizationUrl,
     status: { type: 'status', status: oauth ? 'oauth_waiting' : 'needs_login', purpose },
     navigation: {
@@ -203,7 +135,7 @@ async function openCase({ provider, purpose, width }) {
       localStorage.removeItem('kin_api_base')
       window.__fixtureProps = props
     },
-    { provider, purpose, ...(provider === 'anthropic' ? { flavor: 'cai' } : {}), completionMode: 'preserve_state' },
+    { purpose },
   )
   const page = await context.newPage()
   page.on('pageerror', (error) => errors.push(error.message))
@@ -220,16 +152,6 @@ async function openCase({ provider, purpose, width }) {
   )
   assert.equal(await back.count(), oauth ? 1 : 0, 'return button exists only for an active OAuth session')
   await capture(page, `${label}-${width}-address`)
-  await checkAuthDiagnostic(page, dialog, address, { provider, width, label })
-  const navigationConnections = fixture.connections
-
-  // Clear the diagnostic case's draft before testing clean-focus navigation.
-  if (provider === 'anthropic') {
-    await address.fill(authorizationUrl)
-    await address.press('Enter')
-    await until(async () => await go.isEnabled(), 'reconnected navigation is ready')
-    fixture.wire.length = 0
-  }
 
   await address.focus()
   navigation({ url: 'https://redirect.example.test/focused-without-edits', loading: false })
@@ -249,6 +171,11 @@ async function openCase({ provider, purpose, width }) {
   await address.press('Enter')
   await dialog.getByText('请输入 http:// 或 https:// 开头的完整网址。', { exact: true }).waitFor()
   assert.equal(fixture.wire.length, before, 'invalid scheme does not reach the socket')
+
+  await address.fill('https://mail.example.test/composition?code=offline#ime')
+  await address.dispatchEvent('keydown', { key: 'Enter', code: 'Enter', isComposing: true })
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  assert.equal(fixture.wire.length, before, 'IME composition Enter does not navigate')
 
   const destination = 'https://mail.example.test/verify?token=offline%2Btoken&continue=%2Flogin#verification-code'
   await address.fill(destination)
@@ -277,6 +204,21 @@ async function openCase({ provider, purpose, width }) {
     'redirect snapshot received after blur',
   )
   assert.equal(await address.inputValue(), draft, 'dirty address also survives a redirect after blur')
+
+  for (const ws of sockets) ws.close()
+  await until(() => sockets.size === 0, 'browser disconnected')
+  const reconnect = dialog.getByRole('button', { name: '重新连接', exact: true })
+  await until(async () => await reconnect.isEnabled(), 'reconnect action enabled')
+  await reconnect.click()
+  await until(() => fixture.connections === 2, 'same browser session reconnected')
+  await until(async () => await go.isEnabled(), 'reconnected address controls ready')
+  assert.equal(await address.inputValue(), draft, 'reconnect preserves the unsubmitted address')
+  assert.equal(
+    fixture.requests.filter(({ route }) => route === `POST ${base}/browser/open`).length,
+    1,
+    'reconnect does not reopen the account session',
+  )
+  const navigationConnections = fixture.connections
   await go.click()
   await until(
     () => fixture.wire.some((message) => message.type === 'navigate' && message.url === draft),
@@ -289,6 +231,11 @@ async function openCase({ provider, purpose, width }) {
   await go.click()
   await dialog.getByText('离线测试：网页暂时无法打开，请检查地址后重试。', { exact: true }).waitFor()
   assert.equal(await address.inputValue(), failure, 'failed destination remains editable')
+  navigation({ inputLocked: true })
+  await until(async () => await address.isDisabled(), 'server input lock disables address input')
+  assert.equal(await go.isDisabled(), true, 'server input lock disables navigation')
+  navigation({ inputLocked: false })
+  await until(async () => await go.isEnabled(), 'server releases address navigation lock')
   await capture(page, `${label}-${width}-navigation-error`)
 
   if (oauth) {
@@ -314,9 +261,27 @@ async function openCase({ provider, purpose, width }) {
     await dialog.getByText('离线测试：网页暂时无法打开，请检查地址后重试。', { exact: true }).waitFor()
     navigation({ loading: false, canReturnToAuthorization: false, inputLocked: true })
     status({ status: 'oauth_complete', result: { oauth_email: 'offline@example.test' } })
+    const start = dialog.getByRole('button', { name: '开机并完成', exact: true })
     const done = dialog.getByRole('button', { name: '完成', exact: true })
+    await start.waitFor()
+    assert.equal(await done.count(), 0, 'saving OAuth does not skip boot, health, or scheduling')
+    assert.equal(await start.isEnabled(), true, 'navigation error does not disable OAuth completion')
+    assert.equal(
+      fixture.requests.filter(({ route }) => route === `POST ${base}/start`).length,
+      0,
+      'saving OAuth does not power on before explicit completion',
+    )
+    await start.click()
     await done.waitFor()
-    assert.equal(await done.isEnabled(), true, 'navigation error does not disable OAuth completion')
+    assert.deepEqual(
+      fixture.requests
+        .map(({ route }) => route)
+        .filter((route) => [`POST ${base}/start`, `GET ${base}/health`, `POST ${base}/schedulable`].includes(route)),
+      [`POST ${base}/start`, `GET ${base}/health`, `POST ${base}/schedulable`],
+      'GPT completion powers on, verifies Codex health, then enables scheduling',
+    )
+    assert.equal(fixture.vm.status, 'running')
+    assert.equal(fixture.vm.schedulable, true)
     assert.equal(await back.count(), 0, 'return disappears once authorization is no longer active')
     assert.equal(await address.isDisabled(), true, 'authorization commit lock disables address input')
     await capture(page, `${label}-${width}-oauth-complete`)
@@ -332,18 +297,28 @@ async function openCase({ provider, purpose, width }) {
     assert.equal(await back.count(), 0)
     await page.getByRole('button', { name: '关闭浏览器窗口', exact: true }).click()
     await dialog.waitFor({ state: 'detached' })
+    assert.equal(
+      fixture.requests.filter(({ route }) => /\/(start|health|schedulable)$/.test(route)).length,
+      0,
+      'Platform navigation does not change slot power or scheduling',
+    )
   }
+  assert.equal(
+    fixture.requests.filter(({ route }) => route === `POST ${base}/browser/close`).length,
+    1,
+    'completion and dismissal close the browser once',
+  )
   const commands = fixture.wire.filter(({ type }) => ['navigate', 'return_to_authorization'].includes(type))
   assert.ok(
     commands.every((message, index) => !index || message.seq > commands[index - 1].seq),
     'navigation commands keep input sequence ordering',
   )
   cases.push({
-    provider,
     purpose,
     width,
     navigation_preserves_socket: fixture.connections === navigationConnections,
-    diagnostic_reconnect: provider === 'anthropic',
+    dirty_reconnect: true,
+    ime_enter_ignored: true,
     navigation_commands: commands.length,
   })
   await context.close()
@@ -409,7 +384,6 @@ try {
       })
       ws.send(JSON.stringify(fixture.status))
       ws.send(JSON.stringify(fixture.navigation))
-      ws.send(JSON.stringify({ type: 'auth_diagnostic', diagnostic: fixture.diagnostic }))
       ws.send(
         JSON.stringify({
           type: 'frame',
@@ -438,9 +412,8 @@ try {
   frame = await framePage.screenshot({ type: 'jpeg', quality: 80 })
   await framePage.close()
   for (const width of [1440, 390]) {
-    await openCase({ provider: 'anthropic', purpose: 'oauth', width })
-    await openCase({ provider: 'openai', purpose: 'oauth', width })
-    await openCase({ provider: 'openai', purpose: 'platform', width })
+    await openCase({ purpose: 'oauth', width })
+    await openCase({ purpose: 'platform', width })
   }
   assert.deepEqual(errors, [], 'no uncaught page errors')
   assert.deepEqual(external, [], 'all requests are local and mocked')
@@ -448,11 +421,10 @@ try {
     JSON.stringify({
       offline: true,
       real_shared_dialog: true,
-      claude_auth_diagnostic: true,
       cases,
       page_errors: 0,
       external_requests: 0,
-      screenshots: 18,
+      screenshots: 10,
       output,
     }),
   )

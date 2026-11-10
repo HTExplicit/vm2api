@@ -113,10 +113,6 @@ export function peekAuthUrlSession(sessionId) {
   return sessions.get(sessionId) || null
 }
 
-export function cancelAuthUrlSession(sessionId) {
-  sessions.delete(sessionId)
-}
-
 export function buildAuthorizationURL(state, codeChallenge, scope = SCOPE_OAUTH, flavor = 'cai') {
   const spec = oauthFlavorSpec(flavor)
   const encodedRedirectURI = encodeURIComponent(spec.redirectUri)
@@ -192,7 +188,6 @@ export async function exchangeAuthCode({
   exec,
   projectRoot,
   routing,
-  preservePowerIntent = false,
 } = {}) {
   sweepExpired()
   const session = sessions.get(sessionId)
@@ -238,7 +233,6 @@ export async function exchangeAuthCode({
     exec,
     projectRoot,
     routing,
-    preservePowerIntent,
     fetchImpl,
   })
   sessions.delete(sessionId)

@@ -16,7 +16,6 @@ import {
 import { KVM_GUEST_EXEC } from '../../src/lib/vm/slot-exec.mjs'
 import { FULL_OAUTH_SCOPE } from '../../src/lib/oauth/oauth-contract.mjs'
 import { prepareSlotOAuth } from '../../src/lib/oauth/guest-oauth-helper.mjs'
-import { authLoginBlocksRefresh } from '../../src/lib/oauth/oauth-credentials.mjs'
 
 test('extractAuthLoginUrl reads the official manual CAI link', () => {
   const url =
@@ -292,90 +291,7 @@ test('prepareSlotOAuth reads the nested kernel health that startSlotReady actual
   }
 })
 
-test('browser CLI login isolates HOME and credentials while retaining the slot identity and refresh hold', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-auth-login-isolated-'))
-  const vm = { id: 'vm-22', runtime: { type: 'docker' }, timezone: 'Asia/Singapore', locale: 'en_US.UTF-8' }
-  const home = path.join(root, 'vms', vm.id, 'cli-home')
-  const dir = authLoginSessionDir(root, vm.id)
-  const calls = []
-  let launch
-  try {
-    fs.mkdirSync(path.join(home, '.kin'), { recursive: true })
-    fs.mkdirSync(path.join(home, '.claude'), { recursive: true })
-    fs.writeFileSync(path.join(home, '.kin', 'cli-node'), '')
-    fs.writeFileSync(path.join(home, '.claude', 'credentials.json'), 'existing-official-credential')
-    fs.writeFileSync(path.join(root, 'vms', `${vm.id}.json`), JSON.stringify(vm))
-    const started = await startClaudeAuthLoginSession({
-      vm,
-      projectRoot: root,
-      isolated: true,
-      preservePowerIntent: true,
-      inspect: () => ({ running: true }),
-      prepare: async (options) => {
-        assert.equal(options.preservePowerIntent, true)
-        return { exec: { vm } }
-      },
-      stopSession: async () => ({ ok: true }),
-      runDocker: async (argv) => {
-        calls.push(argv)
-        return { code: 0 }
-      },
-      spawnPty: (_bin, _argv, options) => {
-        launch = options.env
-        fs.writeFileSync(
-          path.join(dir, 'status.json'),
-          JSON.stringify({
-            session_id: launch.KIN_SESSION_ID,
-            vm_id: vm.id,
-            status: 'waiting_auth',
-            auth_url: 'https://claude.com/cai/oauth/authorize?code=true&state=browser',
-            updated_at: Number(launch.KIN_CREATED_AT),
-            expires_at: Number(launch.KIN_EXPIRES_AT),
-          }),
-        )
-        return { unref() {} }
-      },
-    })
-    const isolatedHome = `/home/kincli/.cache/oauth-browser/${started.session_id}`
-    const argv = JSON.parse(launch.KIN_DOCKER_ARGV)
-    assert.ok(argv.includes(`HOME=${isolatedHome}`))
-    assert.ok(argv.includes(`CLAUDE_CONFIG_DIR=${isolatedHome}/.claude`))
-    assert.ok(argv.includes('KERNEL_CONFIG=/run/kin/kernel.json'))
-    assert.ok(argv.includes('TZ=Asia/Singapore'))
-    assert.ok(argv.includes('KIN_AUTH_LOGIN=1'))
-    assert.equal(argv[argv.indexOf('-w') + 1], isolatedHome)
-    assert.deepEqual(argv.slice(-3), ['/home/kincli/.kin/cli-node', 'auth', 'login'])
-    assert.deepEqual(calls[0].slice(-4), ['mkdir', '-p', `${isolatedHome}/.claude`, `${isolatedHome}/.cache/tmp`])
-    const readCredential = JSON.parse(launch.KIN_CREDENTIAL_ARGV)
-    assert.equal(readCredential.at(-1), `${isolatedHome}/.claude/.credentials.json`)
-    assert.equal(authLoginBlocksRefresh(home), true)
-    assert.equal(
-      fs.readFileSync(path.join(home, '.claude', 'credentials.json'), 'utf8'),
-      'existing-official-credential',
-    )
-
-    await stopClaudeAuthLoginSession(root, vm.id, {
-      sessionId: started.session_id,
-      execDetach: async () => {},
-      runDocker: async (cleanupArgv) => {
-        calls.push(cleanupArgv)
-        return { code: 0 }
-      },
-    })
-    assert.equal(calls.at(-1).at(-1), isolatedHome)
-    assert.match(calls.at(-1).at(-3), /pkill.*\[c\]li-node auth login.*rm -rf -- "\$1"/)
-    assert.equal(authLoginBlocksRefresh(home), false)
-    assert.equal(fs.existsSync(path.join(dir, 'isolation.json')), false)
-    assert.equal(
-      fs.readFileSync(path.join(home, '.claude', 'credentials.json'), 'utf8'),
-      'existing-official-credential',
-    )
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test('an old browser login cannot clean a newer CLI session', async () => {
+test('an old manual login completion cannot clean a newer CLI session', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-auth-login-owner-'))
   const dir = authLoginSessionDir(root, 'vm-23')
   try {
@@ -385,7 +301,6 @@ test('an old browser login cannot clean a newer CLI session', async () => {
     const result = await stopClaudeAuthLoginSession(root, 'vm-23', {
       sessionId: 'old-session',
       execDetach: unexpected,
-      runDocker: unexpected,
     })
     assert.equal(result.skipped, true)
     assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8')).session_id, 'new-session')
@@ -394,34 +309,30 @@ test('an old browser login cannot clean a newer CLI session', async () => {
   }
 })
 
-test('cancelled official login does not feed a code or await the exchange timeout', async () => {
-  const abort = new AbortController()
-  abort.abort(new Error('browser closed'))
-  await assert.rejects(
-    completeClaudeAuthLogin({ projectRoot: '/unused', vmId: 'vm-24', code: 'code#state', signal: abort.signal }),
-    /browser closed/,
-  )
-})
-
-test('failed isolated directory cleanup retains its session for a retry', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-auth-login-cleanup-'))
-  const dir = authLoginSessionDir(root, 'vm-25')
+test('manual session cleanup removes legacy isolation metadata without touching its old HOME', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-auth-login-legacy-'))
+  const vmId = 'vm-24'
+  const dir = authLoginSessionDir(root, vmId)
   const sessionId = 'a'.repeat(32)
+  const oldHome = path.join(root, 'vms', vmId, 'cli-home', '.cache', 'oauth-browser', sessionId)
   try {
     fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(root, 'vms', 'vm-25.json'), JSON.stringify({ id: 'vm-25' }))
+    fs.mkdirSync(oldHome, { recursive: true })
+    fs.writeFileSync(path.join(root, 'vms', `${vmId}.json`), JSON.stringify({ id: vmId }))
     fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ session_id: sessionId }))
     fs.writeFileSync(path.join(dir, 'isolation.json'), JSON.stringify({ session_id: sessionId }))
-    await assert.rejects(
-      stopClaudeAuthLoginSession(root, 'vm-25', {
-        sessionId,
-        execDetach: async () => {},
-        runDocker: async () => ({ code: 1 }),
-      }),
-      (error) => error.code === 'auth_login_cleanup_failed',
-    )
-    assert.equal(fs.existsSync(path.join(dir, 'isolation.json')), true)
-    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8')).session_id, sessionId)
+    fs.writeFileSync(path.join(oldHome, 'preserve.txt'), 'old session data')
+    const commands = []
+    await stopClaudeAuthLoginSession(root, vmId, {
+      sessionId,
+      execDetach: async (_connect, _id, command) => commands.push(command),
+    })
+    assert.equal(fs.existsSync(path.join(dir, 'status.json')), false)
+    assert.equal(fs.existsSync(path.join(dir, 'isolation.json')), false)
+    assert.equal(fs.readFileSync(path.join(oldHome, 'preserve.txt'), 'utf8'), 'old session data')
+    assert.equal(commands.length, 1)
+    assert.match(commands[0].at(-1), /auth login/)
+    assert.doesNotMatch(commands[0].at(-1), /rm|oauth-browser/)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

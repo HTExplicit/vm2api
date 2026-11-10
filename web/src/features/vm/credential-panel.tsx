@@ -4,7 +4,6 @@ import type { AuthScheme, Vm } from '@/types/panel-vm'
 import {
   Copy,
   ExternalLink,
-  Globe,
   Keyboard,
   Link2,
   SquareTerminal,
@@ -51,17 +50,11 @@ import { dashboardQueryOptions } from '@/features/overview/queries'
 import { CodexCredentialPanel } from '@/features/vm/codex-credential-panel'
 import { ConvertOauthToSetupButton } from '@/features/vm/convert-oauth-button'
 import { prepareLoginTerminal } from '@/features/vm/login-terminal-start'
-import {
-  SlotBrowserDialog,
-  type BrowserCompletionMode,
-} from '@/features/vm/openai-platform-browser-dialog'
 import { vmQueryOptions, vmsListQueryOptions } from '@/features/vm/queries'
-import { useVmPerms } from '@/features/vm/vm-perms'
 
 export type CommitResult = {
   official_cc_bootstrap?: { scheduled?: boolean; reason?: string } | null
   oauth_email?: string
-  completion?: 'browser_oauth'
 }
 
 const SESSION_KEY_PREFIX = /^sk-ant-sid/i
@@ -144,13 +137,11 @@ export function CredentialPanel({
   vm,
   onCommitted,
   showConvert = true,
-  browserCompletionMode = 'preserve_state',
 }: {
   vm: Vm
   /** 凭证落盘后回调，交由调用方决定跳转 / 追踪初装。 */
   onCommitted?: (data: CommitResult, vmId: string, what: string) => void
   showConvert?: boolean
-  browserCompletionMode?: BrowserCompletionMode
 }) {
   if (importSurfaceFor(vm) === 'codex') {
     return <CodexCredentialPanel vm={vm} onCommitted={onCommitted} />
@@ -161,7 +152,6 @@ export function CredentialPanel({
       vm={vm}
       onCommitted={onCommitted}
       showConvert={showConvert}
-      browserCompletionMode={browserCompletionMode}
     />
   )
 }
@@ -170,15 +160,12 @@ function ClaudeCredentialPanel({
   vm,
   onCommitted,
   showConvert = true,
-  browserCompletionMode,
 }: {
   vm: Vm
   onCommitted?: (data: CommitResult, vmId: string, what: string) => void
   showConvert?: boolean
-  browserCompletionMode: BrowserCompletionMode
 }) {
   const qc = useQueryClient()
-  const perms = useVmPerms()
   const vmId = vm.id
 
   const [kind, setKind] = useState<ImportKind>(defaultImportKind)
@@ -194,7 +181,6 @@ function ClaudeCredentialPanel({
   const [sessionKey, setSessionKey] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [loginOpen, setLoginOpen] = useState(false)
-  const [browserOpen, setBrowserOpen] = useState(false)
   const [loginUrl, setLoginUrl] = useState('')
   const [loginCode, setLoginCode] = useState('')
   const loginTerm = useRef<LoginTerminalHandle>(null)
@@ -336,8 +322,7 @@ function ClaudeCredentialPanel({
     gen.isPending ||
     exchange.isPending ||
     importCred.isPending ||
-    openLogin.isPending ||
-    browserOpen
+    openLogin.isPending
   const proxyHint =
     link.proxyHint || (vm.proxy?.host ? proxyNamedLabel(vm.proxy) : '')
 
@@ -359,23 +344,6 @@ function ClaudeCredentialPanel({
           onChange={switchMethod}
           disabled={busy}
         />
-      ) : null}
-
-      {perms.admin && kind === 'oauth' && activeMethod !== 'session' ? (
-        <div className='flex flex-wrap items-center gap-2'>
-          <Button
-            size='sm'
-            variant='outline'
-            disabled={busy}
-            onClick={() => setBrowserOpen(true)}
-          >
-            <Globe className='size-3.5' aria-hidden />
-            浏览器登录
-          </Button>
-          <span className='text-xs text-muted-foreground'>
-            使用本槽固定身份与绑定代理，授权后自动保存凭据
-          </span>
-        </div>
       ) : null}
 
       {showConvert ? (
@@ -771,39 +739,6 @@ function ClaudeCredentialPanel({
           </Button>
         </div>
       )}
-      {browserOpen ? (
-        <SlotBrowserDialog
-          vmId={vmId}
-          email={vm.email}
-          provider='anthropic'
-          purpose='oauth'
-          flavor={activeMethod === 'cc' ? 'claude_code' : 'cai'}
-          completionMode={browserCompletionMode}
-          open={browserOpen}
-          onOpenChange={setBrowserOpen}
-          onCredentialsSaved={() => {
-            void invalidate()
-            toast.info(
-              browserCompletionMode === 'start_and_schedule'
-                ? 'Claude 登录凭据已保存，请开机完成配置'
-                : 'Claude 登录凭据已保存，保留当前启停和调度设置'
-            )
-          }}
-          onComplete={(data) => {
-            void invalidate()
-            const message =
-              browserCompletionMode === 'start_and_schedule'
-                ? 'Claude 登录完成，已开机并开启调度'
-                : 'Claude 登录完成，已保留当前启停和调度设置'
-            const result: CommitResult = {
-              ...data,
-              completion: 'browser_oauth',
-            }
-            if (onCommitted) onCommitted(result, vmId, message)
-            else toast.success(message)
-          }}
-        />
-      ) : null}
     </div>
   )
 }

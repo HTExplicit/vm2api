@@ -31,7 +31,6 @@ import {
 import type { CommitResult } from '@/features/vm/credential-panel'
 
 type BrowserPurpose = 'oauth' | 'platform'
-export type BrowserCompletionMode = 'start_and_schedule' | 'preserve_state'
 
 type BrowserStatus = {
   type: 'status'
@@ -56,16 +55,6 @@ type BrowserNavigation = {
   error?: string
   canReturnToAuthorization: boolean
   inputLocked?: boolean
-}
-
-type AuthDiagnostic = {
-  endpoint: string
-  status: number | null
-  errorType: string | null
-  errorCode: string | null
-  requestId: string | null
-  timestamp: string
-  transportFailure: boolean
 }
 
 function closeBrowser(
@@ -99,9 +88,6 @@ type SlotBrowserDialogProps = {
   vmId: string
   email?: string | null
   purpose: BrowserPurpose
-  provider?: 'openai' | 'anthropic'
-  flavor?: 'cai' | 'claude_code'
-  completionMode?: BrowserCompletionMode
   open: boolean
   onOpenChange: (open: boolean) => void
   onCredentialsSaved?: (result?: CommitResult) => void
@@ -131,15 +117,11 @@ export function SlotBrowserDialog({
   vmId,
   email,
   purpose,
-  provider = 'openai',
-  flavor,
-  completionMode = 'start_and_schedule',
   open,
   onOpenChange,
   onCredentialsSaved,
   onComplete,
 }: SlotBrowserDialogProps) {
-  const preserveState = completionMode === 'preserve_state'
   const socket = useRef<WebSocket | null>(null)
   const keyboard = useRef<HTMLTextAreaElement | null>(null)
   const viewport = useRef<HTMLDivElement | null>(null)
@@ -194,9 +176,6 @@ export function SlotBrowserDialog({
     canReturnToAuthorization: false,
   })
   const [navigationReceived, setNavigationReceived] = useState(false)
-  const [authDiagnostic, setAuthDiagnostic] = useState<AuthDiagnostic | null>(
-    null
-  )
   const closeFailed = status === 'close_failed'
   const inputBlocked = closing || closeFailed
   const navigationBlocked =
@@ -212,9 +191,8 @@ export function SlotBrowserDialog({
   const finishBusy = ['starting', 'checking', 'scheduling'].includes(
     finish.phase
   )
-  const oauthMessage = preserveState
-    ? 'Claude 登录凭据已保存。点击“完成”结束登录，保留当前启停和调度设置。'
-    : finish.phase === 'ready'
+  const oauthMessage =
+    finish.phase === 'ready'
       ? '已开机，内核已就绪，调度已开启。点击“完成”结束登录。'
       : finish.phase === 'starting'
         ? '正在开机并启动内核…'
@@ -296,7 +274,6 @@ export function SlotBrowserDialog({
     released.current = null
     setClosing(false)
     setWarning('')
-    setAuthDiagnostic(null)
     addressEdited.current = false
     addressFocused.current = false
     firstNavigation.current = true
@@ -374,7 +351,6 @@ export function SlotBrowserDialog({
     )
     setConnected(false)
     setNavigationReceived(false)
-    setAuthDiagnostic(null)
     setFrame(null)
     setError('')
     setMessage('正在连接槽位浏览器…')
@@ -388,8 +364,7 @@ export function SlotBrowserDialog({
         closingRequested.current = true
         setStatus('close_failed')
         setMessage(
-          current.message ||
-            browserStatusMessage('close_failed', purpose, provider)
+          current.message || browserStatusMessage('close_failed', purpose)
         )
         setError(current.message || '浏览器清理未完成，请重试关闭。')
         setWarning(current.warning || '')
@@ -416,10 +391,7 @@ export function SlotBrowserDialog({
             vmId,
             promise: api(`${base}/open`, {
               method: 'POST',
-              body: JSON.stringify({
-                purpose: targetPurpose,
-                ...(provider === 'anthropic' ? { flavor } : {}),
-              }),
+              body: JSON.stringify({ purpose: targetPurpose }),
             }),
           }
           opening.current = request
@@ -463,7 +435,6 @@ export function SlotBrowserDialog({
           | BrowserStatus
           | BrowserNavigation
           | { type: 'input_ack' }
-          | { type: 'auth_diagnostic'; diagnostic: AuthDiagnostic | null }
         if (payload.type === 'frame') {
           if (!closingRequested.current) frames.describe(payload)
         } else if (payload.type === 'navigation') {
@@ -477,8 +448,6 @@ export function SlotBrowserDialog({
             addressEdited.current = false
           }
           firstNavigation.current = false
-        } else if (payload.type === 'auth_diagnostic') {
-          if (!closingRequested.current) setAuthDiagnostic(payload.diagnostic)
         } else if (payload.type === 'status') {
           const nextPurpose = payload.purpose || purposeRef.current
           purposeRef.current = nextPurpose
@@ -486,11 +455,9 @@ export function SlotBrowserDialog({
           setStatus(payload.status)
           setWarning(payload.warning || '')
           setMessage(
-            payload.message ||
-              browserStatusMessage(payload.status, nextPurpose, provider)
+            payload.message || browserStatusMessage(payload.status, nextPurpose)
           )
           if (payload.status === 'closed') {
-            setAuthDiagnostic(null)
             opened.current = ''
             opening.current = null
             closingRequested.current = false
@@ -501,14 +468,12 @@ export function SlotBrowserDialog({
             ws?.close()
           }
           if (payload.status === 'closing') {
-            setAuthDiagnostic(null)
             closingRequested.current = true
             setClosing(true)
             setConnected(false)
             setFrame(null)
             frames.close()
           } else if (payload.status === 'close_failed') {
-            setAuthDiagnostic(null)
             closingRequested.current = true
             setClosing(false)
             setConnected(false)
@@ -524,7 +489,6 @@ export function SlotBrowserDialog({
             updateFinish({
               ...previous,
               saved: true,
-              phase: preserveState ? 'ready' : previous.phase,
               result: payload.result || previous.result,
               warning: payload.message?.includes('会话保存失败')
                 ? payload.message
@@ -552,7 +516,6 @@ export function SlotBrowserDialog({
       ws.onclose = () => {
         if (!cancelled) {
           setConnected(false)
-          setAuthDiagnostic(null)
         }
       }
     }
@@ -578,7 +541,7 @@ export function SlotBrowserDialog({
       stop()
       if (stopTransport.current === stop) stopTransport.current = null
     }
-  }, [open, vmId, purpose, provider, flavor, preserveState, attempt, base])
+  }, [open, vmId, purpose, attempt, base])
 
   const send = (payload: object) => {
     if (
@@ -632,7 +595,6 @@ export function SlotBrowserDialog({
     updateFinish({ ...finishRef.current, error: '' })
     try {
       await finishCodexBrowserLogin(vmId, {
-        provider,
         retry: finishRef.current.retry,
         isCurrent,
         onProgress: (phase) => {
@@ -669,7 +631,6 @@ export function SlotBrowserDialog({
     closingRequested.current = true
     finishing.current = false
     setClosing(true)
-    setAuthDiagnostic(null)
     setError('')
     setStatus('closing')
     setMessage('正在关闭浏览器并清理临时文件…')
@@ -792,7 +753,7 @@ export function SlotBrowserDialog({
           <DialogTitle className='flex items-center gap-2 text-base'>
             <ExternalLink className='size-4' aria-hidden />
             {currentPurpose === 'oauth'
-              ? `${provider === 'anthropic' ? 'Claude' : 'OpenAI'} 浏览器登录`
+              ? 'OpenAI 浏览器登录'
               : '连接 OpenAI Platform'}
           </DialogTitle>
           <DialogDescription>
@@ -880,37 +841,6 @@ export function SlotBrowserDialog({
             </p>
           ) : null}
         </div>
-        {provider === 'anthropic' && authDiagnostic ? (
-          <div
-            role='status'
-            aria-label='Claude 登录请求诊断'
-            aria-atomic='true'
-            className='min-w-0 space-y-1 text-xs leading-relaxed'
-          >
-            <p className='m-0 break-all text-destructive'>
-              {authDiagnostic.transportFailure
-                ? 'Claude 登录请求未完成'
-                : 'Claude 登录请求失败'}
-              ：{authDiagnostic.endpoint}
-              {authDiagnostic.status !== null
-                ? ` · HTTP ${authDiagnostic.status}`
-                : ''}
-            </p>
-            <p className='m-0 break-all text-muted-foreground'>
-              {[
-                authDiagnostic.errorType &&
-                  `错误类型：${authDiagnostic.errorType}`,
-                authDiagnostic.errorCode &&
-                  `错误码：${authDiagnostic.errorCode}`,
-                authDiagnostic.requestId &&
-                  `请求编号：${authDiagnostic.requestId}`,
-                `时间：${authDiagnostic.timestamp}`,
-              ]
-                .filter(Boolean)
-                .join(' · ')}
-            </p>
-          </div>
-        ) : null}
         <div
           ref={viewport}
           role='application'
@@ -989,7 +919,7 @@ export function SlotBrowserDialog({
           {frame ? (
             <img
               src={frame.url}
-              alt={`${provider === 'anthropic' ? 'Claude' : 'OpenAI'} 官方登录与账号网页`}
+              alt='OpenAI 官方登录与账号网页'
               draggable={false}
               className={
                 originalSize
@@ -1094,9 +1024,7 @@ export function SlotBrowserDialog({
           </div>
           <div className='flex flex-wrap items-center gap-2'>
             {currentPurpose === 'oauth' ? (
-              provider === 'openai' &&
-              purpose === 'oauth' &&
-              finish.phase === 'ready' ? (
+              purpose === 'oauth' && finish.phase === 'ready' ? (
                 <Button
                   size='sm'
                   variant='outline'
@@ -1128,9 +1056,7 @@ export function SlotBrowserDialog({
                 </Button>
               ) : !finish.saved ? (
                 <p className='m-0 text-xs text-muted-foreground'>
-                  {preserveState
-                    ? '授权成功后自动保存凭据，保留当前启停和调度设置'
-                    : '授权成功后自动保存凭据，再开机完成配置'}
+                  授权成功后自动保存凭据，再开机完成配置
                 </p>
               ) : null
             ) : (
