@@ -1,5 +1,5 @@
-# Control plane. Only source is in git: the console and kin-api-kernel build here; the
-# slot payloads and Go helpers come from the release pinned in deploy/payload.json.
+# Control plane. The console, kin-api-kernel, kin-redact and kin-egress build
+# from source; the remaining payload comes from deploy/payload.json.
 
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web
 RUN npm install -g pnpm@10
@@ -14,11 +14,15 @@ ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 WORKDIR /src
 COPY api-kernel/go.mod api-kernel/go.sum ./api-kernel/
 COPY redact/go.mod redact/go.sum ./redact/
-RUN cd api-kernel && go mod download && cd ../redact && go mod download
+COPY worker/go.mod worker/go.sum ./worker/
+RUN cd api-kernel && go mod download && cd ../redact && go mod download \
+  && cd ../worker && go mod download
 COPY api-kernel/ ./api-kernel/
 COPY redact/ ./redact/
+COPY worker/ ./worker/
 RUN cd api-kernel && go build -buildvcs=false -trimpath -o /out/kin-api-kernel ./cmd/kin-api-kernel \
-  && cd ../redact && go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/kin-redact ./cmd/kin-redact
+  && cd ../redact && go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/kin-redact ./cmd/kin-redact \
+  && cd ../worker && go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/kin-egress ./cmd/kin-egress
 
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS payload
 WORKDIR /src
@@ -52,7 +56,7 @@ COPY docker/kin-kvm ./docker/kin-kvm
 COPY --from=web /src/web/dist ./web/dist
 COPY --from=payload /payload/bin/ /opt/vm2api/image-bin/
 COPY --from=helpers /out/ /opt/vm2api/image-bin/
-RUN test -x /opt/vm2api/image-bin/kin-redact
+RUN test -x /opt/vm2api/image-bin/kin-redact && test -x /opt/vm2api/image-bin/kin-egress
 COPY share/wrap-cli /opt/vm2api/image-wrap-cli
 COPY --from=payload /payload/share/wrap-cli/ /opt/vm2api/image-wrap-cli/
 COPY --from=payload /payload/share/crag/ /opt/vm2api/image-crag/

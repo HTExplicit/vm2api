@@ -20,6 +20,8 @@ import { extractOpenaiUsage } from '../../src/lib/protocol/openai-usage.mjs'
 import { callRustKernel, rustKernelHealth } from '../../src/lib/transport/rust-kernel-client.mjs'
 import { callCodexKernel, streamCodexKernel } from '../../src/lib/transport/codex-kernel-client.mjs'
 import { forwardApi, readApiJson } from '../../src/lib/transport/api-kernel-client.mjs'
+import { normalizeRedaction } from '../../src/lib/redaction/policy.mjs'
+import { publishRedactionForTests } from '../../src/lib/redaction/runtime.mjs'
 
 test('restoreUncommittedHop keeps a structured upstream code', () => {
   const restored = restoreUncommittedHop({
@@ -712,6 +714,57 @@ unixTest('a reported final body is capped at 10000 tokens and stays off the call
     assert.equal(snapshots[0].extra.body_truncated, true)
     assert.doesNotMatch(lines.join('\n'), /kin_outbound_headers|2\.1\.317/)
   } finally {
+    await fx.close()
+  }
+})
+
+unixTest('response restoration leaves the final outbound diagnostic body unchanged', async () => {
+  const masked = 'MASKED_VALUE'
+  const original = 'original-value'
+  const outboundBody = JSON.stringify({ messages: [{ role: 'user', content: masked }] })
+  const fx = await fixture((req, res) => {
+    req.resume()
+    res.setHeader('content-type', 'text/event-stream')
+    res.write(`event: kin_outbound_headers\ndata: ${JSON.stringify({
+      type: 'kin_outbound_headers', headers: { 'content-type': 'application/json' }, body: outboundBody,
+    })}\n\n`)
+    writeData(res, { type: 'message_start', message: { content: [] } })
+    writeData(res, { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: masked } })
+    writeData(res, { type: 'message_stop' })
+    res.end()
+  })
+  const policy = normalizeRedaction({ enabled: true, secrets: true, personal: false })
+  const restoredBodies = []
+  publishRedactionForTests({
+    enabled: true, ready: true, policy,
+    client: {
+      mask: async ({ body }) => ({ body }),
+      restore: async ({ body }) => {
+        restoredBodies.push(body)
+        return { body: body.replaceAll(masked, original) }
+      },
+    },
+  })
+  try {
+    const snapshots = []
+    const lines = []
+    const result = await streamGoWorker({
+      exec: fx.exec,
+      body: { model: 'claude-test', messages: [{ role: 'user', content: 'hi' }] },
+      routing: { redaction: policy },
+      redactionPrincipal: 'key-test',
+      redactionSession: 'session-test',
+      onOutboundHeaders: (_headers, extra) => snapshots.push(extra.body),
+      onEvent: (line) => lines.push(line),
+    })
+    assert.equal(result.ok, true)
+    assert.deepEqual(snapshots, [outboundBody])
+    assert.ok(restoredBodies.some((body) => body.includes('content_block_delta')))
+    assert.ok(restoredBodies.every((body) => !body.includes('kin_outbound_headers')))
+    assert.match(lines.join('\n'), /original-value/)
+    assert.doesNotMatch(lines.join('\n'), /MASKED_VALUE|kin_outbound_headers/)
+  } finally {
+    publishRedactionForTests(null)
     await fx.close()
   }
 })

@@ -89,6 +89,8 @@ jobs:
             test/unit/errors-map.test.mjs \
             test/unit/error-class.test.mjs \
             test/unit/release.test.mjs \
+            test/unit/fetch-payload.test.mjs \
+            test/unit/release-assets.test.mjs \
             test/unit/release-errors.test.mjs \
             test/unit/release-source.test.mjs \
             test/unit/release-kernel.test.mjs \
