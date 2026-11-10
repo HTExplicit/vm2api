@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
+  OFFICIAL_303_AGENT_IDENTITY,
   OFFICIAL_303_ENV_UNTRUSTED,
   OFFICIAL_303_IDENTITY,
   OFFICIAL_303_MAIN_PROMPT,
@@ -289,7 +290,7 @@ test('default official templates send the current CLI identity on the real chain
       })
       assert.equal(wire.status, 200, where)
       const texts = wire.body.system.map((block) => block.text)
-      assert.equal(texts[1], "You are Claude Code, Anthropic's official CLI for Claude.", where)
+      assert.equal(texts[1], entry === 'cli' ? OFFICIAL_303_IDENTITY : OFFICIAL_303_AGENT_IDENTITY, where)
       assert.equal(texts[2].includes('You are an agent working with the user'), true, where)
     }
   }
@@ -336,7 +337,7 @@ test('default official templates put a third-party prompt in one first-user remi
         assert.equal(wire.headers['user-agent'], officialClaudeCliUa(OFFICIAL_CLI_VERSION, entry), where)
         const billing = wire.body.system[0].text
         assert.match(billing, new RegExp(`cc_version=${CURRENT_VERSION_PATTERN}\\.[0-9a-f]+; cc_entrypoint=${entry};`), where)
-        assert.match(billing, /cc_turn_origin=sdk;/, where)
+        assert.match(billing, new RegExp(`cc_turn_origin=${entry === 'cli' ? 'human' : 'sdk'};`), where)
         const got = /cch=([0-9a-f]{5});/.exec(billing)?.[1]
         const expected = computeClaudeCodeCch(Buffer.from(projectClaudeCodeCchText(wire.raw), 'utf8'))
         assert.equal(got, expected, where)
@@ -347,7 +348,7 @@ test('default official templates put a third-party prompt in one first-user remi
           false,
           where,
         )
-        assert.equal(texts[1], "You are Claude Code, Anthropic's official CLI for Claude.", where)
+        assert.equal(texts[1], entry === 'cli' ? OFFICIAL_303_IDENTITY : OFFICIAL_303_AGENT_IDENTITY, where)
         assert.equal(
           texts.some((text) => text.includes('You are an agent working with the user')),
           true,

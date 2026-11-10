@@ -61,6 +61,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          failed=0
           for file in \
             test/unit/forced-tool-choice.test.mjs \
             test/unit/sonnet-55-policy.test.mjs \
@@ -224,8 +225,9 @@ jobs:
             test/unit/redaction-policy.test.mjs \
             test/unit/redaction-runtime.test.mjs \
             test/unit/vm-package.test.mjs; do
-            node --test "$file"
+            node --test "$file" || failed=$((failed + 1))
           done
+          test "$failed" -eq 0
       - name: Model defaults fill missing output budgets
         run: node --test --test-name-pattern='^officialMessagesBody keeps a caller max_tokens and fills a missing one from the model$' test/unit/crs-clean.test.mjs
       - name: Inline tool beta reaches the final CLI hop
