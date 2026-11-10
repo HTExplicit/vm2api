@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
  * Slot payloads (closed-source kernels, wrap CLIs, glibc shim) live in a GitHub
- * release, not in git. deploy/payload.json pins every file by size and sha256.
+ * release, not in git. deploy/payload.json pins downloaded files by size and
+ * sha256; a file.release overrides the default release. Source-built helpers
+ * such as kin-egress are supplied by the control-plane image.
  *
  *   node scripts/fetch-payload.mjs [--dest DIR]   download missing / stale files
  *   node scripts/fetch-payload.mjs --check        verify local files, no network
@@ -50,6 +52,7 @@ if (opts.pin) {
     if (buf === null) throw new Error(`${file.path} is missing; cannot pin`)
     file.size = buf.length
     file.sha256 = sha256(buf)
+    delete file.release
   }
   manifest.release = opts.pin
   fs.writeFileSync(opts.manifest, `${JSON.stringify(manifest, null, 2)}\n`)
@@ -85,7 +88,7 @@ if (opts.pin) {
   for (const file of manifest.files) {
     const target = path.join(opts.dest, file.path)
     if (matches(readLocal(file), file)) continue
-    const url = `${base}/${manifest.release}/${file.asset}`
+    const url = `${base}/${file.release || manifest.release}/${file.asset}`
     if (!downloads.has(url)) {
       let res
       for (let attempt = 1; attempt <= 4; attempt++) {

@@ -17,6 +17,7 @@ let readers = []
 let ready = null
 let rr = 0
 let seq = 0
+let stopping = Promise.resolve()
 /** @type {Map<number, { resolve: Function, reject: Function, worker: Worker }>} */
 const pending = new Map()
 
@@ -40,13 +41,14 @@ export function stopSqlitePool() {
   file = null
   ready = null
   rr = 0
-  for (const worker of dying) {
-    worker.worker.terminate()
-  }
+  // Closing the main connection does not close these worker connections.
+  // Restore must await their exit before replacing the DB and WAL files.
+  stopping = Promise.all([stopping, ...dying.map((worker) => worker.worker.terminate())]).then(() => undefined)
   for (const [id, waiter] of pending) {
     pending.delete(id)
     waiter.reject(new Error('sqlite pool stopped'))
   }
+  return stopping
 }
 
 export async function usageRead({ kind, method, args = [], mutedErrorClasses = [] }) {

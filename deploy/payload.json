@@ -33,12 +33,6 @@
       "sha256": "d6b29f1144cd389696fe11edd6b5a024499bfc598da6a9ac96a4c7a9f9d6071b"
     },
     {
-      "path": "bin/kin-egress",
-      "asset": "kin-egress",
-      "size": 9047621,
-      "sha256": "0bf1eeb0424fb341ad371fed1e40c39e68e940770222a0ac940d3340f3b4e277"
-    },
-    {
       "path": "bin/kin-slot-gate",
       "asset": "kin-slot-gate",
       "size": 8120583,
@@ -47,8 +41,9 @@
     {
       "path": "share/wrap-cli/cli-node",
       "asset": "cli-node",
-      "size": 27933052,
-      "sha256": "8484c4c58f4b7782a190f7cab7c8aa5d1f706ae26b2d2a5cafe81af070f0611b"
+      "release": "v1.4.061",
+      "size": 27934256,
+      "sha256": "77762eee800cc034256d2219a2cecb40f0e373503cbf0085aa9d7f23ecc79277"
     },
     {
       "path": "share/wrap-cli/cc-node",

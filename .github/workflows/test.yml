@@ -54,10 +54,14 @@ jobs:
       - name: redaction helper unit checks
         working-directory: redact
         run: go test ./...
+      - name: egress timeout and DNS regressions
+        working-directory: worker
+        run: go test -race ./internal/egress ./internal/proxy
       - name: focused backend regressions
         shell: bash
         run: |
           set -euo pipefail
+          failed=0
           for file in \
             test/unit/forced-tool-choice.test.mjs \
             test/unit/sonnet-55-policy.test.mjs \
@@ -86,6 +90,8 @@ jobs:
             test/unit/errors-map.test.mjs \
             test/unit/error-class.test.mjs \
             test/unit/release.test.mjs \
+            test/unit/fetch-payload.test.mjs \
+            test/unit/release-assets.test.mjs \
             test/unit/release-errors.test.mjs \
             test/unit/release-source.test.mjs \
             test/unit/release-kernel.test.mjs \
@@ -114,6 +120,7 @@ jobs:
             test/unit/request-logs-export.test.mjs \
             test/unit/panel-usage-logs.test.mjs \
             test/unit/database.test.mjs \
+            test/unit/backup-service.test.mjs \
             test/unit/go-worker-client.test.mjs \
             test/unit/outbound-log-envelope.test.mjs \
             test/unit/panel-billing-lookup.test.mjs \
@@ -169,11 +176,16 @@ jobs:
             test/unit/codex-usage.test.mjs \
             test/unit/codex-credits.test.mjs \
             test/unit/codex-slot-pool.test.mjs \
+            test/unit/openai-account-selector.test.mjs \
             test/unit/codex-admission-records.test.mjs \
             test/unit/codex-slot.test.mjs \
             test/unit/codex-quota-stale.test.mjs \
             test/unit/usage-probe-monitor.test.mjs \
             test/unit/crs-usage-probe.test.mjs \
+            test/unit/subscription-plan.test.mjs \
+            test/unit/oauth-identity.test.mjs \
+            test/unit/outbound-snapshot.test.mjs \
+            test/unit/crag-v2-credential-health.test.mjs \
             test/unit/guest-oauth-transparent-egress.test.mjs \
             test/unit/kvm-runtime.test.mjs \
             test/unit/panel-subscription.test.mjs \
@@ -213,8 +225,9 @@ jobs:
             test/unit/redaction-policy.test.mjs \
             test/unit/redaction-runtime.test.mjs \
             test/unit/vm-package.test.mjs; do
-            node --test "$file"
+            node --test "$file" || failed=$((failed + 1))
           done
+          test "$failed" -eq 0
       - name: Model defaults fill missing output budgets
         run: node --test --test-name-pattern='^officialMessagesBody keeps a caller max_tokens and fills a missing one from the model$' test/unit/crs-clean.test.mjs
       - name: Inline tool beta reaches the final CLI hop
@@ -249,7 +262,7 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm exec vitest run src/features/pelican/pelican.test.ts src/features/pelican/preview-fit.test.ts
           pnpm exec vitest run src/config/repo.test.ts src/features/settings/about-pane.test.ts
-          pnpm exec vitest run src/lib/vm-status.test.ts -t 'GPT plan label follows OpenAI plan_type'
+          pnpm exec vitest run src/lib/vm-status.test.ts src/features/vm/vm-list-table.test.tsx
           pnpm exec vitest run src/features/vm/usage-windows.test.tsx src/features/vm/vm-rack-model.test.ts
           pnpm exec vitest run src/features/models/model-mapping.test.ts src/features/models/policy.test.ts
           pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx src/features/vm/openai-api-actions.test.tsx src/features/settings/openai-api-balance-section.test.tsx
@@ -261,6 +274,7 @@ jobs:
           pnpm exec vitest run src/features/settings/health-pane.test.ts src/features/cluster/slot-migration.test.ts
           pnpm exec vitest run src/features/vm/engine-contract.test.ts src/features/vm/persona-contract.test.ts src/lib/wrap-health.test.ts src/features/system/compat-patch.test.ts
           pnpm exec vitest run src/config/nav.test.ts src/features/auth/route-guard.test.ts src/features/users/user-concurrency.test.ts src/features/vm/vm-perms.test.ts
+          pnpm exec vitest run src/lib/session-cache.test.ts src/lib/api.test.ts src/features/vm/use-vm-test-chat.test.tsx
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx
           pnpm exec vitest run src/features/cluster/model.test.ts src/features/cluster/connection-rows.test.ts
           pnpm build

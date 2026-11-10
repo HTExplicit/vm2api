@@ -71,6 +71,20 @@ test('scores inside 0.05 rotate by account id', () => {
   assert.equal(second.candidate.id, 'b')
 })
 
+test('quota reset priority ranks known reset times before missing reset times', () => {
+  const now = Date.parse('2026-11-10T00:00:00.000Z')
+  const ordered = orderOpenAIAccounts(
+    [
+      account('missing-null'),
+      account('missing-undefined', { quotaResetAt: undefined }),
+      account('later', { quotaResetAt: now + 120_000 }),
+      account('sooner', { quotaResetAt: now + 60_000 }),
+    ],
+    { strategy: 'quota_reset_priority', now },
+  )
+  assert.deepEqual(ordered.ids, ['sooner', 'later', 'missing-null', 'missing-undefined'])
+})
+
 test('concurrency and request interval block before scoring', () => {
   const now = 1_000_000
   const busy = account('busy', { inFlight: 2, concurrency: 2, quotaRemainingRank: 10_000 })

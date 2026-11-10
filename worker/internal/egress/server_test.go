@@ -179,7 +179,7 @@ func TestResolveDNSOverSOCKSTCP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	query := []byte{0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	query := overrideQuery(t, 1)
 	reply, err := srv.ResolveDNS(context.Background(), query)
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestResolveDNSOverDoH(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	query := []byte{0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	query := overrideQuery(t, 1)
 	reply, err := srv.ResolveDNS(context.Background(), query)
 	if err != nil {
 		t.Fatal(err)
@@ -470,7 +470,7 @@ func TestResolveDNSFallsBackToNextUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	query := []byte{0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	query := overrideQuery(t, 1)
 	reply, err := srv.ResolveDNS(context.Background(), query)
 	if err != nil {
 		t.Fatal(err)

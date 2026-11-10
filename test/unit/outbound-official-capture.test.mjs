@@ -12,7 +12,7 @@ import {
   CRS_AGENT_EXPANSION,
   AGENT_EXPANSION_CACHE_CONTROL,
 } from '../../src/lib/identity/crs-persona.mjs'
-import { loadVmIdentity, OFFICIAL_CLI_VERSION, OFFICIAL_CLAUDE_CLI_UA } from '../../src/lib/identity/vm-identity.mjs'
+import { loadVmIdentity, OFFICIAL_CLI_VERSION, OFFICIAL_CLAUDE_CLI_UA, OFFICIAL_STAINLESS } from '../../src/lib/identity/vm-identity.mjs'
 import { prepareOutboundEnvelope } from '../../src/lib/protocol/outbound-attempt.mjs'
 
 test('unofficial outbound envelope matches official 2.1.281 capture keys', () => {
@@ -74,7 +74,7 @@ test('unofficial outbound envelope matches official 2.1.281 capture keys', () =>
   assert.equal(headers['x-stainless-os'], 'Linux')
   assert.equal(headers['x-stainless-arch'], 'x64')
   assert.equal(headers['x-stainless-runtime'], 'node')
-  assert.equal(headers['x-stainless-runtime-version'], 'v26.3.0')
+  assert.equal(headers['x-stainless-runtime-version'], OFFICIAL_STAINLESS.stainless_runtime_version)
   assert.equal(headers['x-stainless-retry-count'], '0')
   assert.equal(headers['x-stainless-timeout'], '600')
   assert.equal(headers.accept, 'text/event-stream')
@@ -188,7 +188,7 @@ test('outbound headers use the official CLI pin and keep the 2.1.281 fingerprint
   assert.equal(headers['x-stainless-os'], 'Linux')
   assert.equal(headers['x-stainless-arch'], 'x64')
   assert.equal(headers['x-stainless-runtime'], 'node')
-  assert.equal(headers['x-stainless-runtime-version'], 'v26.3.0')
+  assert.equal(headers['x-stainless-runtime-version'], OFFICIAL_STAINLESS.stainless_runtime_version)
   assert.equal(headers['x-stainless-retry-count'], '0')
   assert.equal(headers['x-stainless-timeout'], '600')
   assert.match(
@@ -197,7 +197,7 @@ test('outbound headers use the official CLI pin and keep the 2.1.281 fingerprint
       `cc_version=${OFFICIAL_CLI_VERSION.replaceAll('.', '\\.')}\\.${computeClaudeCodeFingerprint(CAPTURE_281_FIRST_USER, OFFICIAL_CLI_VERSION)}`,
     ),
   )
-  assert.match(body.system[2].text, /cc_prompt_index=0; cc_turn_index=1;/)
+  assert.match(body.system[2].text, /cc_turn_origin=human; cc_prompt_index=1; cc_turn_index=1;/)
   const uid = JSON.parse(body.metadata.user_id)
   assert.equal(headers['x-claude-code-session-id'], uid.session_id)
   fs.rmSync(dir, { recursive: true, force: true })

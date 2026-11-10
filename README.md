@@ -47,11 +47,11 @@
 
 上游归属、[LICENSE](LICENSE)、鸣谢与历史文档保留；下方旧版说明和评测为上游历史内容，具体版本以对应记录为准。
 
-控制面镜像默认使用 `ghcr.io/htexplicit/vm2api`，通过 `VM2API_IMAGE` 配置；`VM2API_GITHUB_REPO` 指定发布仓库，Compose 会传入控制面，面板更新默认检查本 fork 的公开 Release。槽位二进制仍由 `deploy/payload.json` 固定上游来源、版本、大小和 SHA256，客体系统镜像来源保持原配置。
+控制面镜像默认使用 `ghcr.io/htexplicit/vm2api`，通过 `VM2API_IMAGE` 配置；`VM2API_GITHUB_REPO` 指定发布仓库，Compose 会传入控制面，面板更新默认检查本 fork 的公开 Release。槽位闭源二进制由 `deploy/payload.json` 固定上游来源、版本、大小和 SHA256；`kin-egress` 与控制面 helper 从本 fork 源码编译，客体系统镜像来源保持原配置。
 
-当前发布 **linux/amd64** 控制面镜像与 10 个固定附件。发布流程先准备草稿和附件，再构建推送版本镜像，核验 GHCR 匿名访问后才移动镜像 `latest` 并公开 Release。若新建包为私有，维护者需设为 Public；匿名访问检查失败时保留草稿，修正包权限后可重跑失败的 `publish` job。当前不提供 ARM64 控制面镜像。
+当前发布 **linux/amd64** 控制面镜像与 10 个附件，全部从同一最终镜像按 digest 提取。9 个附件核对上游固定校验值，其中 `cli-node` 固定官方 1.4.061；`kin-egress` 使用镜像内由 fork 源码编译的同一份字节。发布流程先准备草稿，再构建推送版本镜像并提取、校验、上传附件，核验 GHCR 匿名访问后才移动镜像 `latest` 并公开 Release。若新建包为私有，维护者需设为 Public；匿名访问检查失败时保留草稿，修正包权限后可重跑失败的 `publish` job。当前不提供 ARM64 控制面镜像。
 
-官方 1.4.055 的集群槽镜像准备和远端载荷推送统一依赖已校验的 amd64 CRAG v2 包，包括远端 Codex/wrap 槽。本 fork 的 10 个固定附件不含该包；使用集群前须显式备妥可信包，缺少时沿用官方错误，不自动下载、激活或回退。本地 Codex Docker 槽不受此依赖影响。
+官方 1.4.055 的集群槽镜像准备和远端载荷推送统一依赖已校验的 amd64 CRAG v2 包，包括远端 Codex/wrap 槽。本 fork 的 10 个附件不含该包；使用集群前须显式备妥可信包，缺少时沿用官方错误，不自动下载、激活或回退。本地 Codex Docker 槽不受此依赖影响。
 
 ## 目录
 - [💡 项目概览](#-项目概览)

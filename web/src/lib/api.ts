@@ -7,6 +7,7 @@ import {
   apiBase,
   expirePanelSession,
   hasSession,
+  sessionRevision,
   sessionToken,
 } from '@/lib/session'
 
@@ -119,12 +120,22 @@ export async function panelFetch(
   path: string,
   opts: RequestInit = {}
 ): Promise<Response> {
-  const url = `${apiBase() || ''}${path}`
+  const base = apiBase()
+  const token = sessionToken()
+  const revision = sessionRevision()
+  const url = `${base || ''}${path}`
   const res = await fetch(url, {
     ...opts,
     credentials: 'include',
     headers: { ...authHeaders(), ...(opts.headers || {}) },
   })
+  if (
+    revision !== sessionRevision() ||
+    token !== sessionToken() ||
+    base !== apiBase()
+  ) {
+    throw new ApiError('登录状态已变更，请重试', 0, 'session_changed')
+  }
   if (res.status === 401 && isPanelApiPath(path)) expirePanelSession()
   return res
 }
@@ -134,10 +145,19 @@ export async function api<T = unknown>(
   opts: RequestInit = {}
 ): Promise<T> {
   if (!hasSession()) throw new ApiError('未登录', 401)
+  const revision = sessionRevision()
   const res = await panelFetch(path, opts)
+  const responseRevision = sessionRevision()
   const json = (await res.json().catch(() => ({}))) as Json
+  if (responseRevision !== sessionRevision()) {
+    throw new ApiError('登录状态已变更，请重试', 0, 'session_changed')
+  }
   if (res.status === 401) {
     throw apiErrorFrom(json, res.status, '登录已过期')
+  }
+  // A late mutation must not refill the next account's cache via onSuccess.
+  if (revision !== sessionRevision()) {
+    throw new ApiError('登录状态已变更，请重试', 0, 'session_changed')
   }
   if (!res.ok) {
     throw apiErrorFrom(json, res.status, res.statusText || '请求失败')

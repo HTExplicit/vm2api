@@ -15,6 +15,7 @@ import { useAuthStore } from '@/stores/auth-store'
 import { ApiError } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import { onPanelSessionExpired } from '@/lib/session'
+import { bindSessionQueryCache } from '@/lib/session-cache'
 import { DirectionProvider } from './context/direction-provider'
 import { FontProvider } from './context/font-provider'
 import { ThemeProvider } from './context/theme-provider'
@@ -49,6 +50,8 @@ const queryClient = new QueryClient({
     },
   }),
 })
+
+bindSessionQueryCache(queryClient)
 
 const router = createRouter({
   routeTree,

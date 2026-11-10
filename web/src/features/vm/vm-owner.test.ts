@@ -13,6 +13,7 @@ vi.mock('@/lib/session', () => ({
   clearSession: vi.fn(),
   hasSession: () => true,
   sessionToken: () => '',
+  sessionRevision: () => 0,
 }))
 
 function vm(over: Partial<Vm> = {}): Vm {

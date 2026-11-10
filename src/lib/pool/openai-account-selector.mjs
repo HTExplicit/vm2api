@@ -99,8 +99,8 @@ function selectInBand(eligible, context) {
     const ranked = [...eligible].sort((left, right) => {
       const leftReset = Number(left.quotaResetAt)
       const rightReset = Number(right.quotaResetAt)
-      const leftMissing = !Number.isFinite(leftReset)
-      const rightMissing = !Number.isFinite(rightReset)
+      const leftMissing = left.quotaResetAt == null || !Number.isFinite(leftReset)
+      const rightMissing = right.quotaResetAt == null || !Number.isFinite(rightReset)
       if (leftMissing !== rightMissing) return leftMissing ? 1 : -1
       if (!leftMissing && leftReset !== rightReset) return leftReset - rightReset
       const load = capacityUtilization(left, fallbackConcurrency) - capacityUtilization(right, fallbackConcurrency)
