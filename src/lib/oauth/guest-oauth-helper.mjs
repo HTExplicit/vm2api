@@ -23,6 +23,7 @@ export async function prepareSlotOAuth({
   projectRoot = exec?.projectRoot,
   routing = {},
   timeoutMs,
+  preservePowerIntent = false,
   startReady = startSlotReady,
 } = {}) {
   if (!projectRoot || !exec?.vmId || (exec.vm?.id && exec.vm.id !== exec.vmId)) {
@@ -51,7 +52,10 @@ export async function prepareSlotOAuth({
   ) {
     throw fail(boot?.rust?.code || boot?.code || 'oauth_runtime_not_ready', 'Target VM native CLI is not ready')
   }
-  const patch = { ...(boot.runtime ? { runtime: boot.runtime } : {}), status: 'running' }
+  const patch = {
+    ...(boot.runtime ? { runtime: boot.runtime } : {}),
+    ...(!preservePowerIntent ? { status: 'running' } : {}),
+  }
   const stored = patchVmRecord(projectRoot, vm.id, patch)
   Object.assign(vm, stored || patch)
   Object.assign(exec, slotExec(projectRoot, vm))
@@ -90,13 +94,14 @@ export async function runGuestOAuthAuthService(
     projectRoot = exec?.projectRoot,
     routing,
     timeoutMs = 15000,
+    preservePowerIntent = false,
     prepare = prepareSlotOAuth,
     runDocker = runSlotProcess,
     postTelemetry = postRustKernelTelemetryEvent,
     runNative,
   } = {},
 ) {
-  const context = await prepare({ exec, projectRoot, routing, timeoutMs })
+  const context = await prepare({ exec, projectRoot, routing, timeoutMs, preservePowerIntent })
   const { host, configDir, home } = context
   exec = context.exec
   // The approved Linux cutover must not change macOS non-telemetry behavior.

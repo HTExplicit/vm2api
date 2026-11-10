@@ -15,6 +15,11 @@ export class CodexBrowserFinishError extends Error {
 type KernelHealthResponse = {
   id?: string
   kernel?: {
+    rust_health?: {
+      reachable?: boolean
+      process_up?: boolean
+      status?: number | string | null
+    } | null
     codex_health?: {
       reachable?: boolean
       process_up?: boolean
@@ -29,15 +34,28 @@ type SlotState = {
   vm?: { id?: string; status?: string; runtime?: { stopped?: boolean } }
 }
 
-function kernelReady(data: KernelHealthResponse, vmId: string) {
-  const health = data.kernel?.codex_health
+function kernelReady(
+  data: KernelHealthResponse,
+  vmId: string,
+  provider: 'openai' | 'anthropic'
+) {
+  if (provider === 'anthropic') {
+    const health = data.kernel?.rust_health
+    return (
+      data.id === vmId &&
+      health?.reachable === true &&
+      health.process_up === true &&
+      health.status === 200
+    )
+  }
+  const codex = data.kernel?.codex_health
   return (
     data.id === vmId &&
-    health?.vm_id === vmId &&
-    health.reachable === true &&
-    health.process_up === true &&
-    health.status === 200 &&
-    health.healthy !== false
+    codex?.vm_id === vmId &&
+    codex.reachable === true &&
+    codex.process_up === true &&
+    codex.status === 200 &&
+    codex.healthy !== false
   )
 }
 
@@ -49,12 +67,14 @@ function errorMessage(reason: unknown) {
 export async function finishCodexBrowserLogin(
   vmId: string,
   options: {
+    provider?: 'openai' | 'anthropic'
     retry?: FinishRetry
     isCurrent?: () => boolean
     onProgress?: (stage: 'starting' | 'checking' | 'scheduling') => void
   } = {}
 ): Promise<void> {
   const base = `/api/panel/vms/${encodeURIComponent(vmId)}`
+  const provider = options.provider || 'openai'
   const assertCurrent = () => {
     if (options.isCurrent?.() === false)
       throw new Error('登录窗口已关闭或槽位已切换')
@@ -65,9 +85,22 @@ export async function finishCodexBrowserLogin(
   }
   const readHealth = async () => {
     progress('checking')
+    if (provider === 'anthropic') {
+      const [health, detail] = await Promise.all([
+        api<KernelHealthResponse>(`${base}/health`),
+        api<SlotState>(base),
+      ])
+      assertCurrent()
+      return (
+        detail.vm?.id === vmId &&
+        detail.vm.status === 'running' &&
+        detail.vm.runtime?.stopped !== true &&
+        kernelReady(health, vmId, provider)
+      )
+    }
     const health = await api<KernelHealthResponse>(`${base}/health`)
     assertCurrent()
-    return kernelReady(health, vmId)
+    return kernelReady(health, vmId, provider)
   }
   const reconcile = async () => {
     progress('checking')
@@ -88,7 +121,7 @@ export async function finishCodexBrowserLogin(
         !stopped &&
         running &&
         health.status === 'fulfilled' &&
-        kernelReady(health.value, vmId),
+        kernelReady(health.value, vmId, provider),
     }
   }
 

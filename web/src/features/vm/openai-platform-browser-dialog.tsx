@@ -30,6 +30,7 @@ import {
 import type { CommitResult } from '@/features/vm/credential-panel'
 
 type BrowserPurpose = 'oauth' | 'platform'
+export type BrowserCompletionMode = 'start_and_schedule' | 'preserve_state'
 
 type BrowserStatus = {
   type: 'status'
@@ -78,6 +79,9 @@ type SlotBrowserDialogProps = {
   vmId: string
   email?: string | null
   purpose: BrowserPurpose
+  provider?: 'openai' | 'anthropic'
+  flavor?: 'cai' | 'claude_code'
+  completionMode?: BrowserCompletionMode
   open: boolean
   onOpenChange: (open: boolean) => void
   onCredentialsSaved?: (result?: CommitResult) => void
@@ -107,11 +111,15 @@ export function SlotBrowserDialog({
   vmId,
   email,
   purpose,
+  provider = 'openai',
+  flavor,
+  completionMode = 'start_and_schedule',
   open,
   onOpenChange,
   onCredentialsSaved,
   onComplete,
 }: SlotBrowserDialogProps) {
+  const preserveState = completionMode === 'preserve_state'
   const socket = useRef<WebSocket | null>(null)
   const keyboard = useRef<HTMLTextAreaElement | null>(null)
   const viewport = useRef<HTMLDivElement | null>(null)
@@ -164,8 +172,9 @@ export function SlotBrowserDialog({
   const finishBusy = ['starting', 'checking', 'scheduling'].includes(
     finish.phase
   )
-  const oauthMessage =
-    finish.phase === 'ready'
+  const oauthMessage = preserveState
+    ? 'Claude 登录凭据已保存。点击“完成”结束登录，保留当前启停和调度设置。'
+    : finish.phase === 'ready'
       ? '已开机，内核已就绪，调度已开启。点击“完成”结束登录。'
       : finish.phase === 'starting'
         ? '正在开机并启动内核…'
@@ -325,7 +334,8 @@ export function SlotBrowserDialog({
         closingRequested.current = true
         setStatus('close_failed')
         setMessage(
-          current.message || browserStatusMessage('close_failed', purpose)
+          current.message ||
+            browserStatusMessage('close_failed', purpose, provider)
         )
         setError(current.message || '浏览器清理未完成，请重试关闭。')
         setWarning(current.warning || '')
@@ -352,7 +362,10 @@ export function SlotBrowserDialog({
             vmId,
             promise: api(`${base}/open`, {
               method: 'POST',
-              body: JSON.stringify({ purpose: targetPurpose }),
+              body: JSON.stringify({
+                purpose: targetPurpose,
+                ...(provider === 'anthropic' ? { flavor } : {}),
+              }),
             }),
           }
           opening.current = request
@@ -402,7 +415,8 @@ export function SlotBrowserDialog({
           setStatus(payload.status)
           setWarning(payload.warning || '')
           setMessage(
-            payload.message || browserStatusMessage(payload.status, nextPurpose)
+            payload.message ||
+              browserStatusMessage(payload.status, nextPurpose, provider)
           )
           if (payload.status === 'closed') {
             opened.current = ''
@@ -436,6 +450,7 @@ export function SlotBrowserDialog({
             updateFinish({
               ...previous,
               saved: true,
+              phase: preserveState ? 'ready' : previous.phase,
               result: payload.result || previous.result,
               warning: payload.message?.includes('会话保存失败')
                 ? payload.message
@@ -486,7 +501,7 @@ export function SlotBrowserDialog({
       stop()
       if (stopTransport.current === stop) stopTransport.current = null
     }
-  }, [open, vmId, purpose, attempt, base])
+  }, [open, vmId, purpose, provider, flavor, preserveState, attempt, base])
 
   const send = (payload: object) => {
     if (
@@ -511,6 +526,7 @@ export function SlotBrowserDialog({
     updateFinish({ ...finishRef.current, error: '' })
     try {
       await finishCodexBrowserLogin(vmId, {
+        provider,
         retry: finishRef.current.retry,
         isCurrent,
         onProgress: (phase) => {
@@ -669,7 +685,7 @@ export function SlotBrowserDialog({
           <DialogTitle className='flex items-center gap-2 text-base'>
             <ExternalLink className='size-4' aria-hidden />
             {currentPurpose === 'oauth'
-              ? 'OpenAI 浏览器登录'
+              ? `${provider === 'anthropic' ? 'Claude' : 'OpenAI'} 浏览器登录`
               : '连接 OpenAI Platform'}
           </DialogTitle>
           <DialogDescription>
@@ -773,7 +789,7 @@ export function SlotBrowserDialog({
           {frame ? (
             <img
               src={frame.url}
-              alt='OpenAI 官方登录与账号网页'
+              alt={`${provider === 'anthropic' ? 'Claude' : 'OpenAI'} 官方登录与账号网页`}
               draggable={false}
               className={
                 originalSize
@@ -878,7 +894,9 @@ export function SlotBrowserDialog({
           </div>
           <div className='flex flex-wrap items-center gap-2'>
             {currentPurpose === 'oauth' ? (
-              purpose === 'oauth' && finish.phase === 'ready' ? (
+              provider === 'openai' &&
+              purpose === 'oauth' &&
+              finish.phase === 'ready' ? (
                 <Button
                   size='sm'
                   variant='outline'
@@ -910,7 +928,9 @@ export function SlotBrowserDialog({
                 </Button>
               ) : !finish.saved ? (
                 <p className='m-0 text-xs text-muted-foreground'>
-                  授权成功后自动保存凭据，再开机完成配置
+                  {preserveState
+                    ? '授权成功后自动保存凭据，保留当前启停和调度设置'
+                    : '授权成功后自动保存凭据，再开机完成配置'}
                 </p>
               ) : null
             ) : (

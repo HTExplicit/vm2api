@@ -174,4 +174,17 @@ describe('latest browser frame transport', () => {
       '无需重新创建密钥'
     )
   })
+
+  it('uses Claude OAuth labels without OpenAI Platform actions', () => {
+    expect(browserStatusMessage('ready', 'oauth', 'anthropic')).toContain(
+      'Claude'
+    )
+    const completed = browserStatusMessage(
+      'oauth_complete',
+      'oauth',
+      'anthropic'
+    )
+    expect(completed).toContain('Claude 授权成功')
+    expect(completed).not.toContain('Platform')
+  })
 })

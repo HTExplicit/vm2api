@@ -27,7 +27,7 @@ import {
   normalizeCredentialRefreshConfig,
 } from './lib/oauth/credential-refresh-monitor.mjs'
 import { createKernelWatchdog, normalizeKernelWatchdogConfig } from './lib/transport/kernel-watchdog.mjs'
-import { ensureSlotSubscriptionType } from './lib/oauth/oauth-credentials.mjs'
+import { ensureSlotSubscriptionType, readSlotCredentialIdentity } from './lib/oauth/oauth-credentials.mjs'
 import { createCliNodeGuard } from './lib/vm/cli-node-guard.mjs'
 
 import { createSlotBridgeHealer, powerOnSlot, reviveDownSlots } from './lib/vm/slot-recovery.mjs'
@@ -57,6 +57,7 @@ import { SlotBrowserRepo } from './lib/db/repos/slot-browser-repo.mjs'
 import { SlotBrowserManager } from './lib/browser/slot-browser-manager.mjs'
 import { createBrowserTempCleanup } from './lib/browser/temp-cleanup.mjs'
 import { CodexBrowserLoginService } from './lib/oauth/codex-browser-login.mjs'
+import { ClaudeBrowserLoginService } from './lib/oauth/claude-browser-login.mjs'
 import { commitImportedCodexVm } from './lib/admin/panel-routes.mjs'
 import { resolveInferenceBackend } from './lib/pool/api-protocol.mjs'
 import { bootApiKernel, apiKernelPaths, apiKernelSnapshot } from './lib/transport/api-kernel-client.mjs'
@@ -70,6 +71,7 @@ import {
   setScheduleHold,
   clearScheduleHold,
   isCodexVm,
+  summarizeVm,
   syncCodexQuotaSchedule,
 } from './lib/vm/vm-registry.mjs'
 import { makeError, ErrorType, ErrorCode } from './lib/core/errors.mjs'
@@ -326,6 +328,14 @@ apiScheduler.reload(apiEndpointStore.listRaw())
 const openaiApiRepo = new OpenaiApiRepo()
 const slotBrowserRepo = new SlotBrowserRepo(undefined, { projectRoot: cfg.paths.project })
 const slotAccountIdentity = (id) => {
+  const vm = getVm(cfg.paths.project, id)
+  if (vm && !isCodexVm(vm)) {
+    const credential = readSlotCredentialIdentity(path.join(cfg.paths.project, 'vms', id, 'cli-home'))
+    return {
+      accountId: credential?.account_uuid || vm.claude?.account_uuid || '',
+      email: credential?.email || vm.claude?.email || '',
+    }
+  }
   try {
     const current = openaiApiCredits.accountForVm(id)
     return { accountId: current.accountId, email: current.account.email || '' }
@@ -903,6 +913,36 @@ const importCommit = createImportCommit({
 
 const { commitImportedOauth, requireSlotProxy, officialCcStatsHandler } = importCommit
 
+const claudeBrowserLogin = new ClaudeBrowserLoginService({
+  browserManager: slotBrowserManager,
+  projectRoot: cfg.paths.project,
+  getVm: (id) => getVm(cfg.paths.project, id),
+  getRouting: () => routingConfig,
+  getAccountIdentity: slotAccountIdentity,
+  commitCredentials: async ({ vmId, oauth, ...options }) => {
+    const existing = getVm(cfg.paths.project, vmId)
+    if (!existing) throw Object.assign(new Error('槽位已删除'), { code: 'vm_not_found' })
+    const committed = await commitImportedOauth({
+      ...options,
+      vmId,
+      vmPath: path.join(cfg.paths.project, 'vms', `${vmId}.json`),
+      existing,
+      oauth,
+      source: oauth.source || 'oauth-browser',
+    })
+    if (!committed.ok) return committed
+    return {
+      vm: summarizeVm(existing, cfg.paths.project, routingConfig),
+      oauth_email: existing.claude?.email,
+      has_refresh: existing.claude?.has_refresh,
+      official_cc_bootstrap: committed.official_cc_bootstrap || null,
+      ...(committed.telemetry_error ? { telemetry_error: committed.telemetry_error } : {}),
+      source: oauth.source,
+      flavor: oauth.flavor,
+    }
+  },
+})
+
 const handleKeySelf = createKeySelfHandler({
   json,
   requireAuth,
@@ -1076,6 +1116,7 @@ const handlePanel = createPanelHandler({
   slotBrowserRepo,
   slotBrowserManager,
   codexBrowserLogin,
+  claudeBrowserLogin,
   requestLog,
   vmTestSchedule,
   backupService,
@@ -1137,6 +1178,7 @@ const gracefulShutdown = createGracefulShutdown({
   afterDrain: async () => {
     const browserStops = await Promise.allSettled([
       codexBrowserLogin.stop(),
+      claudeBrowserLogin.stop(),
       slotBrowserManager.stop(),
       openaiApiManager.stop(),
     ])
@@ -1144,7 +1186,7 @@ const gracefulShutdown = createGracefulShutdown({
     for (const [index, result] of browserStops.entries()) {
       if (result.status === 'rejected')
         console.warn('[shutdown] browser service cleanup failed', {
-          service: ['oauth', 'browser', 'openai-api'][index],
+          service: ['openai-oauth', 'claude-oauth', 'browser', 'openai-api'][index],
           code: result.reason?.code || 'browser_cleanup_failed',
         })
     }

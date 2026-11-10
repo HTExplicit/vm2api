@@ -147,7 +147,17 @@ export function createImportCommit(ctx) {
     }
   }
 
-  async function commitImportedOauthGrant({ vmId, vmPath, existing, oauth, source, name, skipOfficialCc = false }) {
+  async function commitImportedOauthGrant({
+    vmId,
+    vmPath,
+    existing,
+    oauth,
+    source,
+    name,
+    skipOfficialCc = false,
+    prepareRuntime = true,
+    preservePowerIntent = false,
+  }) {
     const importedCredential = importedCredentialFromOauth(oauth, existing)
     const workerExec = {
       vmId,
@@ -161,7 +171,7 @@ export function createImportCommit(ctx) {
       bindVmProxy(ctx.cfg.paths.project, vmId, bound)
       adoptVmProxyBinding(existing, getVm(ctx.cfg.paths.project, vmId))
     }
-    if (process.env.KIN_CRS_MOCK !== '1') {
+    if (prepareRuntime && process.env.KIN_CRS_MOCK !== '1') {
       const desynced = isSlotProxyDesynced(existing, ctx.cfg.paths.project)
       const legacy = slotHost(existing).native || isCodexVm(existing)
       const health = legacy ? null : await rustKernelHealth(workerExec)
@@ -219,7 +229,7 @@ export function createImportCommit(ctx) {
           mode: importedCredential.mode || credentialModeFromOauth(oauth),
           type: importedCredential.type || importedCredential.mode,
         },
-        { acceptLiveGrant: true, operatorImport: true },
+        { acceptLiveGrant: true, operatorImport: true, preservePowerIntent },
       )
       try {
         const accountId = importedCredential.account_uuid || existing.claude?.account_uuid || vmId
