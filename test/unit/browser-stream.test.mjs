@@ -629,6 +629,30 @@ test('a provider callback owns navigation aborts while authorization completes w
   assert.equal(ws.json().at(-1).error, '页面打开失败，请检查链接后重试。')
 })
 
+test('new navigation after OAuth completion still reports genuine network failures and timeouts', async (t) => {
+  const f = fixture(t, { isAuthorizationCompleting: () => true })
+  const ws = new Socket()
+  f.stream.attach(ws)
+  for (const [name, expected] of [
+    ['Error', '页面打开失败，请检查链接后重试。'],
+    ['TimeoutError', '页面打开超时，请检查链接后重试。'],
+  ]) {
+    f.page.goto = async () => {
+      throw Object.assign(Error('page.goto failed at https://mail.fixture.test/verify?token=private'), { name })
+    }
+    ws.input({ type: 'navigate', url: 'https://claude.com/login' })
+    await f.stream.inputTail
+    assert.equal(ws.json().at(-1).type, 'navigation')
+    assert.equal(ws.json().at(-1).loading, false)
+    assert.equal(ws.json().at(-1).error, expected)
+    assert.doesNotMatch(ws.json().at(-1).error, /private|token=/)
+  }
+  assert.equal(
+    ws.json().some((item) => item.type === 'status'),
+    false,
+  )
+})
+
 test('returning to authorization uses the current service callback and reports expired capability separately', async (t) => {
   let available = true
   let returned = 0

@@ -275,6 +275,7 @@ export class BrowserStream {
     if (this.closed || !client || ws.readyState !== 1) return
     const navigationInput = input.type === 'navigate' || input.type === 'return_to_authorization'
     let navigationStarted = false
+    let authorizationCompletingAtStart = false
     try {
       try {
         await this.assertCurrent()
@@ -311,6 +312,7 @@ export class BrowserStream {
         } else if (!this.canReturnToAuthorization()) {
           throw new Error('当前授权会话已结束，无法返回原授权页面。')
         }
+        authorizationCompletingAtStart = this.isAuthorizationCompleting()
         navigationStarted = true
         this.navigationLoading = true
         this.sendNavigation()
@@ -345,7 +347,7 @@ export class BrowserStream {
     } catch (error) {
       if (navigationInput) {
         this.navigationLoading = false
-        if (navigationStarted && this.isAuthorizationCompleting()) {
+        if (navigationStarted && !authorizationCompletingAtStart && this.isAuthorizationCompleting()) {
           this.sendNavigation()
         } else {
           this.sendNavigation(
