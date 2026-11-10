@@ -118,6 +118,7 @@ export async function runSlotOauth(
     headers,
     force = false,
     timeoutMs = 45000,
+    configPath = WORKER_CONFIG,
     runDocker = runSlotProcess,
     postTelemetry = postRustKernelTelemetryEvent,
   } = {},
@@ -128,7 +129,7 @@ export async function runSlotOauth(
   const host = slotHost(exec?.vm)
   const vm = { ...(exec?.vm || {}), id: exec?.vmId || exec?.vm?.id }
   const user = host.execUser(vm)
-  const argv = slotExecArgv(vm, [WORKER_BIN, 'oauth', op, '--config', WORKER_CONFIG], { interactive: true, user })
+  const argv = slotExecArgv(vm, [WORKER_BIN, 'oauth', op, '--config', configPath], { interactive: true, user })
   if (force) argv.push('--force')
 
   const stdin =

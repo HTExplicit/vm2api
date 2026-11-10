@@ -238,6 +238,7 @@ export async function exchangeTokenViaCookieAuth({
   exec,
   projectRoot,
   routing,
+  preservePowerIntent = false,
 } = {}) {
   const parsed = parseFullCode(code, state)
   if (!fetchImpl) {
@@ -251,7 +252,7 @@ export async function exchangeTokenViaCookieAuth({
         proxy_url: proxyUrl,
         timeout_ms: timeoutMs,
       },
-      { exec, projectRoot, routing, timeoutMs, runNative: runNativeOAuthAuthService },
+      { exec, projectRoot, routing, timeoutMs, preservePowerIntent, runNative: runNativeOAuthAuthService },
     )
   }
   const auth = await loadLocalAuthForTest()

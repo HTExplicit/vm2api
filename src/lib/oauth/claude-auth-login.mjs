@@ -24,6 +24,7 @@ import { FULL_OAUTH_SCOPE } from './oauth-contract.mjs'
 import { flattenOauthIdentity } from './oauth-identity.mjs'
 import { prepareSlotOAuth } from './guest-oauth-helper.mjs'
 import { slotExec } from '../vm/slot-runtime.mjs'
+import { runSlotProcess } from '../transport/slot-oauth.mjs'
 
 export const AUTH_LOGIN_SESSION_TTL_MS = 30 * 60 * 1000
 export const AUTH_LOGIN_SOURCE = 'claude-auth-login'
@@ -117,9 +118,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function waitFor(fn, timeoutMs, intervalMs = 200) {
+async function waitFor(fn, timeoutMs, intervalMs = 200, signal) {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
+    signal?.throwIfAborted()
     const value = fn()
     if (value) return value
     await sleep(intervalMs)
@@ -162,8 +164,20 @@ export async function assertAuthLoginReady(projectRoot, vm, { inspect = inspectC
   return { container: name, cli }
 }
 
-export async function stopClaudeAuthLoginSession(projectRoot, vmId, { execDetach = execDetached } = {}) {
+function isolatedLoginHome(sessionId) {
+  return /^[a-f0-9]{32}$/.test(sessionId || '') ? `/home/kincli/.cache/oauth-browser/${sessionId}` : null
+}
+
+export async function stopClaudeAuthLoginSession(
+  projectRoot,
+  vmId,
+  { execDetach = execDetached, runDocker = runSlotProcess, sessionId } = {},
+) {
   const dir = authLoginSessionDir(projectRoot, vmId)
+  const isolation = readJson(path.join(dir, 'isolation.json'))
+  const isolatedHome = isolatedLoginHome(isolation?.session_id)
+  const current = readJson(path.join(dir, 'status.json'))
+  if (sessionId && (current?.session_id || isolation?.session_id) !== sessionId) return { ok: true, skipped: true }
   const ptyPid = readPidFile(path.join(dir, 'pty.pid'))
   const childPid = readPidFile(path.join(dir, 'child.pid'))
   for (const pid of [ptyPid, childPid]) {
@@ -174,15 +188,17 @@ export async function stopClaudeAuthLoginSession(projectRoot, vmId, { execDetach
     }
   }
   const vm = { ...(getVm(projectRoot, vmId) || {}), id: vmId }
-  try {
-    const connect = slotHost(vm).dockerApi()
-    const { Cmd, User } = slotExecCmd(vm, [
-      'sh',
-      '-lc',
-      `pkill -f '${CONTAINER_CLI_NODE_BIN} auth login' >/dev/null 2>&1 || true`,
-    ])
-    await execDetach(connect, containerName(vmId), Cmd, User ? { user: User } : {})
-  } catch {}
+  if (!isolatedHome) {
+    try {
+      const connect = slotHost(vm).dockerApi()
+      const { Cmd, User } = slotExecCmd(vm, [
+        'sh',
+        '-lc',
+        `pkill -f '${CONTAINER_CLI_NODE_BIN} auth login' >/dev/null 2>&1 || true`,
+      ])
+      await execDetach(connect, containerName(vmId), Cmd, User ? { user: User } : {})
+    } catch {}
+  }
 
   const deadline = Date.now() + 3000
   while (Date.now() < deadline) {
@@ -196,7 +212,28 @@ export async function stopClaudeAuthLoginSession(projectRoot, vmId, { execDetach
       } catch {}
     }
   }
-  for (const name of ['code.inbox', 'credential.json', 'pty.pid', 'child.pid', 'pty.out', 'status.json']) {
+  if (isolatedHome) {
+    const host = slotHost(vm)
+    const pattern = `${host.bins.cli.replace(/cli-node$/, '[c]li-node')} auth login`
+    const cleaned = await runDocker(
+      slotExecArgv(
+        vm,
+        ['sh', '-c', `pkill -f '${pattern}' >/dev/null 2>&1 || true; rm -rf -- "$1"`, 'cleanup-login', isolatedHome],
+        { user: host.execUser(vm) },
+      ),
+      { env: host.dockerEnv(), timeoutMs: 15000 },
+    )
+    if (cleaned?.code !== 0) throw fail('auth_login_cleanup_failed', '官方登录临时目录清理失败，请重试关闭')
+  }
+  for (const name of [
+    'code.inbox',
+    'credential.json',
+    'pty.pid',
+    'child.pid',
+    'pty.out',
+    'status.json',
+    'isolation.json',
+  ]) {
     try {
       fs.unlinkSync(path.join(dir, name))
     } catch {}
@@ -204,13 +241,13 @@ export async function stopClaudeAuthLoginSession(projectRoot, vmId, { execDetach
   return { ok: true }
 }
 
-function loginEnv(vm) {
+function loginEnv(vm, home = '/home/kincli') {
   const locale = vm.locale || vm.fingerprint?.locale || 'en_US.UTF-8'
   const tz = vm.timezone || vm.fingerprint?.timezone || 'UTC'
   return [
-    'HOME=/home/kincli',
-    'TMPDIR=/home/kincli/.cache/tmp',
-    'CLAUDE_CONFIG_DIR=/home/kincli/.claude',
+    `HOME=${home}`,
+    `TMPDIR=${home}/.cache/tmp`,
+    `CLAUDE_CONFIG_DIR=${home}/.claude`,
     'KERNEL_CONFIG=/run/kin/kernel.json',
     `TZ=${tz}`,
     `LANG=${locale}`,
@@ -242,14 +279,21 @@ export async function startClaudeAuthLoginSession({
   projectRoot,
   routing,
   force = false,
+  isolated = false,
+  preservePowerIntent = false,
   inspect = inspectContainer,
   prepare = prepareSlotOAuth,
+  runDocker = runSlotProcess,
+  spawnPty = spawn,
+  stopSession = stopClaudeAuthLoginSession,
+  signal,
 } = {}) {
+  signal?.throwIfAborted()
   const vmId = vm?.id
   if (!vmId || !projectRoot) throw fail('vm_required', 'vm_id required')
   const fake = process.env.KIN_FAKE_SESSION_OAUTH === '1' || process.env.KIN_FAKE_SESSION_OAUTH === 'true'
   if (!fake) {
-    const prepared = await prepare({ exec: slotExec(projectRoot, vm), projectRoot, routing })
+    const prepared = await prepare({ exec: slotExec(projectRoot, vm), projectRoot, routing, preservePowerIntent })
     vm = prepared.exec.vm
   }
   await assertAuthLoginReady(projectRoot, vm, { inspect })
@@ -264,7 +308,8 @@ export async function startClaudeAuthLoginSession({
     }
   }
   const existing = readAuthLoginSession(projectRoot, vmId)
-  if (isPersistentAuthLoginSession(existing, { force })) {
+  const existingIsolated = !!readJson(path.join(authLoginSessionDir(projectRoot, vmId), 'isolation.json'))
+  if (existingIsolated === isolated && isPersistentAuthLoginSession(existing, { force })) {
     return {
       session_id: existing.session_id,
       auth_url: existing.auth_url,
@@ -275,7 +320,7 @@ export async function startClaudeAuthLoginSession({
       reused: true,
     }
   }
-  await stopClaudeAuthLoginSession(projectRoot, vmId)
+  await stopSession(projectRoot, vmId, { runDocker })
   const dir = authLoginSessionDir(projectRoot, vmId)
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   const sessionId = crypto.randomBytes(16).toString('hex')
@@ -286,14 +331,25 @@ export async function startClaudeAuthLoginSession({
   const [uid, gid] = user.split(':')
   const dockerEnv = host.dockerEnv()
   const ptyScript = path.join(scriptsDir(), 'claude-auth-login-pty.py')
+  const home = isolated ? isolatedLoginHome(sessionId) : '/home/kincli'
+  if (isolated) {
+    const prepared = await runDocker(
+      slotExecArgv(vm, ['mkdir', '-p', `${home}/.claude`, `${home}/.cache/tmp`], { user }),
+      { env: dockerEnv, timeoutMs: 15000 },
+    )
+    if (prepared?.code !== 0) throw fail('auth_login_setup_failed', '无法准备官方登录临时目录')
+    fs.writeFileSync(path.join(dir, 'isolation.json'), JSON.stringify({ session_id: sessionId }) + '\n', {
+      mode: 0o600,
+    })
+  }
   const execArgv = slotExecArgv(vm, [host.bins.cli, 'auth', 'login'], {
     user,
-    env: loginEnv(vm),
-    workdir: '/home/kincli',
+    env: loginEnv(vm, home),
+    workdir: home,
     interactive: true,
     tty: true,
   })
-  const child = spawn('python3', [ptyScript], {
+  const child = spawnPty('python3', [ptyScript], {
     env: {
       ...(dockerEnv?.DOCKER_HOST ? { DOCKER_HOST: dockerEnv.DOCKER_HOST } : {}),
       PATH: process.env.PATH || '/usr/bin:/bin',
@@ -307,7 +363,16 @@ export async function startClaudeAuthLoginSession({
       KIN_GID: gid,
       KIN_CLI_BIN: host.bins.cli,
       KIN_SESSION_DIR: dir,
-      KIN_CREDENTIAL_FILE: path.join(officialCcHome(projectRoot, vmId), '.claude', '.credentials.json'),
+      KIN_CREDENTIAL_FILE: isolated
+        ? path.join(
+            officialCcHome(projectRoot, vmId),
+            '.cache',
+            'oauth-browser',
+            sessionId,
+            '.claude',
+            '.credentials.json',
+          )
+        : path.join(officialCcHome(projectRoot, vmId), '.claude', '.credentials.json'),
       KIN_SESSION_ID: sessionId,
       KIN_VM_ID: vmId,
       KIN_CREATED_AT: String(createdAt),
@@ -320,7 +385,9 @@ export async function startClaudeAuthLoginSession({
           [
             'sh',
             '-c',
-            'f=/home/kincli/.claude/credentials.json; [ -f "$f" ] && [ ! -L "$f" ] && dd if="$f" iflag=nofollow,nonblock bs=65536 count=16 status=none',
+            'f="$1"; [ -f "$f" ] && [ ! -L "$f" ] && dd if="$f" iflag=nofollow,nonblock bs=65536 count=16 status=none',
+            'read-login-credential',
+            `${home}/.claude/${isolated ? '.credentials.json' : 'credentials.json'}`,
           ],
           { user },
         ),
@@ -330,12 +397,17 @@ export async function startClaudeAuthLoginSession({
     stdio: 'ignore',
   })
   child.unref()
-  const found = await waitFor(() => {
-    const s = readAuthLoginSession(projectRoot, vmId)
-    if (Number(s?.updated_at || 0) < createdAt) return null
-    if (s?.error && (s.status === 'error' || s.status === 'exited')) throw fail('auth_login_failed', s.error)
-    return s?.auth_url ? s : null
-  }, URL_WAIT_MS)
+  const found = await waitFor(
+    () => {
+      const s = readAuthLoginSession(projectRoot, vmId)
+      if (Number(s?.updated_at || 0) < createdAt) return null
+      if (s?.error && (s.status === 'error' || s.status === 'exited')) throw fail('auth_login_failed', s.error)
+      return s?.auth_url ? s : null
+    },
+    URL_WAIT_MS,
+    200,
+    signal,
+  )
   if (!found?.auth_url) {
     const s = readAuthLoginSession(projectRoot, vmId)
     throw fail('auth_login_url_timeout', s?.error || '槽内 claude auth login 未给出授权链接')
@@ -410,7 +482,8 @@ function readLoginCredential(file) {
   }
 }
 
-export async function completeClaudeAuthLogin({ projectRoot, vmId, sessionId, code } = {}) {
+export async function completeClaudeAuthLogin({ projectRoot, vmId, sessionId, code, signal } = {}) {
+  signal?.throwIfAborted()
   const raw = String(code || '').trim()
   if (!raw) throw fail('code_required', '请粘贴授权码（含 # 后半段）')
   if (process.env.KIN_FAKE_SESSION_OAUTH === '1' || process.env.KIN_FAKE_SESSION_OAUTH === 'true') {
@@ -439,7 +512,7 @@ export async function completeClaudeAuthLogin({ projectRoot, vmId, sessionId, co
   if (session.status === 'login_ready') {
     const ready = readLoginCredential(credFile)
     if (ready) {
-      await stopClaudeAuthLoginSession(projectRoot, vmId)
+      await stopClaudeAuthLoginSession(projectRoot, vmId, { sessionId: session.session_id })
       return ready
     }
   }
@@ -469,6 +542,7 @@ export async function completeClaudeAuthLogin({ projectRoot, vmId, sessionId, co
     },
     TOKEN_WAIT_MS,
     300,
+    signal,
   )
   if (!credential) {
     const s = readAuthLoginSession(projectRoot, vmId)
@@ -477,6 +551,6 @@ export async function completeClaudeAuthLogin({ projectRoot, vmId, sessionId, co
       s?.error || '官方 CLI 未完成换票。请再打开当前链接粘贴完整授权码（含 # 后半段），不要重新生成',
     )
   }
-  await stopClaudeAuthLoginSession(projectRoot, vmId)
+  await stopClaudeAuthLoginSession(projectRoot, vmId, { sessionId: session.session_id })
   return credential
 }

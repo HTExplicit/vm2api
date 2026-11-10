@@ -166,16 +166,26 @@ for (const cleanupFails of [false, true]) {
     const logs = new RequestLogStore({ dataDir: dir, db, mode: 'normal' })
     const events = []
     const source = fs.readFileSync(new URL('../../src/server.mjs', import.meta.url), 'utf8')
-    const wiring = source.slice(source.indexOf('let browserShutdownFailed = false'), source.indexOf('const server = http.createServer'))
-    const stop = (name) => ({ stop: async () => { events.push(name) } })
+    const wiring = source.slice(
+      source.indexOf('let browserShutdownFailed = false'),
+      source.indexOf('const server = http.createServer'),
+    )
+    const stop = (name) => ({
+      stop: async () => {
+        events.push(name)
+      },
+    })
     const context = {
-      createGracefulShutdown: (options) => createGracefulShutdown({
-        ...options,
-        logger: { log() {}, warn() {} },
-      }),
+      createGracefulShutdown: (options) =>
+        createGracefulShutdown({
+          ...options,
+          logger: { log() {}, warn() {} },
+        }),
       process: { exit: (code) => events.push(`exit:${code}`) },
       console: { warn() {} },
-      installJevUsageRecorder() { events.push('jev-recorder-off') },
+      installJevUsageRecorder() {
+        events.push('jev-recorder-off')
+      },
       vmTestSchedule: stop('schedule'),
       backupService: { stopScheduler() {} },
       proxyPool: { stopScheduler() {} },
@@ -187,15 +197,25 @@ for (const cleanupFails of [false, true]) {
       catalogMonitor: stop('catalog'),
       notifyMonitor: stop('notify'),
       codexBrowserLogin: stop('oauth'),
-      slotBrowserManager: { stop: async () => {
-        events.push('browser')
-        if (cleanupFails) throw Object.assign(new Error('fixture'), { code: 'browser_close_failed' })
-      } },
+      claudeBrowserLogin: stop('claude-oauth'),
+      slotBrowserManager: {
+        stop: async () => {
+          events.push('browser')
+          if (cleanupFails) throw Object.assign(new Error('fixture'), { code: 'browser_close_failed' })
+        },
+      },
       openaiApiManager: stop('account-api'),
-      stopVmWatch() { events.push('watch') },
-      stopAllRustKernels() { events.push('kernels') },
+      stopVmWatch() {
+        events.push('watch')
+      },
+      stopAllRustKernels() {
+        events.push('kernels')
+      },
       clusterManager: stop('cluster'),
-      closeDatabase() { events.push('database'); closeDatabase() },
+      closeDatabase() {
+        events.push('database')
+        closeDatabase()
+      },
     }
     let persisted
     try {
@@ -204,16 +224,26 @@ for (const cleanupFails of [false, true]) {
       context.shutdown.trackRequest({}, response)
       const pending = context.shutdown.shutdown()
       assert.equal(events.includes('browser'), false, 'cleanup waits for active HTTP requests')
-      assert.equal(events.includes('jev-recorder-off'), false, 'active reviews keep their usage recorder while draining')
-      const row = logs.finish(logs.start({ headers: {}, socket: {} }, { protocol: 'anthropic.messages' }), { status: 200 })
+      assert.equal(
+        events.includes('jev-recorder-off'),
+        false,
+        'active reviews keep their usage recorder while draining',
+      )
+      const row = logs.finish(logs.start({ headers: {}, socket: {} }, { protocol: 'anthropic.messages' }), {
+        status: 200,
+      })
       response.end()
       await pending
-      for (const service of ['oauth', 'browser', 'account-api']) assert.equal(events.filter((name) => name === service).length, 1)
+      for (const service of ['oauth', 'claude-oauth', 'browser', 'account-api'])
+        assert.equal(events.filter((name) => name === service).length, 1)
       assert.ok(events.indexOf('database') > events.indexOf('account-api'))
       assert.ok(events.indexOf('jev-recorder-off') < events.indexOf('database'))
       assert.equal(events.at(-1), `exit:${cleanupFails ? 1 : 0}`)
       persisted = new DatabaseSync(path.join(dir, 'kin.db'), { readOnly: true })
-      assert.equal(persisted.prepare('SELECT status FROM usage_logs WHERE request_id = ?').get(row.request_id)?.status, 200)
+      assert.equal(
+        persisted.prepare('SELECT status FROM usage_logs WHERE request_id = ?').get(row.request_id)?.status,
+        200,
+      )
     } finally {
       closeDatabase()
       persisted?.close()

@@ -71,6 +71,19 @@ test('runSlotOauth builds the worker argv and sends count-tokens stdin', async (
   })
 })
 
+test('runSlotOauth profiles an isolated incoming grant using its temporary config', async () => {
+  let seen
+  const result = await runSlotOauth(exec, 'profile', {
+    configPath: '/home/kincli/.cache/oauth-browser/session/worker.json',
+    runDocker: async (argv) => {
+      seen = argv
+      return { code: 0, stdout: '{"ok":true,"status":200,"body":{"account":{"uuid":"incoming"}}}' }
+    },
+  })
+  assert.equal(seen.at(-1), '/home/kincli/.cache/oauth-browser/session/worker.json')
+  assert.equal(result.body.account.uuid, 'incoming')
+})
+
 test('runSlotOauth sends reset-redeem stdin without wrapping it', async () => {
   let seen = null
   await runSlotOauth(exec, 'reset-redeem', {

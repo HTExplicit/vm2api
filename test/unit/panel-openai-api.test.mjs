@@ -144,6 +144,94 @@ function handler(root, { who = ADMIN, body = {}, manager = {}, credits = {}, ...
   }
 }
 
+test('Claude browser routes dispatch both OAuth flavors without OpenAI Platform work', async (t) => {
+  const root = fixture(t)
+  fs.writeFileSync(path.join(root, 'vms', 'vm-api.json'), JSON.stringify({ id: 'vm-api', platform: 'anthropic' }))
+  const steps = []
+  const state = { vm_id: 'vm-api', active: true, purpose: 'oauth', status: 'oauth_waiting' }
+  const options = {
+    claudeBrowserLogin: {
+      start(id, input) {
+        steps.push(['start', id, input])
+        return state
+      },
+      async cancel(id) {
+        steps.push(['cancel', id])
+      },
+    },
+    slotBrowserManager: {
+      state: () => state,
+      browserTicket: () => ({ ticket: 'claude-ticket' }),
+      async close(id) {
+        steps.push(['close', id])
+      },
+    },
+  }
+  for (const flavor of ['cai', 'claude_code']) {
+    const out = await handler(root, { ...options, body: { purpose: 'oauth', flavor } })(
+      'POST',
+      '/api/panel/vms/vm-api/browser/open',
+    )
+    assert.equal(out.status, 200)
+    assert.deepEqual(steps.at(-1), ['start', 'vm-api', { flavor }])
+  }
+  const before = steps.length
+  for (const body of [{ purpose: 'platform' }, { purpose: 'oauth', flavor: 'setup_token' }]) {
+    const denied = await handler(root, { ...options, body })('POST', '/api/panel/vms/vm-api/browser/open')
+    assert.equal(denied.status, 400)
+  }
+  assert.equal(steps.length, before)
+  const ticket = await handler(root, options)('POST', '/api/panel/vms/vm-api/browser-ticket')
+  assert.equal(ticket.body.data.ticket, 'claude-ticket')
+  const closed = await handler(root, options)('POST', '/api/panel/vms/vm-api/browser/close')
+  assert.equal(closed.status, 200)
+  assert.deepEqual(steps.slice(-2), [
+    ['cancel', 'vm-api'],
+    ['close', 'vm-api'],
+  ])
+})
+
+test('power and credential operations await Claude login cleanup before mutating the slot', async (t) => {
+  const root = fixture(t)
+  for (const route of [
+    'start',
+    'stop',
+    'reset',
+    'credential/clear',
+    'oauth/generate-auth-url',
+    'package',
+    'reset-fingerprint',
+    'reconcile-fingerprint',
+    'oauth/to-setup-token',
+  ]) {
+    let release
+    let cancelled = false
+    let mutated = false
+    const cleanup = new Promise((resolve) => {
+      release = resolve
+    })
+    const request = handler(root, {
+      claudeBrowserLogin: {
+        async cancel(id) {
+          assert.equal(id, 'vm-api')
+          cancelled = true
+          await cleanup
+        },
+      },
+      async powerOnSlot() {
+        mutated = true
+        return { ok: false, status: 409, code: 'fixture', error: 'fixture' }
+      },
+    })('POST', `/api/panel/vms/vm-api/${route}`)
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(cancelled, true, route)
+    assert.equal(mutated, false, route)
+    // Abort here so this ordering test never starts the real fixture runtime.
+    release(Promise.reject(Object.assign(new Error('cleanup fixture failure'), { code: 'fixture' })))
+    await assert.rejects(request, /cleanup fixture failure/)
+  }
+})
+
 test('OpenAi_api aggregates only current bound keys, eligible bind choices and safe proxy summaries', async (t) => {
   const root = fixture(t)
   for (const [id, name] of [

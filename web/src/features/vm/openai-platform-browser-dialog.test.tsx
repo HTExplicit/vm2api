@@ -18,6 +18,10 @@ const controls = vi.hoisted(() => ({
   saved: vi.fn(),
   changeOpen: vi.fn(),
   purpose: 'platform' as 'oauth' | 'platform',
+  provider: 'openai' as 'openai' | 'anthropic',
+  flavor: 'cai' as 'cai' | 'claude_code',
+  completionMode: 'start_and_schedule' as
+    'start_and_schedule' | 'preserve_state',
   vmId: 'slot-a',
   open: true,
   dialogChange: null as null | ((open: boolean) => void),
@@ -156,6 +160,9 @@ function render() {
       <SlotBrowserDialog
         vmId={controls.vmId}
         purpose='oauth'
+        provider={controls.provider}
+        flavor={controls.flavor}
+        completionMode={controls.completionMode}
         open={controls.open}
         onOpenChange={controls.changeOpen}
         onCredentialsSaved={controls.saved}
@@ -203,6 +210,9 @@ beforeEach(() => {
   controls.toastError.mockReset()
   controls.toastWarning.mockReset()
   controls.purpose = 'platform'
+  controls.provider = 'openai'
+  controls.flavor = 'cai'
+  controls.completionMode = 'start_and_schedule'
   controls.vmId = 'slot-a'
   controls.open = true
   Socket.instances = []
@@ -501,6 +511,90 @@ describe('OAuth browser login completion', () => {
     expect(html).toContain('网页会话保存失败')
     expect(button('开机并完成')?.disabled).toBe(false)
     expect(controls.complete).not.toHaveBeenCalled()
+  })
+})
+
+describe('Claude OAuth browser login', () => {
+  beforeEach(() => {
+    controls.purpose = 'oauth'
+    controls.provider = 'anthropic'
+    controls.api.mockImplementation(async (path: string) => {
+      if (path.endsWith('/health'))
+        return {
+          id: 'slot-a',
+          kernel: {
+            rust_health: { reachable: true, process_up: true, status: 200 },
+          },
+        }
+      if (path === '/api/panel/vms/slot-a')
+        return {
+          vm: { id: 'slot-a', status: 'running', runtime: { stopped: false } },
+        }
+      return loginRequests(path)
+    })
+  })
+
+  it.each(['cai', 'claude_code'] as const)(
+    'opens the selected %s flow with Claude labels',
+    async (flavor) => {
+      controls.flavor = flavor
+      await mount()
+      const html = render()
+      expect(controls.api).toHaveBeenCalledWith(
+        '/api/panel/vms/slot-a/browser/open',
+        {
+          method: 'POST',
+          body: JSON.stringify({ purpose: 'oauth', flavor }),
+        }
+      )
+      expect(html).toContain('Claude 浏览器登录')
+      expect(html).not.toContain('OpenAI')
+      expect(html).not.toContain('Platform')
+    }
+  )
+
+  it('preserves power and scheduling on reauthorization and completes only after browser close', async () => {
+    controls.completionMode = 'preserve_state'
+    const socket = await mount()
+    const result = { oauth_email: 'claude@example.test' }
+    socket.status('oauth_complete', undefined, result)
+    const html = render()
+    expect(html).toContain('保留当前启停和调度设置')
+    expect(button('开机并完成')).toBeUndefined()
+    expect(button('完成')?.disabled).not.toBe(true)
+    expect(controls.saved).toHaveBeenCalledExactlyOnceWith(result)
+    expect(controls.complete).not.toHaveBeenCalled()
+    button('完成')!.onClick!({} as never)
+    await settle()
+    expect(controls.complete).toHaveBeenCalledExactlyOnceWith(result)
+    expect(
+      controls.api.mock.calls.some(([path]) =>
+        /\/(start|health|schedulable)$/.test(path)
+      )
+    ).toBe(false)
+  })
+
+  it('starts and verifies Claude before scheduling a new slot without offering Platform', async () => {
+    const socket = await mount()
+    socket.status('oauth_complete')
+    render()
+    expect(button('开机并完成')?.disabled).toBe(false)
+    button('开机并完成')!.onClick!({} as never)
+    await settle()
+    const html = render()
+    expect(html).toContain('内核已就绪，调度已开启')
+    expect(html).not.toContain('Platform')
+    expect(controls.api).toHaveBeenCalledWith(
+      '/api/panel/vms/slot-a/schedulable',
+      {
+        method: 'POST',
+        body: JSON.stringify({ schedulable: true }),
+      }
+    )
+    expect(controls.complete).not.toHaveBeenCalled()
+    button('完成')!.onClick!({} as never)
+    await settle()
+    expect(controls.complete).toHaveBeenCalledOnce()
   })
 })
 
