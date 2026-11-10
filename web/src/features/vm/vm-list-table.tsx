@@ -329,13 +329,11 @@ function WeekPills({ week }: { week: VmWeekOutcome }) {
   )
 }
 
-/** pro / max（GPT 为套餐名）跟着账号走，放在账号名同一行。 */
+/** 官方订阅套餐跟着账号走，放在账号名同一行。 */
 function TierBadge({ vm }: { vm: Vm }) {
   if (isCodexVm(vm)) return <OpenaiPlanBadge vm={vm} />
   const skin = tierVisual(vm)
-  if (skin.key !== 'pro' && skin.key !== 'max' && skin.key !== 'unknown') {
-    return null
-  }
+  if (skin.key === 'none') return null
   return (
     <span
       className={cn(
