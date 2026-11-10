@@ -11,7 +11,7 @@ function fixture(t, options = {}) {
   const vms = new Map(
     ['a', 'b', 'c'].map((id) => [id, { id, proxy: { url: `socks5h://127.0.0.1:${id === 'a' ? 1080 : 1081}` } }]),
   )
-  const calls = { launched: [], closed: [], saved: [], routes: [] }
+  const calls = { launched: [], closed: [], saved: [], routes: [], navigation: [] }
   const repo = {
     get(id) {
       return records.get(id) || null
@@ -32,6 +32,12 @@ function fixture(t, options = {}) {
     }
     attach(ws) {
       this.clients.add(ws)
+    }
+    sendNavigation() {
+      calls.navigation.push({
+        canReturnToAuthorization: this.config.canReturnToAuthorization(),
+        inputLocked: this.config.isInputLocked(),
+      })
     }
     close() {
       this.closed = true
@@ -91,6 +97,73 @@ test('slot identities persist and a retained same-slot session is reused without
   assert.deepEqual(f.calls.launched[1].fingerprint, { unique: 1 })
   assert.deepEqual(f.calls.launched[1].storageState, f.records.get('a').storage_state)
   await f.manager.release(restored)
+})
+
+test('navigation reuses the live OAuth return callback and tracks Platform input locks without replacing status', async (t) => {
+  const f = fixture(t)
+  const live = await f.manager.acquire('a', { interactive: true, purpose: 'oauth' })
+  let returns = 0
+  live.returnToAuthorization = async () => {
+    returns++
+  }
+  live.canReturnToAuthorization = () => true
+  assert.equal(live.stream.config.isInputLocked(), true, 'the initial ready page must await OAuth navigation')
+  f.manager.setStatus(live, 'opening', '正在打开授权页')
+  assert.deepEqual(f.calls.navigation.at(-1), { canReturnToAuthorization: false, inputLocked: true })
+  assert.equal(live.stream.config.onInput({ type: 'click' }), true, 'navigation locks do not change page input policy')
+  f.manager.setStatus(live, 'oauth_waiting', '等待授权')
+  assert.deepEqual(f.calls.navigation.at(-1), { canReturnToAuthorization: true, inputLocked: false })
+  await live.stream.config.onReturnToAuthorization()
+  assert.equal(returns, 1)
+  assert.equal(f.manager.state('a').status, 'oauth_waiting')
+  live.authorizationInProgress = () => true
+  live.stream.sendNavigation()
+  assert.equal(f.calls.navigation.at(-1).inputLocked, true)
+  assert.equal(live.stream.config.isAuthorizationCompleting(), true)
+  live.authorizationInProgress = () => false
+
+  live.inputLocked = true
+  f.manager.setStatus(live, 'configuring', '正在配置')
+  assert.deepEqual(f.calls.navigation.at(-1), { canReturnToAuthorization: false, inputLocked: true })
+  assert.equal(live.stream.config.onInput({ type: 'navigate' }), false)
+  assert.equal(live.stream.config.onInput({ type: 'return_to_authorization' }), false)
+  assert.equal(live.stream.config.onInput({ type: 'continue' }), true)
+  assert.equal(live.stream.config.onInput({ type: 'close' }), true)
+
+  live.inputLocked = false
+  live.canReturnToAuthorization = () => false
+  f.manager.setStatus(live, 'oauth_complete', '授权已保存')
+  assert.deepEqual(f.calls.navigation.at(-1), { canReturnToAuthorization: false, inputLocked: false })
+  assert.throws(() => live.stream.config.onReturnToAuthorization(), { code: 'oauth_return_unavailable' })
+  assert.equal(returns, 1)
+  assert.equal(f.manager.state('a').status, 'oauth_complete')
+  assert.equal(live.stream.config.isAuthorizationCompleting(), true)
+  await f.manager.close('a')
+  assert.equal(f.calls.navigation.at(-1).inputLocked, true)
+})
+
+test('Platform opening locks only its address tools until its existing interaction phase begins', async (t) => {
+  const f = fixture(t)
+  const live = await f.manager.acquire('a', { interactive: true, purpose: 'platform' })
+  assert.equal(live.stream.config.isInputLocked(), false)
+  f.manager.setStatus(live, 'opening', '正在打开 Platform')
+  assert.equal(f.calls.navigation.at(-1).inputLocked, true)
+  assert.equal(live.stream.config.onInput({ type: 'click' }), true)
+  f.manager.setStatus(live, 'needs_login', '请登录')
+  assert.equal(f.calls.navigation.at(-1).inputLocked, false)
+})
+
+test('return-to-authorization checks the current slot binding before calling a live callback', async (t) => {
+  const f = fixture(t)
+  const live = await f.manager.acquire('a', { interactive: true })
+  let returned = false
+  live.canReturnToAuthorization = () => true
+  live.returnToAuthorization = () => {
+    returned = true
+  }
+  f.vms.get('a').proxy.url = 'socks5h://127.0.0.1:9999'
+  assert.throws(() => live.stream.config.onReturnToAuthorization(), { code: 'api_proxy_changed' })
+  assert.equal(returned, false)
 })
 
 test('one browser runs at a time, queued interactive work precedes background work, and cancelled work never launches', async (t) => {

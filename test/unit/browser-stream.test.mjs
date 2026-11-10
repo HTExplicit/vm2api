@@ -28,6 +28,16 @@ function fixture(t, options = {}) {
   const timers = new Map()
   const calls = { screenshots: 0, viewport: 0, resizes: 0, input: [], closed: 0 }
   const page = new EventEmitter()
+  let url = 'https://claude.com/login'
+  const mainFrame = {}
+  page.url = () => url
+  page.mainFrame = () => mainFrame
+  page.goto = async (next, options) => {
+    calls.input.push(['goto', next, options])
+    url = next
+    page.emit('framenavigated', mainFrame)
+    page.emit('domcontentloaded')
+  }
   page.evaluate = async () => {
     calls.viewport++
     return { width: 1920, height: 1080 }
@@ -97,11 +107,11 @@ test('clients share one screenshot and one smooth encoding, with JSON metadata a
   assert.equal(f.calls.screenshots, 1)
   assert.equal(f.calls.resizes, 1)
   for (const ws of [a, b, native]) {
-    assert.equal(ws.sent.length, 2)
-    assert.equal(typeof ws.sent[0].data, 'string')
-    assert.ok(Buffer.isBuffer(ws.sent[1].data))
-    assert.equal(ws.sent[1].options.binary, true)
-    assert.deepEqual(ws.json()[0], {
+    assert.equal(ws.sent.length, 3)
+    assert.equal(typeof ws.sent[1].data, 'string')
+    assert.ok(Buffer.isBuffer(ws.sent[2].data))
+    assert.equal(ws.sent[2].options.binary, true)
+    assert.deepEqual(ws.json()[1], {
       type: 'frame',
       seq: 1,
       mime: 'image/jpeg',
@@ -112,7 +122,7 @@ test('clients share one screenshot and one smooth encoding, with JSON metadata a
       quality: ws === native ? 'native' : 'smooth',
     })
   }
-  assert.strictEqual(a.sent[1].data, b.sent[1].data)
+  assert.strictEqual(a.sent[2].data, b.sent[2].data)
   assert.equal(f.calls.viewport, 1)
   await f.fire()
   assert.equal(f.calls.viewport, 1, 'unchanged viewport should not be queried every frame')
@@ -270,12 +280,12 @@ test('backpressured clients do not accumulate old frames and resume with the lat
   f.stream.attach(slow)
   await f.fire()
   await f.fire()
-  assert.equal(slow.sent.length, 0)
+  assert.equal(slow.sent.length, 1)
   slow.bufferedAmount = 0
   await f.fire()
-  assert.equal(slow.sent.length, 2)
-  assert.equal(slow.json()[0].seq, 3)
-  assert.equal(slow.sent[1].data.toString(), 'small-image-3')
+  assert.equal(slow.sent.length, 3)
+  assert.equal(slow.json()[1].seq, 3)
+  assert.equal(slow.sent[2].data.toString(), 'small-image-3')
 })
 
 test('native mode avoids resizing and quality switches do not change the page viewport', async (t) => {
@@ -320,6 +330,7 @@ test('closing detaches listeners and all clients without leaving an idle capture
   assert.equal(f.timers.size, 0)
   assert.equal(ws.listenerCount('message'), 0)
   assert.equal(f.page.listenerCount('domcontentloaded'), 0)
+  assert.equal(f.page.listenerCount('framenavigated'), 0)
   assert.equal(ws.readyState, 3)
 })
 
@@ -414,4 +425,295 @@ test('a proxy change discovered by input immediately closes before the next peri
   assert.equal(f.timers.size, 0)
   assert.equal(ws.readyState, 3)
   assert.deepEqual(f.calls.input, [])
+})
+
+test('attach and main-frame redirects report the current address without exposing subframe URLs', async (t) => {
+  let canReturn = true
+  let locked = false
+  const f = fixture(t, {
+    canReturnToAuthorization: () => canReturn,
+    isInputLocked: () => locked,
+  })
+  const ws = new Socket()
+  f.stream.attach(ws)
+  assert.deepEqual(ws.json()[0], {
+    type: 'navigation',
+    url: 'https://claude.com/login',
+    loading: false,
+    canReturnToAuthorization: true,
+    inputLocked: false,
+  })
+  f.page.emit('framenavigated', { url: () => 'https://iframe.example.test/' })
+  assert.equal(ws.json().length, 1)
+  f.page.url = () => 'https://claude.com/login/verify?flow=existing'
+  f.page.emit('framenavigated', f.page.mainFrame())
+  assert.equal(ws.json().at(-1).url, 'https://claude.com/login/verify?flow=existing')
+  canReturn = false
+  locked = true
+  f.stream.sendNavigation()
+  assert.equal(ws.json().at(-1).canReturnToAuthorization, false)
+  assert.equal(ws.json().at(-1).inputLocked, true)
+  const reconnect = new Socket()
+  f.stream.attach(reconnect)
+  assert.deepEqual(reconnect.json()[0], ws.json().at(-1))
+})
+
+test('mail-link navigation preserves the full URL and stays in the input queue and current page', async (t) => {
+  const f = fixture(t)
+  const ws = new Socket()
+  f.stream.attach(ws)
+  const url = 'https://claude.com/login/verify?token=a%2Bb%3D&return_to=%2Fcai%2Foauth%2Fauthorize#continue'
+  ws.input({ type: 'text', text: 'before', seq: 1 })
+  ws.input({ type: 'navigate', url: `  ${url}  `, seq: 2 })
+  ws.input({ type: 'key', key: 'Tab', seq: 3 })
+  await f.stream.inputTail
+  assert.deepEqual(f.calls.input, [
+    ['text', 'before'],
+    ['goto', url, { waitUntil: 'domcontentloaded', timeout: 45_000 }],
+    ['key', 'Tab'],
+  ])
+  const navigation = ws.json().filter((item) => item.type === 'navigation')
+  assert.ok(navigation.some((item) => item.loading === true))
+  assert.deepEqual(navigation.at(-1), {
+    type: 'navigation',
+    url,
+    loading: false,
+    canReturnToAuthorization: false,
+    inputLocked: false,
+  })
+  assert.deepEqual(
+    ws
+      .json()
+      .filter((item) => item.type === 'input_ack')
+      .map((item) => item.seq),
+    [1, 2, 3],
+  )
+  assert.equal(
+    ws.json().some((item) => item.type === 'status'),
+    false,
+  )
+})
+
+test('WebSocket close interrupts a pending navigation before later queued input can execute', async (t) => {
+  let f, rejectNavigation, started
+  let navigationSettled = false
+  let closedDuringNavigation = false
+  const navigating = new Promise((resolve) => {
+    started = resolve
+  })
+  f = fixture(t, {
+    onClose() {
+      closedDuringNavigation = !navigationSettled
+      f.calls.closed++
+      f.stream.close()
+      rejectNavigation(Error('browser closed during navigation'))
+    },
+  })
+  f.page.goto = async () => {
+    started()
+    try {
+      await new Promise((_, reject) => {
+        rejectNavigation = reject
+      })
+    } finally {
+      navigationSettled = true
+    }
+  }
+  const ws = new Socket()
+  f.stream.attach(ws)
+  ws.input({ type: 'navigate', url: 'https://claude.com/login', seq: 1 })
+  await navigating
+  ws.input({ type: 'text', text: 'must not reach the closed browser', seq: 2 })
+  ws.input({ type: 'close', seq: 3 })
+  for (let i = 0; i < 10 && !f.calls.closed; i++) await Promise.resolve()
+  assert.equal(f.calls.closed, 1)
+  assert.equal(closedDuringNavigation, true)
+  await f.stream.inputTail
+  assert.equal(f.stream.closed, true)
+  assert.equal(ws.readyState, 3)
+  assert.deepEqual(f.calls.input, [])
+  assert.equal(
+    ws.json().some((item) => item.type === 'status'),
+    false,
+  )
+  assert.equal(
+    ws.json().some((item) => item.type === 'input_ack'),
+    false,
+  )
+})
+
+test('invalid addresses and failed navigation report a navigation error without overriding OAuth status', async (t) => {
+  const f = fixture(t)
+  const ws = new Socket()
+  f.stream.attach(ws)
+  for (const url of ['', 'claude.com/login', 'javascript:alert(1)', 'file:///tmp/private', 'data:text/html,test']) {
+    ws.input({ type: 'navigate', url })
+    await f.stream.inputTail
+    assert.equal(ws.json().at(-1).type, 'navigation')
+    assert.equal(ws.json().at(-1).loading, false)
+    assert.ok(ws.json().at(-1).error)
+  }
+  assert.deepEqual(f.calls.input, [])
+  const privateUrl = 'https://claude.com/login/verify?token=fixture-private-mail-token&signature=private-signature'
+  f.page.goto = async () => {
+    throw Object.assign(Error(`page.goto: Timeout 45000ms navigating to "${privateUrl}"`), { name: 'TimeoutError' })
+  }
+  ws.input({ type: 'navigate', url: privateUrl })
+  await f.stream.inputTail
+  assert.equal(ws.json().at(-1).error, '页面打开超时，请检查链接后重试。')
+  assert.equal(ws.json().at(-1).loading, false)
+  assert.doesNotMatch(JSON.stringify(ws.json()), /fixture-private-mail-token|private-signature/)
+  f.page.goto = async () => {
+    throw Error(`page.goto: ERR_PROXY_CONNECTION_FAILED ${privateUrl}`)
+  }
+  ws.input({ type: 'navigate', url: privateUrl })
+  await f.stream.inputTail
+  assert.equal(ws.json().at(-1).error, '页面打开失败，请检查链接后重试。')
+  assert.doesNotMatch(JSON.stringify(ws.json()), /fixture-private-mail-token|private-signature/)
+  assert.equal(
+    ws.json().some((item) => item.type === 'status'),
+    false,
+  )
+})
+
+test('authorization return execution errors omit the signed URL from the navigation error', async (t) => {
+  const f = fixture(t, {
+    canReturnToAuthorization: () => true,
+    onReturnToAuthorization: async () => {
+      throw Error(
+        'page.goto failed https://claude.com/cai/oauth/authorize?state=private-state&code_challenge=private-challenge',
+      )
+    },
+  })
+  const ws = new Socket()
+  f.stream.attach(ws)
+  ws.input({ type: 'return_to_authorization' })
+  await f.stream.inputTail
+  assert.equal(ws.json().at(-1).error, '页面打开失败，请检查链接后重试。')
+  assert.doesNotMatch(JSON.stringify(ws.json()), /private-state|private-challenge/)
+  assert.equal(
+    ws.json().some((item) => item.type === 'status'),
+    false,
+  )
+})
+
+test('a provider callback owns navigation aborts while authorization completes without hiding invalid URLs', async (t) => {
+  let completing = false
+  const f = fixture(t, { isAuthorizationCompleting: () => completing })
+  f.page.goto = async () => {
+    completing = true
+    throw Error('page.goto: NS_ERROR_ABORTED at provider OAuth callback')
+  }
+  const ws = new Socket()
+  f.stream.attach(ws)
+  ws.input({ type: 'navigate', url: 'https://claude.com/login/verify?token=fixture-token' })
+  await f.stream.inputTail
+  assert.equal(ws.json().at(-1).type, 'navigation')
+  assert.equal(ws.json().at(-1).loading, false)
+  assert.equal(ws.json().at(-1).error, undefined)
+  assert.equal(
+    ws.json().some((item) => item.type === 'status'),
+    false,
+  )
+
+  ws.input({ type: 'navigate', url: 'javascript:alert(1)' })
+  await f.stream.inputTail
+  assert.match(ws.json().at(-1).error, /仅支持/)
+
+  completing = false
+  f.page.goto = async () => {
+    throw Error('page.goto: ERR_PROXY_CONNECTION_FAILED')
+  }
+  ws.input({ type: 'navigate', url: 'https://claude.com/login' })
+  await f.stream.inputTail
+  assert.equal(ws.json().at(-1).error, '页面打开失败，请检查链接后重试。')
+})
+
+test('new navigation after OAuth completion still reports genuine network failures and timeouts', async (t) => {
+  const f = fixture(t, { isAuthorizationCompleting: () => true })
+  const ws = new Socket()
+  f.stream.attach(ws)
+  for (const [name, expected] of [
+    ['Error', '页面打开失败，请检查链接后重试。'],
+    ['TimeoutError', '页面打开超时，请检查链接后重试。'],
+  ]) {
+    f.page.goto = async () => {
+      throw Object.assign(Error('page.goto failed at https://mail.fixture.test/verify?token=private'), { name })
+    }
+    ws.input({ type: 'navigate', url: 'https://claude.com/login' })
+    await f.stream.inputTail
+    assert.equal(ws.json().at(-1).type, 'navigation')
+    assert.equal(ws.json().at(-1).loading, false)
+    assert.equal(ws.json().at(-1).error, expected)
+    assert.doesNotMatch(ws.json().at(-1).error, /private|token=/)
+  }
+  assert.equal(
+    ws.json().some((item) => item.type === 'status'),
+    false,
+  )
+})
+
+test('returning to authorization uses the current service callback and reports expired capability separately', async (t) => {
+  let available = true
+  let returned = 0
+  const f = fixture(t, {
+    canReturnToAuthorization: () => available,
+    onReturnToAuthorization: async () => {
+      returned++
+    },
+  })
+  const ws = new Socket()
+  f.stream.attach(ws)
+  ws.input({ type: 'return_to_authorization', seq: 9 })
+  await f.stream.inputTail
+  assert.equal(returned, 1)
+  assert.deepEqual(
+    ws.json().filter((item) => item.type === 'input_ack'),
+    [{ type: 'input_ack', seq: 9 }],
+  )
+  available = false
+  f.stream.sendNavigation()
+  ws.input({ type: 'return_to_authorization', seq: 10 })
+  await f.stream.inputTail
+  assert.equal(returned, 1)
+  assert.equal(ws.json().at(-1).canReturnToAuthorization, false)
+  assert.match(ws.json().at(-1).error, /授权会话已结束/)
+  assert.equal(
+    ws.json().some((item) => item.type === 'status'),
+    false,
+  )
+})
+
+test('input locks and existing admission checks prevent navigation and authorization return', async (t) => {
+  let returned = 0
+  const locked = fixture(t, {
+    isInputLocked: () => true,
+    canReturnToAuthorization: () => true,
+    onReturnToAuthorization: async () => {
+      returned++
+    },
+  })
+  const ws = new Socket()
+  locked.stream.attach(ws)
+  ws.input({ type: 'navigate', url: 'https://claude.com/login' })
+  ws.input({ type: 'return_to_authorization' })
+  await locked.stream.inputTail
+  assert.deepEqual(locked.calls.input, [])
+  assert.equal(returned, 0)
+  assert.equal(ws.json().at(-1).inputLocked, true)
+  assert.equal(ws.json().at(-1).canReturnToAuthorization, false)
+
+  const rejected = fixture(t, { onInput: () => false })
+  const blocked = new Socket()
+  rejected.stream.attach(blocked)
+  blocked.input({ type: 'navigate', url: 'https://claude.com/login' })
+  await rejected.stream.inputTail
+  assert.deepEqual(rejected.calls.input, [])
+  rejected.stream.assertCurrent = () => {
+    throw Error('proxy changed')
+  }
+  blocked.input({ type: 'navigate', url: 'https://claude.com/login' })
+  await rejected.stream.inputTail
+  assert.equal(rejected.calls.closed, 1)
+  assert.deepEqual(rejected.calls.input, [])
 })

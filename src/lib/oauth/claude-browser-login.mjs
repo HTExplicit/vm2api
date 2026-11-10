@@ -307,11 +307,37 @@ export class ClaudeBrowserLoginService {
         Math.max(0, generated.expires_at - this.now()),
       )
       job.timer.unref?.()
+      job.canReturnToAuthorization = () =>
+        this.jobs.get(job.vmId) === job &&
+        !job.abort.signal.aborted &&
+        !job.live.closeSignal?.aborted &&
+        !job.exchanging &&
+        !job.saved &&
+        this.now() < generated.expires_at
+      job.returnToAuthorization = async () => {
+        this.assertCurrent(job)
+        if (!job.canReturnToAuthorization())
+          throw problem('oauth_return_unavailable', '当前 Claude 授权已结束，无法返回授权页。')
+        await unlessCancelled(
+          job.live.page.goto(generated.auth_url, { waitUntil: 'domcontentloaded', timeout: 45_000 }),
+          job.abort.signal,
+        )
+      }
+      job.live.returnToAuthorization = job.returnToAuthorization
+      job.live.canReturnToAuthorization = job.canReturnToAuthorization
+      job.authorizationInProgress = () => job.exchanging === true && !job.abort.signal.aborted
+      job.live.authorizationInProgress = job.authorizationInProgress
+      job.live.stream?.sendNavigation()
       this.browserManager.setStatus(job.live, 'opening', '正在打开 Claude 授权页面…')
-      await unlessCancelled(
-        job.live.page.goto(generated.auth_url, { waitUntil: 'domcontentloaded', timeout: 45_000 }),
-        job.abort.signal,
-      )
+      try {
+        await unlessCancelled(
+          job.live.page.goto(generated.auth_url, { waitUntil: 'domcontentloaded', timeout: 45_000 }),
+          job.abort.signal,
+        )
+      } catch (error) {
+        if (!job.exchanging || job.abort.signal.aborted) throw error
+        await unlessCancelled(job.completed.promise, job.abort.signal)
+      }
       if (!job.saved)
         this.browserManager.setStatus(job.live, 'oauth_waiting', '请在此窗口完成 Claude 登录、验证码及授权。')
       await unlessCancelled(job.completed.promise, job.abort.signal)
@@ -319,6 +345,17 @@ export class ClaudeBrowserLoginService {
       failure = error
     } finally {
       clearTimeout(job.timer)
+      let navigationChanged = false
+      if (job.returnToAuthorization && job.live?.returnToAuthorization === job.returnToAuthorization) {
+        delete job.live.returnToAuthorization
+        delete job.live.canReturnToAuthorization
+        navigationChanged = true
+      }
+      if (job.authorizationInProgress && job.live?.authorizationInProgress === job.authorizationInProgress) {
+        delete job.live.authorizationInProgress
+        navigationChanged = true
+      }
+      if (navigationChanged) job.live.stream?.sendNavigation()
       await job.callbackPromise
       if (job.routeMatch) await job.live.context.unroute(job.routeMatch, job.routeHandler).catch(() => {})
       job.live?.closeSignal?.removeEventListener('abort', onClosed)
@@ -374,6 +411,7 @@ export class ClaudeBrowserLoginService {
       return
     }
     job.exchanging = true
+    job.live.stream?.sendNavigation()
     try {
       let vm = this.assertCurrent(job)
       const code = parseClaudeBrowserCallback(route.request().url(), job.redirect)

@@ -81,6 +81,8 @@ function fixture(t, options = {}) {
     committed: [],
     statuses: [],
     cancelled: [],
+    navigationUpdates: [],
+    navigations: [],
   }
   let routeHandler, routeMatch, rejectAcquire
   let state = { vm_id: vm.id, status: 'closed' }
@@ -89,8 +91,15 @@ function fixture(t, options = {}) {
     proxyUrl: 'socks5h://bound.fixture.test:1080',
     closeSignal: closed.signal,
     page: {
-      async goto(url) {
+      async goto(url, navigationOptions) {
         calls.navigation = url
+        calls.navigations.push({ url, options: navigationOptions })
+        if (calls.navigations.length === 1 && options.initialGotoWait) await options.initialGotoWait
+      },
+    },
+    stream: {
+      sendNavigation() {
+        calls.navigationUpdates.push(live.canReturnToAuthorization?.() || false)
       },
     },
     context: {
@@ -141,11 +150,13 @@ function fixture(t, options = {}) {
   }
   function generated(args) {
     calls.generated.push(args)
-    return {
+    const result = {
       session_id: 'session-first',
       auth_url: `https://claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent(redirect)}&state=authorize-nonce`,
       expires_at: Date.now() + 60_000,
     }
+    calls.grant = result
+    return result
   }
   const service = new ClaudeBrowserLoginService({
     projectRoot: '/fixture',
@@ -153,6 +164,7 @@ function fixture(t, options = {}) {
     getVm: () => current,
     getAccountIdentity: () => vm.claude,
     getRouting: () => ({ inference: { engine: 'rust' } }),
+    ...(options.now ? { now: options.now } : {}),
     async getRuntimeState() {
       calls.inspections = (calls.inspections || 0) + 1
       return { running: options.actualRunning ?? options.running ?? false }
@@ -294,6 +306,177 @@ test('standard OAuth saves through the shared commit and stops a temporarily sta
   assert.equal(f.calls.statuses.at(-1).result.vm.runtime.stopped, true)
   assert.equal(f.calls.bound, identity.account_uuid)
   assert.equal(f.calls.persisted, true)
+})
+
+for (const flavor of ['cai', 'claude_code']) {
+  test(`${flavor} returns from an email page using the same original authorization and callback session`, async (t) => {
+    const f = fixture(t)
+    await f.service.start(f.vm.id, { flavor })
+    await f.waiting()
+    const original = f.calls.navigation
+    assert.equal(f.live.canReturnToAuthorization(), true)
+    await f.live.page.goto('https://claude.ai/login/email-link?token=fixture-mail&redirect=fixture')
+    const statusesBefore = f.calls.statuses.length
+    await f.live.returnToAuthorization()
+    assert.equal(f.calls.navigation, original)
+    assert.deepEqual(f.calls.navigations.at(-1).options, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+    assert.equal(f.calls.statuses.length, statusesBefore)
+    assert.equal(f.calls.generated.length, 1)
+    assert.equal(f.calls.prepared.length, flavor === 'cai' ? 1 : 0)
+    assert.equal(f.calls.cli.length, flavor === 'claude_code' ? 1 : 0)
+    assert.equal(f.calls.stops, undefined)
+    await f.callback()
+    await f.settled()
+    assert.equal(f.calls.exchanged[0].sessionId, 'session-first')
+    assert.equal(f.calls.committed.length, 1)
+    assert.equal(f.calls.stops, 1)
+    assert.equal(f.live.returnToAuthorization, undefined)
+    assert.equal(f.live.canReturnToAuthorization, undefined)
+    assert.equal(f.live.authorizationInProgress, undefined)
+    assert.deepEqual(f.calls.navigationUpdates, [true, false, false])
+  })
+}
+
+test('Claude return navigation failure does not replace OAuth waiting status or regenerate the session', async (t) => {
+  const f = fixture(t)
+  await f.service.start(f.vm.id)
+  await f.waiting()
+  const goto = f.live.page.goto
+  f.live.page.goto = async () => {
+    throw Error('fixture navigation failed')
+  }
+  const previousStatus = f.calls.statuses.at(-1)
+  await assert.rejects(f.live.returnToAuthorization(), /fixture navigation failed/)
+  assert.equal(f.calls.statuses.at(-1), previousStatus)
+  assert.equal(f.live.canReturnToAuthorization(), true)
+  f.live.page.goto = goto
+  await f.live.returnToAuthorization()
+  await f.callback()
+  await f.settled()
+  assert.equal(f.calls.generated.length, 1)
+})
+
+test('a callback interrupting initial Claude navigation completes its commit before session cleanup', async (t) => {
+  let interruptNavigation
+  const initialGotoWait = new Promise((_, reject) => {
+    interruptNavigation = reject
+  })
+  const commit = latch()
+  const f = fixture(t, { initialGotoWait, commitWait: commit.promise })
+  await f.service.start(f.vm.id)
+  await f.waiting()
+  const callback = f.callback()
+  await until(() => f.calls.committed.length)
+  assert.equal(f.live.authorizationInProgress(), true)
+  interruptNavigation(Error('navigation interrupted by callback'))
+  await sleep(5)
+  assert.equal(f.service.jobs.size, 1)
+  assert.equal(f.calls.cancelled.length, 0)
+  assert.equal(f.calls.stops, undefined)
+  assert.equal(
+    f.calls.statuses.some((status) => status.status === 'error'),
+    false,
+  )
+  commit.resolve()
+  await callback
+  await f.settled()
+  assert.equal(f.calls.statuses.at(-1).status, 'oauth_complete')
+  assert.equal(f.calls.committed.length, 1)
+  assert.equal(f.calls.stops, 1)
+  assert.equal(f.live.authorizationInProgress, undefined)
+})
+
+test('interrupted Claude navigation waits for the actual callback failure or explicit cancellation', async (t) => {
+  let interruptNavigation
+  const initialGotoWait = new Promise((_, reject) => {
+    interruptNavigation = reject
+  })
+  const commit = latch()
+  const f = fixture(t, { initialGotoWait, commitWait: commit.promise, commitFailure: true })
+  await f.service.start(f.vm.id)
+  await f.waiting()
+  const callback = f.callback()
+  await until(() => f.calls.committed.length)
+  interruptNavigation(Error('navigation interrupted by callback'))
+  await sleep(5)
+  assert.equal(f.calls.cancelled.length, 0)
+  assert.equal(
+    f.calls.statuses.some((status) => status.status === 'error'),
+    false,
+  )
+  commit.resolve()
+  await callback
+  await f.settled()
+  assert.equal(f.calls.statuses.at(-1).error, 'import_rejected')
+
+  let interruptSecond
+  const secondGoto = new Promise((_, reject) => {
+    interruptSecond = reject
+  })
+  const exchange = latch()
+  const cancelled = fixture(t, { initialGotoWait: secondGoto, exchangeWait: exchange.promise })
+  await cancelled.service.start(cancelled.vm.id)
+  await cancelled.waiting()
+  const lateCallback = cancelled.callback()
+  await until(() => cancelled.calls.exchanged.length)
+  interruptSecond(Error('navigation interrupted by callback'))
+  const cancellation = cancelled.service.cancel(cancelled.vm.id)
+  exchange.resolve()
+  await Promise.all([lateCallback, cancellation])
+  assert.equal(cancelled.calls.committed.length, 0)
+  assert.equal(cancelled.calls.stops, 1)
+  assert.equal(
+    cancelled.calls.statuses.some((status) => status.status === 'error'),
+    false,
+  )
+})
+
+test('Claude return validates current proxy and account and refuses expired or cancelled authorization', async (t) => {
+  let changed = false
+  let now = Date.now()
+  const f = fixture(t, { proxyChanged: () => changed, now: () => now })
+  await f.service.start(f.vm.id)
+  await f.waiting()
+  const returnToAuthorization = f.live.returnToAuthorization
+  changed = true
+  await assert.rejects(returnToAuthorization(), { code: 'api_proxy_changed' })
+  changed = false
+  f.vm.claude = { account_uuid: 'other-account', email: 'other@example.test' }
+  await assert.rejects(returnToAuthorization(), { code: 'oauth_account_changed' })
+  f.vm.claude = {}
+  now = f.calls.grant.expires_at
+  assert.equal(f.live.canReturnToAuthorization(), false)
+  await assert.rejects(returnToAuthorization(), { code: 'oauth_return_unavailable' })
+  now = Date.now()
+  await f.service.cancel(f.vm.id)
+  await assert.rejects(returnToAuthorization(), { code: 'oauth_cancelled' })
+  assert.equal(f.calls.navigations.length, 1)
+  assert.equal(f.live.returnToAuthorization, undefined)
+})
+
+test('Claude disables return when exchange starts and cleanup leaves a newer capability owner intact', async (t) => {
+  const exchange = latch()
+  const f = fixture(t, { exchangeWait: exchange.promise })
+  await f.service.start(f.vm.id)
+  await f.waiting()
+  const returnToAuthorization = f.live.returnToAuthorization
+  const callback = f.callback()
+  await until(() => f.calls.exchanged.length)
+  assert.equal(f.live.canReturnToAuthorization(), false)
+  await assert.rejects(returnToAuthorization(), { code: 'oauth_return_unavailable' })
+  const newerReturn = async () => {}
+  const newerCapability = () => true
+  const newerProgress = () => false
+  f.live.returnToAuthorization = newerReturn
+  f.live.canReturnToAuthorization = newerCapability
+  f.live.authorizationInProgress = newerProgress
+  exchange.resolve()
+  await callback
+  await f.settled()
+  assert.equal(f.live.returnToAuthorization, newerReturn)
+  assert.equal(f.live.canReturnToAuthorization, newerCapability)
+  assert.equal(f.live.authorizationInProgress, newerProgress)
+  assert.deepEqual(f.calls.navigationUpdates, [true, false])
 })
 
 test('official CLI runs isolated and verifies token-only credentials before installing them', async (t) => {

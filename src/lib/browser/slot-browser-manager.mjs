@@ -110,6 +110,7 @@ export class SlotBrowserManager {
       ...(live.warning ? { warning: live.warning } : {}),
       ...details,
     })
+    live.stream?.sendNavigation?.()
   }
 
   send(live, message) {
@@ -261,6 +262,12 @@ export class SlotBrowserManager {
         void this.close(live.vmId, { reason: 'identity_changed' }).catch(() => {})
       }
     })
+    const navigationLocked = () =>
+      live.inputLocked === true ||
+      live.closeSignal.aborted ||
+      live.authorizationInProgress?.() === true ||
+      live.status === 'opening' ||
+      (live.purpose === 'oauth' && ['ready', 'starting'].includes(live.status))
     live.stream = new this.Stream({
       page: live.page,
       assertCurrent: () => this.assertCurrent(live),
@@ -271,6 +278,16 @@ export class SlotBrowserManager {
       },
       onClose: () => this.close(live.vmId),
       onContinue: () => live.checkLogin?.(),
+      onReturnToAuthorization: () => {
+        this.assertCurrent(live)
+        if (!live.canReturnToAuthorization?.()) {
+          throw problem('oauth_return_unavailable', '当前授权会话不可返回，请重新登录。')
+        }
+        return live.returnToAuthorization()
+      },
+      canReturnToAuthorization: () => !navigationLocked() && live.canReturnToAuthorization?.() === true,
+      isInputLocked: navigationLocked,
+      isAuthorizationCompleting: () => live.authorizationInProgress?.() === true || live.status === 'oauth_complete',
       now: this.now,
     })
     for (const ws of live.clients) live.stream.attach(ws)
@@ -349,6 +366,7 @@ export class SlotBrowserManager {
 
   beginClose(live) {
     live.inputLocked = true
+    live.stream?.sendNavigation?.()
     clearInterval(live.watchdog)
     for (const [ticket, grant] of this.tickets) if (grant.liveId === live.id) this.tickets.delete(ticket)
     if (live.status !== 'closing') {
