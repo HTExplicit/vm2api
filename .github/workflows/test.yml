@@ -295,6 +295,8 @@ jobs:
         run: node scripts/smoke-import-browser-flow.mjs
       - name: Claude browser login flow
         run: node scripts/smoke-claude-browser-flow.mjs
+      - name: Browser address navigation
+        run: node scripts/smoke-browser-navigation.mjs
 
   performance:
     if: github.event_name == 'workflow_dispatch' && inputs.performance

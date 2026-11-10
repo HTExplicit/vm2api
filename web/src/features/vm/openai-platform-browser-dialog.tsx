@@ -11,6 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import {
   browserNeedsOpening,
   browserSocketUrl,
@@ -46,6 +47,15 @@ type BrowserState = {
   status?: string
   message?: string | null
   warning?: string | null
+}
+
+type BrowserNavigation = {
+  type: 'navigation'
+  url: string
+  loading: boolean
+  error?: string
+  canReturnToAuthorization: boolean
+  inputLocked?: boolean
 }
 
 function closeBrowser(
@@ -150,6 +160,9 @@ export function SlotBrowserDialog({
   const released = useRef<{ vmId: string; epoch: number } | null>(null)
   const closingRequested = useRef(false)
   const stopTransport = useRef<(() => void) | null>(null)
+  const addressEdited = useRef(false)
+  const addressFocused = useRef(false)
+  const firstNavigation = useRef(true)
   const [finish, setFinish] = useState<OauthFinish>(emptyOauthFinish)
   const [frame, setFrame] = useState<DisplayedBrowserFrame | null>(null)
   const [currentPurpose, setCurrentPurpose] = useState(purpose)
@@ -163,8 +176,22 @@ export function SlotBrowserDialog({
   const [switching, setSwitching] = useState(false)
   const [closing, setClosing] = useState(false)
   const [warning, setWarning] = useState('')
+  const [address, setAddress] = useState('')
+  const [navigation, setNavigation] = useState<BrowserNavigation>({
+    type: 'navigation',
+    url: '',
+    loading: false,
+    canReturnToAuthorization: false,
+  })
+  const [navigationReceived, setNavigationReceived] = useState(false)
   const closeFailed = status === 'close_failed'
   const inputBlocked = closing || closeFailed
+  const navigationBlocked =
+    inputBlocked ||
+    !connected ||
+    !navigationReceived ||
+    navigation.loading ||
+    navigation.inputLocked
   const updateFinish = (next: OauthFinish) => {
     finishRef.current = next
     setFinish(next)
@@ -256,6 +283,17 @@ export function SlotBrowserDialog({
     released.current = null
     setClosing(false)
     setWarning('')
+    addressEdited.current = false
+    addressFocused.current = false
+    firstNavigation.current = true
+    setAddress('')
+    setNavigation({
+      type: 'navigation',
+      url: '',
+      loading: false,
+      canReturnToAuthorization: false,
+    })
+    setNavigationReceived(false)
     updateFinish(emptyOauthFinish())
     setSwitching(false)
     if (!open) {
@@ -321,6 +359,7 @@ export function SlotBrowserDialog({
       }
     )
     setConnected(false)
+    setNavigationReceived(false)
     setFrame(null)
     setError('')
     setMessage('正在连接槽位浏览器…')
@@ -405,9 +444,23 @@ export function SlotBrowserDialog({
           return
         }
         const payload = JSON.parse(event.data) as
-          BrowserFrameMetadata | BrowserStatus | { type: 'input_ack' }
+          | BrowserFrameMetadata
+          | BrowserStatus
+          | BrowserNavigation
+          | { type: 'input_ack' }
         if (payload.type === 'frame') {
           if (!closingRequested.current) frames.describe(payload)
+        } else if (payload.type === 'navigation') {
+          setNavigation(payload)
+          setNavigationReceived(true)
+          if (
+            firstNavigation.current ||
+            (!addressEdited.current && !addressFocused.current)
+          ) {
+            setAddress(payload.url)
+            addressEdited.current = false
+          }
+          firstNavigation.current = false
         } else if (payload.type === 'status') {
           const nextPurpose = payload.purpose || purposeRef.current
           purposeRef.current = nextPurpose
@@ -512,6 +565,35 @@ export function SlotBrowserDialog({
         JSON.stringify({ ...payload, seq: ++inputSeq.current })
       )
     }
+  }
+
+  const navigate = () => {
+    if (navigationBlocked || closingRequested.current) return
+    const url = address.trim()
+    try {
+      const target = new URL(url)
+      if (target.protocol !== 'http:' && target.protocol !== 'https:')
+        throw new Error()
+    } catch {
+      setNavigation({
+        ...navigation,
+        error: '请输入 http:// 或 https:// 开头的完整网址。',
+      })
+      return
+    }
+    addressEdited.current = false
+    addressFocused.current = false
+    setAddress(url)
+    setNavigation({ ...navigation, loading: true, error: undefined })
+    send({ type: 'navigate', url })
+  }
+
+  const returnToAuthorization = () => {
+    if (navigationBlocked || closingRequested.current) return
+    addressEdited.current = false
+    addressFocused.current = false
+    setNavigation({ ...navigation, loading: true, error: undefined })
+    send({ type: 'return_to_authorization' })
   }
 
   const startAndFinish = async () => {
@@ -711,6 +793,68 @@ export function SlotBrowserDialog({
             {finish.error || error}
           </p>
         ) : null}
+        <div className='space-y-1.5'>
+          <div className='flex flex-wrap items-center gap-2'>
+            <Input
+              aria-label='浏览器地址'
+              aria-invalid={!!navigation.error}
+              title={navigation.url}
+              value={address}
+              autoComplete='off'
+              spellCheck={false}
+              placeholder='https://…'
+              disabled={!!navigationBlocked}
+              className='min-w-0 flex-[1_1_12rem]'
+              onChange={(event) => {
+                addressEdited.current = true
+                setAddress(event.target.value)
+              }}
+              onFocus={() => {
+                addressFocused.current = true
+              }}
+              onBlur={() => {
+                addressFocused.current = false
+                if (!addressEdited.current) setAddress(navigation.url)
+              }}
+              onKeyDown={(event) => {
+                event.stopPropagation()
+                if (event.key !== 'Enter') return
+                event.preventDefault()
+                if (event.nativeEvent.isComposing || event.keyCode === 229)
+                  return
+                navigate()
+              }}
+            />
+            <Button
+              type='button'
+              size='sm'
+              variant='outline'
+              aria-label='前往网页'
+              disabled={!!navigationBlocked || !address.trim()}
+              loading={navigation.loading}
+              onClick={navigate}
+            >
+              前往
+            </Button>
+            {navigation.canReturnToAuthorization ? (
+              <Button
+                type='button'
+                size='sm'
+                variant='outline'
+                aria-label='返回当前授权页'
+                disabled={!!navigationBlocked}
+                onClick={returnToAuthorization}
+              >
+                返回当前授权页
+              </Button>
+            ) : null}
+          </div>
+          {navigation.error ? (
+            <p role='alert' className='m-0 text-xs text-destructive'>
+              {navigation.error}
+            </p>
+          ) : null}
+        </div>
         <div
           ref={viewport}
           role='application'

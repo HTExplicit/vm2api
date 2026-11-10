@@ -32,12 +32,30 @@ export class BrowserStream {
     onInput = () => {},
     onClose = () => {},
     onContinue = () => {},
+    onReturnToAuthorization = () => {},
+    canReturnToAuthorization = () => false,
+    isInputLocked = () => false,
+    isAuthorizationCompleting = () => false,
     now = Date.now,
     resize = resizeJpeg,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
   }) {
-    Object.assign(this, { page, assertCurrent, onInput, onClose, onContinue, now, resize, setTimer, clearTimer })
+    Object.assign(this, {
+      page,
+      assertCurrent,
+      onInput,
+      onClose,
+      onContinue,
+      onReturnToAuthorization,
+      canReturnToAuthorization,
+      isInputLocked,
+      isAuthorizationCompleting,
+      now,
+      resize,
+      setTimer,
+      clearTimer,
+    })
     this.clients = new Map()
     this.closed = false
     this.capturing = false
@@ -48,11 +66,34 @@ export class BrowserStream {
     this.inputTail = Promise.resolve()
     this.viewportDirty = true
     this.viewport = null
+    this.navigationLoading = false
     this.navigation = () => {
       this.viewportDirty = true
       this.requestFrame()
     }
+    this.frameNavigated = (frame) => {
+      if (frame !== this.page.mainFrame()) return
+      this.sendNavigation()
+    }
     page.on?.('domcontentloaded', this.navigation)
+    page.on?.('framenavigated', this.frameNavigated)
+  }
+
+  navigationState(error) {
+    return {
+      type: 'navigation',
+      url: this.page.url(),
+      loading: this.navigationLoading,
+      canReturnToAuthorization: !this.isInputLocked() && this.canReturnToAuthorization(),
+      inputLocked: this.isInputLocked(),
+      ...(error ? { error: message(error) } : {}),
+    }
+  }
+
+  sendNavigation(error) {
+    if (this.closed) return
+    const payload = JSON.stringify(this.navigationState(error))
+    for (const ws of this.clients.keys()) if (ws.readyState === 1) ws.send(payload)
   }
 
   attach(ws) {
@@ -68,6 +109,7 @@ export class BrowserStream {
     ws.on('message', client.message)
     ws.on('close', client.close)
     ws.on('error', client.error)
+    if (ws.readyState === 1) ws.send(JSON.stringify(this.navigationState()))
     this.schedule(0)
   }
 
@@ -182,6 +224,11 @@ export class BrowserStream {
     }
     const client = this.clients.get(ws)
     if (!client || this.closed) return
+    if (input.type === 'close') {
+      // Closing the browser interrupts a pending goto; it must not wait behind it.
+      void this.input(ws, input)
+      return
+    }
     if (input.type === 'quality') {
       if (input.mode === 'smooth' || input.mode === 'native') {
         client.mode = input.mode
@@ -226,6 +273,8 @@ export class BrowserStream {
   async input(ws, input) {
     const client = this.clients.get(ws)
     if (this.closed || !client || ws.readyState !== 1) return
+    const navigationInput = input.type === 'navigate' || input.type === 'return_to_authorization'
+    let navigationStarted = false
     try {
       try {
         await this.assertCurrent()
@@ -234,12 +283,45 @@ export class BrowserStream {
         await this.onClose(error)
         return
       }
-      if ((await this.onInput(input, ws)) === false) return
+      if ((await this.onInput(input, ws)) === false) {
+        if (navigationInput) this.sendNavigation()
+        return
+      }
       if (input.type === 'close') {
         await this.onClose()
         return
       }
-      if (input.type === 'continue') await this.onContinue(input, ws)
+      if (navigationInput) {
+        if (this.isInputLocked()) {
+          this.sendNavigation()
+          return
+        }
+        let url
+        if (input.type === 'navigate') {
+          url = String(input.url || '').trim()
+          let parsed
+          try {
+            parsed = new URL(url)
+          } catch {
+            throw new Error('请输入完整的 http:// 或 https:// 链接。')
+          }
+          if (!['http:', 'https:'].includes(parsed.protocol)) {
+            throw new Error('仅支持 http:// 或 https:// 链接。')
+          }
+        } else if (!this.canReturnToAuthorization()) {
+          throw new Error('当前授权会话已结束，无法返回原授权页面。')
+        }
+        navigationStarted = true
+        this.navigationLoading = true
+        this.sendNavigation()
+        if (input.type === 'navigate') {
+          await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+        } else {
+          await this.onReturnToAuthorization(input, ws)
+        }
+        this.navigationLoading = false
+        this.sendNavigation()
+      } else if (input.type === 'continue') await this.onContinue(input, ws)
       else if (input.type === 'click')
         await this.page.mouse.click(Number(input.x), Number(input.y), { button: input.button || 'left' })
       else if (input.type === 'mouse_down' || input.type === 'mouse_up') {
@@ -261,7 +343,25 @@ export class BrowserStream {
       if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'input_ack', seq: input.seq ?? null }))
       if (input.type !== 'move') this.requestFrame()
     } catch (error) {
-      if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'status', status: 'error', message: message(error) }))
+      if (navigationInput) {
+        this.navigationLoading = false
+        if (navigationStarted && this.isAuthorizationCompleting()) {
+          this.sendNavigation()
+        } else {
+          this.sendNavigation(
+            navigationStarted
+              ? new Error(
+                  error?.name === 'TimeoutError'
+                    ? '页面打开超时，请检查链接后重试。'
+                    : '页面打开失败，请检查链接后重试。',
+                )
+              : error,
+          )
+        }
+        this.requestFrame()
+      } else if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'status', status: 'error', message: message(error) }))
+      }
     }
   }
 
@@ -270,6 +370,7 @@ export class BrowserStream {
     this.closed = true
     this.clearSchedule()
     this.page.off?.('domcontentloaded', this.navigation)
+    this.page.off?.('framenavigated', this.frameNavigated)
     for (const ws of [...this.clients.keys()]) {
       this.detach(ws)
       ws.close()

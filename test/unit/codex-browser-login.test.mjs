@@ -35,6 +35,8 @@ function fixture(t, options = {}) {
     persisted: [],
     statuses: [],
     cancelled: [],
+    navigationUpdates: [],
+    navigations: [],
   }
   let routeMatch, routeHandler, rejectAcquire
   let current = vm
@@ -45,8 +47,15 @@ function fixture(t, options = {}) {
     closeSignal: closeController.signal,
     persistable: true,
     page: {
-      async goto(url) {
+      async goto(url, navigationOptions) {
         calls.navigation = url
+        calls.navigations.push({ url, options: navigationOptions })
+        if (calls.navigations.length === 1 && options.initialGotoWait) await options.initialGotoWait
+      },
+    },
+    stream: {
+      sendNavigation() {
+        calls.navigationUpdates.push(live.canReturnToAuthorization?.() || false)
       },
     },
     context: {
@@ -97,6 +106,7 @@ function fixture(t, options = {}) {
     browserManager: manager,
     getVm: () => current,
     ...(options.tokenIdentity !== undefined ? { getAccountIdentity: () => tokenIdentity } : {}),
+    ...(options.now ? { now: options.now } : {}),
     async commitCredentials(value) {
       calls.committed.push(value)
       const identity = openaiIdentityFromOauthTokens(value.account)
@@ -190,6 +200,176 @@ test('first login commits through the shared chain, binds the slot profile and r
   assert.match(replies[0].body, /开机并完成.*开启调度/)
   assert.equal(f.live.closeSignal.aborted, false)
   assert.equal(f.calls.unrouted, true)
+})
+
+test('returning from an email page reuses the original OpenAI authorization and callback session', async (t) => {
+  const f = fixture(t)
+  f.service.start(f.vm.id)
+  await f.waiting()
+  const original = f.calls.navigation
+  const sessionId = f.calls.grant.session_id
+  assert.equal(f.live.canReturnToAuthorization(), true)
+  await f.live.page.goto('https://auth.openai.com/email-confirmation?token=fixture-mail')
+  const statusesBefore = f.calls.statuses.length
+  await f.live.returnToAuthorization()
+  assert.equal(f.calls.navigation, original)
+  assert.deepEqual(f.calls.navigations.at(-1).options, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+  assert.equal(f.calls.statuses.length, statusesBefore)
+  assert.equal(f.calls.generated.length, 1)
+  assert.equal(f.calls.acquired.length, 1)
+  await f.callback()
+  await until(() => !f.service.jobs.size)
+  assert.equal(f.calls.exchanged[0].sessionId, sessionId)
+  assert.equal(f.calls.committed.length, 1)
+  assert.equal(f.live.returnToAuthorization, undefined)
+  assert.equal(f.live.canReturnToAuthorization, undefined)
+  assert.equal(f.live.authorizationInProgress, undefined)
+  assert.deepEqual(f.calls.navigationUpdates, [true, false, false])
+})
+
+test('a callback that interrupts initial OpenAI navigation owns completion until its commit settles', async (t) => {
+  let interruptNavigation, finishCommit
+  const initialGotoWait = new Promise((_, reject) => {
+    interruptNavigation = reject
+  })
+  const commitWait = new Promise((resolve) => {
+    finishCommit = resolve
+  })
+  const f = fixture(t, { initialGotoWait, commitWait })
+  f.service.start(f.vm.id)
+  await f.waiting()
+  const callback = f.callback()
+  await until(() => f.calls.committed.length)
+  assert.equal(f.live.authorizationInProgress(), true)
+  interruptNavigation(Error('navigation interrupted by callback'))
+  await sleep(5)
+  assert.equal(f.service.jobs.size, 1)
+  assert.equal(f.calls.cancelled.length, 0)
+  assert.equal(
+    f.calls.statuses.some((status) => status.status === 'error'),
+    false,
+  )
+  finishCommit()
+  await callback
+  await until(() => !f.service.jobs.size)
+  assert.equal(f.calls.statuses.at(-1).status, 'oauth_complete')
+  assert.equal(f.calls.committed.length, 1)
+  assert.equal(f.live.authorizationInProgress, undefined)
+})
+
+test('interrupted OpenAI navigation reports the real callback failure and still permits cancellation', async (t) => {
+  let interruptNavigation, rejectExchange
+  const initialGotoWait = new Promise((_, reject) => {
+    interruptNavigation = reject
+  })
+  const exchangeWait = new Promise((_, reject) => {
+    rejectExchange = reject
+  })
+  const f = fixture(t, { initialGotoWait, exchange: () => exchangeWait })
+  f.service.start(f.vm.id)
+  await f.waiting()
+  const callback = f.callback()
+  await until(() => f.calls.exchanged.length)
+  interruptNavigation(Error('navigation interrupted by callback'))
+  await sleep(5)
+  assert.equal(f.calls.cancelled.length, 0)
+  rejectExchange(Object.assign(Error('exchange failure'), { code: 'fixture_exchange_failed' }))
+  await callback
+  await until(() => !f.service.jobs.size)
+  assert.equal(f.calls.statuses.at(-1).error, 'fixture_exchange_failed')
+  assert.equal(f.calls.committed.length, 0)
+
+  let interruptSecond, finishExchange
+  const secondGoto = new Promise((_, reject) => {
+    interruptSecond = reject
+  })
+  const secondExchange = new Promise((resolve) => {
+    finishExchange = resolve
+  })
+  const cancelled = fixture(t, { initialGotoWait: secondGoto, exchange: () => secondExchange })
+  cancelled.service.start(cancelled.vm.id)
+  await cancelled.waiting()
+  const lateCallback = cancelled.callback()
+  await until(() => cancelled.calls.exchanged.length)
+  interruptSecond(Error('navigation interrupted by callback'))
+  const cancellation = cancelled.service.cancel(cancelled.vm.id)
+  finishExchange(tokens())
+  await Promise.all([lateCallback, cancellation])
+  assert.equal(cancelled.calls.committed.length, 0)
+  assert.equal(
+    cancelled.calls.statuses.some((status) => status.status === 'error'),
+    false,
+  )
+})
+
+test('OpenAI return navigation failure leaves the authorization waiting and retryable', async (t) => {
+  const f = fixture(t)
+  f.service.start(f.vm.id)
+  await f.waiting()
+  const goto = f.live.page.goto
+  f.live.page.goto = async () => {
+    throw Error('fixture network error')
+  }
+  const previousStatus = f.calls.statuses.at(-1)
+  await assert.rejects(f.live.returnToAuthorization(), /fixture network error/)
+  assert.equal(f.calls.statuses.at(-1), previousStatus)
+  assert.equal(f.live.canReturnToAuthorization(), true)
+  f.live.page.goto = goto
+  await f.live.returnToAuthorization()
+  await f.callback()
+  await until(() => !f.service.jobs.size)
+  assert.equal(f.calls.generated.length, 1)
+})
+
+test('OpenAI return refuses a changed proxy or account and an expired or cancelled job', async (t) => {
+  let changed = false
+  let now = Date.now()
+  const f = fixture(t, { proxyChanged: () => changed, now: () => now })
+  f.service.start(f.vm.id)
+  await f.waiting()
+  const returnToAuthorization = f.live.returnToAuthorization
+  changed = true
+  await assert.rejects(returnToAuthorization(), { code: 'browser_proxy_changed' })
+  changed = false
+  f.vm.codex = { chatgpt_account_id: 'other-account', email: 'other@example.test' }
+  await assert.rejects(returnToAuthorization(), { code: 'oauth_account_changed' })
+  f.vm.codex = {}
+  now = f.calls.grant.expires_at
+  assert.equal(f.live.canReturnToAuthorization(), false)
+  await assert.rejects(returnToAuthorization(), { code: 'oauth_return_unavailable' })
+  now = Date.now()
+  await f.service.cancel(f.vm.id)
+  await assert.rejects(returnToAuthorization(), { code: 'oauth_cancelled' })
+  assert.equal(f.calls.navigations.length, 1)
+  assert.equal(f.live.returnToAuthorization, undefined)
+})
+
+test('OpenAI disables authorization return when exchange starts and does not replace a newer owner on cleanup', async (t) => {
+  let finish
+  const exchange = new Promise((resolve) => {
+    finish = resolve
+  })
+  const f = fixture(t, { exchange: () => exchange })
+  f.service.start(f.vm.id)
+  await f.waiting()
+  const returnToAuthorization = f.live.returnToAuthorization
+  const callback = f.callback()
+  await until(() => f.calls.exchanged.length)
+  assert.equal(f.live.canReturnToAuthorization(), false)
+  await assert.rejects(returnToAuthorization(), { code: 'oauth_return_unavailable' })
+  const newerReturn = async () => {}
+  const newerCapability = () => true
+  const newerProgress = () => false
+  f.live.returnToAuthorization = newerReturn
+  f.live.canReturnToAuthorization = newerCapability
+  f.live.authorizationInProgress = newerProgress
+  finish(tokens())
+  await callback
+  await until(() => !f.service.jobs.size)
+  assert.equal(f.live.returnToAuthorization, newerReturn)
+  assert.equal(f.live.canReturnToAuthorization, newerCapability)
+  assert.equal(f.live.authorizationInProgress, newerProgress)
+  assert.deepEqual(f.calls.navigationUpdates, [true, false])
 })
 
 test('reauthorization verifies the existing identity before saving credentials', async (t) => {

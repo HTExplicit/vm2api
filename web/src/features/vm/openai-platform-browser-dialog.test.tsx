@@ -1,4 +1,8 @@
-import type { ButtonHTMLAttributes, PropsWithChildren } from 'react'
+import type {
+  ButtonHTMLAttributes,
+  InputHTMLAttributes,
+  PropsWithChildren,
+} from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -13,6 +17,7 @@ const controls = vi.hoisted(() => ({
   cleanup: [] as (() => void)[],
   effectCleanup: [] as (() => void | undefined)[],
   buttons: [] as ButtonHTMLAttributes<HTMLButtonElement>[],
+  inputs: [] as InputHTMLAttributes<HTMLInputElement>[],
   api: vi.fn(),
   complete: vi.fn(),
   saved: vi.fn(),
@@ -110,6 +115,19 @@ vi.mock('@/components/ui/button', () => ({
     )
   },
 }))
+vi.mock('@/components/ui/input', () => ({
+  Input: (props: InputHTMLAttributes<HTMLInputElement>) => {
+    controls.inputs.push(props)
+    return (
+      <input
+        aria-label={props['aria-label']}
+        value={props.value}
+        disabled={props.disabled}
+        readOnly
+      />
+    )
+  },
+}))
 
 class Socket {
   static OPEN = 1
@@ -125,6 +143,27 @@ class Socket {
 
   constructor(readonly url: URL) {
     Socket.instances.push(this)
+  }
+
+  navigation(
+    fields: Partial<{
+      url: string
+      loading: boolean
+      error: string
+      canReturnToAuthorization: boolean
+      inputLocked: boolean
+    }> = {}
+  ) {
+    this.onmessage?.({
+      data: JSON.stringify({
+        type: 'navigation',
+        url: 'https://claude.ai/login',
+        loading: false,
+        canReturnToAuthorization: true,
+        inputLocked: false,
+        ...fields,
+      }),
+    })
   }
 
   status(
@@ -148,6 +187,7 @@ class Socket {
 function render() {
   controls.cursor = 0
   controls.buttons = []
+  controls.inputs = []
   return renderToStaticMarkup(
     controls.purpose === 'platform' ? (
       <OpenaiPlatformBrowserDialog
@@ -197,6 +237,7 @@ beforeEach(() => {
   controls.cleanup = []
   controls.effectCleanup = []
   controls.buttons = []
+  controls.inputs = []
   controls.api
     .mockReset()
     .mockImplementation(async (path: string) =>
@@ -596,6 +637,207 @@ describe('Claude OAuth browser login', () => {
     await settle()
     expect(controls.complete).toHaveBeenCalledOnce()
   })
+})
+
+describe('shared browser address navigation', () => {
+  const addressInput = () =>
+    controls.inputs.find((props) => props['aria-label'] === '浏览器地址')!
+  const editAddress = (value: string) => {
+    addressInput().onChange!({ target: { value } } as never)
+    render()
+  }
+  const navigationMessages = (socket: Socket) =>
+    socket.send.mock.calls
+      .map(([raw]) => JSON.parse(raw as string))
+      .filter((message) =>
+        ['navigate', 'return_to_authorization'].includes(message.type)
+      )
+
+  it.each([
+    ['Claude', 'oauth', 'anthropic'],
+    ['GPT', 'oauth', 'openai'],
+    ['Platform', 'platform', 'openai'],
+  ] as const)(
+    'navigates %s in the existing browser and preserves query and fragment',
+    async (_label, purpose, provider) => {
+      controls.purpose = purpose
+      controls.provider = provider
+      const socket = await mount()
+      socket.navigation()
+      render()
+      const target =
+        'https://example.test/mail?code=abc%23def&next=%2Flogin#inbox/message-1'
+      editAddress(target)
+      button('前往网页')!.onClick!({} as never)
+      expect(navigationMessages(socket)).toEqual([
+        { type: 'navigate', url: target, seq: 1 },
+      ])
+      expect(
+        controls.api.mock.calls.filter(([path]) =>
+          path.endsWith('/browser/open')
+        )
+      ).toHaveLength(1)
+      expect(render()).toContain('浏览器地址')
+      expect(button('前往网页')?.disabled).toBe(true)
+      socket.navigation({ url: target })
+      render()
+      expect(addressInput().value).toBe(target)
+      expect(button('前往网页')?.disabled).toBe(false)
+    }
+  )
+
+  it('submits Enter once, isolates its keys, and leaves IME confirmation alone', async () => {
+    const socket = await mount()
+    socket.navigation()
+    render()
+    editAddress('https://example.test/login#verify')
+    const event = {
+      key: 'Enter',
+      keyCode: 13,
+      nativeEvent: { isComposing: true },
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    }
+    addressInput().onKeyDown!(event as never)
+    expect(event.stopPropagation).toHaveBeenCalledOnce()
+    expect(navigationMessages(socket)).toEqual([])
+    addressInput().onKeyDown!({
+      ...event,
+      keyCode: 229,
+      nativeEvent: { isComposing: false },
+    } as never)
+    expect(navigationMessages(socket)).toEqual([])
+    addressInput().onKeyDown!({
+      ...event,
+      nativeEvent: { isComposing: false },
+    } as never)
+    expect(navigationMessages(socket)).toHaveLength(1)
+    expect(
+      socket.send.mock.calls.map(([raw]) => JSON.parse(raw as string).type)
+    ).not.toContain('key')
+  })
+
+  it('tracks redirects without replacing focused or edited address text', async () => {
+    const socket = await mount()
+    socket.navigation({ url: 'https://example.test/first' })
+    render()
+    addressInput().onFocus!({} as never)
+    socket.navigation({ url: 'https://example.test/redirect' })
+    render()
+    expect(addressInput().value).toBe('https://example.test/first')
+    addressInput().onBlur!({} as never)
+    render()
+    expect(addressInput().value).toBe('https://example.test/redirect')
+    editAddress('https://mail.example.test/pending#draft')
+    addressInput().onBlur!({} as never)
+    socket.navigation({ url: 'https://example.test/final' })
+    render()
+    expect(addressInput().value).toBe('https://mail.example.test/pending#draft')
+    expect(addressInput().title).toBe('https://example.test/final')
+  })
+
+  it.each([
+    'javascript:alert(1)',
+    'file:///tmp/a',
+    'ftp://example.test',
+    'example.test/login',
+  ])('rejects non-HTTP URLs without disrupting login: %s', async (target) => {
+    controls.purpose = 'oauth'
+    const socket = await mount()
+    socket.navigation()
+    socket.status('oauth_complete')
+    render()
+    editAddress(target)
+    button('前往网页')!.onClick!({} as never)
+    const html = render()
+    expect(html).toContain('请输入 http:// 或 https:// 开头的完整网址')
+    expect(html).toContain('登录凭据已保存')
+    expect(button('开机并完成')?.disabled).toBe(false)
+    expect(navigationMessages(socket)).toEqual([])
+  })
+
+  it('keeps navigation errors separate from OAuth completion and clears them on a successful navigation', async () => {
+    controls.purpose = 'oauth'
+    controls.provider = 'anthropic'
+    controls.completionMode = 'preserve_state'
+    const socket = await mount()
+    socket.navigation({ error: '网页打开失败，请检查网址' })
+    socket.status('oauth_complete')
+    expect(render()).toContain('网页打开失败，请检查网址')
+    expect(button('完成')?.disabled).toBe(false)
+    socket.navigation({ url: 'https://example.test/recovered' })
+    expect(render()).not.toContain('网页打开失败，请检查网址')
+    expect(button('完成')?.disabled).toBe(false)
+  })
+
+  it('shows return only while offered by the active authorization and blocks navigation while loading or locked', async () => {
+    const socket = await mount()
+    socket.navigation({ canReturnToAuthorization: false })
+    render()
+    expect(button('返回当前授权页')).toBeUndefined()
+    socket.navigation({ inputLocked: true })
+    render()
+    expect(addressInput().disabled).toBe(true)
+    expect(button('前往网页')?.disabled).toBe(true)
+    expect(button('返回当前授权页')?.disabled).toBe(true)
+    socket.navigation({ loading: true })
+    render()
+    expect(button('返回当前授权页')?.disabled).toBe(true)
+    socket.navigation()
+    render()
+    button('返回当前授权页')!.onClick!({} as never)
+    expect(navigationMessages(socket)).toEqual([
+      { type: 'return_to_authorization', seq: 1 },
+    ])
+    socket.navigation({ url: 'https://example.test/oauth' })
+    render()
+    expect(addressInput().value).toBe('https://example.test/oauth')
+    socket.onclose?.()
+    render()
+    expect(addressInput().disabled).toBe(true)
+    expect(button('前往网页')?.disabled).toBe(true)
+    expect(button('返回当前授权页')?.disabled).toBe(true)
+  })
+
+  it.each([
+    [
+      'keeps an unsent address after reconnect',
+      true,
+      'https://mail.example.test/unsent?verify=1#email',
+    ],
+    [
+      'restores the actual URL after reconnect when not editing',
+      false,
+      'https://example.test/live#current',
+    ],
+  ] as const)(
+    '%s without opening another browser',
+    async (_label, editing, expected) => {
+      const socket = await mount()
+      socket.navigation({ url: 'https://example.test/original' })
+      render()
+      if (editing)
+        editAddress('https://mail.example.test/unsent?verify=1#email')
+      socket.onclose?.()
+      render()
+      button('重新连接')!.onClick!({} as never)
+      render()
+      for (const effect of controls.effects.splice(0)) effect()
+      await settle()
+      expect(Socket.instances).toHaveLength(2)
+      const reconnected = Socket.instances[1]
+      reconnected.onopen?.()
+      reconnected.navigation({ url: 'https://example.test/live#current' })
+      render()
+      expect(addressInput().value).toBe(expected)
+      expect(addressInput().title).toBe('https://example.test/live#current')
+      expect(
+        controls.api.mock.calls.filter(([path]) =>
+          path.endsWith('/browser/open')
+        )
+      ).toHaveLength(1)
+    }
+  )
 })
 
 describe('browser close lifecycle', () => {
