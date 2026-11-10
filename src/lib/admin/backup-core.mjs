@@ -11,17 +11,21 @@
  * thread with its own database connection, while BackupService stays a thin
  * orchestrator on the main thread.
  *
- * Fallback: when `tar` is unavailable the snapshot is gzipped in memory
- * (only sane below ~2 GiB) — unchanged from the original implementation.
+ * `tar` is required: the DB only mirrors slot metadata, so a database-only
+ * fallback would silently omit the credentials needed for disaster recovery.
  */
 
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import zlib from 'node:zlib'
 import { spawnSync } from 'node:child_process'
 import { getDb, vacuumInto } from '../db/database.mjs'
 import { BackupRepo } from '../db/repos/backup-repo.mjs'
+import { isValidVmId } from '../vm/vm-file.mjs'
+
+// Deliberately bounded: guest disks, sockets, caches and binaries are not part
+// of this archive. Codex OAuth is not mirrored into the database.
+export const SLOT_BACKUP_FILES = ['codex-credentials.json']
 
 export function stamp(d = new Date()) {
   return d.toISOString().replace(/[:.]/g, '-')
@@ -90,6 +94,7 @@ export function runBackupJob(ctx, { id, createdAt, kind = 'manual', note = null,
   const repo = new BackupRepo(getDb())
   let tmp = null
   try {
+    if (!tarAvailable()) throw new Error('tar is required to back up slot credentials and configuration')
     fs.mkdirSync(ctx.backupDir, { recursive: true, mode: 0o700 })
     try {
       fs.chmodSync(ctx.backupDir, 0o700)
@@ -108,16 +113,29 @@ export function runBackupJob(ctx, { id, createdAt, kind = 'manual', note = null,
     if (vmsDir && fs.existsSync(vmsDir)) {
       const outVms = path.join(tmp, 'vms')
       fs.mkdirSync(outVms, { recursive: true })
+      const copyVmFile = (rel) => {
+        const src = path.join(vmsDir, rel)
+        if (!fs.lstatSync(src).isFile()) throw new Error(`backup requires a regular file: vms/${rel}`)
+        const dest = path.join(outVms, rel)
+        fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 })
+        fs.copyFileSync(src, dest)
+        fs.chmodSync(dest, 0o600)
+        // Hash the staged bytes: the live credential can rotate after copying.
+        sha256s[`vms/${rel}`] = sha256File(dest)
+        includes.vms += 1
+      }
       for (const f of fs.readdirSync(vmsDir)) {
-        if (!/\.json$/.test(f)) continue
         const src = path.join(vmsDir, f)
-        try {
-          if (!fs.statSync(src).isFile()) continue
-          fs.copyFileSync(src, path.join(outVms, f))
-          fs.chmodSync(path.join(outVms, f), 0o600)
-          sha256s[`vms/${f}`] = sha256File(src)
-          includes.vms += 1
-        } catch {}
+        if (f.endsWith('.json')) copyVmFile(f)
+        else if (isValidVmId(f) && fs.lstatSync(src).isDirectory()) {
+          for (const name of SLOT_BACKUP_FILES) {
+            const rel = `${f}/${name}`
+            const st = fs.lstatSync(path.join(vmsDir, rel), { throwIfNoEntry: false })
+            if (st) copyVmFile(rel)
+          }
+        } else if (isValidVmId(f) && fs.lstatSync(src).isSymbolicLink()) {
+          throw new Error(`backup refuses a linked slot directory: vms/${f}`)
+        }
       }
     }
     if (ctx.configDir && fs.existsSync(ctx.configDir)) {
@@ -126,12 +144,12 @@ export function runBackupJob(ctx, { id, createdAt, kind = 'manual', note = null,
       for (const f of fs.readdirSync(ctx.configDir)) {
         if (!/\.json$/.test(f)) continue
         const src = path.join(ctx.configDir, f)
-        try {
-          if (!fs.statSync(src).isFile()) continue
-          fs.copyFileSync(src, path.join(outCfg, f))
-          sha256s[`config/${f}`] = sha256File(src)
-          includes.config += 1
-        } catch {}
+        if (!fs.lstatSync(src).isFile()) throw new Error(`backup requires a regular file: config/${f}`)
+        const dest = path.join(outCfg, f)
+        fs.copyFileSync(src, dest)
+        fs.chmodSync(dest, 0o600)
+        sha256s[`config/${f}`] = sha256File(dest)
+        includes.config += 1
       }
     }
 
@@ -146,24 +164,13 @@ export function runBackupJob(ctx, { id, createdAt, kind = 'manual', note = null,
     }
     fs.writeFileSync(path.join(tmp, 'manifest.json'), JSON.stringify(manifest, null, 2))
 
-    // 4. archive (tar.gz preferred; gzipped db fallback)
-    let filePath,
-      fileName,
-      noteOut = note
-    if (tarAvailable()) {
-      fileName = `kin-backup-${stamp(new Date(createdAt))}.tar.gz`
-      filePath = path.join(ctx.backupDir, fileName)
-      const r = spawnSync('tar', ['-czf', filePath, '-C', tmp, '.'], { stdio: 'pipe' })
-      if (r.status !== 0) {
-        throw new Error(`tar failed: ${String(r.stderr || '').slice(0, 300)}`)
-      }
-    } else {
-      fileName = `kin-backup-${stamp(new Date(createdAt))}.db.gz`
-      filePath = path.join(ctx.backupDir, fileName)
-      fs.writeFileSync(filePath, zlib.gzipSync(fs.readFileSync(dbSnap)))
-      noteOut = [note, 'tar unavailable — db-only gzip snapshot (vm files rebuilt from DB on restore)']
-        .filter(Boolean)
-        .join(' | ')
+    // 4. archive
+    const fileName = `kin-backup-${stamp(new Date(createdAt))}.tar.gz`
+    const filePath = path.join(ctx.backupDir, fileName)
+    const r = spawnSync('tar', ['-czf', filePath, '-C', tmp, '.'], { stdio: 'pipe' })
+    if (r.status !== 0) {
+      fs.rmSync(filePath, { force: true })
+      throw new Error(`tar failed: ${String(r.stderr || '').slice(0, 300)}`)
     }
     try {
       fs.chmodSync(filePath, 0o600)
@@ -181,7 +188,7 @@ export function runBackupJob(ctx, { id, createdAt, kind = 'manual', note = null,
       db_bytes: dbBytes,
       includes,
       error: null,
-      note: noteOut,
+      note,
     })
     applyRetention(repo, retention)
     return rec

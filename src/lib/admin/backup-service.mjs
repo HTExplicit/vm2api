@@ -3,16 +3,14 @@
  *
  * Backup artifact: data/backups/kin-backup-<stamp>.tar.gz (0600) containing
  *   manifest.json   {version, created_at, kind, includes, sha256s}
- *   db/kin.db       VACUUM INTO online-consistent snapshot (credentials
- *                   already mirrored into the `vms` table)
- *   vms/            slot *.json + active.json (double safety)
+ *   db/kin.db       VACUUM INTO online-consistent snapshot (slot metadata)
+ *   vms/            slot *.json + active.json + nested Codex credentials
  *   config/         routing.json / intercept-rules.json …
  *
- * When `tar` is unavailable the service degrades to a gzipped DB snapshot
- * (kin-backup-<stamp>.db.gz) — still fully restorable because the DB holds
- * the credential mirror (vm files are rebuilt from vms.vm_json). That fallback
- * buffers the whole snapshot in memory, so it only works below ~2 GiB; the
- * tar path has no such limit.
+ * Creating backups requires tar. Older db.gz snapshots remain readable but
+ * contain metadata only; they cannot reconstruct missing OAuth credentials.
+ * Keep the original DB secret separately, and preserve complete slot homes
+ * for native Claude credentials, guest identity and runtime state.
  *
  * Staging lives on the data volume (`<dataDir>/tmp`, override with
  * KIN_BACKUP_TMPDIR), not os.tmpdir(): /tmp is a tmpfs sized to a fraction of
@@ -42,7 +40,8 @@ import zlib from 'node:zlib'
 import { spawnSync } from 'node:child_process'
 import { Worker } from 'node:worker_threads'
 import { getDb, getDbPath, closeDatabase, openDatabase } from '../db/database.mjs'
-import { sha256File } from './backup-core.mjs'
+import { stopSqlitePool } from '../db/sqlite-pool.mjs'
+import { sha256File, SLOT_BACKUP_FILES } from './backup-core.mjs'
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { BackupRepo } from '../db/repos/backup-repo.mjs'
 import { reconcileVms } from '../vm/vm-db-sync.mjs'
@@ -54,6 +53,68 @@ import { invalidateReadCache, isVmRecordFile } from '../vm/vm-file.mjs'
 export { tarAvailable } from './backup-core.mjs'
 
 const SCHEDULE_KEY = 'backup_schedule'
+
+function corruptBackup(message) {
+  return Object.assign(new Error(message), { code: 'backup_corrupt' })
+}
+
+function allowedArchiveFile(name) {
+  if (name === 'manifest.json' || name === 'db/kin.db') return true
+  if (/^(vms|config)\/[^/\\:]+\.json$/.test(name)) return true
+  const parts = name.split('/')
+  return (
+    parts.length === 3 &&
+    parts[0] === 'vms' &&
+    /^[A-Za-z0-9_-]+$/.test(parts[1]) &&
+    SLOT_BACKUP_FILES.includes(parts[2])
+  )
+}
+
+// Check names and entry types before extraction. Only the regular files and
+// directories produced by this backup writer belong in a restore archive.
+function validateArchiveEntries(file) {
+  const names = spawnSync('tar', ['-tzf', file], { encoding: 'utf8' })
+  const types = spawnSync('tar', ['-tvzf', file], { encoding: 'utf8' })
+  if (names.status !== 0 || types.status !== 0) throw corruptBackup('cannot list backup archive')
+  for (const line of types.stdout.split(/\r?\n/).filter(Boolean)) {
+    if (!['-', 'd'].includes(line[0])) throw corruptBackup('backup contains a link or special file')
+  }
+  for (const raw of names.stdout.split(/\r?\n/).filter(Boolean)) {
+    const name = raw.replace(/^\.\//, '').replace(/\/$/, '')
+    if (!name || name === '.') continue
+    if (name.includes('\\') || name.split('/').some((part) => !part || part === '.' || part === '..')) {
+      throw corruptBackup('backup contains an unsafe path')
+    }
+    if (raw.endsWith('/') && (['db', 'vms', 'config'].includes(name) || /^vms\/[A-Za-z0-9_-]+$/.test(name))) continue
+    if (!allowedArchiveFile(name)) throw corruptBackup('backup contains an unsupported path')
+  }
+}
+
+function archiveFiles(dir, rel = '') {
+  const files = []
+  for (const name of fs.readdirSync(path.join(dir, rel))) {
+    const key = rel ? `${rel}/${name}` : name
+    const st = fs.lstatSync(path.join(dir, key))
+    if (st.isDirectory()) files.push(...archiveFiles(dir, key))
+    else if (st.isFile() && allowedArchiveFile(key)) files.push(key)
+    else throw corruptBackup('backup contains an unsupported file')
+  }
+  return files
+}
+
+// Reject linked or incompatible destination paths before replacing the DB.
+function validateRestoreTarget(base, rel) {
+  let current = base
+  const parts = rel.split('/')
+  for (let i = -1; i < parts.length; i++) {
+    if (i >= 0) current = path.join(current, parts[i])
+    const st = fs.lstatSync(current, { throwIfNoEntry: false })
+    if (!st) continue
+    if (st.isSymbolicLink() || (i < parts.length - 1 ? !st.isDirectory() : !st.isFile())) {
+      throw corruptBackup('restore destination is linked or has an incompatible type')
+    }
+  }
+}
 
 export const DEFAULT_SCHEDULE = {
   enabled: true,
@@ -155,6 +216,9 @@ export class BackupService {
    * @returns {Promise<backup record>}
    */
   async createBackup({ kind = 'manual', note = null } = {}) {
+    if (this.isRestoring && kind !== 'pre_restore') {
+      throw Object.assign(new Error('restore already in progress'), { code: 'restore_in_progress' })
+    }
     if (this._running) throw Object.assign(new Error('backup already in progress'), { code: 'backup_in_progress' })
     this._running = true
     const id = 'bak_' + crypto.randomBytes(6).toString('hex')
@@ -209,13 +273,17 @@ export class BackupService {
         },
       })
       let settled = false
+      let result = null
       const finish = (fn, arg) => {
         if (settled) return
         settled = true
         fn(arg)
       }
       worker.once('message', (msg) => {
-        if (msg && msg.ok) return finish(resolve, msg.rec)
+        if (msg && msg.ok) {
+          result = msg.rec
+          return
+        }
         finish(
           reject,
           Object.assign(new Error((msg && msg.error && msg.error.message) || 'backup failed'), {
@@ -226,6 +294,8 @@ export class BackupService {
       worker.once('error', (e) => finish(reject, e))
       worker.once('exit', (code) => {
         if (code !== 0) finish(reject, new Error(`backup worker exited with code ${code}`))
+        else if (result) finish(resolve, result)
+        else finish(reject, new Error('backup worker exited without a result'))
       })
     })
   }
@@ -278,25 +348,40 @@ export class BackupService {
 
     this.isRestoring = true
     let tmp = null
+    let databaseClosed = false
+    let completed = false
     try {
-      // 0. safety net snapshot of the current state
-      const pre = await this.createBackup({ kind: 'pre_restore', note: `before restore of ${rec.id}` })
-
-      // 1. extract / decompress
+      // Stage and validate before taking the safety snapshot: its retention
+      // policy may remove the selected archive if it is an older pre_restore.
       tmp = this._mkdtemp('kin-restore-')
       let dbFile
       let manifest = null
+      let files = []
       if (rec.file_name?.endsWith('.tar.gz')) {
+        validateArchiveEntries(rec.file_path)
         const r = spawnSync('tar', ['-xzf', rec.file_path, '-C', tmp], { stdio: 'pipe' })
         if (r.status !== 0) throw new Error(`tar extract failed: ${String(r.stderr || '').slice(0, 300)}`)
         dbFile = path.join(tmp, 'db', 'kin.db')
         try {
           manifest = JSON.parse(fs.readFileSync(path.join(tmp, 'manifest.json'), 'utf8'))
-        } catch {}
-        if (manifest?.sha256s?.['db/kin.db']) {
-          if (sha256File(dbFile) !== manifest.sha256s['db/kin.db']) {
-            throw Object.assign(new Error('db snapshot sha256 mismatch inside archive'), { code: 'backup_corrupt' })
+        } catch {
+          throw corruptBackup('backup manifest is missing or invalid')
+        }
+        if (manifest?.version !== 1 || !manifest.sha256s?.['db/kin.db']) throw corruptBackup('invalid backup manifest')
+        files = archiveFiles(tmp)
+        for (const key of new Set([
+          ...files.filter((name) => name !== 'manifest.json'),
+          ...Object.keys(manifest.sha256s),
+        ])) {
+          if (
+            !allowedArchiveFile(key) ||
+            !files.includes(key) ||
+            sha256File(path.join(tmp, key)) !== manifest.sha256s[key]
+          ) {
+            throw corruptBackup('file sha256 mismatch inside backup archive')
           }
+          if (key.startsWith('vms/') && this.projectRoot) validateRestoreTarget(this.projectRoot, key)
+          if (key.startsWith('config/') && this.configDir) validateRestoreTarget(this.configDir, key.slice(7))
         }
       } else {
         dbFile = path.join(tmp, 'kin.db')
@@ -304,21 +389,21 @@ export class BackupService {
       }
       if (!fs.existsSync(dbFile)) throw new Error('no db snapshot inside backup')
 
+      const pre = await this.createBackup({ kind: 'pre_restore', note: `before restore of ${rec.id}` })
+
       // 2. swap the live database
       const dbPath = getDbPath()
+      await stopSqlitePool()
       closeDatabase()
+      databaseClosed = true
       const keep = `${dbPath}.pre-restore`
-      try {
-        fs.rmSync(keep, { force: true })
-      } catch {}
-      try {
-        fs.renameSync(dbPath, keep)
-      } catch {}
+      // A stale WAL can replay newer pages over the restored snapshot. Never
+      // overwrite the database when a sidecar is still open or unremovable.
       for (const suffix of ['-wal', '-shm']) {
-        try {
-          fs.rmSync(dbPath + suffix, { force: true })
-        } catch {}
+        fs.rmSync(dbPath + suffix, { force: true })
       }
+      fs.rmSync(keep, { force: true })
+      fs.renameSync(dbPath, keep)
       fs.copyFileSync(dbFile, dbPath)
       try {
         fs.chmodSync(dbPath, 0o600)
@@ -329,7 +414,8 @@ export class BackupService {
       if (this.projectRoot && fs.existsSync(vmsDirSrc)) {
         const vmsDir = path.join(this.projectRoot, 'vms')
         fs.mkdirSync(vmsDir, { recursive: true })
-        // replace vm json records with archive state (cli-home dirs untouched)
+        // Replace top-level records, then restore only the credential files
+        // explicitly staged and verified above. Other slot-home data stays put.
         for (const f of fs.readdirSync(vmsDir)) {
           if (isVmRecordFile(f) || f === 'active.json') {
             try {
@@ -337,10 +423,12 @@ export class BackupService {
             } catch {}
           }
         }
-        for (const f of fs.readdirSync(vmsDirSrc)) {
-          fs.copyFileSync(path.join(vmsDirSrc, f), path.join(vmsDir, f))
+        for (const key of files.filter((name) => name.startsWith('vms/'))) {
+          const dest = path.join(this.projectRoot, key)
+          fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 })
+          fs.copyFileSync(path.join(tmp, key), dest)
           try {
-            fs.chmodSync(path.join(vmsDir, f), 0o600)
+            fs.chmodSync(dest, 0o600)
           } catch {}
         }
       }
@@ -355,7 +443,7 @@ export class BackupService {
       // 4. reopen + migrate (old backups upgrade automatically)
       const db = openDatabase({ dataDir: this.dataDir, dbPath })
 
-      // 5. db-only backups: rebuild vm files from the credential mirror
+      // 5. db-only backups: rebuild slot metadata (not OAuth credentials)
       if (this.projectRoot) {
         invalidateReadCache()
         try {
@@ -384,9 +472,13 @@ export class BackupService {
       //    the restore fail instead of reporting a false success.
       if (this._rebindStores) this._rebindStores(db)
 
+      completed = true
       return { ok: true, restored: rec.id, pre_restore: pre.id }
     } finally {
-      this.isRestoring = false
+      // Once database replacement starts, an error can leave stale/closed
+      // stores. Keep protocol traffic paused until the operator recovers and
+      // restarts, instead of serving against a partially restored state.
+      this.isRestoring = databaseClosed && !completed
       if (tmp) {
         try {
           fs.rmSync(tmp, { recursive: true, force: true })

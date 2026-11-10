@@ -5,6 +5,23 @@ const COOKIE = 'kin_panel_token'
 
 export { LS_TOKEN, LS_USER, LS_BASE, COOKIE }
 
+const panelSessionChangeListeners = new Set<() => void>()
+let panelSessionRevision = 0
+
+export function sessionRevision(): number {
+  return panelSessionRevision
+}
+
+export function onPanelSessionChange(listener: () => void) {
+  panelSessionChangeListeners.add(listener)
+  return () => panelSessionChangeListeners.delete(listener)
+}
+
+function notifyPanelSessionChange() {
+  panelSessionRevision += 1
+  for (const listener of panelSessionChangeListeners) listener()
+}
+
 export function sameOriginPanel(host = location.hostname): boolean {
   return /^kin\.fkcodex\.com$/i.test(host || '')
 }
@@ -19,12 +36,14 @@ export function apiBase(): string {
 }
 
 export function setApiBase(base: string) {
+  const previous = apiBase()
   const trimmed = base.trim().replace(/\/$/, '')
   if (sameOriginPanel() || !trimmed) {
     localStorage.removeItem(LS_BASE)
-    return
+  } else {
+    localStorage.setItem(LS_BASE, trimmed)
   }
-  localStorage.setItem(LS_BASE, trimmed)
+  if (apiBase() !== previous) notifyPanelSessionChange()
 }
 
 function clearClientCookie(name: string) {
@@ -64,6 +83,7 @@ export function setSession(token: string, user?: string) {
     localStorage.setItem(LS_TOKEN, token)
   } else localStorage.removeItem(LS_TOKEN)
   if (user) localStorage.setItem(LS_USER, user)
+  notifyPanelSessionChange()
 }
 
 export function clearSession() {
@@ -71,6 +91,7 @@ export function clearSession() {
   localStorage.removeItem(LS_USER)
   clearClientCookie(COOKIE)
   clearClientCookie('kin_console_token')
+  notifyPanelSessionChange()
 }
 
 export function storedUser(): string {

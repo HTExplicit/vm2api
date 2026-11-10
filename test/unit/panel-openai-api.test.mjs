@@ -519,10 +519,19 @@ test('dashboard, list and detail carry API state even while the OAuth slot is st
   assert.equal(detail.data.vm.schedulable, false)
 })
 
-test('restore waits for account browsers to close and restarts the monitor after stores are rebound', async (t) => {
+test('restore restarts browser monitors only after success or a failure before database replacement', async (t) => {
   const root = fixture(t)
-  for (const failing of [false, true]) {
+  for (const failure of [null, 'validation', 'partial']) {
     const steps = []
+    const browserSteps = []
+    const slotBrowserManager = {
+      async stop() {
+        browserSteps.push('closed')
+      },
+      start() {
+        browserSteps.push('started')
+      },
+    }
     const manager = {
       async stop() {
         steps.push('closing')
@@ -534,26 +543,35 @@ test('restore waits for account browsers to close and restarts the monitor after
       },
     }
     const backupService = {
+      isRestoring: false,
       async restoreBackup(id) {
         assert.equal(id, 'backup-fixture')
         assert.deepEqual(steps, ['closing', 'closed'])
         steps.push('restoring')
-        if (failing) throw Object.assign(new Error('fixture failed'), { code: 'backup_corrupt' })
+        if (failure) {
+          this.isRestoring = failure === 'partial'
+          throw Object.assign(new Error('fixture failed'), {
+            code: failure === 'partial' ? 'restore_failed' : 'backup_corrupt',
+          })
+        }
         steps.push('rebound')
         return { ok: true }
       },
     }
-    const out = await handler(root, { manager, backupService, body: { confirm: true } })(
+    const out = await handler(root, { manager, slotBrowserManager, backupService, body: { confirm: true } })(
       'POST',
       '/api/panel/backups/backup-fixture/restore',
     )
-    assert.equal(out.status, failing ? 422 : 200)
+    assert.equal(out.status, failure === 'partial' ? 500 : failure ? 422 : 200)
     assert.deepEqual(
       steps,
-      failing
-        ? ['closing', 'closed', 'restoring', 'started']
-        : ['closing', 'closed', 'restoring', 'rebound', 'started'],
+      failure === 'partial'
+        ? ['closing', 'closed', 'restoring']
+        : failure
+          ? ['closing', 'closed', 'restoring', 'started']
+          : ['closing', 'closed', 'restoring', 'rebound', 'started'],
     )
+    assert.deepEqual(browserSteps, failure === 'partial' ? ['closed'] : ['closed', 'started'])
   }
 })
 

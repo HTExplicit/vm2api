@@ -11,6 +11,7 @@ vi.mock('@/lib/session', () => ({
   clearSession: vi.fn(),
   hasSession: () => true,
   sessionToken: () => '',
+  sessionRevision: () => 0,
 }))
 
 describe('VM persona preset contract', () => {

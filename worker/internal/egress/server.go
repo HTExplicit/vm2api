@@ -231,8 +231,8 @@ func spliceIdle(a, b net.Conn, dest string, idle time.Duration) error {
 			return
 		}
 		deadline := time.Now().Add(idle)
-		_ = a.SetReadDeadline(deadline)
-		_ = b.SetReadDeadline(deadline)
+		_ = a.SetDeadline(deadline)
+		_ = b.SetDeadline(deadline)
 	}
 	arm()
 	var wg sync.WaitGroup
@@ -440,11 +440,11 @@ func dnsServFail(query []byte) ([]byte, bool) {
 // ResolveDNS tries each upstream in order, starting from the last one that
 // succeeded, and returns the first valid reply.
 func (s *Server) ResolveDNS(ctx context.Context, query []byte) ([]byte, error) {
+	var msg dnsmessage.Message
+	if err := msg.Unpack(query); err != nil {
+		return nil, fmt.Errorf("decode DNS query: %w", err)
+	}
 	if len(s.cfg.DNSEmptyTypes) > 0 {
-		var msg dnsmessage.Message
-		if err := msg.Unpack(query); err != nil {
-			return nil, fmt.Errorf("decode DNS query for override: %w", err)
-		}
 		if msg.Response || msg.OpCode != 0 || len(msg.Questions) == 0 {
 			return nil, fmt.Errorf("DNS override requires a standard query with questions")
 		}
@@ -479,6 +479,9 @@ func (s *Server) ResolveDNS(ctx context.Context, query []byte) ([]byte, error) {
 		reply, err := s.resolveOne(attemptCtx, upstream, query)
 		cancel()
 		if err == nil {
+			err = validateDNSReply(&msg, reply)
+		}
+		if err == nil {
 			if s.cfg.DomainForward {
 				s.domains.observe(reply, time.Now())
 			}
@@ -494,6 +497,32 @@ func (s *Server) ResolveDNS(ctx context.Context, query []byte) ([]byte, error) {
 		}
 	}
 	return nil, errors.Join(errs...)
+}
+
+func validateDNSReply(query *dnsmessage.Message, data []byte) error {
+	var reply dnsmessage.Message
+	if err := reply.Unpack(data); err != nil {
+		return fmt.Errorf("decode DNS reply: %w", err)
+	}
+	if !reply.Response || reply.ID != query.ID || reply.OpCode != query.OpCode {
+		return fmt.Errorf("DNS reply does not match query header")
+	}
+	// A protocol error may omit the question. Preserve valid negative/error
+	// replies rather than treating their RCode as an upstream transport failure.
+	if len(reply.Questions) == 0 && reply.RCode != dnsmessage.RCodeSuccess {
+		return nil
+	}
+	if len(reply.Questions) != len(query.Questions) {
+		return fmt.Errorf("DNS reply question count does not match query")
+	}
+	for i, question := range query.Questions {
+		answer := reply.Questions[i]
+		if answer.Type != question.Type || answer.Class != question.Class ||
+			!strings.EqualFold(answer.Name.String(), question.Name.String()) {
+			return fmt.Errorf("DNS reply question %d does not match query", i)
+		}
+	}
+	return nil
 }
 
 func (s *Server) resolveOne(ctx context.Context, upstream string, query []byte) ([]byte, error) {
@@ -518,12 +547,15 @@ func (s *Server) resolveDoH(ctx context.Context, upstream string, query []byte) 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("doh status %s", resp.Status)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 65535))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
 	if err != nil {
 		return nil, err
 	}
 	if len(body) < 12 {
 		return nil, fmt.Errorf("doh short reply %d", len(body))
+	}
+	if len(body) > 65535 {
+		return nil, fmt.Errorf("doh oversized reply %d", len(body))
 	}
 	return body, nil
 }

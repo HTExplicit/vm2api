@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, normalizePanelError, panelFetch } from './api'
+import { ApiError, api, normalizePanelError, panelFetch } from './api'
 import {
   hasSession,
   onPanelSessionExpired,
   sessionToken,
+  setApiBase,
   setSession,
 } from './session'
 
@@ -87,5 +88,74 @@ describe('panelFetch 401', () => {
     expect(res.status).toBe(401)
     expect(hasSession()).toBe(true)
     expect(expired).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['new login', () => setSession('new-token', 'tenant')],
+    [
+      'same-token reauthentication',
+      () => setSession('kin-panel-test-token', 'admin'),
+    ],
+    ['different backend', () => setApiBase('https://other.example')],
+  ])('ignores an old request 401 after %s', async (_name, changeSession) => {
+    let resolve!: (value: Response) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>((done) => {
+            resolve = done
+          })
+      )
+    )
+    const expired = vi.fn()
+    const unsubscribe = onPanelSessionExpired(expired)
+    try {
+      const pending = panelFetch('/api/panel/me')
+      changeSession()
+      resolve(new Response('{}', { status: 401 }))
+      await expect(pending).rejects.toMatchObject({ code: 'session_changed' })
+      expect(hasSession()).toBe(true)
+      expect(expired).not.toHaveBeenCalled()
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('discards a successful old mutation response after switching accounts', async () => {
+    let resolve!: (value: Response) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>((done) => {
+            resolve = done
+          })
+      )
+    )
+    const pending = api('/api/panel/api-keys', { method: 'POST', body: '{}' })
+    setSession('tenant-token', 'tenant')
+    resolve(new Response(JSON.stringify({ data: { key: 'old-account-key' } })))
+    await expect(pending).rejects.toMatchObject({ code: 'session_changed' })
+    expect(sessionToken()).toBe('tenant-token')
+  })
+
+  it('discards old JSON when the account changes while the response body is loading', async () => {
+    let resolveBody!: (value: unknown) => void
+    const json = vi.fn(
+      () =>
+        new Promise((done) => {
+          resolveBody = done
+        })
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, status: 200, json }))
+    )
+    const pending = api('/api/panel/api-keys')
+    await vi.waitFor(() => expect(json).toHaveBeenCalledOnce())
+    setSession('tenant-token', 'tenant')
+    resolveBody({ data: { items: ['old-account-key'] } })
+    await expect(pending).rejects.toMatchObject({ code: 'session_changed' })
   })
 })

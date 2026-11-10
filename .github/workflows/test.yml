@@ -54,6 +54,9 @@ jobs:
       - name: redaction helper unit checks
         working-directory: redact
         run: go test ./...
+      - name: egress timeout and DNS regressions
+        working-directory: worker
+        run: go test -race ./internal/egress ./internal/proxy
       - name: focused backend regressions
         shell: bash
         run: |
@@ -114,6 +117,7 @@ jobs:
             test/unit/request-logs-export.test.mjs \
             test/unit/panel-usage-logs.test.mjs \
             test/unit/database.test.mjs \
+            test/unit/backup-service.test.mjs \
             test/unit/go-worker-client.test.mjs \
             test/unit/outbound-log-envelope.test.mjs \
             test/unit/panel-billing-lookup.test.mjs \
@@ -169,6 +173,7 @@ jobs:
             test/unit/codex-usage.test.mjs \
             test/unit/codex-credits.test.mjs \
             test/unit/codex-slot-pool.test.mjs \
+            test/unit/openai-account-selector.test.mjs \
             test/unit/codex-admission-records.test.mjs \
             test/unit/codex-slot.test.mjs \
             test/unit/codex-quota-stale.test.mjs \
@@ -261,6 +266,7 @@ jobs:
           pnpm exec vitest run src/features/settings/health-pane.test.ts src/features/cluster/slot-migration.test.ts
           pnpm exec vitest run src/features/vm/engine-contract.test.ts src/features/vm/persona-contract.test.ts src/lib/wrap-health.test.ts src/features/system/compat-patch.test.ts
           pnpm exec vitest run src/config/nav.test.ts src/features/auth/route-guard.test.ts src/features/users/user-concurrency.test.ts src/features/vm/vm-perms.test.ts
+          pnpm exec vitest run src/lib/session-cache.test.ts src/lib/api.test.ts src/features/vm/use-vm-test-chat.test.tsx
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx
           pnpm exec vitest run src/features/cluster/model.test.ts src/features/cluster/connection-rows.test.ts
           pnpm build

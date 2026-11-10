@@ -3,11 +3,16 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import zlib from 'node:zlib'
 import { spawnSync } from 'node:child_process'
+import { Worker } from 'node:worker_threads'
 import { openDatabase, closeDatabase, getDb } from '../../src/lib/db/database.mjs'
 import { SettingsRepo } from '../../src/lib/db/repos/settings-repo.mjs'
 import { VmsRepo } from '../../src/lib/db/repos/vms-repo.mjs'
 import { BackupService, tarAvailable } from '../../src/lib/admin/backup-service.mjs'
+import { sha256File } from '../../src/lib/admin/backup-core.mjs'
+import { BackupRepo } from '../../src/lib/db/repos/backup-repo.mjs'
+import { readAll } from '../../src/lib/db/sqlite-pool.mjs'
 import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
 import { stopVmWatch, initVmDbSync } from '../../src/lib/vm/vm-db-sync.mjs'
 import { setVmWriteHook } from '../../src/lib/vm/vm-file.mjs'
@@ -160,11 +165,12 @@ test('restore fails when stores cannot rebind to the reopened database', async (
   })
 
   await assert.rejects(svc.restoreBackup(rec.id), /store rebind failed/)
-  assert.equal(svc.isRestoring, false)
+  assert.equal(svc.isRestoring, true, 'traffic must stay paused after a partially applied restore')
+  await assert.rejects(svc.createBackup(), /restore already in progress/)
   assert.doesNotThrow(() => getDb().prepare('SELECT 1').get())
 })
 
-test('restore rebuilds vm files from DB mirror for db-only path', async () => {
+test('restore preserves legacy top-level VM archive files', async () => {
   seedVm('vm-b2')
   initVmDbSync(root, { watch: false })
   const rec = await svc.createBackup({ kind: 'manual' })
@@ -180,6 +186,195 @@ test('restore rebuilds vm files from DB mirror for db-only path', async () => {
   assert.equal(row.access_token, null)
   assert.equal(row.vm.claude.has_access, true)
   assert.equal(row.vm.claude.access_token, undefined)
+})
+
+test('backup and restore include nested Codex credentials without guest caches', async () => {
+  seedVm('vm-codex')
+  const slotDir = path.join(root, 'vms', 'vm-codex')
+  fs.mkdirSync(path.join(slotDir, 'cli-home'), { recursive: true })
+  const credentialFile = path.join(slotDir, 'codex-credentials.json')
+  const credential = JSON.stringify({ accounts: [{ access_token: 'test-access', refresh_token: 'test-refresh' }] })
+  fs.writeFileSync(credentialFile, credential)
+  fs.writeFileSync(path.join(slotDir, 'cli-home', 'cache.json'), 'keep-current-cache')
+  const rec = await svc.createBackup()
+  assert.equal(rec.includes.vms, 3)
+  const stage = path.join(root, 'inspect')
+  fs.mkdirSync(stage)
+  assert.equal(spawnSync('tar', ['-xzf', rec.file_path, '-C', stage]).status, 0)
+  const stagedFile = path.join(stage, 'vms', 'vm-codex', 'codex-credentials.json')
+  const manifest = JSON.parse(fs.readFileSync(path.join(stage, 'manifest.json'), 'utf8'))
+  assert.equal(fs.readFileSync(stagedFile, 'utf8'), credential)
+  assert.equal(manifest.sha256s['vms/vm-codex/codex-credentials.json'], sha256File(stagedFile))
+  assert.equal(fs.existsSync(path.join(stage, 'vms', 'vm-codex', 'cli-home')), false)
+  fs.writeFileSync(credentialFile, '{"accounts":[]}')
+  await svc.restoreBackup(rec.id)
+  assert.equal(fs.readFileSync(credentialFile, 'utf8'), credential)
+  assert.equal(fs.readFileSync(path.join(slotDir, 'cli-home', 'cache.json'), 'utf8'), 'keep-current-cache')
+})
+
+test('corrupt nested credentials fail validation before changing the live database', async () => {
+  seedVm('vm-codex')
+  const slotDir = path.join(root, 'vms', 'vm-codex')
+  fs.mkdirSync(slotDir)
+  fs.writeFileSync(path.join(slotDir, 'codex-credentials.json'), '{"accounts":[]}')
+  const rec = await svc.createBackup()
+  const stage = path.join(root, 'tampered')
+  fs.mkdirSync(stage)
+  assert.equal(spawnSync('tar', ['-xzf', rec.file_path, '-C', stage]).status, 0)
+  fs.writeFileSync(path.join(stage, 'vms', 'vm-codex', 'codex-credentials.json'), 'damaged')
+  assert.equal(spawnSync('tar', ['-czf', rec.file_path, '-C', stage, '.']).status, 0)
+  getDb().prepare('UPDATE backup_records SET sha256 = ? WHERE id = ?').run(sha256File(rec.file_path), rec.id)
+  new SettingsRepo(getDb()).set('marker', 'live-state')
+  await assert.rejects(svc.restoreBackup(rec.id), /sha256 mismatch/)
+  assert.equal(new SettingsRepo(getDb()).get('marker'), 'live-state')
+  assert.equal(fs.existsSync(path.join(dataDir, 'kin.db.pre-restore')), false)
+  assert.equal(svc.list().length, 1, 'invalid archive must not rotate safety backups')
+})
+
+test('restore rejects incompatible nested targets before replacing the live database', async () => {
+  seedVm('vm-codex')
+  const slotDir = path.join(root, 'vms', 'vm-codex')
+  fs.mkdirSync(slotDir)
+  const credentialFile = path.join(slotDir, 'codex-credentials.json')
+  fs.writeFileSync(credentialFile, '{"accounts":[]}')
+  const rec = await svc.createBackup()
+  fs.unlinkSync(credentialFile)
+  fs.mkdirSync(credentialFile)
+  new SettingsRepo(getDb()).set('marker', 'live-state')
+  await assert.rejects(svc.restoreBackup(rec.id), /incompatible type/)
+  assert.equal(new SettingsRepo(getDb()).get('marker'), 'live-state')
+  assert.equal(fs.existsSync(path.join(dataDir, 'kin.db.pre-restore')), false)
+})
+
+test('restoring oldest retained pre_restore survives safety-backup retention', async () => {
+  seedVm()
+  new SettingsRepo(getDb()).set('marker', 'oldest')
+  const oldest = await svc.createBackup({ kind: 'pre_restore' })
+  new SettingsRepo(getDb()).set('marker', 'later')
+  await svc.createBackup({ kind: 'pre_restore' })
+  await svc.createBackup({ kind: 'pre_restore' })
+  const restored = await svc.restoreBackup(oldest.id)
+  assert.equal(restored.ok, true)
+  assert.equal(new SettingsRepo(getDb()).get('marker'), 'oldest')
+})
+
+test('legacy database-only gzip snapshots remain restorable as metadata', async () => {
+  seedVm('vm-legacy')
+  initVmDbSync(root, { watch: false })
+  new SettingsRepo(getDb()).set('marker', 'legacy')
+  const rec = await svc.createBackup()
+  const stage = path.join(root, 'legacy')
+  fs.mkdirSync(stage)
+  assert.equal(spawnSync('tar', ['-xzf', rec.file_path, '-C', stage]).status, 0)
+  const filePath = path.join(svc.backupDir, 'kin-backup-legacy.db.gz')
+  fs.writeFileSync(filePath, zlib.gzipSync(fs.readFileSync(path.join(stage, 'db', 'kin.db'))))
+  const legacy = new BackupRepo(getDb()).insert({
+    ...rec,
+    id: 'bak_legacy',
+    file_path: filePath,
+    file_name: path.basename(filePath),
+    sha256: sha256File(filePath),
+    size_bytes: fs.statSync(filePath).size,
+  })
+  new SettingsRepo(getDb()).set('marker', 'current')
+  fs.unlinkSync(path.join(root, 'vms', 'vm-legacy.json'))
+  await svc.restoreBackup(legacy.id)
+  assert.equal(new SettingsRepo(getDb()).get('marker'), 'legacy')
+  const restored = JSON.parse(fs.readFileSync(path.join(root, 'vms', 'vm-legacy.json'), 'utf8'))
+  assert.equal(restored.id, 'vm-legacy')
+  assert.equal(restored.claude.access_token, undefined)
+})
+
+test('missing tar fails visibly without pruning successful backups', async () => {
+  seedVm()
+  const rec = await svc.createBackup()
+  const originalPath = process.env.PATH
+  try {
+    process.env.PATH = path.join(root, 'no-tools')
+    await assert.rejects(svc.createBackup(), /tar is required/)
+  } finally {
+    process.env.PATH = originalPath
+  }
+  assert.equal(svc.list().filter((row) => row.status === 'failed').length, 1)
+  assert.equal(fs.existsSync(rec.file_path), true)
+  assert.equal(
+    fs.readdirSync(svc.backupDir).some((name) => name.endsWith('.db.gz')),
+    false,
+  )
+})
+
+test('unreadable credential entry fails the backup instead of silently omitting it', async () => {
+  seedVm('vm-codex')
+  const rec = await svc.createBackup()
+  fs.mkdirSync(path.join(root, 'vms', 'vm-codex', 'codex-credentials.json'), { recursive: true })
+  await assert.rejects(svc.createBackup(), /requires a regular file/)
+  assert.equal(svc.list().filter((row) => row.status === 'failed').length, 1)
+  assert.equal(fs.existsSync(rec.file_path), true)
+})
+
+test('archive links are rejected before extraction or live changes', async () => {
+  seedVm()
+  const rec = await svc.createBackup()
+  const stage = path.join(root, 'linked-archive')
+  fs.mkdirSync(stage)
+  assert.equal(spawnSync('tar', ['-xzf', rec.file_path, '-C', stage]).status, 0)
+  // A hardlink is portable on the Windows fixture filesystem and must be
+  // rejected just like a symlink, even with a matching outer archive hash.
+  fs.linkSync(path.join(stage, 'db', 'kin.db'), path.join(stage, 'vms', 'linked.json'))
+  assert.equal(spawnSync('tar', ['-czf', rec.file_path, '-C', stage, '.']).status, 0)
+  getDb().prepare('UPDATE backup_records SET sha256 = ? WHERE id = ?').run(sha256File(rec.file_path), rec.id)
+  new SettingsRepo(getDb()).set('marker', 'live-state')
+  await assert.rejects(svc.restoreBackup(rec.id), /link or special file/)
+  assert.equal(new SettingsRepo(getDb()).get('marker'), 'live-state')
+  assert.equal(fs.existsSync(path.join(dataDir, 'kin.db.pre-restore')), false)
+})
+
+test('restore waits for pooled readers before removing the live WAL', async (t) => {
+  openDatabase({ dataDir, pooled: true })
+  await readAll('SELECT 1')
+  new SettingsRepo(getDb()).set('marker', 'before')
+  const rec = await svc.createBackup()
+  new SettingsRepo(getDb()).set('marker', 'after')
+  await readAll('SELECT 1')
+  const originalTerminate = Worker.prototype.terminate
+  let readersTerminated = 0
+  const terminateMock = t.mock.method(Worker.prototype, 'terminate', function () {
+    return new Promise((resolve) => setTimeout(resolve, 50)).then(async () => {
+      const code = await originalTerminate.call(this)
+      readersTerminated += 1
+      return code
+    })
+  })
+  const originalRemove = fs.rmSync
+  const removeMock = t.mock.method(fs, 'rmSync', (file, options) => {
+    if (file === path.join(dataDir, 'kin.db-wal'))
+      assert.ok(readersTerminated > 0, 'readers must exit before WAL removal')
+    return originalRemove(file, options)
+  })
+  try {
+    await svc.restoreBackup(rec.id)
+  } finally {
+    terminateMock.mock.restore()
+    removeMock.mock.restore()
+  }
+  assert.equal(new SettingsRepo(getDb()).get('marker'), 'before')
+})
+
+test('restore refuses to replace the database when a WAL sidecar cannot be removed', async (t) => {
+  seedVm()
+  const rec = await svc.createBackup()
+  new SettingsRepo(getDb()).set('marker', 'live-state')
+  const originalRemove = fs.rmSync
+  const removeMock = t.mock.method(fs, 'rmSync', (file, options) => {
+    if (file === path.join(dataDir, 'kin.db-wal')) throw new Error('test WAL is still held open')
+    return originalRemove(file, options)
+  })
+  await assert.rejects(svc.restoreBackup(rec.id), /WAL is still held open/)
+  assert.equal(svc.isRestoring, true)
+  removeMock.mock.restore()
+  openDatabase({ dataDir })
+  assert.equal(new SettingsRepo(getDb()).get('marker'), 'live-state')
+  assert.equal(fs.existsSync(path.join(dataDir, 'kin.db.pre-restore')), false)
 })
 
 test('sha256 tamper detection blocks restore', async () => {

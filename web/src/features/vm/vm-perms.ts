@@ -13,7 +13,7 @@ export type VmPerms = {
   power: boolean
   /** test-chat、定时测试。 */
   test: boolean
-  /** GET /api/panel/test-models（后端目前只放行 admin）。 */
+  /** GET /api/panel/test-models；租户读取自己的槽，主动刷新仅 admin。 */
   testModels: boolean
   /** oauth/*、导入凭证、额度刷新、重置券、诊断与恢复服务。租户只查看。 */
   credential: boolean
@@ -58,6 +58,7 @@ export function vmPermsFor(
       known: true,
       power: true,
       test: true,
+      testModels: true,
       credential: false,
       proxy: false,
     }

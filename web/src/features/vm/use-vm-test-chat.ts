@@ -169,7 +169,7 @@ export function useVmTestChat(vm: Vm) {
     result,
     running: send.isPending,
     modelsRefreshing: testModels.isFetching || refreshModels.isPending,
-    canRefreshModels: canTest,
+    canRefreshModels: permissions.admin,
     canSavePromptDefault: permissions.admin,
     savingPromptDefault: savePromptDefault.isPending,
     promptDefaultsLoading: defaults.isPending,
@@ -185,7 +185,7 @@ export function useVmTestChat(vm: Vm) {
       send.mutate()
     },
     onRefreshModels: () => {
-      if (!refreshModels.isPending) refreshModels.mutate()
+      if (permissions.admin && !refreshModels.isPending) refreshModels.mutate()
     },
   }
 }

@@ -28,8 +28,8 @@ describe('vmPermsFor follows panel-acl roles', () => {
     expect(p.dashboard).toBe(false)
     expect(p.power).toBe(true)
     expect(p.test).toBe(true)
-    // The backend only serves GET /api/panel/test-models to admins.
-    expect(p.testModels).toBe(false)
+    // Tenants may read their slot's models; live refresh remains admin-only.
+    expect(p.testModels).toBe(true)
     expect(p.credential).toBe(false)
     expect(p.proxy).toBe(false)
     expect(p.remove).toBe(false)

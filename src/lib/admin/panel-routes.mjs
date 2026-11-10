@@ -2778,8 +2778,10 @@ export function createPanelHandler(ctx) {
             error: { message: String(e.message || e), code: e.code || 'restore_failed' },
           })
         } finally {
-          slotBrowserManager?.start()
-          if (process.env.KIN_CRS_MOCK !== '1') openaiApiManager?.start()
+          if (!backupService.isRestoring) {
+            slotBrowserManager?.start()
+            if (process.env.KIN_CRS_MOCK !== '1') openaiApiManager?.start()
+          }
         }
       }
       if (req.method === 'DELETE' && /^\/api\/panel\/backups\/[^/]+$/.test(p)) {
