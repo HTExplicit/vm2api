@@ -179,6 +179,10 @@ jobs:
             test/unit/codex-quota-stale.test.mjs \
             test/unit/usage-probe-monitor.test.mjs \
             test/unit/crs-usage-probe.test.mjs \
+            test/unit/subscription-plan.test.mjs \
+            test/unit/oauth-identity.test.mjs \
+            test/unit/outbound-snapshot.test.mjs \
+            test/unit/crag-v2-credential-health.test.mjs \
             test/unit/guest-oauth-transparent-egress.test.mjs \
             test/unit/kvm-runtime.test.mjs \
             test/unit/panel-subscription.test.mjs \
@@ -254,7 +258,7 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm exec vitest run src/features/pelican/pelican.test.ts src/features/pelican/preview-fit.test.ts
           pnpm exec vitest run src/config/repo.test.ts src/features/settings/about-pane.test.ts
-          pnpm exec vitest run src/lib/vm-status.test.ts -t 'GPT plan label follows OpenAI plan_type'
+          pnpm exec vitest run src/lib/vm-status.test.ts src/features/vm/vm-list-table.test.tsx
           pnpm exec vitest run src/features/vm/usage-windows.test.tsx src/features/vm/vm-rack-model.test.ts
           pnpm exec vitest run src/features/models/model-mapping.test.ts src/features/models/policy.test.ts
           pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx src/features/vm/openai-api-actions.test.tsx src/features/settings/openai-api-balance-section.test.tsx

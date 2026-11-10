@@ -3358,19 +3358,34 @@ export function createPanelHandler(ctx) {
           })
         const vm = getVm(cfg.paths.project, p.split('/')[4])
         if (!vm) return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'vm not found' } })
-        if (isCodexVm(vm) || vm.node_id || isKvmRuntime(vm))
+        if (isCodexVm(vm) || isKvmRuntime(vm) || isNativeNodeVm(vm))
           return json(res, 400, {
             ok: false,
             error: {
               code: 'crag_v2_unsupported_placement',
-              message: 'CRAG activation requires a local Linux Docker Claude slot.',
+              message: isCodexVm(vm)
+                ? '请选择 Claude 虚拟机'
+                : isKvmRuntime(vm)
+                  ? 'CRAG v2 不支持 KVM 槽'
+                  : 'CRAG v2 不支持 macOS 原生节点',
             },
           })
+        const remotePlacement = Boolean(vm.node_id) || isKvmRuntime(vm)
         try {
           if (req.method === 'GET')
             return json(res, 200, panel.ok(getCragLicense(cfg.paths.project, vm, { initialize: true })))
           const body = await readBody(req, 32768)
-          const activated = activateCragLicense(cfg.paths.project, vm, body?.registration_code)
+          const registrationCode = typeof body?.registration_code === 'string' ? body.registration_code.trim() : ''
+          if (remotePlacement && !registrationCode.startsWith('CRAGU1.')) {
+            return json(res, 400, {
+              ok: false,
+              error: {
+                code: 'crag_v2_unsupported_placement',
+                message: '集群槽只能激活离线通用码。设备注册码仍需要本机 Linux Docker 槽。',
+              },
+            })
+          }
+          const activated = activateCragLicense(cfg.paths.project, vm, registrationCode)
           if (activated.license?.scope === 'kernel') await distributeCragUniversalGrant(cfg.paths.project)
           return json(res, 200, panel.ok(activated))
         } catch (error) {

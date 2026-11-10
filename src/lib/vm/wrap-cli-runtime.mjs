@@ -16,7 +16,6 @@ import os from 'node:os'
 import path from 'node:path'
 import { kernelBinPath } from '../transport/rust-kernel-supervisor.mjs'
 import { isCodexVm } from './vm-kind.mjs'
-import { isKvmRuntime } from './runtime-kind.mjs'
 import { nativeCliForVm, NATIVE_CLI_FILES } from './native-cli.mjs'
 import { resolveCragKernelVersion, resolveKernelDataplane } from './slot-engine.mjs'
 import { checkCragLicense, decodeLicenseBytes } from './crag-license.mjs'
@@ -80,7 +79,7 @@ exec "$DIR/${WRAP_KERNEL_WRAPPER}.real" "$@"
 
 export const CRAG_V2_DIR = 'crag-v2'
 const CRAG_V2_ENTRY = 'crag-v2'
-const CRAG_V2_CLAUDE = 'claude-code-2.1.317/claude'
+const CRAG_V2_CLAUDE = 'claude-code-2.1.321/claude'
 const CRAG_V2_CAPS = Object.freeze(['official_full', 'zero', 'cancel', 'telemetry', 'unix_socket_envelope'])
 
 export function cragV2Arch() {
@@ -137,14 +136,29 @@ exec "$DIR/${CRAG_V2_DIR}/${CRAG_V2_ENTRY}" "$@"
 }
 
 function cragV2PlacementError(vm) {
-  if (String(vm?.node_id || '').trim() || isKvmRuntime(vm)) {
+  if (isCodexVm(vm)) {
+    return { ok: false, code: 'kernel_codex_unsupported', error: '请选择 Claude 虚拟机' }
+  }
+  if (vm?.node_platform === 'darwin') {
     return {
       ok: false,
       code: 'crag_v2_unsupported_placement',
-      error: 'CRAG v2 only runs on a local Linux Docker slot',
+      error: 'CRAG v2 不支持 macOS 原生节点',
+    }
+  }
+  // A cluster slot's tree is the node slot-bin, not this control plane's home.
+  if (String(vm?.node_id || '').trim()) {
+    return {
+      ok: false,
+      code: 'crag_v2_unsupported_placement',
+      error: '集群槽的 CRAG 由内核页推到节点，不在控制面本机物化',
     }
   }
   return null
+}
+
+function clusterDockerSlot(vm) {
+  return Boolean(String(vm?.node_id || '').trim())
 }
 
 function listCragV2Files(dir, prefix = '') {
@@ -185,7 +199,7 @@ function listCragV2Files(dir, prefix = '') {
   return rows
 }
 
-export function verifyCragV2Tree(dir, { arch = cragV2Arch() } = {}) {
+export function verifyCragV2Tree(dir, { arch = cragV2Arch(), allowPreviousClaude = false } = {}) {
   try {
     const root = fs.lstatSync(dir)
     if (root.isSymbolicLink())
@@ -264,6 +278,8 @@ export function verifyCragV2Tree(dir, { arch = cragV2Arch() } = {}) {
   }
   for (const rel of present) {
     if (!expected.has(rel)) {
+      // A running slot may still exec the previous official Claude path.
+      if (allowPreviousClaude && retainedClaudePath(rel)) continue
       return { ok: false, code: 'crag_v2_hash_mismatch', error: `CRAG v2 package has unlisted file ${rel}` }
     }
     const file = path.join(dir, rel)
@@ -351,11 +367,22 @@ export function verifyCragV2Tree(dir, { arch = cragV2Arch() } = {}) {
   return { ok: true, manifest }
 }
 
+function retainedClaudePath(rel) {
+  const current = CRAG_V2_CLAUDE.split('/')[0]
+  return rel.startsWith('claude-code-') && !rel.startsWith(`${current}/`)
+}
+
+function restoreDirectoryContents(backup, dest) {
+  for (const name of fs.readdirSync(dest)) fs.rmSync(path.join(dest, name), { recursive: true, force: true })
+  for (const name of fs.readdirSync(backup)) {
+    fs.cpSync(path.join(backup, name), path.join(dest, name), { recursive: true, dereference: false })
+  }
+}
+
 function stageCragV2Tree(src, dest) {
   const parent = path.dirname(dest)
   const staging = fs.mkdtempSync(path.join(parent, `.${path.basename(dest)}.new-`))
-  const backup = `${staging}.bak`
-  let had = false
+  let backup = ''
   try {
     fs.cpSync(src, staging, { recursive: true, dereference: false })
     // mkdtemp is 0700. The slot user is not root, so it cannot exec the bootstrap inside it.
@@ -365,18 +392,26 @@ function stageCragV2Tree(src, dest) {
       fs.rmSync(staging, { recursive: true, force: true })
       return verified
     }
+    let had = false
     try {
       fs.lstatSync(dest)
       had = true
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
     }
-    if (had) fs.renameSync(dest, backup)
-    try {
-      fs.renameSync(staging, dest)
-    } catch (error) {
-      if (had) fs.renameSync(backup, dest)
-      throw error
+    if (!had) fs.renameSync(staging, dest)
+    else {
+      backup = `${staging}.bak`
+      fs.cpSync(dest, backup, { recursive: true, dereference: false })
+      try {
+        publishCragTree(staging, dest)
+      } catch (error) {
+        restoreDirectoryContents(backup, dest)
+        fs.rmSync(backup, { recursive: true, force: true })
+        backup = ''
+        throw error
+      }
+      fs.rmSync(staging, { recursive: true, force: true })
     }
   } catch (error) {
     fs.rmSync(staging, { recursive: true, force: true })
@@ -385,19 +420,31 @@ function stageCragV2Tree(src, dest) {
   return {
     ok: true,
     rollback() {
-      fs.rmSync(dest, { recursive: true, force: true })
-      if (had) fs.renameSync(backup, dest)
+      if (!backup) return
+      restoreDirectoryContents(backup, dest)
+      fs.rmSync(backup, { recursive: true, force: true })
+      backup = ''
     },
     commit() {
-      fs.rmSync(backup, { recursive: true, force: true })
+      if (backup) fs.rmSync(backup, { recursive: true, force: true })
+      backup = ''
     },
+  }
+}
+
+function publishCragTree(src, dest) {
+  const next = new Set(listCragV2Files(src))
+  for (const rel of next) replaceFile(path.join(src, rel), path.join(dest, rel))
+  for (const rel of listCragV2Files(dest)) {
+    if (next.has(rel) || retainedClaudePath(rel)) continue
+    fs.rmSync(path.join(dest, rel), { force: true })
   }
 }
 
 function cragV2WouldChange(src, destDir) {
   const destRoot = path.join(destDir, CRAG_V2_DIR)
   if (!filesEqual(path.join(src, 'manifest.json'), path.join(destRoot, 'manifest.json'))) return true
-  if (verifyCragV2Tree(destRoot).ok !== true) return true
+  if (verifyCragV2Tree(destRoot, { allowPreviousClaude: true }).ok !== true) return true
   try {
     const wrapper = fs.lstatSync(path.join(destDir, WRAP_KERNEL_WRAPPER))
     if (!wrapper.isFile() || !(wrapper.mode & 0o111)) return true
@@ -446,8 +493,26 @@ export function materializeCragV2(projectRoot, vm, { uid = null, gid = null } = 
   }
   const verified = verifyCragV2Tree(src)
   if (!verified.ok) return verified
-  const licensed = checkCragLicense(projectRoot, { ...vm, dataplane: 'crag' })
+  const licensed = checkCragLicense(projectRoot, { ...vm, dataplane: 'crag', crag_kernel_version: 'v2' })
   if (!licensed.ok) return licensed
+  // The node receives this tree, including native Claude Code, through the CRAG package push.
+  if (clusterDockerSlot(vm)) {
+    return {
+      ok: true,
+      remote: true,
+      dest: '',
+      src,
+      dataplane: 'crag',
+      kernel_version: 'v2',
+      runtime_variant: 'crag-v2',
+      claude_bin: CRAG_V2_CLAUDE,
+      changed: false,
+      kernel_changed: false,
+      glibc_shim: false,
+      wrapper: true,
+      kernel_bin: true,
+    }
+  }
   const dest = wrapCliHomeDir(projectRoot, vm.id)
   fs.mkdirSync(dest, { recursive: true })
   if (!cragV2WouldChange(src, dest)) {
@@ -721,17 +786,15 @@ function replaceFile(src, dest) {
   try {
     fs.chmodSync(tmp, 0o755)
   } catch {}
+  // Rename over the live path. Unlinking first drops a file bind mount and the slot cannot exec.
   try {
-    fs.unlinkSync(dest)
+    fs.renameSync(tmp, dest)
   } catch (error) {
-    if (error?.code !== 'ENOENT') {
-      try {
-        fs.unlinkSync(tmp)
-      } catch {}
-      throw error
-    }
+    try {
+      fs.unlinkSync(tmp)
+    } catch {}
+    throw error
   }
-  fs.renameSync(tmp, dest)
   return true
 }
 
@@ -1107,16 +1170,13 @@ function writeKernelBytes(dest, bytes) {
   const tmp = path.join(path.dirname(dest), `.${path.basename(dest)}.${process.pid}.new`)
   fs.writeFileSync(tmp, bytes, { mode: 0o755 })
   try {
-    fs.unlinkSync(dest)
+    fs.renameSync(tmp, dest)
   } catch (error) {
-    if (error?.code !== 'ENOENT') {
-      try {
-        fs.unlinkSync(tmp)
-      } catch {}
-      throw error
-    }
+    try {
+      fs.unlinkSync(tmp)
+    } catch {}
+    throw error
   }
-  fs.renameSync(tmp, dest)
 }
 
 function kernelWriteTargets(projectRoot) {
@@ -1284,7 +1344,9 @@ export function inspectKernelChanges(projectRoot, vms, { routing, nativeCliOptio
         })
         continue
       }
-      const kernelChanged = cragV2WouldChange(src, destDir) || Boolean(vm?.kernel_restart_pending)
+      const kernelChanged = clusterDockerSlot(vm)
+        ? false
+        : cragV2WouldChange(src, destDir) || Boolean(vm?.kernel_restart_pending)
       items.push({ id: vm.id, dataplane, kernel_version: 'v2', ok: true, kernel_changed: kernelChanged })
       continue
     }
