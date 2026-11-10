@@ -249,39 +249,6 @@ test('persistOauthToVm heals revoke on an operator import even if expiry did not
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
-test('browser OAuth imports clear auth failure without changing power intent or manual scheduling', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-power-'))
-  try {
-    for (const status of ['stopped', 'paused', 'disabled']) {
-      for (const scheduleOff of [false, true]) {
-        const vmPath = path.join(dir, `${status}-${scheduleOff}.json`)
-        fs.writeFileSync(
-          vmPath,
-          JSON.stringify({
-            id: 'vm-50',
-            status,
-            schedule_off: scheduleOff,
-            unschedulable: { reason: 'oauth_revoked' },
-            claude: { has_access: true, refresh_error: 'oauth_revoked' },
-          }),
-        )
-        const vm = persistOauthToVm(
-          vmPath,
-          { access_token: 'new', refresh_token: 'new-rt' },
-          { acceptLiveGrant: true, operatorImport: true, preservePowerIntent: true },
-        )
-        assert.equal(vm.status, status)
-        assert.equal(vm.schedule_off, scheduleOff)
-        assert.equal(vm.schedulable, !scheduleOff)
-        assert.equal(vm.unschedulable, undefined)
-        assert.equal(vm.claude.refresh_error, null)
-      }
-    }
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
-  }
-})
-
 test('restoreScheduleAfterLiveCredential ignores operator stopped', () => {
   const vm = {
     status: 'stopped',

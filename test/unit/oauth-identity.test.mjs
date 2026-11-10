@@ -1,8 +1,5 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
 import {
   applyOauthIdentity,
   CLAUDE_CLI_BOOTSTRAP_URL,
@@ -225,53 +222,4 @@ test('liveOauthToSetupToken keeps flattened identity', () => {
   assert.equal(out.email, 'live@example.com')
   assert.equal(out.account_uuid, 'acct-live')
   assert.equal(out.org_uuid, 'org-live')
-})
-
-test('browser OAuth commit saves credentials while leaving a stopped slot and manual scheduling unchanged', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-save-only-'))
-  const vmPath = path.join(root, 'vms', 'vm-01.json')
-  const existing = {
-    id: 'vm-01',
-    status: 'stopped',
-    runtime: { type: 'docker', stopped: true },
-    schedule_off: true,
-    unschedulable: { reason: 'oauth_revoked' },
-    claude: { account_uuid: 'acct-1', refresh_error: 'oauth_revoked' },
-  }
-  fs.mkdirSync(path.dirname(vmPath), { recursive: true })
-  fs.writeFileSync(vmPath, JSON.stringify(existing))
-  const imported = []
-  try {
-    const { commitImportedOauth } = createImportCommit({
-      cfg: { paths: { project: root } },
-      routingConfig: {},
-      accountQuota: { rebindToVm() {}, clearGrantRevokeLeftover() {} },
-      importWorkerCredential: async (exec, grant) => {
-        imported.push({ exec, grant })
-        return { ok: true }
-      },
-    })
-    const result = await commitImportedOauth({
-      vmId: existing.id,
-      vmPath,
-      existing,
-      oauth: { access_token: 'new-access', refresh_token: 'new-refresh', account_uuid: 'acct-1' },
-      prepareRuntime: false,
-      preservePowerIntent: true,
-      skipOfficialCc: true,
-    })
-    assert.equal(result.ok, true)
-    assert.equal(imported.length, 1)
-    assert.equal(imported[0].grant.access_token, 'new-access')
-    const saved = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-    assert.equal(saved.status, 'stopped')
-    assert.equal(saved.runtime.stopped, true)
-    assert.equal(saved.schedule_off, true)
-    assert.equal(saved.unschedulable, undefined)
-    assert.equal(saved.claude.refresh_error, null)
-    assert.equal(result.official_cc_bootstrap.scheduled, false)
-    assert.equal(result.official_cc_bootstrap.reason, 'credential_edit')
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true })
-  }
 })

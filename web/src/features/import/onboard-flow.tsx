@@ -324,7 +324,6 @@ export function OnboardFlow() {
   const [vmId, setVmId] = useState('')
   /** 换票成功后钉住的槽：留在本页看初装与开机。 */
   const [pinnedId, setPinnedId] = useState('')
-  const [browserCompleted, setBrowserCompleted] = useState(false)
   const [backTo, setBackTo] = useState<number | null>(null)
   const [pendingBootstrap, setPendingBootstrap] = useState('')
   const bootSeen = useRef('')
@@ -370,7 +369,7 @@ export function OnboardFlow() {
   const boot = useQuery(
     officialCcBootstrapQueryOptions(
       activeId,
-      !!activeId && !!current?.has_token && !browserCompleted
+      !!activeId && !!current?.has_token
     )
   )
   const bootStatus = boot.data?.status || null
@@ -433,8 +432,7 @@ export function OnboardFlow() {
     const vm = vms.find((item) => item.id === target) || current
     setBackTo(null)
     setPinnedId(target)
-    setBrowserCompleted(data.completion === 'browser_oauth')
-    if (data.completion === 'browser_oauth' || isCodexVm(vm ?? undefined)) {
+    if (isCodexVm(vm ?? undefined)) {
       setPendingBootstrap('')
       toast.success(ok)
       await qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey })
@@ -459,7 +457,6 @@ export function OnboardFlow() {
 
   function restart() {
     setPinnedId('')
-    setBrowserCompleted(false)
     setVmId('')
     setBackTo(null)
     setPendingBootstrap('')
@@ -505,7 +502,7 @@ export function OnboardFlow() {
     2: current ? (hasProxy ? '已绑出口' : '待绑定') : null,
     3: pinned || current?.has_token ? current?.email || '已导入' : null,
     4: pinned
-      ? browserCompleted || isCodexVm(pinned) || credType !== 'oauth'
+      ? isCodexVm(pinned) || credType !== 'oauth'
         ? running
           ? '运行中'
           : '待开机'
@@ -663,7 +660,6 @@ export function OnboardFlow() {
             <div className='space-y-3'>
               <CredentialPanel
                 vm={current}
-                browserCompletionMode='start_and_schedule'
                 onCommitted={(data, target, what) =>
                   void afterCommit(data, target, what)
                 }
@@ -716,11 +712,7 @@ export function OnboardFlow() {
                 </div>
               </div>
 
-              {browserCompleted ? (
-                <p className='text-xs text-muted-foreground'>
-                  Claude 浏览器登录已完成，内核已就绪并开启调度。
-                </p>
-              ) : isCodexVm(pinned) ? (
+              {isCodexVm(pinned) ? (
                 <p className='text-xs text-muted-foreground'>
                   GPT 槽不跑 Claude 官方初装。
                 </p>

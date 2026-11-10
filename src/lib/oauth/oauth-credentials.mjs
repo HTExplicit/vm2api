@@ -584,30 +584,18 @@ export function mirrorWorkerCredentialsToVm(vmPath, homeDir, opts = {}) {
  * waits for an operator action, so a misread grant death cannot silently
  * come back.
  */
-export function restoreScheduleAfterLiveCredential(vm, { operatorImport = false, preservePowerIntent = false } = {}) {
+export function restoreScheduleAfterLiveCredential(vm, { operatorImport = false } = {}) {
   if (!vm || !hasCredentialPresence(vm.claude)) return vm
-  const powerStatus = vm.status
   migrateScheduleRecord(vm)
-  if (!vm.unschedulable) {
-    if (preservePowerIntent) vm.status = powerStatus
-    return vm
-  }
+  if (!vm.unschedulable) return vm
   applyClearUnschedulable(vm, { by: operatorImport ? 'credential_import' : 'credential_present' })
-  if (preservePowerIntent) {
-    vm.status = powerStatus
-    return vm
-  }
   if (vm.unschedulable) return vm
   const status = String(vm.status || '').toLowerCase()
   if (status === 'stopped' || status === 'paused' || status === 'disabled') vm.status = 'running'
   return vm
 }
 
-export function persistOauthToVm(
-  vmPath,
-  cred,
-  { acceptLiveGrant = false, operatorImport = false, preservePowerIntent = false } = {},
-) {
+export function persistOauthToVm(vmPath, cred, { acceptLiveGrant = false, operatorImport = false } = {}) {
   if (!vmPath || !fs.existsSync(vmPath)) return null
   const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
   const prev = vm.claude || {}
@@ -676,7 +664,7 @@ export function persistOauthToVm(
   vm.claude.refreshed_at = new Date().toISOString()
   vm.claude._token_version = n._token_version || Date.now()
   clearClaudeAuthCooldown(vm.claude)
-  restoreScheduleAfterLiveCredential(vm, { operatorImport, preservePowerIntent })
+  restoreScheduleAfterLiveCredential(vm, { operatorImport })
   vm.updated_at = new Date().toISOString()
   atomicWriteJson(vmPath, vm, { mode: 0o600 })
   return vm

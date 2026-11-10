@@ -197,7 +197,6 @@ for (const cleanupFails of [false, true]) {
       catalogMonitor: stop('catalog'),
       notifyMonitor: stop('notify'),
       codexBrowserLogin: stop('oauth'),
-      claudeBrowserLogin: stop('claude-oauth'),
       slotBrowserManager: {
         stop: async () => {
           events.push('browser')
@@ -234,7 +233,7 @@ for (const cleanupFails of [false, true]) {
       })
       response.end()
       await pending
-      for (const service of ['oauth', 'claude-oauth', 'browser', 'account-api'])
+      for (const service of ['oauth', 'browser', 'account-api'])
         assert.equal(events.filter((name) => name === service).length, 1)
       assert.ok(events.indexOf('database') > events.indexOf('account-api'))
       assert.ok(events.indexOf('jev-recorder-off') < events.indexOf('database'))

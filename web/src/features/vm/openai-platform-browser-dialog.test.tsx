@@ -23,10 +23,6 @@ const controls = vi.hoisted(() => ({
   saved: vi.fn(),
   changeOpen: vi.fn(),
   purpose: 'platform' as 'oauth' | 'platform',
-  provider: 'openai' as 'openai' | 'anthropic',
-  flavor: 'cai' as 'cai' | 'claude_code',
-  completionMode: 'start_and_schedule' as
-    'start_and_schedule' | 'preserve_state',
   vmId: 'slot-a',
   open: true,
   dialogChange: null as null | ((open: boolean) => void),
@@ -157,18 +153,12 @@ class Socket {
     this.onmessage?.({
       data: JSON.stringify({
         type: 'navigation',
-        url: 'https://claude.ai/login',
+        url: 'https://auth.openai.com/log-in',
         loading: false,
         canReturnToAuthorization: true,
         inputLocked: false,
         ...fields,
       }),
-    })
-  }
-
-  authDiagnostic(diagnostic: Record<string, unknown> | null) {
-    this.onmessage?.({
-      data: JSON.stringify({ type: 'auth_diagnostic', diagnostic }),
     })
   }
 
@@ -206,9 +196,6 @@ function render() {
       <SlotBrowserDialog
         vmId={controls.vmId}
         purpose='oauth'
-        provider={controls.provider}
-        flavor={controls.flavor}
-        completionMode={controls.completionMode}
         open={controls.open}
         onOpenChange={controls.changeOpen}
         onCredentialsSaved={controls.saved}
@@ -257,9 +244,6 @@ beforeEach(() => {
   controls.toastError.mockReset()
   controls.toastWarning.mockReset()
   controls.purpose = 'platform'
-  controls.provider = 'openai'
-  controls.flavor = 'cai'
-  controls.completionMode = 'start_and_schedule'
   controls.vmId = 'slot-a'
   controls.open = true
   Socket.instances = []
@@ -561,90 +545,6 @@ describe('OAuth browser login completion', () => {
   })
 })
 
-describe('Claude OAuth browser login', () => {
-  beforeEach(() => {
-    controls.purpose = 'oauth'
-    controls.provider = 'anthropic'
-    controls.api.mockImplementation(async (path: string) => {
-      if (path.endsWith('/health'))
-        return {
-          id: 'slot-a',
-          kernel: {
-            rust_health: { reachable: true, process_up: true, status: 200 },
-          },
-        }
-      if (path === '/api/panel/vms/slot-a')
-        return {
-          vm: { id: 'slot-a', status: 'running', runtime: { stopped: false } },
-        }
-      return loginRequests(path)
-    })
-  })
-
-  it.each(['cai', 'claude_code'] as const)(
-    'opens the selected %s flow with Claude labels',
-    async (flavor) => {
-      controls.flavor = flavor
-      await mount()
-      const html = render()
-      expect(controls.api).toHaveBeenCalledWith(
-        '/api/panel/vms/slot-a/browser/open',
-        {
-          method: 'POST',
-          body: JSON.stringify({ purpose: 'oauth', flavor }),
-        }
-      )
-      expect(html).toContain('Claude 浏览器登录')
-      expect(html).not.toContain('OpenAI')
-      expect(html).not.toContain('Platform')
-    }
-  )
-
-  it('preserves power and scheduling on reauthorization and completes only after browser close', async () => {
-    controls.completionMode = 'preserve_state'
-    const socket = await mount()
-    const result = { oauth_email: 'claude@example.test' }
-    socket.status('oauth_complete', undefined, result)
-    const html = render()
-    expect(html).toContain('保留当前启停和调度设置')
-    expect(button('开机并完成')).toBeUndefined()
-    expect(button('完成')?.disabled).not.toBe(true)
-    expect(controls.saved).toHaveBeenCalledExactlyOnceWith(result)
-    expect(controls.complete).not.toHaveBeenCalled()
-    button('完成')!.onClick!({} as never)
-    await settle()
-    expect(controls.complete).toHaveBeenCalledExactlyOnceWith(result)
-    expect(
-      controls.api.mock.calls.some(([path]) =>
-        /\/(start|health|schedulable)$/.test(path)
-      )
-    ).toBe(false)
-  })
-
-  it('starts and verifies Claude before scheduling a new slot without offering Platform', async () => {
-    const socket = await mount()
-    socket.status('oauth_complete')
-    render()
-    expect(button('开机并完成')?.disabled).toBe(false)
-    button('开机并完成')!.onClick!({} as never)
-    await settle()
-    const html = render()
-    expect(html).toContain('内核已就绪，调度已开启')
-    expect(html).not.toContain('Platform')
-    expect(controls.api).toHaveBeenCalledWith(
-      '/api/panel/vms/slot-a/schedulable',
-      {
-        method: 'POST',
-        body: JSON.stringify({ schedulable: true }),
-      }
-    )
-    expect(controls.complete).not.toHaveBeenCalled()
-    button('完成')!.onClick!({} as never)
-    await settle()
-    expect(controls.complete).toHaveBeenCalledOnce()
-  })
-})
-
 describe('shared browser address navigation', () => {
   const addressInput = () =>
     controls.inputs.find((props) => props['aria-label'] === '浏览器地址')!
@@ -660,14 +560,12 @@ describe('shared browser address navigation', () => {
       )
 
   it.each([
-    ['Claude', 'oauth', 'anthropic'],
-    ['GPT', 'oauth', 'openai'],
-    ['Platform', 'platform', 'openai'],
+    ['GPT', 'oauth'],
+    ['Platform', 'platform'],
   ] as const)(
     'navigates %s in the existing browser and preserves query and fragment',
-    async (_label, purpose, provider) => {
+    async (_label, purpose) => {
       controls.purpose = purpose
-      controls.provider = provider
       const socket = await mount()
       socket.navigation()
       render()
@@ -764,16 +662,15 @@ describe('shared browser address navigation', () => {
 
   it('keeps navigation errors separate from OAuth completion and clears them on a successful navigation', async () => {
     controls.purpose = 'oauth'
-    controls.provider = 'anthropic'
-    controls.completionMode = 'preserve_state'
     const socket = await mount()
     socket.navigation({ error: '网页打开失败，请检查网址' })
     socket.status('oauth_complete')
     expect(render()).toContain('网页打开失败，请检查网址')
-    expect(button('完成')?.disabled).toBe(false)
+    expect(render()).toContain('登录凭据已保存')
+    expect(button('开机并完成')?.disabled).toBe(false)
     socket.navigation({ url: 'https://example.test/recovered' })
     expect(render()).not.toContain('网页打开失败，请检查网址')
-    expect(button('完成')?.disabled).toBe(false)
+    expect(button('开机并完成')?.disabled).toBe(false)
   })
 
   it('shows return only while offered by the active authorization and blocks navigation while loading or locked', async () => {
@@ -844,140 +741,6 @@ describe('shared browser address navigation', () => {
       ).toHaveLength(1)
     }
   )
-})
-
-describe('Claude login request diagnostics', () => {
-  const diagnostic = {
-    endpoint: '/api/auth/verify_magic_link',
-    status: 403,
-    errorType: 'permission_error',
-    errorCode: 'sign_in_not_permitted',
-    requestId: 'req_very_long_request_identifier_0123456789abcdef',
-    timestamp: '2026-11-10T12:00:00.000Z',
-    transportFailure: false,
-  }
-
-  beforeEach(() => {
-    controls.purpose = 'oauth'
-    controls.provider = 'anthropic'
-    controls.completionMode = 'preserve_state'
-  })
-
-  it('shows the failed request facts independently of the waiting status', async () => {
-    const socket = await mount()
-    socket.status('oauth_waiting', '等待 Claude 授权完成')
-    socket.authDiagnostic(diagnostic)
-    const html = render()
-    expect(html).toContain('Claude 登录请求诊断')
-    expect(html).toContain('Claude 登录请求失败')
-    expect(html).toContain('/api/auth/verify_magic_link')
-    expect(html).toContain('HTTP 403')
-    expect(html).toContain('错误类型：permission_error')
-    expect(html).toContain('错误码：sign_in_not_permitted')
-    expect(html).toContain(`请求编号：${diagnostic.requestId}`)
-    expect(html).toContain(`时间：${diagnostic.timestamp}`)
-    expect(html).toContain('等待 Claude 授权完成')
-    expect(controls.saved).not.toHaveBeenCalled()
-    expect(controls.complete).not.toHaveBeenCalled()
-  })
-
-  it('clears on null without changing the login waiting state', async () => {
-    const socket = await mount()
-    socket.status('oauth_waiting', '等待 Claude 授权完成')
-    socket.authDiagnostic(diagnostic)
-    render()
-    socket.authDiagnostic(null)
-    const html = render()
-    expect(html).not.toContain('Claude 登录请求诊断')
-    expect(html).toContain('等待 Claude 授权完成')
-    expect(controls.saved).not.toHaveBeenCalled()
-  })
-
-  it('reports an unfinished network request without inferring an HTTP status or cause', async () => {
-    const socket = await mount()
-    socket.authDiagnostic({
-      ...diagnostic,
-      status: null,
-      errorType: null,
-      errorCode: null,
-      requestId: null,
-      transportFailure: true,
-    })
-    const html = render()
-    expect(html).toContain('Claude 登录请求未完成')
-    expect(html).toContain('/api/auth/verify_magic_link')
-    expect(html).not.toContain('HTTP')
-    expect(html).not.toContain('错误类型')
-    expect(html).not.toContain('错误码')
-    expect(html).not.toContain('请求编号')
-    expect(html).not.toContain('账号被封')
-    expect(html).not.toContain('IP 被封')
-  })
-
-  it('does not replace a saved credential state or block final completion', async () => {
-    const socket = await mount()
-    socket.status('oauth_complete', undefined, {
-      oauth_email: 'claude@example.test',
-    })
-    socket.authDiagnostic(diagnostic)
-    const html = render()
-    expect(html).toContain('Claude 登录请求诊断')
-    expect(html).toContain('Claude 登录凭据已保存')
-    expect(button('完成')?.disabled).toBe(false)
-    expect(controls.saved).toHaveBeenCalledOnce()
-    button('完成')!.onClick!({} as never)
-    expect(render()).not.toContain('Claude 登录请求诊断')
-    await settle()
-    expect(controls.complete).toHaveBeenCalledOnce()
-  })
-
-  it.each(['oauth', 'platform'] as const)(
-    'does not show Claude request diagnostics in OpenAI %s',
-    async (purpose) => {
-      controls.purpose = purpose
-      controls.provider = 'openai'
-      const socket = await mount()
-      socket.authDiagnostic(diagnostic)
-      const html = render()
-      expect(html).not.toContain('Claude 登录请求诊断')
-      expect(html).not.toContain('permission_error')
-      expect(html).not.toContain('/api/auth/verify_magic_link')
-    }
-  )
-
-  it('clears stale diagnostics on disconnect and accepts the current task snapshot after reconnect', async () => {
-    const socket = await mount()
-    socket.authDiagnostic(diagnostic)
-    expect(render()).toContain('Claude 登录请求诊断')
-    socket.onclose?.()
-    expect(render()).not.toContain('Claude 登录请求诊断')
-    button('重新连接')!.onClick!({} as never)
-    render()
-    for (const effect of controls.effects.splice(0)) effect()
-    await settle()
-    const reconnected = Socket.instances[1]
-    reconnected.onopen?.()
-    expect(render()).not.toContain('Claude 登录请求诊断')
-    reconnected.authDiagnostic({
-      ...diagnostic,
-      endpoint: '/api/auth/send_magic_link',
-      status: 400,
-    })
-    const html = render()
-    expect(html).toContain('/api/auth/send_magic_link')
-    expect(html).toContain('HTTP 400')
-    expect(html).not.toContain('/api/auth/verify_magic_link')
-  })
-
-  it('clears diagnostics when switching to another OAuth task', async () => {
-    const socket = await mount()
-    socket.authDiagnostic(diagnostic)
-    expect(render()).toContain('Claude 登录请求诊断')
-    controls.flavor = 'claude_code'
-    render()
-    for (const effect of controls.effects.splice(0)) effect()
-    expect(render()).not.toContain('Claude 登录请求诊断')
-  })
 })
 
 describe('browser close lifecycle', () => {

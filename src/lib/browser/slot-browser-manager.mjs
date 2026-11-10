@@ -91,7 +91,6 @@ export class SlotBrowserManager {
         status: live.status,
         purpose: live.purpose,
         message: live.message,
-        ...(live.authDiagnostics ? { auth_diagnostic: live.authDiagnostics.current() } : {}),
         ...(live.warning ? { warning: live.warning } : {}),
         ...live.statusDetails,
       }
@@ -367,8 +366,6 @@ export class SlotBrowserManager {
 
   beginClose(live) {
     live.inputLocked = true
-    live.authDiagnostics?.stop()
-    delete live.authDiagnostics
     live.stream?.sendNavigation?.()
     clearInterval(live.watchdog)
     for (const [ticket, grant] of this.tickets) if (grant.liveId === live.id) this.tickets.delete(ticket)
@@ -508,8 +505,6 @@ export class SlotBrowserManager {
           ...live.statusDetails,
         }),
       )
-      if (live.authDiagnostics)
-        ws.send(JSON.stringify({ type: 'auth_diagnostic', diagnostic: live.authDiagnostics.current() }))
     })
     return true
   }

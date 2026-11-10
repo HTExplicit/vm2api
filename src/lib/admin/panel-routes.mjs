@@ -715,7 +715,6 @@ export function createPanelHandler(ctx) {
   const openaiApiCredits = ctx.openaiApiCredits
   const slotBrowserManager = ctx.slotBrowserManager
   const codexBrowserLogin = ctx.codexBrowserLogin
-  const claudeBrowserLogin = ctx.claudeBrowserLogin
   const slotBrowserRepo = ctx.slotBrowserRepo
   const openaiApiRepo = ctx.openaiApiRepo
   const panelUsers = ctx.panelUsers
@@ -1016,7 +1015,6 @@ export function createPanelHandler(ctx) {
   }
 
   async function cleanupChangedBrowserAccount(vmId, accountId) {
-    await claudeBrowserLogin?.cancel(vmId)
     await codexBrowserLogin?.cancel(vmId)
     await openaiApiManager?.cancel(vmId)
     await slotBrowserManager?.close(vmId)
@@ -1631,14 +1629,6 @@ export function createPanelHandler(ctx) {
       ) {
         return true
       }
-      // Finish temporary OAuth runtime work before a new operator action takes ownership.
-      const claudeLoginMutation =
-        /^\/api\/panel\/vms\/([^/]+)(?:\/(start|stop|recover|reset|migration|package|reset-fingerprint|reconcile-fingerprint|credential\/clear|wrap-cli\/repair|oauth\/(?:generate-auth-url|exchange-code|credential|refresh|to-setup-token)))?$/.exec(
-          p,
-        )
-      if (claudeLoginMutation && req.method !== 'GET' && (claudeLoginMutation[2] || req.method === 'DELETE')) {
-        await claudeBrowserLogin?.cancel(claudeLoginMutation[1])
-      }
       // Cold slot moves are administrator-only (not a tenant placement edit).
       const migrationRoute = /^\/api\/panel\/vms\/([^/]+)\/migration$/.exec(p)
       if (migrationRoute && ['GET', 'POST'].includes(req.method)) {
@@ -1682,7 +1672,8 @@ export function createPanelHandler(ctx) {
         const [, vmId, resource, action] = slotBrowserRoute
         try {
           const vm = getVm(cfg.paths.project, vmId)
-          if (!vm) return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: '账号槽位不存在' } })
+          if (!vm || !isCodexVm(vm))
+            return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'OpenAI 槽位不存在' } })
           let result
           if (req.method === 'GET' && resource === 'browser') result = slotBrowserManager.state(vmId)
           else if (req.method === 'POST' && resource === 'browser-ticket')
@@ -1696,19 +1687,9 @@ export function createPanelHandler(ctx) {
                 return json(res, 200, panel.ok(currentBrowser))
             }
             if (purpose === 'oauth') {
-              if (isCodexVm(vm)) {
-                await openaiApiManager.cancel(vmId, { closeBrowser: false })
-                result = codexBrowserLogin.start(vmId)
-              } else {
-                const flavor = body?.flavor || 'cai'
-                if (!['cai', 'claude_code'].includes(flavor))
-                  return json(res, 400, {
-                    ok: false,
-                    error: { code: 'invalid_oauth_flavor', message: '请选择标准 OAuth 或官方 Claude Code 登录' },
-                  })
-                result = await claudeBrowserLogin.start(vmId, { flavor })
-              }
-            } else if (purpose === 'platform' && isCodexVm(vm)) {
+              await openaiApiManager.cancel(vmId, { closeBrowser: false })
+              result = codexBrowserLogin.start(vmId)
+            } else if (purpose === 'platform') {
               await codexBrowserLogin.cancel(vmId)
               const account = openaiApiManager.view(vm)
               if (['claimed', 'pending'].includes(account?.claim_status)) {
@@ -1735,10 +1716,8 @@ export function createPanelHandler(ctx) {
                 error: { code: 'invalid_browser_purpose', message: '请选择 OAuth 或 Platform' },
               })
           } else if (req.method === 'POST' && action === 'close') {
-            if (isCodexVm(vm)) {
-              await codexBrowserLogin?.cancel(vmId)
-              await openaiApiManager?.cancel(vmId)
-            } else await claudeBrowserLogin?.cancel(vmId)
+            await codexBrowserLogin?.cancel(vmId)
+            await openaiApiManager?.cancel(vmId)
             await slotBrowserManager.close(vmId)
             result = slotBrowserManager.state(vmId)
           } else return json(res, 404, { ok: false, error: { code: 'not_found', message: '接口不存在' } })
@@ -2781,7 +2760,6 @@ export function createPanelHandler(ctx) {
           })
         }
         try {
-          await claudeBrowserLogin?.stop()
           await codexBrowserLogin?.stop()
           await slotBrowserManager?.stop()
           await openaiApiManager?.stop()
@@ -2891,14 +2869,10 @@ export function createPanelHandler(ctx) {
       }
       // POST /api/panel/vms/fleet-update
       if (req.method === 'POST' && p === '/api/panel/vms/reconcile-fingerprints') {
-        await claudeBrowserLogin?.stop()
         return json(res, 200, panel.ok(reconcileOfficialFingerprints(cfg.paths.project)))
       }
       if (req.method === 'POST' && p === '/api/panel/vms/fleet-update') {
         const body = await readBody(req, 32 * 1024).catch(() => ({}))
-        for (const vm of listVms(cfg.paths.project)) {
-          if (!Array.isArray(body.ids) || body.ids.includes(vm.id)) await claudeBrowserLogin?.cancel(vm.id)
-        }
         const report = await runFleetUpdate(cfg.paths.project, {
           action: body.action || 'roll',
           ids: Array.isArray(body.ids) ? body.ids : null,
@@ -5275,7 +5249,6 @@ export function createPanelHandler(ctx) {
         const apiKeyRaw = body.api_key || body.apiKey || ''
         const requestedType = body.type || body.credential_mode || body.scope || ''
         const vmId = body.vm_id || body.id || null
-        if (vmId) await claudeBrowserLogin?.cancel(vmId)
         const exportDoc = body.sub2api || body.account || body
         try {
           if (!vmId) {
@@ -6553,7 +6526,6 @@ export function createPanelHandler(ctx) {
         let worker = null
         let timezone = null
         if (bindVmId && result.items?.[0]?.id) {
-          await claudeBrowserLogin?.cancel(bindVmId)
           const bind = proxyPool.bind(result.items[0].id, bindVmId)
           if (bind.ok) {
             bindVmProxy(cfg.paths.project, bindVmId, proxyPool.getProxyForVm(bindVmId))
@@ -6636,15 +6608,6 @@ export function createPanelHandler(ctx) {
         const patch = {}
         for (const key of ['host', 'port', 'username', 'password', 'label', 'domain_forward']) {
           if (Object.prototype.hasOwnProperty.call(body, key)) patch[key] = body[key]
-        }
-        const currentProxy = proxyPool.getProxyByIdWithAuth(id)
-        if (
-          currentProxy &&
-          ['host', 'port', 'username', 'password', 'domain_forward'].some(
-            (key) => Object.hasOwn(patch, key) && patch[key] !== currentProxy[key],
-          )
-        ) {
-          for (const vmId of currentProxy.bound_vm_ids || []) await claudeBrowserLogin?.cancel(vmId)
         }
         const result = proxyPool.update(id, patch)
         if (!result.ok) {
@@ -6804,7 +6767,6 @@ export function createPanelHandler(ctx) {
             ok: false,
             error: { type: 'invalid_request_error', code: 'missing_field', message: 'vm_id required', param: 'vm_id' },
           })
-        await claudeBrowserLogin?.cancel(vmId)
         const result = proxyPool.bind(id, vmId)
         if (!result.ok) {
           const message =
@@ -6850,7 +6812,6 @@ export function createPanelHandler(ctx) {
             : snap?.bound_vm_id
               ? [snap.bound_vm_id]
               : []
-        for (const target of targets) await claudeBrowserLogin?.cancel(target)
         const result = proxyPool.unbind(id, vmId || null)
         if (!result.ok)
           return json(res, 404, {
@@ -6870,7 +6831,6 @@ export function createPanelHandler(ctx) {
         const id = p.split('/').pop()
         const snap = proxyPool.snapshot().proxies.find((proxy) => proxy.id === id)
         const targets = snap?.bound_vm_ids?.length ? snap.bound_vm_ids : snap?.bound_vm_id ? [snap.bound_vm_id] : []
-        for (const target of targets) await claudeBrowserLogin?.cancel(target)
         const result = proxyPool.remove(id)
         if (!result.ok)
           return json(res, 404, {
@@ -6887,7 +6847,6 @@ export function createPanelHandler(ctx) {
       // Auto-allocate proxy for a VM
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/allocate-proxy$/.test(p)) {
         const vmId = p.split('/')[4]
-        await claudeBrowserLogin?.cancel(vmId)
         const allocated = proxyPool.allocateForVm(vmId)
         if (!allocated)
           return json(res, 409, {
