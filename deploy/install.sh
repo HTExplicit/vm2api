@@ -30,6 +30,7 @@ INSTALL_DIR="${VM2API_DIR:-/opt/vm2api}"
 SERVICE_NAME="vm2api"
 DEFAULT_PORT="${PORT:-8787}"
 TARGET_VERSION=""
+CRAG_TARGET_VERSION=""
 ASSUME_YES=0
 NO_START=0
 SYNC_WRAP=1
@@ -63,6 +64,7 @@ usage() {
 命令:
   install              安装到 ${INSTALL_DIR}（默认）
   upgrade | update     升到最新 GitHub Release（保留 .env / vms / data）
+  crag-update          独立更新 CRAG V2 包及全部既有 CRAG 副本，不切换槽位内核
   check                对比当前版本与最新 Release，打印 changelog
   changelog            打印本地 CHANGELOG.md
   status               当前版本、容器、探活
@@ -70,6 +72,7 @@ usage() {
 
 选项:
   --version vX.Y.Z     指定 tag（可带 -amd64 / -arm64 后缀，须与宿主架构一致）
+  --crag-version vX.Y.Z 指定 CRAG 供应仓 Release（省略为最新正式版）
   --dir PATH           安装目录（默认 ${INSTALL_DIR}）
   --yes                非交互
   --no-start           只拉代码，不 compose up
@@ -444,8 +447,9 @@ raise SystemExit(0 if d.get("ok") else 1)'
 }
 
 sync_wrap_cli() {
-  local key port response changed
-  key="$(read_env_key VM2API_API_KEY)"
+  local key port response probe
+  key="$(read_env_key VM2API_API_KEY || true)"
+  key="${key:-$(read_env_key KIN_API_KEY || true)}"
   port="$(read_env_key PORT)"
   port="${port:-$DEFAULT_PORT}"
   if [ -z "$key" ]; then
@@ -453,7 +457,7 @@ sync_wrap_cli() {
     echo "  curl -sS -X POST http://127.0.0.1:${port}/api/panel/wrap-cli/sync -H \"Authorization: Bearer \$VM2API_API_KEY\" -H 'Content-Type: application/json' -d '{\"restart\":true}'"
     return 1
   fi
-  info "检查本机槽和集群槽的 kernel、cli-node、cc-node 是否变化"
+  info "检查本机槽和集群槽的 kernel、cli-node 是否变化"
   response="$(curl -fsS -X POST "http://127.0.0.1:${port}/api/panel/wrap-cli/sync" \
     -H "Authorization: Bearer ${key}" \
     -H "Content-Type: application/json" \
@@ -677,7 +681,7 @@ start_stack() {
     fi
     if KIN_AUTO_SYNC_WRAP="$auto_sync_wrap" compose up -d; then
       wait_health || true
-      refresh_slot_services
+      if [ "$SYNC_WRAP" = 1 ]; then refresh_slot_services; fi
       return
     fi
     err "docker compose 失败。日志: docker logs ${SERVICE_NAME}"
@@ -690,7 +694,7 @@ start_stack() {
     cat "$log"
     rm -f "$log"
     wait_health || true
-    refresh_slot_services
+    if [ "$SYNC_WRAP" = 1 ]; then refresh_slot_services; fi
     return
   fi
   cat "$log"
@@ -700,7 +704,7 @@ start_stack() {
     if KIN_AUTO_SYNC_WRAP="$auto_sync_wrap" compose up -d --build; then
       rm -f "$log"
       wait_health || true
-      refresh_slot_services
+      if [ "$SYNC_WRAP" = 1 ]; then refresh_slot_services; fi
       return
     fi
     guide_changelog_error
@@ -724,10 +728,23 @@ refresh_slot_services() {
   if ! docker exec "$SERVICE_NAME" test -f /opt/vm2api/scripts/fleet-services.mjs >/dev/null 2>&1; then
     err "控制面缺少槽刷新脚本，不能确认槽内二进制已换到当前版本"
     exit 1
-  elif ! docker exec "$SERVICE_NAME" node /opt/vm2api/scripts/fleet-services.mjs; then
+  elif ! docker exec "$SERVICE_NAME" node /opt/vm2api/scripts/fleet-services.mjs /opt/vm2api 4 "$CRAG_TARGET_VERSION"; then
     err "槽内二进制刷新失败，见上方逐槽报告；失败的槽可能仍在跑旧的 cli-node / kin-egress"
     exit 1
   fi
+}
+
+cmd_update_crag() {
+  need_root
+  if [ "$NO_START" = 1 ]; then
+    err "crag-update 需要更新槽内运行二进制，不能与 --no-start 一起使用"
+    return 1
+  fi
+  if [ "$(docker inspect --format '{{.State.Running}}' "$SERVICE_NAME" 2>/dev/null || true)" = true ]; then
+    docker exec "$SERVICE_NAME" node /opt/vm2api/scripts/update-crag.mjs /opt/vm2api "$CRAG_TARGET_VERSION"
+    return
+  fi
+  node "${INSTALL_DIR}/scripts/update-crag.mjs" "$INSTALL_DIR" "$CRAG_TARGET_VERSION"
 }
 
 print_banner() {
@@ -761,9 +778,6 @@ cmd_install() {
   prepare_arm64_host
   start_stack
   ok "安装完成  ${INSTALL_DIR}  @ $(local_version)"
-  if [ "$NO_START" = 0 ] && [ "$SYNC_WRAP" = 1 ]; then
-    sync_wrap_cli || { err "槽内 wrap CLI / kernel 同步失败，安装未完成"; exit 1; }
-  fi
 
   print_login_banner
   info "以后更新: curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/maint/deploy/install.sh | sudo bash -s -- upgrade"
@@ -808,12 +822,9 @@ cmd_upgrade() {
   fi
   prepare_arm64_host
   start_stack
-  if [ "$NO_START" = 0 ] && [ "$SYNC_WRAP" = 1 ]; then
-    sync_wrap_cli || { err "槽内 wrap CLI / kernel 同步失败，升级未完成"; exit 1; }
-
-  elif [ "$NO_START" = 1 ]; then
+  if [ "$NO_START" = 1 ]; then
     warn "--no-start：控制面未启动，已跳过槽内 CLI / kernel 同步"
-  else
+  elif [ "$SYNC_WRAP" != 1 ]; then
     warn "--no-sync-wrap：已跳过槽内 CLI / kernel 同步"
   fi
   ok "已更新到 $(local_version)"
@@ -903,7 +914,7 @@ cmd_uninstall() {
 COMMAND="install"
 while [ $# -gt 0 ]; do
   case "$1" in
-    install|upgrade|update|check|changelog|status|uninstall)
+    install|upgrade|update|crag-update|check|changelog|status|uninstall)
       COMMAND="$1"
       shift
       ;;
@@ -918,6 +929,14 @@ while [ $# -gt 0 ]; do
         err "无效版本 $2：格式 vX.Y.Z，可带 -amd64 / -arm64 后缀"
         exit 1
       fi
+      shift 2
+      ;;
+    --crag-version)
+      if [ $# -lt 2 ] || ! [[ "$2" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        err "--crag-version 需要 vX.Y.Z"
+        exit 1
+      fi
+      CRAG_TARGET_VERSION="$2"
       shift 2
       ;;
     --dir)
@@ -959,6 +978,7 @@ done
 case "$COMMAND" in
   install) cmd_install ;;
   upgrade|update) cmd_upgrade ;;
+  crag-update) cmd_update_crag ;;
   check) cmd_check ;;
   changelog) cmd_changelog ;;
   status) cmd_status ;;

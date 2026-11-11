@@ -12,7 +12,7 @@ import unittest
 
 INSTALLER = Path(__file__).resolve().parents[2] / "deploy" / "install.sh"
 # Load definitions without running the installer's command dispatch.
-DEFINITIONS, DISPATCH, _ = INSTALLER.read_text().partition('\nCOMMAND="install"\n')
+DEFINITIONS, DISPATCH, _ = INSTALLER.read_text(encoding="utf-8").partition('\nCOMMAND="install"\n')
 if not DISPATCH:
     raise RuntimeError("Installer command dispatch marker not found")
 
@@ -25,12 +25,86 @@ def run_installer(command, response=None, extra_env=None, mock=None):
     if mock:
         script += mock + "\n"
     return subprocess.run(
-        ["bash", "-c", script + command],
-        env=env, capture_output=True, text=True, timeout=10,
+        ["bash"], input=script + command + "\n",
+        env=env, capture_output=True, text=True, encoding="utf-8", timeout=10,
     )
 
 
 class ScheduleTests(unittest.TestCase):
+    def test_upgrade_runs_shared_fleet_once_and_honors_no_sync(self):
+        mock = r'''
+need_root() { :; }
+require_cmds() { :; }
+resolve_host_arch() { HOST_ARCH=amd64; }
+print_banner() { :; }
+local_version() { echo 1.4.6901; }
+latest_release_tag() { echo v1.4.6901; }
+install_mode() { echo image; }
+fetch_release_files() { :; }
+ensure_env() { :; }
+env_set() { :; }
+prepare_arch_env() { :; }
+prepare_arm64_host() { :; }
+print_changelog_slice() { :; }
+release_notes() { :; }
+print_login_banner() { :; }
+wait_health() { :; }
+compose() { :; }
+sync_wrap_cli() { echo unexpected-second-sync >> "$TRACE"; }
+docker() {
+  case "$*" in
+    *'test -f'*) return 0 ;;
+    *) printf '%s\n' "$*" >> "$TRACE" ;;
+  esac
+}
+'''
+        for enabled in (False, True):
+            with self.subTest(sync=enabled), tempfile.TemporaryDirectory() as tmp:
+                trace = Path(tmp) / "trace"
+                (Path(tmp) / "docker-compose.yml").write_text("")
+                result = run_installer(
+                    'INSTALL_DIR="$TEST_ROOT"; SYNC_WRAP="$TEST_SYNC"; CRAG_TARGET_VERSION=v2.0.2; cmd_upgrade',
+                    mock=mock, extra_env={
+                        "TRACE": str(trace), "TEST_ROOT": tmp,
+                        "TEST_SYNC": str(int(enabled)),
+                    },
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                lines = trace.read_text().splitlines() if trace.exists() else []
+                self.assertEqual(lines, [
+                    "exec vm2api node /opt/vm2api/scripts/fleet-services.mjs /opt/vm2api 4 v2.0.2"
+                ] if enabled else [])
+
+    def test_crag_update_uses_existing_host_or_container_without_compose_restart(self):
+        for container in (False, True):
+            with self.subTest(container=container), tempfile.TemporaryDirectory() as tmp:
+                trace = Path(tmp) / "trace"
+                mock = r'''
+need_root() { :; }
+docker() {
+  if [ "$1" = inspect ]; then echo "$CONTAINER"; return; fi
+  printf 'docker:%s\n' "$*" >> "$TRACE"
+}
+node() { printf 'node:%s\n' "$*" >> "$TRACE"; }
+'''
+                result = run_installer(
+                    'INSTALL_DIR=/test-root; CRAG_TARGET_VERSION=v2.0.1; cmd_update_crag',
+                    mock=mock, extra_env={"TRACE": str(trace), "CONTAINER": str(container).lower()},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = (
+                    'docker:exec vm2api node /opt/vm2api/scripts/update-crag.mjs /opt/vm2api v2.0.1'
+                    if container else 'node:/test-root/scripts/update-crag.mjs /test-root v2.0.1'
+                )
+                self.assertEqual(trace.read_text().strip(), expected)
+
+    def test_crag_update_rejects_no_start_before_any_mutation(self):
+        result = run_installer(
+            'NO_START=1; cmd_update_crag',
+            mock='need_root() { :; }; node() { exit 99; }; docker() { exit 99; }',
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+
     def test_inline_python_supports_python_38_grammar(self):
         snippets = re.findall(r"python3 -c '([^']*)'", DEFINITIONS)
         self.assertTrue(snippets)

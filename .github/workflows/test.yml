@@ -51,6 +51,9 @@ jobs:
         run: |
           bash -n deploy/install.sh
           sh -n scripts/panel-upgrade.sh
+      - name: installer shared finalization
+        working-directory: test/deploy
+        run: python3 -m unittest test_install_schedule.ScheduleTests.test_upgrade_runs_shared_fleet_once_and_honors_no_sync test_install_schedule.ScheduleTests.test_crag_update_uses_existing_host_or_container_without_compose_restart test_install_schedule.ScheduleTests.test_crag_update_rejects_no_start_before_any_mutation
       - name: redaction helper unit checks
         working-directory: redact
         run: go test ./...
@@ -215,6 +218,18 @@ jobs:
             test/unit/vm-test-chat-billing.test.mjs \
             test/unit/kernel-catalog.test.mjs \
             test/unit/kernel-install.test.mjs \
+            test/unit/crag-update.test.mjs \
+            test/unit/crag-factory.test.mjs \
+            test/unit/docker-memory-api.test.mjs \
+            test/unit/docker-slot-memory.test.mjs \
+            test/unit/install-payload.test.mjs \
+            test/unit/official-cc-bootstrap.test.mjs \
+            test/unit/panel-vm-memory-raise.test.mjs \
+            test/unit/remote-memory-raise-bridge.test.mjs \
+            test/unit/routing-runtime-load.test.mjs \
+            test/unit/schedule-state.test.mjs \
+            test/unit/scoped-intercept-session.test.mjs \
+            test/unit/slot-claude.test.mjs \
             test/unit/kernel-install-sandbox.test.mjs \
             test/unit/kernel-install-writer-locks.test.mjs \
             test/unit/panel-kernels.test.mjs \
@@ -278,7 +293,7 @@ jobs:
           pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx
           pnpm exec vitest run src/features/anthropic/endpoint-save.test.ts
           pnpm exec vitest run src/features/settings/health-pane.test.ts src/features/cluster/slot-migration.test.ts
-          pnpm exec vitest run src/features/vm/engine-contract.test.ts src/features/vm/persona-contract.test.ts src/lib/wrap-health.test.ts src/features/system/compat-patch.test.ts
+          pnpm exec vitest run src/features/vm/engine-editor.test.tsx src/lib/slash-line.test.ts src/features/vm/engine-contract.test.ts src/features/vm/persona-contract.test.ts src/lib/wrap-health.test.ts src/features/system/compat-patch.test.ts
           pnpm exec vitest run src/config/nav.test.ts src/features/auth/route-guard.test.ts src/features/users/user-concurrency.test.ts src/features/vm/vm-perms.test.ts
           pnpm exec vitest run src/lib/session-cache.test.ts src/lib/api.test.ts src/features/vm/use-vm-test-chat.test.tsx
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx

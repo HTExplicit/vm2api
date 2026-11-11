@@ -89,23 +89,25 @@ test('materializeWrapCli copies both CLIs into slot home', () => {
   }
 })
 
-test('crag materialize copies the crag kernel and cc-node', () => {
+test('crag materialize installs native Claude and does not copy cc-node', () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-cc-'))
   try {
     seedTemplate(project)
-    seedV2Package(project)
+    const pkg = seedV2Package(project)
     fs.mkdirSync(path.join(project, 'share', 'crag'), { recursive: true })
     fs.writeFileSync(path.join(project, 'share', 'crag', 'kin-kernel'), 'crag-kernel')
     const result = materializeSlotDataplane(project, { id: 'vm-13' }, 'crag')
-    assert.equal(result.ok, true)
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.kernel_version, 'v2')
     const dest = wrapCliHomeDir(project, 'vm-13')
-    assert.equal(fs.readFileSync(path.join(dest, 'kin-kernel.bin'), 'utf8'), 'crag-kernel')
-    assert.equal(fs.readFileSync(path.join(dest, CC_NODE_BIN), 'utf8'), 'cc-node')
+    assert.deepEqual(fs.readFileSync(path.join(dest, 'crag-v2', 'crag-v2')), fs.readFileSync(path.join(pkg, 'crag-v2')))
+    assert.equal(fs.existsSync(path.join(dest, CC_NODE_BIN)), false)
+    assert.equal(fs.existsSync(path.join(dest, 'kin-kernel.bin')), false)
   } finally {
     fs.rmSync(project, { recursive: true, force: true })
   }
 })
-test('crag inspection reports a change and sync marks the kernel for restart', () => {
+test('crag sync ignores the old ELF and does not restart for it', () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-change-'))
   try {
     seedTemplate(project)
@@ -115,16 +117,14 @@ test('crag inspection reports a change and sync marks the kernel for restart', (
     fs.writeFileSync(crag, 'crag-kernel')
     const vm = { id: 'vm-13', dataplane: 'crag' }
     assert.equal(syncWrapSample(project, [vm]).items[0].kernel_changed, true)
-    const dest = path.join(wrapCliHomeDir(project, 'vm-13'), 'kin-kernel.bin')
-    const before = fs.readFileSync(dest)
+    const dest = wrapCliHomeDir(project, 'vm-13')
+    assert.equal(fs.existsSync(path.join(dest, 'crag-v2')), true)
+    assert.equal(fs.existsSync(path.join(dest, CC_NODE_BIN)), false)
     fs.writeFileSync(crag, 'crag-kernel-next')
     const checked = inspectKernelChanges(project, [vm])
-    assert.equal(checked.changed_count, 1)
-    assert.deepEqual(fs.readFileSync(dest), before)
-    const synced = syncWrapSample(project, [vm])
-    assert.equal(synced.items[0].kernel_changed, true)
-    assert.equal(fs.readFileSync(dest, 'utf8'), 'crag-kernel-next')
+    assert.equal(checked.changed_count, 0)
     assert.equal(syncWrapSample(project, [vm]).items[0].kernel_changed, false)
+    assert.equal(fs.existsSync(path.join(dest, 'kin-kernel.bin')), false)
   } finally {
     fs.rmSync(project, { recursive: true, force: true })
   }
@@ -459,7 +459,7 @@ function seedV2Package(project, options = {}) {
   return dir
 }
 
-test('omitted crag version stays on the legacy ELF even when a v2 package exists', () => {
+test('omitted crag version installs native Claude even when the old ELF exists', () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-legacy-pin-'))
   const prev = process.env.KIN_CRAG_V2_ROOT
   try {
@@ -469,10 +469,12 @@ test('omitted crag version stays on the legacy ELF even when a v2 package exists
     fs.mkdirSync(path.join(project, 'share', 'crag'), { recursive: true })
     fs.writeFileSync(path.join(project, 'share', 'crag', 'kin-kernel'), 'crag-kernel')
     const result = materializeSlotDataplane(project, { id: 'vm-13', dataplane: 'crag' }, 'crag')
-    assert.equal(result.ok, true)
+    assert.equal(result.ok, true, result.error)
+    assert.equal(result.kernel_version, 'v2')
     const dest = wrapCliHomeDir(project, 'vm-13')
-    assert.equal(fs.readFileSync(path.join(dest, 'kin-kernel.bin'), 'utf8'), 'crag-kernel')
-    assert.equal(fs.existsSync(path.join(dest, 'crag-v2')), false)
+    assert.equal(fs.existsSync(path.join(dest, 'crag-v2')), true)
+    assert.equal(fs.existsSync(path.join(dest, 'kin-kernel.bin')), false)
+    assert.equal(fs.existsSync(path.join(dest, CC_NODE_BIN)), false)
   } finally {
     if (prev == null) delete process.env.KIN_CRAG_V2_ROOT
     else process.env.KIN_CRAG_V2_ROOT = prev
@@ -554,7 +556,7 @@ test('CRAG v2 rejects a bad package and a cluster slot without replacing cli-nod
     assert.equal(fs.existsSync(path.join(dest, 'crag-v2')), false)
     const remote = materializeCragV2(project, { id: 'vm-remote', node_id: 'node-1' })
     assert.equal(remote.ok, false)
-    assert.equal(remote.code, 'crag_v2_unsupported_placement')
+    assert.equal(remote.code, 'crag_v2_hash_mismatch')
     assert.equal(fs.existsSync(wrapCliHomeDir(project, 'vm-remote')), false)
     const kvm = materializeCragV2(project, { id: 'vm-kvm', runtime: { type: 'kvm' } })
     assert.notEqual(kvm.code, 'crag_v2_unsupported_placement')
@@ -564,7 +566,7 @@ test('CRAG v2 rejects a bad package and a cluster slot without replacing cli-nod
   }
 })
 
-test('a cluster Docker slot refuses control-plane materialization and preserves the package and existing CLI', () => {
+test('a cluster Docker slot resolves the native package without control-plane materialization', () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-v2-cluster-'))
   try {
     const dir = seedV2Package(project)
@@ -581,8 +583,9 @@ test('a cluster Docker slot refuses control-plane materialization and preserves 
       dataplane: 'crag',
       crag_kernel_version: 'v2',
     })
-    assert.equal(laid.ok, false)
-    assert.equal(laid.code, 'crag_v2_unsupported_placement')
+    assert.equal(laid.ok, true, laid.error)
+    assert.equal(laid.remote, true)
+    assert.equal(laid.claude_bin, 'claude-code-2.1.321/claude')
     assert.deepEqual(fs.readFileSync(path.join(dir, 'manifest.json')), manifest)
     assert.deepEqual(fs.readFileSync(native), nativeBytes)
     assert.equal(fs.readFileSync(path.join(local, 'cli-node'), 'utf8'), 'keep-cli')

@@ -54,21 +54,16 @@ if [ ! -x "$API_KERNEL" ]; then
   exit 1
 fi
 mkdir -p "$ROOT/share/wrap-cli"
-WRAP_CHANGED=0
 if [ -d /opt/vm2api/image-wrap-cli ]; then
   # 首装先整目录落地（glibc239 / SAMPLE.json），再由下面的循环按内容覆盖可执行文件。
   if [ ! -f "$ROOT/share/wrap-cli/cli-node" ]; then
     cp -a /opt/vm2api/image-wrap-cli/. "$ROOT/share/wrap-cli/"
-    WRAP_CHANGED=1
   fi
   # cli-node 也随镜像覆盖：只在缺失时复制会让升级用户一直留着旧 ELF（#120 baseline 换不进去）。
   for name in kin-kernel.bin kin-kernel cli-node cc-node; do
     src="/opt/vm2api/image-wrap-cli/$name"
     dest="$ROOT/share/wrap-cli/$name"
     if [ -f "$src" ]; then
-      if [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
-        WRAP_CHANGED=1
-      fi
       cp "$src" "$dest.new"
       chmod 755 "$dest.new"
       mv -f "$dest.new" "$dest"
@@ -83,9 +78,9 @@ if [ -f /opt/vm2api/image-crag/kin-kernel ]; then
     cp /opt/vm2api/image-crag/kin-kernel "$dest.new"
     chmod 755 "$dest.new"
     mv -f "$dest.new" "$dest"
-    WRAP_CHANGED=1
   fi
 fi
+node /opt/vm2api/scripts/publish-crag-factory.mjs "$ROOT"
 
 if [ ! -S /var/run/docker.sock ]; then
   echo "vm2api: /var/run/docker.sock not mounted; slot create/start will fail." >&2
@@ -149,10 +144,6 @@ if [ -z "${VM2API_DB_SECRET:-}" ] && [ -z "${KIN_DB_SECRET:-}" ]; then
   VM2API_DB_SECRET="$(rand_hex)"
   export VM2API_DB_SECRET
   env_upsert_if_empty VM2API_DB_SECRET "$VM2API_DB_SECRET" "$ENVF"
-fi
-
-if [ "$WRAP_CHANGED" = 1 ] && [ "${KIN_AUTO_SYNC_WRAP:-0}" = 1 ]; then
-  node /opt/vm2api/scripts/sync-wrap-cli.mjs &
 fi
 
 cd /opt/vm2api
