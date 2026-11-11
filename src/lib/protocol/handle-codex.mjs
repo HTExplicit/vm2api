@@ -476,17 +476,6 @@ function disabledImageTool(body, logBag) {
   return null
 }
 
-function usageTokens(usage) {
-  const normalized = disjointOpenaiUsage(usage)
-  if (!normalized) return 0
-  return (
-    (normalized.input_tokens || 0) +
-    (normalized.output_tokens || 0) +
-    (normalized.cache_read_input_tokens || normalized.cache_read_tokens || 0) +
-    (normalized.cache_creation_input_tokens || normalized.cache_creation_tokens || 0)
-  )
-}
-
 const WAIT_TIMEOUT_MIN_MS = 1000
 const WAIT_TIMEOUT_MAX_MS = 120000
 const DEFAULT_WAIT_TIMEOUT_MS = 30000
@@ -865,6 +854,7 @@ export async function handleCodexProtocol({
         let streamedUsage = null
         let streamedImageUsage = null
         let conversionError = null
+        let errorEmitted = false
         const attemptStartedAt = Date.now()
         const sessionOptions = {
           boundSessionId: stickyBound?.sessionId || '',
@@ -944,8 +934,18 @@ export async function handleCodexProtocol({
             onEvent: async (line) => {
               hopEmitted = true
               if (line.startsWith('data:')) {
-                const model = reportedModel(parseJson(line.slice(5)))
+                const event = parseJson(line.slice(5))
+                const model = reportedModel(event)
                 if (model) logBag.upstream_response_model = model
+                if (
+                  stream &&
+                  protocol === 'openai.responses' &&
+                  (event?.type === 'error' ||
+                    event?.type === 'response.failed' ||
+                    event?.type === 'response.incomplete' ||
+                    (event?.type === 'response.done' && event.response?.status !== 'completed'))
+                )
+                  errorEmitted = true
               }
               if (conversionError) return
               const tier = serviceTierFromSseLine(line)
@@ -1027,27 +1027,24 @@ export async function handleCodexProtocol({
         const hopUsage = result.usage || result.body?.usage || result.body?.response?.usage || null
         const preferredUsage = preferUsage(hopUsage, streamedUsage)
         const usage = mergeUsage(preferredUsage === hopUsage ? streamedUsage : hopUsage, preferredUsage)
-        // Responses SSE is not a Claude assistant message, so the stream client
-        // reports ok:false / incomplete. A 200 hop that carried tokens still billed.
-        const delivered = !conversionError && (result?.ok || (Number(result?.status) === 200 && usageTokens(usage) > 0))
+        // Preserve observed usage on failures; billing follows the tier sent, not the upstream echo.
+        const serviceTier = normalizeServiceTier(outboundBody.service_tier)
+        logBag.upstream_service_tier = responseServiceTier
+        const logged = disjointOpenaiUsage(usage ? { ...usage, service_tier: serviceTier } : usage)
+        logBag.usage = logged
+        const imageUsage =
+          result.body?.tool_usage?.image_gen || result.body?.response?.tool_usage?.image_gen || streamedImageUsage
+        if (imageUsage) logBag.image_usage = imageUsage
+        logBag.input_tokens = logged?.input_tokens ?? null
+        logBag.output_tokens = logged?.output_tokens ?? null
+        logBag.cache_read_tokens = logged?.cache_read_input_tokens ?? logged?.cache_read_tokens ?? null
+        logBag.cache_creation_tokens = logged?.cache_creation_input_tokens ?? logged?.cache_creation_tokens ?? null
+        const delivered = !conversionError && result?.ok
         if (delivered) {
           attemptKind = 'succeeded'
           bindSticky(outboundSessionId)
-          // Billing follows the tier actually sent (codex-proxy-rs contract). The upstream
-          // echo is kept apart: `priority` answered with `default` is a Fast downgrade (#777).
-          const serviceTier = normalizeServiceTier(outboundBody.service_tier)
-          logBag.upstream_service_tier = responseServiceTier
-          const logged = disjointOpenaiUsage(usage ? { ...usage, service_tier: serviceTier } : usage)
-          logBag.usage = logged
-          const imageUsage =
-            result.body?.tool_usage?.image_gen || result.body?.response?.tool_usage?.image_gen || streamedImageUsage
-          if (imageUsage) logBag.image_usage = imageUsage
-          logBag.input_tokens = logged?.input_tokens ?? null
-          logBag.output_tokens = logged?.output_tokens ?? null
-          logBag.cache_read_tokens = logged?.cache_read_input_tokens ?? logged?.cache_read_tokens ?? null
-          logBag.cache_creation_tokens = logged?.cache_creation_input_tokens ?? logged?.cache_creation_tokens ?? null
           if (isOpenaiCredentialCurrent(hopAuth)) reportOpenAIAttempt(vm.id, 'succeeded', result.ttftMs ?? null)
-          logBag.final_state = result?.ok ? result.terminalState || 'verified' : 'verified'
+          logBag.final_state = result.terminalState || 'verified'
           logBag.upstream_model = converted.body.model
           if (hops > 1) logBag.codex_failed_over = true
           if (!stream) {
@@ -1090,7 +1087,22 @@ export async function handleCodexProtocol({
         if (res.headersSent || hopEmitted) {
           stats.errors++
           logBag.error_code = result?.body?.error?.code || 'codex_upstream'
+          logBag.error_message = result?.body?.error?.message || ''
+          logBag.final_state = result.terminalState === 'cancelled' ? 'cancelled' : 'incomplete'
           logBag.upstream_status = result?.status || 0
+          if (!stream) return json(res, result.status >= 400 ? result.status : 502, result.body)
+          if (!conversionError && !errorEmitted && !gone.signal.aborted) {
+            const error = result.body?.error || {
+              type: 'api_error',
+              code: logBag.error_code,
+              message: logBag.error_message,
+            }
+            res.write(
+              protocol === 'openai.chat' || protocol === 'openai.completions'
+                ? `data: ${JSON.stringify({ error })}\n\ndata: [DONE]\n\n`
+                : `event: error\ndata: ${JSON.stringify({ type: 'error', error })}\n\n`,
+            )
+          }
           return res.end()
         }
         if (result?.admissionBlocked || isCodexFailoverError(result)) {
@@ -1115,6 +1127,8 @@ export async function handleCodexProtocol({
   }
   stats.errors++
   logBag.error_code = last?.body?.error?.code || 'codex_upstream'
+  logBag.error_message = last?.body?.error?.message || ''
+  logBag.final_state = last?.terminalState || 'error'
   logBag.upstream_status = last?.status || 0
   return json(res, last?.status || 502, last?.body || { error: { type: 'api_error', code: 'codex_upstream' } })
 }

@@ -6,6 +6,7 @@ function hasGeneratedContent(block) {
   if (!block || typeof block !== 'object') return false
   if ([block.text, block.thinking, block.refusal].some(nonempty)) return true
   if (block.type === 'redacted_thinking') return nonempty(block.data)
+  if (block.type === 'image_generation_call') return nonempty(block.result)
   return (
     (block.type === 'function_call' ||
       block.type === 'custom_tool_call' ||
@@ -14,7 +15,7 @@ function hasGeneratedContent(block) {
   )
 }
 
-function isGeneratedContentEvent(event) {
+export function isGeneratedContentEvent(event) {
   const type = String(event.type || '')
   if (type === 'content_block_delta') {
     const delta = event.delta || {}
@@ -24,6 +25,7 @@ function isGeneratedContentEvent(event) {
     )
   }
   if (type === 'content_block_start') return hasGeneratedContent(event.content_block)
+  if (type === 'response.image_generation_call.partial_image') return nonempty(event.partial_image_b64)
   if (type.startsWith('response.') && type.endsWith('.delta')) return nonempty(event.delta)
   if (type === 'response.content_part.added' || type === 'response.content_part.done')
     return hasGeneratedContent(event.part)

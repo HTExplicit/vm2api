@@ -577,7 +577,7 @@ test('request log first_token_ms falls back to hop ttftMs without firstTokenAt',
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('incomplete Responses stream still bills tokens from the completed event', async () => {
+test('completed Responses stream bills the observed tokens even when the hop usage is empty', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-bill-'))
   writeGptVm(root, 'vm-gpt-a')
   const res = {
@@ -618,9 +618,9 @@ test('incomplete Responses stream still bills tokens from the completed event', 
           'data: {"type":"response.completed","response":{"service_tier":"priority","usage":{"input_tokens":40,"output_tokens":2,"input_tokens_details":{"cached_tokens":5}}}}',
         )
         return {
-          ok: false,
+          ok: true,
           status: 200,
-          terminalState: 'incomplete',
+          terminalState: 'verified',
           usage: { input_tokens: 0, output_tokens: 0 },
         }
       },
@@ -1075,7 +1075,8 @@ test('same-account retry never replays after the first SSE event', async () => {
       },
     }),
   )
-  assert.equal(out, undefined)
+  assert.equal(out.status, 500)
+  assert.equal(out.body.error.code, 'server_error')
   assert.deepEqual(seen, ['vm-gpt-a'])
   rt.resetOpenAIAccountRuntime()
   fs.rmSync(root, { recursive: true, force: true })

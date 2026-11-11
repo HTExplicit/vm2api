@@ -452,6 +452,14 @@ export function responsesSseToChatChunk(line, id = 'codex', state = null) {
   const event = parsed.event || {}
   const type = event.type || ''
   if (
+    type === 'response.failed' ||
+    type === 'response.incomplete' ||
+    (type === 'response.done' && event.response?.status !== 'completed')
+  ) {
+    session.finished = true
+    return null
+  }
+  if (
     (type === 'response.output_item.added' || type === 'response.output_item.done') &&
     (event.item?.type === 'function_call' || event.item?.type === 'custom_tool_call')
   ) {
@@ -576,6 +584,14 @@ export function responsesSseToAnthropicEvents(line, state = createAnthropicSseSt
   if (parsed.skip || state.finished) return null
   const event = parsed.event || {}
   const type = event.type || ''
+  if (
+    type === 'response.failed' ||
+    type === 'response.incomplete' ||
+    (type === 'response.done' && event.response?.status !== 'completed')
+  ) {
+    state.finished = true
+    return null
+  }
   if (event.response?.id) state.id = event.response.id
   if (event.response?.model) state.model = event.response.model
   const frames = []
