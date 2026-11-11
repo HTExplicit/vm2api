@@ -52,7 +52,8 @@ jobs:
           bash -n deploy/install.sh
           sh -n scripts/panel-upgrade.sh
       - name: installer shared finalization
-        run: python3 -m unittest test.deploy.test_install_schedule.ScheduleTests.test_upgrade_runs_shared_fleet_once_and_honors_no_sync test.deploy.test_install_schedule.ScheduleTests.test_crag_update_uses_existing_host_or_container_without_compose_restart test.deploy.test_install_schedule.ScheduleTests.test_crag_update_rejects_no_start_before_any_mutation
+        working-directory: test/deploy
+        run: python3 -m unittest test_install_schedule.ScheduleTests.test_upgrade_runs_shared_fleet_once_and_honors_no_sync test_install_schedule.ScheduleTests.test_crag_update_uses_existing_host_or_container_without_compose_restart test_install_schedule.ScheduleTests.test_crag_update_rejects_no_start_before_any_mutation
       - name: redaction helper unit checks
         working-directory: redact
         run: go test ./...
