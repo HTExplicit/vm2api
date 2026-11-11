@@ -9,7 +9,6 @@ import { atomicWriteJson } from '../vm/vm-file.mjs'
 import {
   listVms,
   getVm,
-  persistAccountTier,
   persistVmQuotaOverride,
   persistVmSessionSlots,
   persistVmMaxSessions,
@@ -533,7 +532,7 @@ export function createRoutingRuntime(ctx) {
     }
     if (nextRedaction) routingConfig.redaction = nextRedaction
     fs.mkdirSync(path.dirname(ctx.routingConfigPath), { recursive: true })
-    fs.writeFileSync(ctx.routingConfigPath, JSON.stringify(routingConfig, null, 2))
+    atomicWriteJson(ctx.routingConfigPath, routingConfig, { mode: 0o600 })
     ctx.stickyRouter.reloadConfig(routingConfig)
     ctx.accountQuota.reloadConfig(routingConfig)
     getPool()?.reloadConfig?.(poolSchedulerConfig())
@@ -760,13 +759,8 @@ export function createRoutingRuntime(ctx) {
         const accountId = selected?.accountId
         if (accountId) {
           try {
-            ctx.accountQuota.setAccountTier(accountId, 'max')
+            // Model access is not subscription evidence (Pro may also have it).
             ctx.accountQuota.clearModelUnsupported(accountId, model)
-          } catch {}
-        }
-        if (selected?.vmId) {
-          try {
-            persistAccountTier(ctx.cfg.paths.project, selected.vmId, 'max')
           } catch {}
         }
       },

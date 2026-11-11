@@ -2,6 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import http from 'node:http'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { refreshFleetKernels } from '../../scripts/fleet-services.mjs'
+import { seedEncryptedPackage } from '../fixtures/crag-license.mjs'
 
 function runFleet(env) {
   return new Promise((resolve, reject) => {
@@ -52,8 +57,8 @@ const slots = {
   ok: true,
   data: {
     items: [
-      { id: 'local-a', family: 'claude', node_id: null },
-      { id: 'node-b', family: 'claude', node_id: 'node-1' },
+      { id: 'local-a', family: 'claude', resolved_dataplane: 'cc', node_id: null },
+      { id: 'node-b', family: 'claude', resolved_dataplane: 'cc', node_id: 'node-1' },
     ],
   },
 }
@@ -118,7 +123,7 @@ test('fleet refresh runs through the server after node links come up', async () 
         ],
       )
       for (const request of requests.slice(1)) assert.equal(request.authorization, 'Bearer test-key')
-      assert.deepEqual(JSON.parse(requests[4].body), { restart: true })
+      assert.deepEqual(JSON.parse(requests[4].body), { ids: ['local-a', 'node-b'], restart: true })
       assert.deepEqual(JSON.parse(requests[5].body), {
         action: 'telemetry',
         concurrency: 4,
@@ -181,7 +186,10 @@ test('fleet refresh with only local slots skips the node link wait', async () =>
   await withServer(
     {
       '/health': () => ({ status: 'ok' }),
-      '/api/panel/vms': () => ({ ok: true, data: [{ id: 'local-a', family: 'claude', node_id: null }] }),
+      '/api/panel/vms': () => ({
+        ok: true,
+        data: [{ id: 'local-a', family: 'claude', resolved_dataplane: 'cc', node_id: null }],
+      }),
       '/api/panel/wrap-cli/sync': () => kernelSync([{ id: 'local-a', ok: true }]),
       '/api/panel/vms/fleet-update': () => telemetry([{ id: 'local-a', ok: true }]),
     },
@@ -215,7 +223,7 @@ test('all-GPT fleets still sync payloads without submitting a telemetry job', as
           ['POST', '/api/panel/wrap-cli/sync'],
         ],
       )
-      assert.deepEqual(JSON.parse(requests[2].body), { restart: true })
+      assert.deepEqual(JSON.parse(requests[2].body), { ids: ['gpt-a', 'gpt-b'], restart: true })
       const report = JSON.parse(result.stdout)
       assert.equal(report.total, 0)
       assert.equal(report.failed_count, 0)
@@ -228,9 +236,9 @@ test('all-GPT fleets still sync payloads without submitting a telemetry job', as
 
 test('mixed fleets submit telemetry only for Claude slots outside native nodes', async () => {
   const vms = [
-    { id: 'local-a', family: 'claude', runtime_type: 'docker', node_id: null },
-    { id: 'node-b', family: 'claude', runtime_type: 'docker', node_id: 'linux-node' },
-    { id: 'kvm-c', family: 'claude', runtime_type: 'kvm', node_id: null },
+    { id: 'local-a', family: 'claude', resolved_dataplane: 'cc', runtime_type: 'docker', node_id: null },
+    { id: 'node-b', family: 'claude', resolved_dataplane: 'cc', runtime_type: 'docker', node_id: 'linux-node' },
+    { id: 'kvm-c', family: 'claude', resolved_dataplane: 'cc', runtime_type: 'kvm', node_id: null },
     { id: 'native-d', family: 'claude', runtime_type: 'docker', node_id: 'mac-node' },
     { id: 'gpt-e', family: 'codex', runtime_type: 'docker', node_id: null },
   ]
@@ -271,7 +279,7 @@ test('a supported slot telemetry failure still makes fleet finalization fail', a
       '/health': () => ({ status: 'ok' }),
       '/api/panel/vms': () => ({
         ok: true,
-        data: { items: [{ id: 'local-a', family: 'claude', node_id: null }] },
+        data: { items: [{ id: 'local-a', family: 'claude', resolved_dataplane: 'cc', node_id: null }] },
       }),
       '/api/panel/wrap-cli/sync': () => kernelSync([{ id: 'local-a', ok: true }]),
       '/api/panel/vms/fleet-update': () =>
@@ -289,4 +297,70 @@ test('a supported slot telemetry failure still makes fleet finalization fail', a
       assert.equal(report.kernel_sync.ok, true)
     },
   )
+})
+
+test('trusted factory updates CRAG once even in an all-Codex fleet', {
+  skip: process.platform === 'win32' ? 'signed ELF verification requires Unix executable permissions' : false,
+}, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-crag-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  seedEncryptedPackage(root)
+  const calls = []
+  const result = await refreshFleetKernels(root, [{ id: 'gpt-a', family: 'codex' }], {
+    api: async (method, endpoint, body) => {
+      calls.push({ method, endpoint, body })
+      return { ok: true, items: [{ id: 'gpt-a', ok: true }] }
+    },
+    cragUpdate: async (_root, { api }) => {
+      assert.equal(_root, root)
+      await api('/crag-pull', { kernel: 'crag' })
+      return { ok: true, items: [{ id: 'gpt-a', action: 'skip', ok: true }] }
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.deepEqual(calls, [
+    { method: 'POST', endpoint: '/crag-pull', body: { kernel: 'crag' } },
+    { method: 'POST', endpoint: '/api/panel/wrap-cli/sync', body: { ids: ['gpt-a'], restart: true } },
+  ])
+})
+
+test('wrap refresh pulls the running tag and installs changed slots once without legacy overlap', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-wrap-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const vms = [
+    { id: 'wrap-new', family: 'claude', resolved_dataplane: 'wrap', status: 'running', has_token: false },
+    { id: 'wrap-same', family: 'claude', resolved_dataplane: 'wrap', status: 'stopped' },
+    { id: 'gpt-a', family: 'codex' },
+    { id: 'crag-a', family: 'claude', resolved_dataplane: 'crag' },
+  ]
+  const calls = []
+  const api = async (method, endpoint, body) => {
+    calls.push({ method, endpoint, body })
+    if (endpoint === '/api/panel/version') return { current_tag: 'v1.4.6901' }
+    if (endpoint === '/api/panel/kernels/pull') return { kernel: { ready: true } }
+    if (endpoint === '/api/panel/kernels/install')
+      return { ok: true, items: [{ id: 'wrap-new', ok: true, restarted: true }] }
+    if (body.restart === false)
+      return {
+        ok: true,
+        items: [
+          { id: 'wrap-new', ok: true, kernel_changed: true },
+          { id: 'wrap-same', ok: true, kernel_changed: false },
+        ],
+      }
+    return { ok: true, items: [{ id: 'gpt-a', ok: true }] }
+  }
+  const result = await refreshFleetKernels(root, vms, { api })
+  assert.equal(result.ok, true)
+  assert.deepEqual(calls, [
+    { method: 'GET', endpoint: '/api/panel/version', body: undefined },
+    { method: 'POST', endpoint: '/api/panel/kernels/pull', body: { kernel: 'cli-node', tag: 'v1.4.6901' } },
+    { method: 'POST', endpoint: '/api/panel/wrap-cli/sync', body: { ids: ['wrap-new', 'wrap-same'], restart: false } },
+    {
+      method: 'POST',
+      endpoint: '/api/panel/kernels/install',
+      body: { targets: [{ id: 'wrap-new', kernel: 'cli-node' }] },
+    },
+    { method: 'POST', endpoint: '/api/panel/wrap-cli/sync', body: { ids: ['gpt-a'], restart: true } },
+  ])
 })

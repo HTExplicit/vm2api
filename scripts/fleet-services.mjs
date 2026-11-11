@@ -6,16 +6,21 @@
  * cluster_unavailable.
  *
  *   1. wait until every node that hosts a slot has a ready link
- *   2. wrap-cli sync: local slots take the new kernel / cli-node files, node
- *      slots move onto a content-hashed image with the same payload
+ *   2. update the trusted CRAG package, then install changed wrap slots once
+ *      through the server's drain/restart transaction; sync other payloads
  *   3. telemetry: publish the saved policy to supported Claude slots and await its acknowledgment
  */
 import fs from 'node:fs/promises'
 import http from 'node:http'
 import { setTimeout as delay } from 'node:timers/promises'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { verifyCragV2Tree } from '../src/lib/vm/wrap-cli-runtime.mjs'
+import { updateCrag } from './update-crag.mjs'
 
 const root = String(process.argv[2] || process.env.KIN_PROJECT_ROOT || '/opt/vm2api').replace(/\/+$/, '')
 const concurrency = Number(process.argv[3] || 4)
+const cragTag = String(process.argv[4] || '')
 const port = String(process.env.PORT || '8787')
 const base = String(process.env.KIN_AUTO_SYNC_BASE || `http://127.0.0.1:${port}`).replace(/\/+$/, '')
 const envKey = String(process.env.VM2API_API_KEY || process.env.KIN_API_KEY || '').trim()
@@ -130,58 +135,133 @@ function summarizeKernelSync(report) {
   }
 }
 
-for (let attempt = 0; attempt < 90; attempt += 1) {
-  if (await healthReady()) break
-  await delay(pollMs)
-}
-
-const key = await apiKey()
-if (!key) {
-  console.error('[fleet-services] API key is unavailable; slot refresh skipped')
-  process.exit(1)
-}
-
-try {
-  const vms = await fleetSlots(key)
-  const nodeIds = [...new Set(vms.map((vm) => vm.node_id).filter(Boolean))]
-  let nodes = []
-  if (nodeIds.length) {
-    const links = await waitNodeLinks(key, nodeIds)
-    nodes = links.nodes
-    // Slots on these nodes fail below with node_not_ready; the rest still update.
-    if (links.offline.length) console.warn(`[fleet-services] node link not ready: ${links.offline.join(', ')}`)
+/** One post-upgrade pass; the installer owns each changed wrap slot's restart. */
+export async function refreshFleetKernels(projectRoot, vms, { api, cragUpdate = updateCrag, cragVersion = '' } = {}) {
+  const factory = path.join(projectRoot, 'share/crag/kernels/v2', process.arch === 'arm64' ? 'arm64' : 'amd64')
+  let crag = null
+  let hasFactory = false
+  try {
+    await fs.access(path.join(factory, 'manifest.json'))
+    hasFactory = true
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
   }
-  const kernels = summarizeKernelSync(
-    dataOf(
-      '/api/panel/wrap-cli/sync',
-      await call(key, 'POST', '/api/panel/wrap-cli/sync', { restart: true }, SYNC_TIMEOUT_MS),
-    ),
+  if (hasFactory) {
+    const verified = verifyCragV2Tree(factory)
+    if (!verified.ok) throw new Error(`CRAG factory invalid: ${verified.code}`)
+    crag = await cragUpdate(projectRoot, { tag: cragVersion, api: (endpoint, body) => api('POST', endpoint, body) })
+  }
+  const wrap = vms.filter(
+    (vm) =>
+      vm.family === 'claude' &&
+      vm.node_platform !== 'darwin' &&
+      (vm.resolved_dataplane || vm.dataplane || 'wrap') === 'wrap',
   )
-  const nativeNodes = new Set(nodes.filter((node) => node.platform === 'darwin').map((node) => node.id))
-  const ids = vms.filter((vm) => vm.family === 'claude' && !nativeNodes.has(vm.node_id)).map((vm) => vm.id)
-  // An empty ids list means all slots to the API, so do not submit an empty telemetry job.
-  const report = ids.length
-    ? dataOf(
-        '/api/panel/vms/fleet-update',
-        await call(
-          key,
-          'POST',
-          '/api/panel/vms/fleet-update',
-          { action: 'telemetry', concurrency, ids },
-          SYNC_TIMEOUT_MS,
-        ),
-      )
-    : { action: 'telemetry', concurrency, total: 0, ok_count: 0, skipped_count: 0, failed_count: 0, items: [] }
-  console.log(JSON.stringify({ ...report, skipped_not_applicable: vms.length - ids.length, kernel_sync: kernels }))
-  if (report.skipped_count) {
-    for (const item of report.items || []) {
-      if (!item.skipped) continue
-      const container = item.telemetry?.container || item.id
-      console.warn(`[fleet-services] skipped ${item.id}: container unavailable (${container})`)
+  let checked = { ok: true, items: [] }
+  let installed = { ok: true, items: [] }
+  if (wrap.length) {
+    const version = await api('GET', '/api/panel/version')
+    if (!version.current_tag) throw new Error('running release tag is unavailable')
+    await api('POST', '/api/panel/kernels/pull', { kernel: 'cli-node', tag: version.current_tag })
+    checked = await api('POST', '/api/panel/wrap-cli/sync', { ids: wrap.map((vm) => vm.id), restart: false })
+    if (checked.ok !== true || checked.failed_count) throw new Error('wrap kernel inspection failed')
+    const targets = checked.items
+      .filter((item) => item.kernel_changed)
+      .map((item) => ({ id: item.id, kernel: 'cli-node' }))
+    if (targets.length) {
+      installed = await api('POST', '/api/panel/kernels/install', { targets })
+      if (installed.ok !== true || installed.failed_count) throw new Error('wrap kernel installation failed')
     }
   }
-  if (!kernels.ok || report.failed_count) process.exit(1)
-} catch (error) {
-  console.error(`[fleet-services] ${error?.message || error}`)
-  process.exit(1)
+  const managed = new Set(wrap.map((vm) => vm.id))
+  const rest = vms.filter((vm) => !managed.has(vm.id) && (vm.resolved_dataplane || vm.dataplane) !== 'crag')
+  const legacy = rest.length
+    ? await api('POST', '/api/panel/wrap-cli/sync', { ids: rest.map((vm) => vm.id), restart: true })
+    : { ok: true, items: [] }
+  const installedById = new Map(installed.items.map((item) => [item.id, item]))
+  const items = [...checked.items.map((item) => ({ ...item, ...installedById.get(item.id) })), ...legacy.items]
+  const failed_count = items.filter((item) => !item.ok).length
+  return {
+    ok: legacy.ok === true && failed_count === 0,
+    total: items.length,
+    ok_count: items.length - failed_count,
+    failed_count,
+    changed_count: items.filter((item) => item.kernel_changed).length,
+    items,
+    crag,
+  }
 }
+
+async function main() {
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    if (await healthReady()) break
+    await delay(pollMs)
+  }
+
+  const key = await apiKey()
+  if (!key) {
+    console.error('[fleet-services] API key is unavailable; slot refresh skipped')
+    process.exit(1)
+  }
+
+  try {
+    const vms = await fleetSlots(key)
+    const nodeIds = [...new Set(vms.map((vm) => vm.node_id).filter(Boolean))]
+    let nodes = []
+    if (nodeIds.length) {
+      const links = await waitNodeLinks(key, nodeIds)
+      nodes = links.nodes
+      // Slots on these nodes fail below with node_not_ready; the rest still update.
+      if (links.offline.length) console.warn(`[fleet-services] node link not ready: ${links.offline.join(', ')}`)
+    }
+    const refreshed = await refreshFleetKernels(
+      root,
+      vms.map((vm) => ({
+        ...vm,
+        node_platform: vm.node_platform || nodes.find((node) => node.id === vm.node_id)?.platform,
+      })),
+      {
+        api: async (method, endpoint, body) =>
+          dataOf(endpoint, await call(key, method, endpoint, body, SYNC_TIMEOUT_MS)),
+        cragVersion: cragTag,
+      },
+    )
+    const kernels = summarizeKernelSync(refreshed)
+    const nativeNodes = new Set(nodes.filter((node) => node.platform === 'darwin').map((node) => node.id))
+    const ids = vms.filter((vm) => vm.family === 'claude' && !nativeNodes.has(vm.node_id)).map((vm) => vm.id)
+    // An empty ids list means all slots to the API, so do not submit an empty telemetry job.
+    const report = ids.length
+      ? dataOf(
+          '/api/panel/vms/fleet-update',
+          await call(
+            key,
+            'POST',
+            '/api/panel/vms/fleet-update',
+            { action: 'telemetry', concurrency, ids },
+            SYNC_TIMEOUT_MS,
+          ),
+        )
+      : { action: 'telemetry', concurrency, total: 0, ok_count: 0, skipped_count: 0, failed_count: 0, items: [] }
+    console.log(
+      JSON.stringify({
+        ...report,
+        skipped_not_applicable: vms.length - ids.length,
+        kernel_sync: kernels,
+        crag: refreshed.crag,
+      }),
+    )
+    if (report.skipped_count) {
+      for (const item of report.items || []) {
+        if (!item.skipped) continue
+        const container = item.telemetry?.container || item.id
+        console.warn(`[fleet-services] skipped ${item.id}: container unavailable (${container})`)
+      }
+    }
+    if (!kernels.ok || report.failed_count) process.exit(1)
+  } catch (error) {
+    console.error(`[fleet-services] ${error?.message || error}`)
+    process.exit(1)
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main()

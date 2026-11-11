@@ -31,6 +31,7 @@ import { ensureSlotSubscriptionType } from './lib/oauth/oauth-credentials.mjs'
 import { createCliNodeGuard } from './lib/vm/cli-node-guard.mjs'
 
 import { createSlotBridgeHealer, powerOnSlot, reviveDownSlots } from './lib/vm/slot-recovery.mjs'
+import { resumePendingKernelInstalls } from './lib/vm/kernel-install.mjs'
 import { createUsageProbeMonitor, normalizeUsageProbeConfig } from './lib/oauth/usage-probe-monitor.mjs'
 import { createCatalogMonitor } from './lib/admin/catalog-monitor.mjs'
 import { normalizeOfficialCcConfig } from './lib/oauth/official-cc-bootstrap.mjs'
@@ -1008,11 +1009,17 @@ if (proxyPool.snapshot().config.ipv6_enabled !== true) {
   }
 }
 const clusterRoutes = createClusterRoutes({ manager: clusterManager, json, readBody, ok: panel.ok })
-const slotShell = createSlotShell({ projectRoot: cfg.paths.project, importOauth: commitImportedOauth })
+const slotShell = createSlotShell({
+  projectRoot: cfg.paths.project,
+  importOauth: commitImportedOauth,
+  routing: () => routingConfig,
+})
 for (const vm of listVms(cfg.paths.project)) {
   if (isCodexVm(vm)) continue
   try {
-    ensureSlotSubscriptionType(path.join(cfg.paths.project, 'vms', vm.id, 'cli-home'), vm.account_tier)
+    ensureSlotSubscriptionType(path.join(cfg.paths.project, 'vms', vm.id, 'cli-home'), vm.account_tier, {
+      source: vm.account_tier_source,
+    })
   } catch (error) {
     console.warn('[credential-subscription]', vm.id, error?.message || error)
   }
@@ -1422,6 +1429,33 @@ server.headersTimeout = 125_000
 server.timeout = 0
 
 server.listen(cfg.port, cfg.host, () => {
+  // Installation intent is durable; reconnecting nodes must not depend on a lost HTTP callback.
+  if (process.env.KIN_CRS_MOCK !== '1') {
+    let resuming = false
+    const resume = async () => {
+      if (resuming) return
+      resuming = true
+      try {
+        const report = await resumePendingKernelInstalls({
+          projectRoot: cfg.paths.project,
+          routing: routingConfig,
+          watchdog: kernelWatchdog,
+          poolScheduler,
+        })
+        for (const item of report.items) {
+          if (!item.ok) console.warn(`[kernel-install] ${item.id} recovery failed (${item.code})`)
+        }
+      } catch (error) {
+        console.warn(`[kernel-install] recovery pass failed (${error?.code || 'unknown'})`)
+      } finally {
+        resuming = false
+      }
+    }
+    void resume()
+    const timer = setInterval(resume, 15_000)
+    timer.unref()
+    server.once('close', () => clearInterval(timer))
+  }
   try {
     vmTestSchedule.start()
   } catch (e) {
