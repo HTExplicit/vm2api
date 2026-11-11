@@ -15,6 +15,31 @@ import {
   toCodexResponses,
 } from '../../src/lib/protocol/codex-convert.mjs'
 
+test('done status controls successful Chat and Anthropic terminals', () => {
+  const line = 'data: {"type":"response.done","response":{"status":"failed","error":{"code":"server_error"}}}'
+  const chat = createChatSseState()
+  const anthropic = createAnthropicSseState()
+  assert.equal(responsesSseToChatChunk(line, 'codex', chat), null)
+  assert.equal(responsesSseToAnthropicEvents(line, anthropic), null)
+  assert.equal(chat.finished, true)
+  assert.equal(anthropic.finished, true)
+  const completed = 'data: {"type":"response.done","response":{"status":"completed"}}'
+  assert.match(responsesSseToChatChunk(completed, 'codex', createChatSseState()), /\[DONE\]/)
+  assert.match(responsesSseToAnthropicEvents(completed, createAnthropicSseState()), /event: message_stop/)
+})
+
+test('a failed Responses terminal prevents a following raw DONE from emitting success', () => {
+  for (const type of ['response.failed', 'response.incomplete']) {
+    const line = `data: ${JSON.stringify({ type, response: { status: 'failed', error: { code: 'server_error' } } })}`
+    const chat = createChatSseState()
+    const anthropic = createAnthropicSseState()
+    assert.equal(responsesSseToChatChunk(line, 'codex', chat), null)
+    assert.equal(responsesSseToAnthropicEvents(line, anthropic), null)
+    assert.equal(responsesSseToChatChunk('data: [DONE]', 'codex', chat), null)
+    assert.equal(responsesSseToAnthropicEvents('data: [DONE]', anthropic), null)
+  }
+})
+
 test('strips client identity fields', () => {
   const out = stripCodexIdentity({
     model: 'gpt-5.4',

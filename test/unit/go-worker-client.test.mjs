@@ -19,6 +19,7 @@ import { callerAutoCompactWindow, defaultSeedPolicy, sanitizeInboundBody } from 
 import { extractOpenaiUsage } from '../../src/lib/protocol/openai-usage.mjs'
 import { callRustKernel, rustKernelHealth } from '../../src/lib/transport/rust-kernel-client.mjs'
 import { callCodexKernel, streamCodexKernel } from '../../src/lib/transport/codex-kernel-client.mjs'
+import { runCodexKernelHop } from '../../src/lib/protocol/handle-codex.mjs'
 import { forwardApi, readApiJson } from '../../src/lib/transport/api-kernel-client.mjs'
 import { normalizeRedaction } from '../../src/lib/redaction/policy.mjs'
 import { publishRedactionForTests } from '../../src/lib/redaction/runtime.mjs'
@@ -868,12 +869,19 @@ unixTest('streamGoWorker keeps raw response models separate from headers and ind
   }
 })
 
-unixTest('streamGoWorker retains a declared model after the upstream stream disconnects', async () => {
+unixTest('streamGoWorker retains model and usage after a reset', async () => {
   let upstream
   const fx = await fixture((req, res) => {
     upstream = res
     res.setHeader('content-type', 'text/event-stream')
-    writeData(res, { type: 'message_start', message: { model: 'reported-before-disconnect', content: [] } })
+    writeData(res, {
+      type: 'message_start',
+      message: {
+        model: 'reported-before-disconnect',
+        content: [],
+        usage: { input_tokens: 80, cache_read_input_tokens: 20 },
+      },
+    })
     writeData(res, { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } })
   })
   try {
@@ -885,8 +893,126 @@ unixTest('streamGoWorker retains a declared model after the upstream stream disc
       },
     })
     assert.equal(result.ok, false)
+    assert.equal(result.status, 0)
+    assert.equal(result.body.error.code, 'ECONNRESET')
+    assert.equal(result.committed, true)
+    assert.equal(result.terminalState, 'incomplete')
     assert.equal(result.transportError, true)
+    assert.deepEqual(result.usage, { input_tokens: 80, cache_read_input_tokens: 20 })
     assert.equal(result.upstreamResponseModel, 'reported-before-disconnect')
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('a reset after empty Responses items uses the existing same-account retry', async () => {
+  for (const item of [{ type: 'message', content: [] }, { type: 'reasoning', summary: [] }]) {
+    let requests = 0
+    const fx = await fixture((req, res) => {
+      req.resume()
+      requests++
+      res.setHeader('content-type', 'text/event-stream')
+      if (requests === 1) {
+        writeData(res, { type: 'response.created', response: { id: 'resp_failed' } })
+        writeData(res, { type: 'response.output_item.added', item })
+        setTimeout(() => res.destroy(), 20)
+      } else {
+        writeData(res, { type: 'response.output_text.delta', delta: 'recovered' })
+        writeData(res, { type: 'response.completed', response: { id: 'resp_recovered', status: 'completed' } })
+        res.end()
+      }
+    })
+    try {
+      const lines = []
+      const result = await runCodexKernelHop({
+        hop: streamGoWorker,
+        args: { exec: fx.exec, envelope: { body: { model: 'gpt-5.4', input: 'hi' }, stream: true } },
+        onEvent: (line) => lines.push(line),
+      })
+      assert.equal(requests, 2)
+      assert.equal(result.ok, true)
+      assert.equal(result.transport_retried, true)
+      assert.match(lines.join('\n'), /recovered/)
+      assert.doesNotMatch(lines.join('\n'), /resp_failed/)
+    } finally {
+      await fx.close()
+    }
+  }
+})
+
+for (const [type, terminal] of [
+  ['response.completed', 'completed'],
+  ['response.failed', 'failed'],
+  ['response.incomplete', 'incomplete'],
+  ['response.done', 'completed'],
+  ['response.done', 'failed'],
+  ['response.done', 'incomplete'],
+  ['response.done', 'cancelled'],
+  ['response.done', null],
+]) {
+  unixTest(`streamGoWorker uses ${type} status ${terminal} independently of its usage`, async () => {
+    const usage = { input_tokens: 17, output_tokens: 3, input_tokens_details: { cached_tokens: 5 } }
+    const response = {
+      id: 'resp_terminal',
+      object: 'response',
+      model: 'gpt-5.4',
+      ...(terminal ? { status: terminal } : {}),
+      output: [],
+      usage,
+      ...(terminal === 'failed' ? { error: { code: 'server_error', message: 'Upstream interrupted' } } : {}),
+      ...(terminal === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
+    }
+    const fx = await fixture((req, res) => {
+      req.resume()
+      res.setHeader('content-type', 'text/event-stream')
+      writeData(res, { type: 'response.output_text.delta', delta: 'partial' })
+      writeData(res, { type, response })
+      res.end()
+    })
+    try {
+      const result = await streamGoWorker({
+        exec: fx.exec,
+        envelope: { body: { model: 'gpt-5.4', input: 'hi' }, stream: true },
+        onEvent() {},
+      })
+      assert.equal(result.ok, terminal === 'completed')
+      assert.equal(result.status, 200)
+      assert.equal(result.terminalState, terminal === 'completed' ? 'verified' : 'incomplete')
+      assert.equal(result.transportError, false)
+      assert.deepEqual(result.usage, usage)
+      if (terminal === 'completed') assert.deepEqual(result.body, response)
+      else assert.equal(result.body.error.code, terminal === 'failed' ? 'server_error' : 'stream_incomplete')
+    } finally {
+      await fx.close()
+    }
+  })
+}
+
+unixTest('streamGoWorker accepts a completed Responses terminal with zero tokens', async () => {
+  const response = {
+    id: 'resp_empty',
+    object: 'response',
+    model: 'gpt-5.4',
+    status: 'completed',
+    output: [],
+    usage: { input_tokens: 0, output_tokens: 0 },
+  }
+  const fx = await fixture((req, res) => {
+    req.resume()
+    res.setHeader('content-type', 'text/event-stream')
+    writeData(res, { type: 'response.completed', response })
+    res.end()
+  })
+  try {
+    const result = await streamGoWorker({
+      exec: fx.exec,
+      envelope: { body: { model: 'gpt-5.4', input: 'hi' }, stream: true },
+      onEvent() {},
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.terminalState, 'verified')
+    assert.deepEqual(result.body, response)
+    assert.deepEqual(result.usage, response.usage)
   } finally {
     await fx.close()
   }
@@ -1480,6 +1606,24 @@ test('terminal metadata is not a downstream commit', () => {
   assert.equal(isDownstreamCommitEvent({ type: 'message_stop' }), false)
   assert.equal(isDownstreamCommitEvent({ type: 'message_delta', delta: { stop_reason: 'end_turn' } }), false)
   assert.equal(isDownstreamCommitEvent({ type: 'message_delta', delta: {} }), false)
+  for (const event of [
+    { type: 'response.created', response: { status: 'in_progress' } },
+    { type: 'response.in_progress' },
+    { type: 'response.output_item.added', item: { type: 'message', content: [] } },
+    { type: 'response.output_item.added', item: { type: 'reasoning', summary: [] } },
+    { type: 'response.output_item.done', item: { type: 'message', content: [] } },
+    { type: 'response.output_item.added', item: { type: 'image_generation_call' } },
+    { type: 'response.output_text.delta', delta: '' },
+  ])
+    assert.equal(isDownstreamCommitEvent(event), false)
+  for (const event of [
+    { type: 'response.output_text.delta', delta: 'text' },
+    { type: 'response.reasoning_summary_text.delta', delta: 'thinking' },
+    { type: 'response.output_item.added', item: { type: 'function_call', name: 'Read' } },
+    { type: 'response.image_generation_call.partial_image', partial_image_b64: 'aW1hZ2U=' },
+    { type: 'response.output_item.done', item: { type: 'image_generation_call', result: 'aW1hZ2U=' } },
+  ])
+    assert.equal(isDownstreamCommitEvent(event), true)
   assert.equal(
     isDownstreamCommitEvent({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'hi' } }),
     true,

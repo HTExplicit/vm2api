@@ -40,7 +40,7 @@ import {
   isWrapConnectionError,
 } from '../core/errors.mjs'
 import { extraHeadersFromLimitError } from '../pool/quota-window.mjs'
-import { createStreamTiming } from '../protocol/stream-timing.mjs'
+import { createStreamTiming, isGeneratedContentEvent } from '../protocol/stream-timing.mjs'
 import { mergeUsage } from '../protocol/openai-usage.mjs'
 import { ensureRedaction, maskJson, restoreJsonValue, createSseRestorer } from '../redaction/runtime.mjs'
 
@@ -299,7 +299,7 @@ export function isDownstreamCommitEvent(event) {
       !!(b.text || b.thinking)
     )
   }
-  return t.startsWith('response.output_')
+  return t.startsWith('response.') && isGeneratedContentEvent(event)
 }
 
 /** Anthropic SSE: message_start.message.usage + message_delta.usage. OpenAI Responses: response.usage. */
@@ -850,6 +850,7 @@ export async function streamGoWorker({
     }
   }
   let committed = false
+  let sseUsage = null
   const timing = createStreamTiming()
   const requestId = randomUUID()
   const stopCancel = cancelOnAbort(exec, signal, requestId)
@@ -910,10 +911,10 @@ export async function streamGoWorker({
     let receivedAt = null
     let lastError = null
     let dataBuf = ''
-    let sseUsage = null
     let sseModel = null
     let sseStop = null
     let sseRateHeaders = {}
+    let responseTerminal = null
     const assembler = createClaudeMessageAssembler()
     const pendingLines = []
     const takeSseEvent = () => {
@@ -948,6 +949,22 @@ export async function streamGoWorker({
         sseRateHeaders = { ...sseRateHeaders, ...event.headers }
       }
       if (event.type === 'error') lastError = event
+      if (event.type === 'response.completed' || event.type === 'response.done') responseTerminal = event
+      if (
+        event.type === 'response.failed' ||
+        event.type === 'response.incomplete' ||
+        (event.type === 'response.done' && event.response?.status !== 'completed')
+      ) {
+        responseTerminal = event
+        lastError = {
+          type: 'error',
+          error: event.response?.error || {
+            type: 'api_error',
+            code: 'stream_incomplete',
+            message: event.response?.incomplete_details?.reason || 'Upstream response incomplete',
+          },
+        }
+      }
       if (event.type === 'message_stop') sawMessageStop = true
       if (event.type === 'message_start') rememberThreadTurn(event.message?.id, prepared.thread)
       const evUsage = usageFromSseEvent(event)
@@ -1083,7 +1100,11 @@ export async function streamGoWorker({
       const meta = streamMetaFromHeaders({ ...headers, ...trailers })
       const assembled = assembler.message
       const stopReason = meta.stopReason || sseStop || assembled?.stop_reason || null
-      const complete = !lastError && isCompleteAssistantMessage({ body: assembled, stopReason, sawMessageStop })
+      const complete =
+        !lastError &&
+        (responseTerminal?.type === 'response.completed' ||
+          (responseTerminal?.type === 'response.done' && responseTerminal.response?.status === 'completed') ||
+          isCompleteAssistantMessage({ body: assembled, stopReason, sawMessageStop }))
       if (!committed && complete) await flushCommit()
       const terminalState = complete ? 'verified' : 'incomplete'
       const rateHeaders = mergeRateLimitHeaders({ ...sseRateHeaders, ...headers, ...trailers })
@@ -1092,7 +1113,9 @@ export async function streamGoWorker({
         status: response.statusCode || 0,
         via: 'go-worker-stream',
 
-        body: lastError || assembled || { type: 'message', role: 'assistant', content: [] },
+        body: lastError ||
+          responseTerminal?.response ||
+          assembled || { type: 'message', role: 'assistant', content: [] },
         headers: rateHeaders,
         // Trailer stays authoritative, but it may carry totals only (Codex/Responses hops).
         // Merge so SSE `input_tokens_details` / cache breakdown survives instead of being short-circuited.
@@ -1118,6 +1141,7 @@ export async function streamGoWorker({
         via: 'go-worker-stream',
         ...timing.snapshot(),
         committed,
+        usage: sseUsage,
         upstreamResponseModel,
       })
     }
@@ -1137,6 +1161,7 @@ export async function streamGoWorker({
       headers: {},
       ...timing.snapshot(),
       committed,
+      usage: sseUsage,
       terminalState: committed ? 'incomplete' : error.status === 413 ? 'rejected' : 'transport_error',
       transportError: error.status !== 413,
       upstreamResponseModel,

@@ -60,6 +60,8 @@ test('omitted thinking and generated tool names establish real first content', (
     { type: 'content_block_delta', delta: { type: 'thinking_delta', estimated_tokens: 50 } },
     { type: 'content_block_start', content_block: { type: 'tool_use', name: 'Read' } },
     { type: 'response.output_item.added', item: { type: 'function_call', name: 'Read' } },
+    { type: 'response.image_generation_call.partial_image', partial_image_b64: 'aW1hZ2U=' },
+    { type: 'response.output_item.done', item: { type: 'image_generation_call', result: 'aW1hZ2U=' } },
   ]) {
     const timing = createStreamTiming(100)
     timing.observe(event, 500)

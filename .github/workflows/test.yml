@@ -203,6 +203,8 @@ jobs:
             test/unit/jev-usage-panel.test.mjs \
             test/unit/codex-slot-reload.test.mjs \
             test/unit/handle-codex.test.mjs \
+            test/unit/handle-codex-reliability.test.mjs \
+            test/unit/stream-timing.test.mjs \
             test/unit/handle-codex-search.test.mjs \
             test/unit/handle-codex-images.test.mjs \
             test/unit/min-max-tokens.test.mjs \

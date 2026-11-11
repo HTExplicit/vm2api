@@ -191,6 +191,96 @@ test('busy failover respects the attempt budget and preserves the last error', a
   assert.equal(fx.res.body.error.code, 'no_capacity')
 })
 
+for (const protocol of ['openai.responses', 'openai.chat', 'anthropic.messages']) {
+  test(`${protocol} reports a reset after output without replaying or discarding usage`, async (t) => {
+    let hops = 0
+    const usage = { input_tokens: 10, output_tokens: 2 }
+    const error = { type: 'worker_error', code: 'ECONNRESET', message: 'aborted' }
+    const fx = fixture(t, {
+      protocol,
+      body: {
+        stream: true,
+        ...(protocol === 'anthropic.messages' ? { messages: [{ role: 'user', content: 'hi' }] } : {}),
+      },
+      hop: async ({ onEvent }) => {
+        hops++
+        await onEvent('data: {"type":"response.output_text.delta","delta":"partial"}')
+        return {
+          ok: false,
+          status: 0,
+          committed: true,
+          transportError: true,
+          terminalState: 'incomplete',
+          usage,
+          body: { type: 'error', error },
+        }
+      },
+    })
+    if (protocol === 'anthropic.messages')
+      fx.args.routing = {
+        codex: {
+          protocols: { 'anthropic.messages': { mode: 'convert', enabled: true } },
+          convert: { anthropic_to_codex: true },
+        },
+      }
+    await handleCodexProtocol(fx.args)
+    assert.equal(hops, 1)
+    assert.equal(fx.res.statusCode, 200)
+    assert.match(fx.chunks.join(''), /"code":"ECONNRESET"/)
+    assert.equal(fx.args.stats.errors, 1)
+    assert.equal(fx.args.logBag.final_state, 'incomplete')
+    assert.equal(fx.args.logBag.error_code, error.code)
+    assert.equal(fx.args.logBag.error_message, error.message)
+    assert.equal(fx.args.logBag.input_tokens, 10)
+    assert.equal(fx.args.logBag.output_tokens, 2)
+  })
+}
+
+test('a non-stream request returns the reset error instead of ending an empty response', async (t) => {
+  let hops = 0
+  const error = { type: 'worker_error', code: 'ECONNRESET', message: 'aborted' }
+  const fx = fixture(t, {
+    hop: async ({ onEvent }) => {
+      hops++
+      await onEvent('data: {"type":"response.output_text.delta","delta":"partial"}')
+      return { ok: false, status: 0, committed: true, terminalState: 'incomplete', body: { type: 'error', error } }
+    },
+  })
+  await handleCodexProtocol(fx.args)
+  assert.equal(hops, 1)
+  assert.equal(fx.res.statusCode, 502)
+  assert.deepEqual(fx.res.body.error, error)
+  assert.equal(fx.args.logBag.final_state, 'incomplete')
+})
+
+for (const terminal of ['failed', 'incomplete', 'done']) {
+  test(`Responses ${terminal} with usage stays a failure and forwards its terminal once`, async (t) => {
+    const fx = fixture(t, {
+      body: { stream: true },
+      hop: async ({ onEvent }) => {
+        await onEvent('data: {"type":"response.output_text.delta","delta":"partial"}')
+        const error = { code: 'server_error', message: 'Upstream interrupted' }
+        const usage = { input_tokens: 10, output_tokens: 2 }
+        await onEvent(`data: ${JSON.stringify({ type: `response.${terminal}`, response: { status: 'failed', error, usage } })}`)
+        return {
+          ok: false,
+          status: 200,
+          committed: true,
+          terminalState: 'incomplete',
+          usage,
+          body: { type: 'error', error },
+        }
+      },
+    })
+    await handleCodexProtocol(fx.args)
+    assert.equal(fx.args.stats.errors, 1)
+    assert.equal(fx.args.logBag.final_state, 'incomplete')
+    assert.equal(fx.args.logBag.input_tokens, 10)
+    assert.equal(fx.args.logBag.output_tokens, 2)
+    assert.equal(fx.chunks.join('').match(/"code":"server_error"/g).length, 1)
+  })
+}
+
 for (const [name, cfg, routing, expected] of [
   ['defaults', null, {}, [600_000, 180_000]],
   [

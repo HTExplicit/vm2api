@@ -287,7 +287,8 @@ export function enrichLogRow(row) {
   if (!cls) {
     return { ...row, error_class: null, error_owner: null, error_label: null }
   }
-  return { ...row, ...cls }
+  const committedFailure = !row.final_state && Number(row.status) >= 200 && Number(row.status) < 300
+  return { ...row, ...cls, ...(committedFailure ? { final_state: 'incomplete' } : {}) }
 }
 
 export function collectErrors(rows = []) {

@@ -128,6 +128,9 @@ test('classifyRequestError maps known codes and statuses', () => {
 
 test('committed stream errors remain classified and collected while client cancellations stay ignored', () => {
   const failed = { status: 200, error_code: 'ECONNRESET', final_state: 'incomplete', error_message: '' }
+  assert.equal(enrichLogRow({ status: 200, error_code: 'ECONNRESET', final_state: null }).final_state, 'incomplete')
+  assert.equal(enrichLogRow({ status: 200, error_code: 'client_cancelled', final_state: null }).final_state, null)
+  assert.equal(enrichLogRow({ status: 200, final_state: 'verified' }).final_state, 'verified')
   assert.equal(classifyRequestError(failed).error_class, 'timeout')
   assert.equal(classifyRequestError({ status: 200, error_code: 'upstream_error' }).error_class, 'upstream')
   const bag = collectErrors([
