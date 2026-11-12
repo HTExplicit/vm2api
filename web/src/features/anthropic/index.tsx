@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { VIEW_TITLES } from '@/config/nav'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
+import { randomUUID } from '@/lib/random-uuid'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -47,7 +48,7 @@ type ModelList = {
 
 function freshEndpoint(protocol: ApiProtocol = 'anthropic'): EndpointDraft {
   return {
-    id: crypto.randomUUID(),
+    id: randomUUID(),
     protocol,
     riskReviewEnabled: false,
     ...API_DEFAULTS[protocol],

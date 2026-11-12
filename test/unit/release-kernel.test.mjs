@@ -9,6 +9,23 @@ import {
   selectReleaseAsset,
   CRAG_V2_RELEASE_ASSET,
 } from '../../src/lib/admin/release-kernel.mjs'
+import { GITHUB_REPO } from '../../src/lib/admin/release.mjs'
+
+test('bundled CRAG uses the fork application tag while explicit supplier tags remain independent', async () => {
+  const seen = []
+  const fetchImpl = async (url) => {
+    seen.push(String(url))
+    return new Response(JSON.stringify({ tag_name: String(url).split('/').at(-1), assets: [] }))
+  }
+  await fetchKernelReleaseMetadata({ kernel: 'crag', bundledCragTag: 'v1.4.7301', fetchImpl })
+  await fetchKernelReleaseMetadata({ kernel: 'crag', tag: 'v1.4.7301', bundledCragTag: 'v1.4.7301', fetchImpl })
+  await fetchKernelReleaseMetadata({ kernel: 'crag', tag: 'v2.8.12', bundledCragTag: 'v1.4.7301', fetchImpl })
+  assert.deepEqual(seen, [
+    `https://api.github.com/repos/${GITHUB_REPO}/releases/tags/v1.4.7301`,
+    `https://api.github.com/repos/${GITHUB_REPO}/releases/tags/v1.4.7301`,
+    'https://api.github.com/repos/dofastted/claude-code/releases/tags/v2.8.12',
+  ])
+})
 
 test('CRAG metadata uses its supplier release, never the vm2api source-only release', async () => {
   const seen = []

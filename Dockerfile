@@ -51,6 +51,7 @@ RUN node scripts/smoke-platform-browser.mjs \
   && node scripts/smoke-platform-balance.mjs \
   && node scripts/smoke-browser-cleanup.mjs
 COPY VERSION CHANGELOG.md ./
+COPY deploy/payload.json ./deploy/payload.json
 COPY docker/kin-os ./docker/kin-os
 COPY docker/kin-kvm ./docker/kin-kvm
 COPY --from=web /src/web/dist ./web/dist

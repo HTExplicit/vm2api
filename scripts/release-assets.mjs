@@ -3,10 +3,12 @@
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { parseArgs } from 'node:util'
 import { fileURLToPath } from 'node:url'
+import { verifyCragV2Tree } from '../src/lib/vm/wrap-cli-runtime.mjs'
 
 const root = path.resolve(import.meta.dirname, '..')
 export function imageAssets(manifest) {
@@ -24,7 +26,7 @@ export function imageAssets(manifest) {
       existing.sources.push(source)
     } else assets.set(file.asset, { file, sources: [source] })
   }
-  assert.equal(assets.size, 20, 'the release contains twenty pinned upstream assets')
+  assert.equal(assets.size, 21, 'the release contains twenty-one pinned upstream assets')
   assets.set('kin-egress', { sources: ['image-bin/kin-egress'] })
   return assets
 }
@@ -44,19 +46,59 @@ export function stagedAssets(manifest, dir) {
   })
 }
 
-export function writeProvenance({ manifest, dir, image, sourceCommit, upstreamBuild, assets }) {
-  for (const [field, name] of [
-    ['cli_upx_sha256', 'cli-node'],
-    ['crag_bootstrap_upx_sha256', 'crag-v2-amd64-crag-v2'],
-    ['crag_payload_ciphertext_sha256', 'crag-v2-amd64-crag-v2.payload.enc'],
-  ]) {
-    const asset = assets.find((item) => item.name === name)
-    assert.equal(asset.digest, `sha256:${upstreamBuild[field]}`, `${name}: upstream provenance mismatch`)
+export function verifyCragArchive(manifest, dir) {
+  const archive = manifest.files.find((file) => file.asset === 'crag-v2-licensed-amd64.tar.gz')
+  const members = manifest.files.filter((file) => file.path.startsWith('share/crag/kernels/v2/amd64/'))
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-release-crag-'))
+  try {
+    execFileSync('tar', ['-xzf', path.join(dir, archive.asset), '-C', staging])
+    const wrapper = path.join(staging, 'crag-v2-licensed-amd64')
+    const packageRoot = fs.existsSync(wrapper) ? wrapper : staging
+    const checked = verifyCragV2Tree(packageRoot, { arch: 'amd64' })
+    assert.equal(checked.ok, true, `CRAG archive signature verification failed: ${checked.code}`)
+    assert.equal(members.length, 8, 'the CRAG factory contains eight pinned members')
+    for (const file of members) {
+      const relative = file.path.slice('share/crag/kernels/v2/amd64/'.length)
+      assert.ok(
+        fs.readFileSync(path.join(packageRoot, relative)).equals(fs.readFileSync(path.join(dir, file.asset))),
+        `${file.asset}: CRAG archive and image factory differ`,
+      )
+    }
+    return checked.manifest
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true })
   }
+}
+
+export function writeProvenance({ manifest, dir, image, sourceCommit, upstreamBuild, cragBuild, assets }) {
+  const rebuilt = assets.filter((asset) => asset.name !== 'kin-egress' && !asset.name.startsWith('crag-v2-'))
+  for (const asset of rebuilt) {
+    const upstream = upstreamBuild.assets.find((item) => item.name === asset.name)
+    assert.equal(asset.size, upstream.size, `${asset.name}: upstream provenance size mismatch`)
+    assert.equal(asset.digest, `sha256:${upstream.sha256}`, `${asset.name}: upstream provenance mismatch`)
+  }
+  for (const asset of assets.filter((item) => item.name.startsWith('crag-v2-'))) {
+    assert.equal(asset.digest, `sha256:${cragBuild.assets[asset.name]}`, `${asset.name}: CRAG provenance mismatch`)
+  }
+  const signedManifest = JSON.parse(fs.readFileSync(path.join(dir, 'crag-v2-amd64-manifest.json'), 'utf8'))
+  assert.equal(
+    signedManifest.payload.plaintext_sha256,
+    cragBuild.core_plaintext_sha256,
+    'CRAG core commitment mismatch',
+  )
   const provenance = {
     source_commit: sourceCommit,
     image,
-    upstream: { repository: manifest.repo, release: manifest.release, build: upstreamBuild },
+    upstream: {
+      repository: manifest.repo,
+      release: manifest.release,
+      build: {
+        ...upstreamBuild,
+        source_record: 'docs/releases/v1.4.072-binaries.json',
+        assets: upstreamBuild.assets.filter((asset) => rebuilt.some((item) => item.name === asset.name)),
+      },
+      crag: cragBuild,
+    },
     source_built: {
       'kin-egress': {
         repository: 'HTExplicit/vm2api',
@@ -120,20 +162,22 @@ function main() {
     run('docker', ['rm', container])
   }
   const expected = stagedAssets(manifest, opts.dest)
+  verifyCragArchive(manifest, opts.dest)
   expected.push(
     writeProvenance({
       manifest,
       dir: opts.dest,
       image: opts.image,
       sourceCommit: capture('git', ['rev-parse', 'HEAD']),
-      upstreamBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.067-binaries.json'), 'utf8')),
+      upstreamBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.072-binaries.json'), 'utf8')),
+      cragBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.073-crag.json'), 'utf8')),
       assets: [...expected],
     }),
   )
   verifyDraft(readRelease(), opts.tag)
   run('gh', ['release', 'upload', opts.tag, '--clobber', ...expected.map((file) => path.join(opts.dest, file.name))])
   verifyReleaseAssets(readRelease(), opts.tag, expected)
-  console.log(`All 22 draft assets verified for ${opts.image}; twenty upstream pins and image-built egress match`)
+  console.log(`All 23 draft assets verified for ${opts.image}; twenty-one upstream pins and image-built egress match`)
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main()

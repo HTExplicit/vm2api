@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { isMainThread } from 'node:worker_threads'
 import { kernelHealthInWorker } from './kernel-health-thread.mjs'
+import { resolveStreamIdleTimeoutMs } from '../core/config.mjs'
 import { prepareOutboundHeaders } from '../protocol/outbound-attempt.mjs'
 import { sanitizeAnthropicBodyForBetaTokens } from '../protocol/anthropic-policy.mjs'
 import { sanitizeAnthropicBody } from '../protocol/sanitize.mjs'
@@ -31,7 +32,13 @@ import {
 import { isApiKeyMode } from '../oauth/credential-mode.mjs'
 import { runSlotOauth } from './slot-oauth.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
-import { cragConsumesModelDirective, cragV2KernelActive, readSlotKernelConfig } from '../protocol/crag-print-prompt.mjs'
+import { normalizeSessionIdleTtlSeconds } from '../vm/slot-engine.mjs'
+import {
+  cragConsumesModelDirective,
+  cragV2KernelActive,
+  readSlotKernelConfig,
+  validateCallerCwd,
+} from '../protocol/crag-print-prompt.mjs'
 import { applyClaudeSSELineToMessage, createClaudeMessageAssembler } from '../protocol/convert.mjs'
 import {
   clientCancelledResult,
@@ -43,8 +50,12 @@ import { extraHeadersFromLimitError } from '../pool/quota-window.mjs'
 import { createStreamTiming, isGeneratedContentEvent } from '../protocol/stream-timing.mjs'
 import { mergeUsage } from '../protocol/openai-usage.mjs'
 import { ensureRedaction, maskJson, restoreJsonValue, createSseRestorer } from '../redaction/runtime.mjs'
+import { inferenceCodec } from './inference-codec.mjs'
+import { parseWorkerJson as parseJson } from './inference-codec-json.mjs'
 
 const MAX_BODY = 64 * 1024 * 1024
+const MAX_GATEWAY_CLOCK_MS = 86_400_000
+const CRAG_HEADER_ALLOWANCE_MS = 5_000
 const credentialRefreshTail = new Map()
 
 function withCredentialRefreshLock(key, fn) {
@@ -90,7 +101,7 @@ function readInternalToken(exec) {
   }
 }
 
-function workerRequest(
+async function workerRequest(
   exec,
   {
     method = 'GET',
@@ -101,15 +112,24 @@ function workerRequest(
     timeoutMode = 'overall',
     headers = {},
     maxRequestBytes = 0,
+    inference = false,
+    onRequestStarted,
+    requireInternalToken = false,
   } = {},
 ) {
+  if (signal?.aborted) throw Object.assign(new Error('The operation was aborted'), { code: 'ABORT_ERR' })
+  const { socketPath } = workerPaths(exec)
+  if (!socketPath) {
+    throw Object.assign(new Error('slot worker socket is not configured'), { code: 'worker_socket_missing' })
+  }
+  const payload =
+    body == null
+      ? null
+      : inference
+        ? await inferenceCodec.encode(body, { signal })
+        : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))
+  if (signal?.aborted) throw Object.assign(new Error('The operation was aborted'), { code: 'ABORT_ERR' })
   return new Promise((resolve, reject) => {
-    const { socketPath } = workerPaths(exec)
-    if (!socketPath) {
-      reject(Object.assign(new Error('slot worker socket is not configured'), { code: 'worker_socket_missing' }))
-      return
-    }
-    const payload = body == null ? null : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))
     // Include the headers, session metadata and request_id added around the caller's body.
     if (maxRequestBytes > 0 && payload?.length > maxRequestBytes) {
       reject(
@@ -121,6 +141,10 @@ function workerRequest(
       return
     }
     const internalToken = readInternalToken(exec)
+    if (requireInternalToken && !internalToken) {
+      reject(Object.assign(new Error('slot worker internal token is not configured'), { code: 'worker_token_missing' }))
+      return
+    }
     const requestHeaders = { ...headers }
     if (payload) {
       requestHeaders['content-type'] = 'application/json'
@@ -159,12 +183,96 @@ function workerRequest(
         resolve(res)
       },
     )
-    arm(timeoutMs, `slot worker timeout after ${timeoutMs}ms`)
+    if (timeoutMs != null) arm(timeoutMs, `slot worker timeout after ${timeoutMs}ms`)
     req.once('close', clearTimer)
     req.once('error', reject)
     if (payload) req.write(payload)
     req.end()
+    // Once handed to HTTP, the kernel may see the request before 'finish'.
+    onRequestStarted?.()
   })
+}
+
+function clockMs(value, fallback) {
+  const ms = Number(value)
+  return Number.isFinite(ms) && ms > 0 ? Math.min(MAX_GATEWAY_CLOCK_MS, Math.max(1, Math.round(ms))) : fallback
+}
+
+function withoutGatewayPolicy(body) {
+  if (!body || !Object.hasOwn(body, 'gateway_policy')) return body
+  const { gateway_policy: _ignored, ...rest } = body
+  return rest
+}
+
+function inferenceRequest(
+  exec,
+  {
+    envelope,
+    requestId,
+    stream,
+    deliveryMode,
+    managedCrag,
+    tenantId,
+    slotWaitDeadlineMs,
+    timeoutMs,
+    idleTimeoutMs,
+    routing,
+    requestPath,
+    ...options
+  },
+) {
+  const headers = stream ? { te: 'trailers' } : {}
+  const body = { ...envelope, request_id: requestId }
+  const authenticatedPolicy = managedCrag && requestPath === '/internal/v1/messages'
+  if (authenticatedPolicy) {
+    body.stream = stream
+    body.delivery_mode = deliveryMode === 'verified' ? 'verified' : 'realtime'
+    if (tenantId) headers['x-tenant-id'] = tenantId
+    const firstByteMs = clockMs(timeoutMs, 600_000)
+    const idleMs = clockMs(idleTimeoutMs, clockMs(resolveStreamIdleTimeoutMs(routing), 180_000))
+    const queueWaitMs = Number.isFinite(slotWaitDeadlineMs)
+      ? Math.min(MAX_GATEWAY_CLOCK_MS, Math.max(0, Math.floor(slotWaitDeadlineMs - Date.now())))
+      : 0
+    body.gateway_policy = {
+      queue_wait_ms: queueWaitMs,
+      first_byte_timeout_ms: firstByteMs,
+      stream_idle_timeout_ms: idleMs,
+      session_idle_ttl_seconds: normalizeSessionIdleTtlSeconds(routing?.inference?.session_idle_ttl_seconds),
+    }
+    // Only realtime exposes headers before completion. The native worker owns
+    // activity deadlines while verified and JSON responses are held back.
+    timeoutMs =
+      stream && body.delivery_mode === 'realtime' ? queueWaitMs + firstByteMs + CRAG_HEADER_ALLOWANCE_MS : null
+  }
+  return workerRequest(exec, {
+    ...options,
+    requestPath,
+    // Do not let async codec queue time be added back to the worker's budget.
+    inference: options.inference && !authenticatedPolicy,
+    requireInternalToken: authenticatedPolicy,
+    method: 'POST',
+    body,
+    headers,
+    timeoutMs,
+    timeoutMode: stream ? 'first-byte' : 'overall',
+  })
+}
+
+function classifyManagedQueueRejection(result, managedCrag) {
+  const error = result.body?.error
+  if (!managedCrag || result.ok || result.body?.type !== 'error') return result
+  if (
+    !(result.status === 503 && error?.type === 'overloaded_error' && error.message === 'runtime queue is full') &&
+    !(result.status === 504 && error?.type === 'timeout_error' && error.message === 'runtime queue timeout')
+  ) {
+    return result
+  }
+  return {
+    ...result,
+    body: { ...result.body, error: { ...error, code: 'slot_busy' } },
+    upstreamExecutions: 0,
+    terminalState: 'rejected',
+  }
 }
 
 /**
@@ -174,7 +282,7 @@ function workerRequest(
  * and an old worker without the route just answers 404.
  */
 function cancelOnAbort(exec, signal, requestId) {
-  if (!signal || signal.aborted) return () => {}
+  if (!signal) return () => {}
   const onAbort = () => {
     workerRequest(exec, {
       method: 'POST',
@@ -188,6 +296,7 @@ function cancelOnAbort(exec, signal, requestId) {
       })
   }
   signal.addEventListener('abort', onAbort, { once: true })
+  if (signal.aborted) onAbort()
   return () => signal.removeEventListener('abort', onAbort)
 }
 
@@ -204,28 +313,6 @@ async function readAll(stream, limit = MAX_BODY) {
     chunks.push(value)
   }
   return Buffer.concat(chunks)
-}
-
-function parseJson(buffer, status = 0) {
-  try {
-    return JSON.parse(String(buffer || ''))
-  } catch {
-    if (status === 413) {
-      return {
-        type: 'error',
-        error: {
-          type: 'invalid_request_error',
-          code: 'body_too_large',
-          message: 'Request body exceeds the slot kernel limit',
-          details: { retryable: false },
-        },
-      }
-    }
-    return {
-      type: 'error',
-      error: { type: 'worker_error', code: 'worker_invalid_json', message: String(buffer || '').slice(0, 400) },
-    }
-  }
 }
 
 function publicHeaders(headers = {}) {
@@ -409,12 +496,19 @@ function dumpSessionEnvelope(envelope) {
   } catch {}
 }
 
-function stripCragEnvelope(body) {
+function gateCragBody(body, print, health) {
   if (!body || typeof body !== 'object') return body
-  if (!body.crag_prompt && !body.crag_model && !body.crag_options?.prompt) return body
+  const caps = print && Array.isArray(health?.capabilities) ? health.capabilities : []
+  const prompt = body.crag_prompt
+  const model = print && cragConsumesModelDirective(health) ? modelDirectiveForCrag(body.model) : null
+  const hasAlias = body.crag_options != null && Object.hasOwn(body.crag_options, 'prompt')
+  if (!model && !Object.hasOwn(body, 'crag_prompt') && !Object.hasOwn(body, 'crag_model') && !hasAlias) {
+    return body
+  }
   const out = { ...body }
-  delete out.crag_prompt
-  delete out.crag_model
+  if (!['append', 'replace'].includes(prompt?.mode) || !caps.includes(`prompt_${prompt.mode}`)) delete out.crag_prompt
+  if (model) out.crag_model = model
+  else delete out.crag_model
   if (out.crag_options && typeof out.crag_options === 'object' && !Array.isArray(out.crag_options)) {
     const { prompt: _prompt, ...rest } = out.crag_options
     if (Object.keys(rest).length) out.crag_options = rest
@@ -446,11 +540,12 @@ export function prepareWorkerPayload({
   // This is the last panel-owned boundary before either kernel. Keep the
   // worker contract Anthropic-shaped even when a caller selected passthrough;
   // cli-node and CRAG must never receive OpenAI/client-only request fields.
-  const canonicalBody = sanitizeAnthropicBody(body, { preserveContentShape: false }) || body
+  const canonicalBody = withoutGatewayPolicy(sanitizeAnthropicBody(body, { preserveContentShape: false }) || body)
   const model = canonicalBody?.model || ''
   const credMode = credentialModeFromOauth(exec?.vm?.claude || {})
   const headers = prepareOutboundHeaders(reqHeaders, exec?.homeDir, identity, model, {
     credentialMode: credMode,
+    routing,
     want1m: want1m === true,
   })
   const displayed =
@@ -470,26 +565,21 @@ export function prepareWorkerPayload({
   // Envelope headers are discarded; the existing MessageRequest.betas channel
   // carries request gates to the native CLI, which builds the actual HTTP wire.
   const gated = cliHop ? { ...main, betas } : sanitizeAnthropicBodyForBetaTokens(main, headers['anthropic-beta'])
-  // CRAG's CLI rebuilds the wire from its own model table. Pass the preset
-  // boundary only when that worker applies it locally. A cluster hop forwards
-  // unknown fields and Anthropic rejects `crag_model`.
+  const health = exec?.workerStatus
   const print =
-    cragPrint == null
-      ? cragV2KernelActive({
-          vm: exec?.vm,
-          health: exec?.workerStatus,
-          kernelConfig: readSlotKernelConfig(exec?.homeDir),
-        })
-      : cragPrint === true
-  const directed =
-    print && cragConsumesModelDirective(exec?.workerStatus)
-      ? { ...gated, crag_model: modelDirectiveForCrag(gated?.model) }
-      : stripCragEnvelope(gated)
+    cragPrint !== false &&
+    cragV2KernelActive({
+      vm: exec?.vm,
+      health,
+      kernelConfig: readSlotKernelConfig(exec?.homeDir),
+    })
+  const directed = gateCragBody(gated, print, health)
   return {
     headers,
     gated: directed,
     cliHop,
     routing,
+    acceptsCallerCwd: print && Array.isArray(health?.capabilities) && health.capabilities.includes('caller_cwd'),
     thread: thread.turn,
   }
 }
@@ -524,6 +614,7 @@ async function workerEnvelope({
   preserveCacheBreakpoints = null,
   cliHop = false,
   cragPrint = null,
+  callerCwd = null,
   repaired = false,
   redactionPrincipal = '',
   redactionSession = '',
@@ -541,10 +632,15 @@ async function workerEnvelope({
     repaired,
   })
   const redaction = await redactionContext({ routing, exec, redactionPrincipal, redactionSession })
-  const gated = redaction ? await maskJson(prepared.gated, redaction) : prepared.gated
+  // Mask the separated path with the same policy as the original system text.
+  const cwd = (prepared.acceptsCallerCwd && validateCallerCwd(callerCwd)) || undefined
+  const masked = redaction ? await maskJson({ body: prepared.gated, caller_cwd: cwd }, redaction) : null
+  const gated = redaction ? masked.body : prepared.gated
+  const outgoingCwd = redaction ? validateCallerCwd(masked.caller_cwd) : cwd
   const finalized = sealPreparedPayload(prepared, gated)
   const envelope = {
     ...(requestContext ? { request_context: requestContext } : {}),
+    ...(typeof outgoingCwd === 'string' ? { caller_cwd: outgoingCwd } : {}),
     body: finalized.body,
     headers: finalized.headers,
     stream: !!stream,
@@ -563,9 +659,24 @@ async function redactionContext({ routing, exec, redactionPrincipal, redactionSe
   return { principal: redactionPrincipal, session: redactionSession || '' }
 }
 
-async function maskEnvelopeBody(envelope, redaction) {
-  if (!redaction || !envelope?.body) return envelope
-  return { ...envelope, body: await maskJson(envelope.body, redaction) }
+async function preparePrebuiltEnvelope(envelope, redaction, messages) {
+  // A prebuilt (e.g. Codex) envelope has no trusted Messages-side cwd source.
+  const { caller_cwd: _callerCwd, ...out } = envelope
+  if (messages) {
+    delete out.gateway_policy
+    out.body = withoutGatewayPolicy(out.body)
+    if (out.headers && typeof out.headers === 'object') {
+      out.headers = Object.fromEntries(
+        Object.entries(out.headers).filter(([name]) => name.toLowerCase() !== 'x-tenant-id'),
+      )
+    }
+  }
+  if (out.body && Object.hasOwn(out.body, 'caller_cwd')) {
+    const { caller_cwd: _bodyCwd, ...body } = out.body
+    out.body = body
+  }
+  if (redaction && out.body) out.body = await maskJson(out.body, redaction)
+  return out
 }
 
 function redactionResult(error) {
@@ -616,6 +727,10 @@ export async function callGoWorker({
   body,
   reqHeaders = {},
   timeoutMs,
+  idleTimeoutMs,
+  managedCrag = false,
+  tenantId = '',
+  slotWaitDeadlineMs,
   maxRequestBytes = 0,
   identity = null,
   routing,
@@ -627,6 +742,7 @@ export async function callGoWorker({
   envelope = null,
   cliHop = false,
   cragPrint = null,
+  callerCwd = null,
   repaired = false,
   onEnvelope = null,
   redactionPrincipal = '',
@@ -658,11 +774,15 @@ export async function callGoWorker({
     }
   }
   const requestId = randomUUID()
-  const stopCancel = cancelOnAbort(exec, signal, requestId)
+  let stopCancel = () => {}
   try {
     const redaction = await redactionContext({ routing, exec, redactionPrincipal, redactionSession })
     const prepared = envelope
-      ? { envelope: await maskEnvelopeBody(envelope, redaction), thread: null, redaction }
+      ? {
+          envelope: await preparePrebuiltEnvelope(envelope, redaction, requestPath === '/internal/v1/messages'),
+          thread: null,
+          redaction,
+        }
       : await workerEnvelope({
           body,
           reqHeaders,
@@ -675,27 +795,38 @@ export async function callGoWorker({
           preserveCacheBreakpoints,
           cliHop,
           cragPrint,
+          callerCwd,
           requestContext,
           repaired,
           redactionPrincipal,
           redactionSession,
         })
     reportEnvelope(onEnvelope, prepared.envelope)
-    const response = await workerRequest(exec, {
-      method: 'POST',
+    const response = await inferenceRequest(exec, {
+      stream: false,
+      managedCrag,
+      tenantId,
+      slotWaitDeadlineMs,
+      idleTimeoutMs,
+      routing,
       requestPath,
-      body: { ...prepared.envelope, request_id: requestId },
+      envelope: prepared.envelope,
+      requestId,
       maxRequestBytes,
+      inference: true,
+      onRequestStarted: () => {
+        stopCancel = cancelOnAbort(exec, signal, requestId)
+      },
       signal,
       timeoutMs,
     })
     const data = await readAll(response)
-    const parsedRaw = parseJson(data, response.statusCode)
+    const parsedRaw = await inferenceCodec.decode(data, { status: response.statusCode, signal })
     const parsed = prepared.redaction ? await restoreJsonValue(parsedRaw, prepared.redaction) : parsedRaw
     const headers = mergeRateLimitHeaders(publicHeaders(response.headers))
     const ok = response.statusCode >= 200 && response.statusCode < 300 && parsed?.type !== 'error'
     if (ok) rememberThreadTurn(parsed?.id, prepared.thread)
-    return restoreKernelErrorStatus({
+    const result = restoreKernelErrorStatus({
       ok,
       status: response.statusCode || 0,
       via: 'go-worker',
@@ -708,9 +839,11 @@ export async function callGoWorker({
       transportError: false,
       threadBetas: prepared.thread,
     })
+    return classifyManagedQueueRejection(result, managedCrag)
   } catch (error) {
     const blocked = redactionResult(error)
     if (blocked) return blocked
+    if (signal?.aborted) return clientCancelledResult({ via: 'go-worker' })
     return {
       ok: false,
       status: error.status === 413 ? 413 : 0,
@@ -740,6 +873,9 @@ export async function streamGoWorker({
   reqHeaders = {},
   timeoutMs,
   idleTimeoutMs = 0,
+  managedCrag = false,
+  tenantId = '',
+  slotWaitDeadlineMs,
   maxRequestBytes = 0,
   identity = null,
   routing,
@@ -754,6 +890,7 @@ export async function streamGoWorker({
   envelope = null,
   cliHop = false,
   cragPrint = null,
+  callerCwd = null,
   repaired = false,
   onEnvelope = null,
   onOutboundHeaders = null,
@@ -853,11 +990,15 @@ export async function streamGoWorker({
   let sseUsage = null
   const timing = createStreamTiming()
   const requestId = randomUUID()
-  const stopCancel = cancelOnAbort(exec, signal, requestId)
+  let stopCancel = () => {}
   try {
     const redaction = await redactionContext({ routing, exec, redactionPrincipal, redactionSession })
     const prepared = envelope
-      ? { envelope: await maskEnvelopeBody(envelope, redaction), thread: null, redaction }
+      ? {
+          envelope: await preparePrebuiltEnvelope(envelope, redaction, requestPath === '/internal/v1/messages'),
+          thread: null,
+          redaction,
+        }
       : await workerEnvelope({
           body,
           reqHeaders,
@@ -871,30 +1012,40 @@ export async function streamGoWorker({
           preserveCacheBreakpoints,
           cliHop,
           cragPrint,
+          callerCwd,
           requestContext,
           repaired,
           redactionPrincipal,
           redactionSession,
         })
     reportEnvelope(onEnvelope, prepared.envelope)
-    const response = await workerRequest(exec, {
-      method: 'POST',
+    const response = await inferenceRequest(exec, {
+      stream: true,
+      deliveryMode,
+      managedCrag,
+      tenantId,
+      slotWaitDeadlineMs,
+      idleTimeoutMs,
+      routing,
       requestPath,
-      body: { ...prepared.envelope, request_id: requestId },
+      envelope: prepared.envelope,
+      requestId,
       maxRequestBytes,
+      inference: true,
+      onRequestStarted: () => {
+        stopCancel = cancelOnAbort(exec, signal, requestId)
+      },
       signal,
       timeoutMs,
-      timeoutMode: 'first-byte',
-      headers: { te: 'trailers' },
     })
     const headers = mergeRateLimitHeaders(publicHeaders(response.headers))
     if ((response.statusCode || 0) < 200 || (response.statusCode || 0) >= 300) {
       const data = await readAll(response, 1024 * 1024)
-      const rawBody = parseJson(data, response.statusCode)
+      const rawBody = await inferenceCodec.decode(data, { status: response.statusCode, signal })
       const parsedBody = prepared.redaction ? await restoreJsonValue(rawBody, prepared.redaction) : rawBody
       const responseModel = parsedBody?.response?.model || parsedBody?.model
       if (typeof responseModel === 'string' && responseModel.trim()) upstreamResponseModel = responseModel
-      return restoreKernelErrorStatus({
+      const result = restoreKernelErrorStatus({
         ok: false,
         status: response.statusCode || 0,
         via: 'go-worker-stream',
@@ -906,6 +1057,7 @@ export async function streamGoWorker({
         threadBetas: prepared.thread,
         upstreamResponseModel,
       })
+      return classifyManagedQueueRejection(result, managedCrag)
     }
     let buffer = ''
     let receivedAt = null
@@ -983,7 +1135,7 @@ export async function streamGoWorker({
     let sawMessageStop = false
     let outboundHeadersFrame = false
     let idleTimer = null
-    if (firstByteMs > 0 || idleMs > 0) {
+    if (!managedCrag && (firstByteMs > 0 || idleMs > 0)) {
       idleTimer = setInterval(() => {
         const limit = sawChunk ? idleMs : firstByteMs
         if (limit <= 0) return
@@ -1108,9 +1260,12 @@ export async function streamGoWorker({
       if (!committed && complete) await flushCommit()
       const terminalState = complete ? 'verified' : 'incomplete'
       const rateHeaders = mergeRateLimitHeaders({ ...sseRateHeaders, ...headers, ...trailers })
+      // A native activity timeout can follow HTTP/SSE metadata but precede
+      // visible output. It is neither an empty hop nor a transport failure.
+      const nativeTimeout = managedCrag && lastError?.error?.type === 'timeout_error'
       return restoreUncommittedHop({
         ok: response.statusCode === 200 && !lastError && complete,
-        status: response.statusCode || 0,
+        status: nativeTimeout && !committed ? 504 : response.statusCode || 0,
         via: 'go-worker-stream',
 
         body: lastError ||
@@ -1126,7 +1281,7 @@ export async function streamGoWorker({
         sawMessageStop,
         ...timing.snapshot(),
         committed,
-        terminalState,
+        terminalState: nativeTimeout && !committed ? 'rejected' : terminalState,
         transportError: false,
         threadBetas: prepared.thread,
       })
