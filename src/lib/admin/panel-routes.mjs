@@ -1705,6 +1705,8 @@ export function createPanelHandler(ctx) {
           const vm = getVm(cfg.paths.project, vmId)
           if (!vm || !isCodexVm(vm))
             return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'OpenAI 槽位不存在' } })
+          if (req.method === 'POST' && action === 'open' && !accountBrowserRuntime?.isInstalling)
+            accountBrowserRuntime?.launchConfig()
           let result
           if (req.method === 'GET' && resource === 'browser') result = slotBrowserManager.state(vmId)
           else if (req.method === 'POST' && resource === 'browser-ticket')

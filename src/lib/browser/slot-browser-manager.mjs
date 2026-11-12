@@ -469,6 +469,7 @@ export class SlotBrowserManager {
 
   browserTicket(vmId, { purpose = 'oauth' } = {}) {
     this.currentVm(vmId)
+    if (!this.runtime?.isInstalling) this.runtime?.launchConfig()
     if (!this.jobs.has(vmId)) this.open(vmId, { purpose, interactive: true })
     const live = this.jobs.get(vmId)
     if (live?.status === 'close_failed')

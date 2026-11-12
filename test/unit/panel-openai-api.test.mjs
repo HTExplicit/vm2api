@@ -221,6 +221,25 @@ test('browser management failures never echo raw provider output', async (t) => 
   assert.equal(JSON.stringify(out.body).includes('cb_secret'), false)
 })
 
+test('unconfigured account browsers fail before starting OAuth so the dialog can show settings', async (t) => {
+  const root = fixture(t)
+  const out = await handler(root, {
+    body: { purpose: 'oauth' },
+    accountBrowserRuntime: {
+      launchConfig() {
+        throw Object.assign(new Error('请先配置浏览器'), { code: 'browser_key_required', status: 400 })
+      },
+    },
+    codexBrowserLogin: {
+      start() {
+        assert.fail('must not start an unconfigured browser')
+      },
+    },
+  })('POST', '/api/panel/vms/vm-api/browser/open')
+  assert.equal(out.status, 400)
+  assert.equal(out.body.error.code, 'browser_key_required')
+})
+
 test('Claude slots cannot reach generic browser state, tickets, login or close operations', async (t) => {
   const root = fixture(t)
   const vmPath = path.join(root, 'vms', 'vm-api.json')
