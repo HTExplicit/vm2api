@@ -1055,6 +1055,7 @@ unixTest('a reset after empty Responses items uses the existing same-account ret
   ]) {
     let requests = 0
     const fx = await fixture(async (req, res) => {
+      res.shouldKeepAlive = false
       const chunks = []
       for await (const chunk of req) chunks.push(chunk)
       assert.equal(JSON.parse(Buffer.concat(chunks)).body.input, input)
