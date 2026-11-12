@@ -1,10 +1,8 @@
-import { getDb, withTransaction } from '../database.mjs'
+import { getDb } from '../database.mjs'
 import { maybeDecrypt, maybeEncrypt } from '../secure.mjs'
-import { codexSubscriptionAccountId, enrichCodexAccountIdentity, readCodexAccounts } from '../../vm/codex-slot.mjs'
 
 const FIELDS = {
   account_id: 'account_id',
-  fingerprint: 'fingerprint_json',
   storage_state: 'storage_state_enc',
   billing_session: 'billing_session_enc',
 }
@@ -14,7 +12,6 @@ function profile(row) {
   return {
     vm_id: row.vm_id,
     account_id: row.account_id,
-    fingerprint: row.fingerprint_json == null ? null : JSON.parse(row.fingerprint_json),
     storage_state: row.storage_state_enc == null ? null : JSON.parse(maybeDecrypt(row.storage_state_enc)),
     billing_session: row.billing_session_enc == null ? null : JSON.parse(maybeDecrypt(row.billing_session_enc)),
     created_at: row.created_at,
@@ -22,22 +19,18 @@ function profile(row) {
   }
 }
 
-/** One persistent web identity per slot. No browser cache or secret duplicates. */
+/** Shared web credentials for the browser and the Billing HTTP client.
+ * The persistent browser directory owns the device identity. */
 export class SlotBrowserRepo {
-  constructor(db = getDb(), { projectRoot, migrateLegacy = true } = {}) {
-    this.projectRoot = projectRoot
-    this.migrateLegacy = migrateLegacy
+  constructor(db = getDb()) {
     this.rebind(db)
   }
 
-  rebind(db, { projectRoot = this.projectRoot, migrateLegacy = this.migrateLegacy } = {}) {
+  rebind(db) {
     this.db = db
-    this.projectRoot = projectRoot
-    this.migrateLegacy = migrateLegacy
     this._get = db.prepare('SELECT * FROM slot_browser_profiles WHERE vm_id = ?')
     this._list = db.prepare('SELECT * FROM slot_browser_profiles ORDER BY vm_id')
     this._remove = db.prepare('DELETE FROM slot_browser_profiles WHERE vm_id = ?')
-    if (migrateLegacy) this.migrateLegacyProfiles()
     return this
   }
 
@@ -60,7 +53,6 @@ export class SlotBrowserRepo {
       .filter((key) => Object.hasOwn(patch, key) && patch[key] !== undefined)
       .map((key) => {
         let value = patch[key]
-        if (key === 'fingerprint') value = value == null ? null : JSON.stringify(value)
         if (key === 'storage_state' || key === 'billing_session')
           value = value == null ? null : maybeEncrypt(JSON.stringify(value))
         return [FIELDS[key], value]
@@ -77,47 +69,5 @@ export class SlotBrowserRepo {
 
   remove(vmId) {
     return this._remove.run(vmId).changes > 0
-  }
-
-  /** SQL migrations cannot inspect an encrypted vms.vm_json. Only move legacy
-   * state after verifying the currently registered slot still owns the account. */
-  migrateLegacyProfiles() {
-    return withTransaction(this.db, () => {
-      const rows = this.db
-        .prepare(`SELECT a.*, v.vm_json FROM openai_api_accounts a
-          JOIN vms v ON v.id = a.vm_id
-          WHERE a.fingerprint_json IS NOT NULL OR a.storage_state_enc IS NOT NULL`)
-        .all()
-      let migrated = 0
-      const clear = this.db.prepare(
-        'UPDATE openai_api_accounts SET fingerprint_json = NULL, storage_state_enc = NULL WHERE account_id = ?',
-      )
-      for (const row of rows) {
-        let vm
-        try {
-          vm = JSON.parse(maybeDecrypt(row.vm_json))
-        } catch {
-          continue
-        }
-        if (vm?.id !== row.vm_id) continue
-        const account = this.projectRoot
-          ? enrichCodexAccountIdentity(readCodexAccounts(this.projectRoot, row.vm_id)[0] || {})
-          : {}
-        const accountId = codexSubscriptionAccountId(account) || vm.codex?.chatgpt_account_id || ''
-        if (accountId !== row.account_id) continue
-        const existing = this._get.get(row.vm_id)
-        if (existing && existing.account_id !== row.account_id) continue
-        if (!existing) {
-          this.db
-            .prepare(`INSERT INTO slot_browser_profiles
-              (vm_id, account_id, fingerprint_json, storage_state_enc, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?)`)
-            .run(row.vm_id, row.account_id, row.fingerprint_json, row.storage_state_enc, row.created_at, row.updated_at)
-        }
-        clear.run(row.account_id)
-        migrated++
-      }
-      return migrated
-    })
   }
 }

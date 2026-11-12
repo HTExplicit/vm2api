@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { SettingRow } from '@/components/setting-row'
+import { AccountBrowserSection } from './account-browser-section'
 import { OpenaiApiBalanceSection } from './openai-api-balance-section'
 import { OpenaiQuotaSection } from './openai-quota-section'
 import { ChipGroup, PaneSection } from './scheduler-controls'
@@ -74,6 +75,7 @@ export function OpenaiPane({
 
   return (
     <div className='space-y-4'>
+      <AccountBrowserSection />
       <OpenaiApiBalanceSection
         value={openaiApi}
         onChange={onOpenaiApiChange}

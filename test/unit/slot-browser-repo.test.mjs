@@ -28,29 +28,33 @@ function fixture(t) {
   return { directory, db }
 }
 
-test('slot profiles retain independent fixed identities and encrypt shared web state', (t) => {
-  const { db } = fixture(t)
+test('slot web state is isolated, encrypted and rebinds to a reopened database', (t) => {
+  const { directory, db } = fixture(t)
   const repo = new SlotBrowserRepo(db)
-  const fpA = { config: { identity: 'random-a', screen: { width: 1440 } } }
-  const fpB = { config: { identity: 'random-b', screen: { width: 1920 } } }
   const storage = { cookies: [{ name: 'session', value: 'web-secret-a' }], origins: [] }
-  const first = repo.upsert('slot-a', { fingerprint: fpA, storage_state: storage })
-  repo.upsert('slot-b', { fingerprint: fpB, account_id: 'account-b' })
+  const first = repo.upsert('slot-a', { storage_state: storage })
+  repo.upsert('slot-b', { account_id: 'account-b', storage_state: { cookies: [] } })
   repo.upsert('slot-a', { account_id: 'account-a' })
   const raw = db.prepare('SELECT storage_state_enc FROM slot_browser_profiles WHERE vm_id = ?').get('slot-a')
   assert.match(raw.storage_state_enc, /^enc:v1:/)
   assert.ok(!raw.storage_state_enc.includes('web-secret-a'))
-  assert.deepEqual(repo.get('slot-a').fingerprint, fpA)
+  assert.equal(Object.hasOwn(repo.get('slot-a'), 'fingerprint'), false)
   assert.deepEqual(repo.get('slot-a').storage_state, storage)
   assert.equal(repo.get('slot-a').created_at, first.created_at)
-  const restored = new SlotBrowserRepo(db)
-  assert.deepEqual(restored.get('slot-a'), repo.get('slot-a'))
-  assert.deepEqual(restored.get('slot-b').fingerprint, fpB)
-  assert.equal(restored.list().length, 2)
-  assert.equal(restored.remove('slot-a'), true)
-  assert.equal(restored.remove('slot-a'), false)
-  assert.equal(restored.get('slot-a'), null)
-  assert.deepEqual(restored.get('slot-b').fingerprint, fpB)
+
+  const reopened = createDatabase({ dataDir: directory })
+  try {
+    assert.equal(repo.rebind(reopened), repo)
+    assert.deepEqual(repo.get('slot-a').storage_state, storage)
+    assert.deepEqual(repo.get('slot-b').storage_state, { cookies: [] })
+    assert.equal(repo.list().length, 2)
+    assert.equal(repo.remove('slot-a'), true)
+    assert.equal(repo.remove('slot-a'), false)
+    assert.equal(repo.get('slot-a'), null)
+    assert.equal(repo.get('slot-b').account_id, 'account-b')
+  } finally {
+    reopened.close()
+  }
 })
 
 test('Billing session is encrypted and survives database restart and the existing snapshot path', (t) => {
@@ -89,17 +93,15 @@ test('Billing session is encrypted and survives database restart and the existin
 test('first account binding retains web and Billing sessions while replacing an account clears both', (t) => {
   const { db } = fixture(t)
   const repo = new SlotBrowserRepo(db)
-  const fingerprint = { identity: 'fixed-random-slot' }
   const storage = { cookies: [{ name: 'session', value: 'web-secret' }], origins: [] }
   const billing = { organization_id: 'org-a', headers: { authorization: 'Bearer billing-secret' } }
-  repo.upsert('slot-a', { fingerprint, storage_state: storage, billing_session: billing })
+  repo.upsert('slot-a', { storage_state: storage, billing_session: billing })
   repo.upsert('slot-a', { account_id: 'account-a' })
   assert.deepEqual(repo.get('slot-a').storage_state, storage)
   assert.deepEqual(repo.get('slot-a').billing_session, billing)
   repo.upsert('slot-a', { account_id: 'account-a', billing_session: undefined })
   assert.deepEqual(repo.get('slot-a').billing_session, billing)
   repo.upsert('slot-a', { account_id: 'account-b' })
-  assert.deepEqual(repo.get('slot-a').fingerprint, fingerprint)
   assert.equal(repo.get('slot-a').storage_state, null)
   assert.equal(repo.get('slot-a').billing_session, null)
   assert.equal(repo.get('slot-a').account_id, 'account-b')
@@ -108,157 +110,128 @@ test('first account binding retains web and Billing sessions while replacing an 
   assert.equal(repo.get('slot-a').billing_session, null)
 })
 
-test('Billing migration adds an empty credential field while preserving an existing slot profile', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-billing-migration-'))
-  const oldMigrations = path.join(directory, 'pre050')
+test('CloakBrowser migration clears Firefox web state once and preserves credentials and business records', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-cloakbrowser-migration-'))
+  const oldMigrations = path.join(directory, 'pre056')
   fs.mkdirSync(oldMigrations)
   for (const name of fs.readdirSync(migrations)) {
-    if (Number(name.split('_')[0]) <= 49) fs.copyFileSync(path.join(migrations, name), path.join(oldMigrations, name))
-  }
-  let db = createDatabase({ dataDir: directory, migrationsDir: oldMigrations })
-  t.after(() => {
-    db.close()
-    assert.ok(path.resolve(directory).startsWith(path.resolve(os.tmpdir()) + path.sep))
-    fs.rmSync(directory, { recursive: true, force: true })
-  })
-  db.prepare(`INSERT INTO slot_browser_profiles
-    (vm_id, account_id, fingerprint_json, storage_state_enc, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 'created', 'updated')`).run(
-    'slot-a',
-    'account-a',
-    JSON.stringify({ identity: 'fixed-slot' }),
-    maybeEncrypt(JSON.stringify({ cookies: [] })),
-  )
-  db.close()
-  db = createDatabase({ dataDir: directory })
-  const profile = new SlotBrowserRepo(db).get('slot-a')
-  assert.equal(profile.account_id, 'account-a')
-  assert.deepEqual(profile.fingerprint, { identity: 'fixed-slot' })
-  assert.deepEqual(profile.storage_state, { cookies: [] })
-  assert.equal(profile.billing_session, null)
-  assert.equal(profile.created_at, 'created')
-})
-
-test('migration moves legacy encrypted storage only to its verified registered slot', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-browser-migration-'))
-  const oldMigrations = path.join(directory, 'pre049')
-  fs.mkdirSync(oldMigrations)
-  for (const name of fs.readdirSync(migrations)) {
-    if (Number(name.split('_')[0]) <= 48) fs.copyFileSync(path.join(migrations, name), path.join(oldMigrations, name))
+    if (Number(name.split('_')[0]) <= 55) fs.copyFileSync(path.join(migrations, name), path.join(oldMigrations, name))
   }
   const previous = process.env.VM2API_DB_SECRET
-  process.env.VM2API_DB_SECRET = 'test-slot-browser-migration-secret'
+  process.env.VM2API_DB_SECRET = 'test-cloakbrowser-migration-secret'
   let db = createDatabase({ dataDir: directory, migrationsDir: oldMigrations })
   t.after(() => {
     db.close()
     if (previous === undefined) delete process.env.VM2API_DB_SECRET
     else process.env.VM2API_DB_SECRET = previous
+    assert.ok(path.resolve(directory).startsWith(path.resolve(os.tmpdir()) + path.sep))
     fs.rmSync(directory, { recursive: true, force: true })
   })
-  const vms = new VmsRepo(db)
-  vms.upsertFromVmJson({ id: 'slot-owned', family: 'codex', codex: { chatgpt_account_id: 'account-owned' } })
-  vms.upsertFromVmJson({ id: 'slot-wrong', family: 'codex', codex: { chatgpt_account_id: 'account-current' } })
-  vms.upsertFromVmJson({ id: 'slot-same-account', family: 'codex', codex: { chatgpt_account_id: 'account-owned' } })
-  const fingerprint = JSON.stringify({ config: { identity: 'preserved-random' } })
-  const encryptedStorage = maybeEncrypt(JSON.stringify({ cookies: [{ value: 'legacy-secret' }] }))
-  const insert = db.prepare(`INSERT INTO openai_api_accounts
-    (account_id, vm_id, claim_status, operation_id, fingerprint_json, storage_state_enc, created_at, updated_at)
-    VALUES (?, ?, 'claimed', 'original-operation', ?, ?, 'created', 'updated')`)
-  insert.run('account-owned', 'slot-owned', fingerprint, encryptedStorage)
-  insert.run('account-old', 'slot-wrong', fingerprint, encryptedStorage)
-  insert.run('account-orphan', 'slot-deleted', fingerprint, encryptedStorage)
+  const credentials = [{ email: 'account@example.test', access_token: 'access-keep', refresh_token: 'refresh-keep' }]
+  fs.mkdirSync(path.join(directory, 'vms', 'slot-a'), { recursive: true })
+  writeCodexAccounts(directory, 'slot-a', credentials)
+  const credentialFile = path.join(directory, 'vms', 'slot-a', 'codex-credentials.json')
+  const credentialBytes = fs.readFileSync(credentialFile)
+  new VmsRepo(db).upsertFromVmJson({
+    id: 'slot-a',
+    family: 'codex',
+    codex: { chatgpt_account_id: 'account-a' },
+    schedulable: true,
+    policy: { maxConcurrency: 3 },
+  })
+  const api = new OpenaiApiRepo(db)
+  const store = new ApiEndpointStore({ db })
+  const endpoint = store.create({ kind: 'openai', name: 'keep-endpoint' })
+  const key = store.addKey(endpoint.id, {
+    api_key: 'sk-platform-keep',
+    source_vm_id: 'slot-a',
+    source_account_id: 'account-a',
+  })
+  api.upsertOrg('org-a', {
+    balance: '12.3456789',
+    paid_balance: '10.0000001',
+    endpoint_id: endpoint.id,
+    grants: [{ id: 'grant-keep', remaining: '2.3456788' }],
+  })
+  api.upsertAccount('account-a', {
+    vm_id: 'slot-a',
+    organization_id: 'org-a',
+    key_id: key.id,
+    enabled: true,
+    claim_status: 'claimed',
+    operation_id: 'never-repeat-claim',
+    setup_status: 'ready',
+    offer: { receipt: 'keep' },
+    benefit: { amount: '12.3456789' },
+    fingerprint: { firefox: 'legacy-account' },
+    storage_state: { cookies: [{ value: 'legacy-account-secret' }] },
+  })
+  api.upsertAccount('account-orphan', {
+    vm_id: 'slot-deleted',
+    fingerprint: { firefox: 'legacy-orphan' },
+    storage_state: { cookies: [{ value: 'legacy-orphan-secret' }] },
+  })
+  const storage = maybeEncrypt(JSON.stringify({ cookies: [{ value: 'legacy-slot-secret' }] }))
+  const billing = maybeEncrypt(JSON.stringify({ headers: { authorization: 'Bearer legacy-billing' } }))
+  db.prepare(`INSERT INTO slot_browser_profiles
+    (vm_id, account_id, fingerprint_json, storage_state_enc, billing_session_enc, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'created', 'updated')`).run(
+    'slot-a',
+    'account-a',
+    JSON.stringify({ firefox: 'legacy-slot' }),
+    storage,
+    billing,
+  )
+  const beforeVm = db.prepare('SELECT * FROM vms WHERE id = ?').get('slot-a')
+  const beforeAccount = db.prepare('SELECT * FROM openai_api_accounts WHERE account_id = ?').get('account-a')
+  const beforeOrg = db.prepare('SELECT * FROM openai_api_orgs WHERE organization_id = ?').get('org-a')
+  const beforeKey = db.prepare('SELECT * FROM api_endpoint_keys WHERE id = ?').get(key.id)
+  const beforeEndpoint = db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get(endpoint.id)
   db.close()
+
   db = createDatabase({ dataDir: directory })
   const repo = new SlotBrowserRepo(db)
-  assert.equal(repo.list().length, 1)
-  assert.equal(repo.get('slot-owned').account_id, 'account-owned')
-  assert.deepEqual(repo.get('slot-owned').fingerprint, JSON.parse(fingerprint))
-  assert.deepEqual(repo.get('slot-owned').storage_state, { cookies: [{ value: 'legacy-secret' }] })
-  assert.equal(repo.get('slot-same-account'), null)
-  assert.equal(repo.get('slot-wrong'), null)
-  assert.equal(repo.get('slot-deleted'), null)
-  const legacy = db.prepare('SELECT * FROM openai_api_accounts WHERE account_id = ?').get('account-owned')
-  assert.equal(legacy.fingerprint_json, null)
-  assert.equal(legacy.storage_state_enc, null)
-  assert.equal(legacy.claim_status, 'claimed')
-  assert.equal(legacy.operation_id, 'original-operation')
+  const migrated = repo.get('slot-a')
+  assert.equal(migrated.account_id, 'account-a')
+  assert.equal(migrated.storage_state, null)
+  assert.equal(migrated.billing_session, null)
+  assert.equal(migrated.created_at, 'created')
+  assert.equal(migrated.updated_at, 'updated')
   assert.equal(
-    db.prepare('SELECT storage_state_enc FROM openai_api_accounts WHERE account_id = ?').get('account-old')
-      .storage_state_enc,
-    encryptedStorage,
+    db.prepare('SELECT fingerprint_json FROM slot_browser_profiles WHERE vm_id = ?').get('slot-a').fingerprint_json,
+    null,
   )
-  assert.equal(
-    db.prepare('SELECT storage_state_enc FROM openai_api_accounts WHERE account_id = ?').get('account-orphan')
-      .storage_state_enc,
-    encryptedStorage,
-  )
-  assert.equal(repo.migrateLegacyProfiles(), 0)
-})
-
-test('legacy migration never replaces a slot identity already generated for that account', (t) => {
-  const { db } = fixture(t)
-  new VmsRepo(db).upsertFromVmJson({ id: 'slot-a', codex: { chatgpt_account_id: 'account-a' } })
-  const profiles = new SlotBrowserRepo(db)
-  profiles.upsert('slot-a', { account_id: 'account-a', fingerprint: { generated: 'slot-identity' } })
-  const api = new OpenaiApiRepo(db)
-  api.upsertAccount('account-a', { vm_id: 'slot-a', fingerprint: { generated: 'legacy-identity' } })
-  assert.equal(profiles.migrateLegacyProfiles(), 1)
-  assert.deepEqual(profiles.get('slot-a').fingerprint, { generated: 'slot-identity' })
-  assert.equal(api.getAccount('account-a').fingerprint, null)
-})
-
-test('legacy migration uses the current access-token account identity when the slot mirror differs', (t) => {
-  const { directory, db } = fixture(t)
-  new VmsRepo(db).upsertFromVmJson({ id: 'slot-a', codex: { chatgpt_account_id: 'user-legacy-id' } })
-  const jwt = (payload) => `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`
-  fs.mkdirSync(path.join(directory, 'vms', 'slot-a'), { recursive: true })
-  writeCodexAccounts(directory, 'slot-a', [
+  assert.deepEqual(db.prepare('SELECT * FROM vms WHERE id = ?').get('slot-a'), beforeVm)
+  assert.deepEqual(
+    { ...db.prepare('SELECT * FROM openai_api_accounts WHERE account_id = ?').get('account-a') },
     {
-      email: 'same-account@example.test',
-      chatgpt_account_id: 'user-legacy-id',
-      access_token: jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'account-current' } }),
+      ...beforeAccount,
+      fingerprint_json: null,
+      storage_state_enc: null,
     },
-  ])
-  const api = new OpenaiApiRepo(db)
-  api.upsertAccount('account-current', {
-    vm_id: 'slot-a',
-    fingerprint: { generated: 'preserve-existing-browser-identity' },
-    storage_state: { cookies: [{ value: 'preserved-platform-session' }] },
-  })
-  const profiles = new SlotBrowserRepo(db, { projectRoot: directory })
-  assert.equal(profiles.get('slot-a').account_id, 'account-current')
-  assert.deepEqual(profiles.get('slot-a').fingerprint, { generated: 'preserve-existing-browser-identity' })
-  assert.deepEqual(profiles.get('slot-a').storage_state, { cookies: [{ value: 'preserved-platform-session' }] })
-  assert.equal(api.getAccount('account-current').fingerprint, null)
-})
+  )
+  assert.deepEqual(db.prepare('SELECT * FROM openai_api_orgs WHERE organization_id = ?').get('org-a'), beforeOrg)
+  assert.deepEqual(db.prepare('SELECT * FROM api_endpoint_keys WHERE id = ?').get(key.id), beforeKey)
+  assert.deepEqual(db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get(endpoint.id), beforeEndpoint)
+  assert.deepEqual(fs.readFileSync(credentialFile), credentialBytes)
+  assert.equal(new OpenaiApiRepo(db).getKey(key.id).api_key, 'sk-platform-keep')
+  const orphan = new OpenaiApiRepo(db).getAccount('account-orphan')
+  assert.equal(orphan.fingerprint, null)
+  assert.equal(orphan.storage_state, null)
+  assert.equal(repo.get('slot-deleted'), null, 'legacy account storage must not recreate a slot profile')
+  const migration = db.prepare('SELECT * FROM schema_migrations WHERE version = ?').get('056')
+  assert.ok(migration)
 
-test('legacy migration preserves a browser identity when the current slot mirror has no account field', (t) => {
-  const { directory, db } = fixture(t)
-  new VmsRepo(db).upsertFromVmJson({ id: 'slot-a', family: 'codex' })
-  fs.mkdirSync(path.join(directory, 'vms', 'slot-a'), { recursive: true })
-  const access = `header.${Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'account-current' } })).toString('base64url')}.signature`
-  writeCodexAccounts(directory, 'slot-a', [{ email: 'existing@example.test', access_token: access }])
-  const api = new OpenaiApiRepo(db)
-  api.upsertAccount('account-current', { vm_id: 'slot-a', fingerprint: { generated: 'legacy-existing' } })
-  const profiles = new SlotBrowserRepo(db, { projectRoot: directory })
-  assert.deepEqual(profiles.get('slot-a').fingerprint, { generated: 'legacy-existing' })
-  assert.equal(profiles.get('slot-a').account_id, 'account-current')
-  assert.equal(api.getAccount('account-current').fingerprint, null)
-})
-
-test('targeted cleanup may open the profile repository without migrating unrelated legacy identities', (t) => {
-  const { db } = fixture(t)
-  new VmsRepo(db).upsertFromVmJson({ id: 'slot-a', codex: { chatgpt_account_id: 'account-a' } })
-  const api = new OpenaiApiRepo(db)
-  api.upsertAccount('account-a', { vm_id: 'slot-a', fingerprint: { generated: 'legacy-identity' } })
-  const profiles = new SlotBrowserRepo(db, { migrateLegacy: false })
-  assert.equal(profiles.get('slot-a'), null)
-  profiles.rebind(db)
-  assert.equal(profiles.get('slot-a'), null)
-  assert.deepEqual(api.getAccount('account-a').fingerprint, { generated: 'legacy-identity' })
-  profiles.rebind(db, { migrateLegacy: true })
-  assert.deepEqual(profiles.get('slot-a').fingerprint, { generated: 'legacy-identity' })
-  assert.equal(api.getAccount('account-a').fingerprint, null)
+  const currentStorage = { cookies: [{ name: 'session', value: 'new-chromium-session' }], origins: [] }
+  const currentBilling = { organization_id: 'org-a', headers: { authorization: 'Bearer new-billing' } }
+  repo.upsert('slot-a', { storage_state: currentStorage, billing_session: currentBilling })
+  db.close()
+  db = createDatabase({ dataDir: directory })
+  repo.rebind(db)
+  assert.deepEqual(repo.get('slot-a').storage_state, currentStorage)
+  assert.deepEqual(repo.get('slot-a').billing_session, currentBilling)
+  assert.deepEqual(db.prepare('SELECT * FROM schema_migrations WHERE version = ?').get('056'), migration)
+  assert.deepEqual(fs.readFileSync(credentialFile), credentialBytes)
 })
 
 test('organization money and grant observations round-trip without losing decimal precision', (t) => {

@@ -24,17 +24,18 @@ function fixture(t, options = {}) {
 test('only exact direct temporary directories are reclaimed, preserving unrelated files', async (t) => {
   const { cleanup, directory, root } = fixture(t)
   directory('playwright-artifacts-a1B2c3', '12345')
-  directory('playwright_firefoxdev_profile-Z9y8x7', '678')
+  const profile = directory('browser-profile', '678')
   const unknown = directory('playwright-artifacts-too-long')
-  const shared = directory('camoufox')
+  const shared = directory('cloakbrowser')
   const plain = path.join(root, 'playwright-artifacts-123456')
   fs.writeFileSync(plain, 'not a directory')
   const report = await cleanup.cleanup()
-  assert.equal(report.removed, 2)
-  assert.equal(report.reclaimed_bytes, 8)
+  assert.equal(report.removed, 1)
+  assert.equal(report.reclaimed_bytes, 5)
   assert.deepEqual(report.failed, [])
   assert.deepEqual(report.skipped, [{ name: path.basename(plain), reason: 'not_owned_directory' }])
   assert.ok(fs.existsSync(shared))
+  assert.ok(fs.existsSync(profile))
   assert.ok(fs.existsSync(unknown))
   assert.ok(fs.existsSync(plain))
 })
@@ -43,7 +44,7 @@ test('a session tracks only directories created after its launch snapshot', asyn
   const { cleanup, directory } = fixture(t)
   const older = directory('playwright-artifacts-123456')
   const before = cleanup.snapshot()
-  const current = directory('playwright_firefoxdev_profile-abcdef')
+  const current = directory('playwright-artifacts-abcdef')
   assert.deepEqual(cleanup.createdSince(before), [current])
   const report = await cleanup.cleanup({ paths: cleanup.createdSince(before) })
   assert.equal(report.removed, 1)
@@ -63,12 +64,12 @@ test('other runtimes report candidates without deleting them', async (t) => {
   assert.ok(fs.existsSync(file))
 })
 
-test('Firefox child executable remains identifiable without a parent profile argument or browser comm', () => {
+test('Chromium child executable remains identifiable without a parent profile argument or browser comm', () => {
   for (const executable of [
-    '/opt/vm2api/browser-cache/camoufox/browsers/firefox',
-    '/opt/paired/firefox-bin',
-    '/opt/paired/camoufox',
-    '/opt/paired/camoufox-bin',
+    '/opt/vm2api/data/browser-runtime/cloakbrowser/chromium-1-pro/chrome',
+    '/opt/paired/chromium',
+    '/opt/paired/cloakbrowser',
+    '/opt/paired/chrome.exe',
   ]) {
     assert.equal(isBrowserExecutable(executable), true)
   }
@@ -78,7 +79,7 @@ test('Firefox child executable remains identifiable without a parent profile arg
 
 test('live browser and profile references stop collection', async (t) => {
   const { root, directory } = fixture(t)
-  const file = directory('playwright_firefoxdev_profile-123456')
+  const file = directory('playwright-artifacts-123456')
   const cleanup = createBrowserTempCleanup({
     tmpDir: root,
     uid: fs.statSync(root).uid,

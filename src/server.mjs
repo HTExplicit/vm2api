@@ -56,7 +56,7 @@ import { OpenaiApiCreditsService } from './lib/oauth/openai-api-credits.mjs'
 import { OpenaiApiManager } from './lib/openai-api/manager.mjs'
 import { SlotBrowserRepo } from './lib/db/repos/slot-browser-repo.mjs'
 import { SlotBrowserManager } from './lib/browser/slot-browser-manager.mjs'
-import { createBrowserTempCleanup } from './lib/browser/temp-cleanup.mjs'
+import { AccountBrowserRuntime } from './lib/browser/account-browser-runtime.mjs'
 import { CodexBrowserLoginService } from './lib/oauth/codex-browser-login.mjs'
 import { commitImportedCodexVm } from './lib/admin/panel-routes.mjs'
 import { resolveInferenceBackend } from './lib/pool/api-protocol.mjs'
@@ -325,7 +325,7 @@ const apiEndpointStore = new ApiEndpointStore({ dataDir: cfg.paths.data })
 const apiScheduler = new ApiScheduler({ getRouting: () => routingConfig })
 apiScheduler.reload(apiEndpointStore.listRaw())
 const openaiApiRepo = new OpenaiApiRepo()
-const slotBrowserRepo = new SlotBrowserRepo(undefined, { projectRoot: cfg.paths.project })
+const slotBrowserRepo = new SlotBrowserRepo()
 const slotAccountIdentity = (id) => {
   try {
     const current = openaiApiCredits.accountForVm(id)
@@ -334,13 +334,19 @@ const slotAccountIdentity = (id) => {
     return {}
   }
 }
-const browserTempReport = await createBrowserTempCleanup().cleanup()
-if (browserTempReport.removed || browserTempReport.skipped.length || browserTempReport.failed.length) {
-  console[browserTempReport.warning ? 'warn' : 'info']('[browser-temp-cleanup]', JSON.stringify(browserTempReport))
-}
+const accountBrowserRuntime = new AccountBrowserRuntime({
+  dataDir: cfg.paths.data,
+  settingsRepo: () => new SettingsRepo(),
+  getBusy: () => !!slotBrowserManager.active,
+  getActiveVersion: () => slotBrowserManager.active?.browser?.version || null,
+  onIdle: () => {
+    void slotBrowserManager.drain()
+  },
+})
 const slotBrowserManager = new SlotBrowserManager({
   cfg,
   profileRepo: slotBrowserRepo,
+  runtime: accountBrowserRuntime,
   getAccountIdentity: (id) => slotAccountIdentity(id).accountId || '',
 })
 let openaiApiManager
@@ -1082,6 +1088,7 @@ const handlePanel = createPanelHandler({
   openaiApiRepo,
   slotBrowserRepo,
   slotBrowserManager,
+  accountBrowserRuntime,
   codexBrowserLogin,
   requestLog,
   vmTestSchedule,
@@ -1146,12 +1153,13 @@ const gracefulShutdown = createGracefulShutdown({
       codexBrowserLogin.stop(),
       slotBrowserManager.stop(),
       openaiApiManager.stop(),
+      accountBrowserRuntime.shutdown(),
     ])
     browserShutdownFailed = browserStops.some((result) => result.status === 'rejected')
     for (const [index, result] of browserStops.entries()) {
       if (result.status === 'rejected')
         console.warn('[shutdown] browser service cleanup failed', {
-          service: ['openai-oauth', 'browser', 'openai-api'][index],
+          service: ['openai-oauth', 'browser', 'openai-api', 'account-browser-runtime'][index],
           code: result.reason?.code || 'browser_cleanup_failed',
         })
     }

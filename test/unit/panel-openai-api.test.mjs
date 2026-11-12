@@ -146,6 +146,81 @@ function handler(root, { who = ADMIN, body = {}, manager = {}, credits = {}, ...
   }
 }
 
+test('account browser management is administrator-only and keeps key writes out of public responses', async (t) => {
+  const root = fixture(t)
+  const calls = []
+  const state = { key_set: false, installed_version: null, installing: false, last_error: null }
+  const runtime = {
+    status: () => ({ ...state }),
+    setKey(key) {
+      calls.push(['key', key])
+      state.key_set = key !== null
+      return { ...state }
+    },
+    async check() {
+      calls.push(['check'])
+      return { ...state, latest_version: '156.0.1' }
+    },
+    install() {
+      calls.push(['install'])
+      return { ...state, installing: true }
+    },
+  }
+  const routes = [
+    ['GET', ''],
+    ['PUT', '/key'],
+    ['POST', '/check'],
+    ['POST', '/install'],
+  ]
+  for (const role of ['user', 'operator']) {
+    for (const [method, suffix] of routes) {
+      const denied = await handler(root, {
+        accountBrowserRuntime: runtime,
+        who: { panelUser: { id: 'u', role }, panelUserId: 'u' },
+        body: { key: 'cb_secret' },
+      })(method, `/api/panel/account-browser${suffix}`)
+      assert.equal(denied.status, 403)
+    }
+  }
+  assert.equal(calls.length, 0)
+  const read = await handler(root, { accountBrowserRuntime: runtime })('GET', '/api/panel/account-browser')
+  assert.equal(read.body.data.key_set, false)
+  const save = await handler(root, { accountBrowserRuntime: runtime, body: { key: 'cb_secret' } })(
+    'PUT',
+    '/api/panel/account-browser/key',
+  )
+  assert.equal(save.body.data.key_set, true)
+  assert.equal(JSON.stringify(save.body).includes('cb_secret'), false)
+  const invalid = await handler(root, { accountBrowserRuntime: runtime, body: {} })(
+    'PUT',
+    '/api/panel/account-browser/key',
+  )
+  assert.equal(invalid.status, 400)
+  const check = await handler(root, { accountBrowserRuntime: runtime })('POST', '/api/panel/account-browser/check')
+  assert.equal(check.body.data.latest_version, '156.0.1')
+  const install = await handler(root, { accountBrowserRuntime: runtime })('POST', '/api/panel/account-browser/install')
+  assert.equal(install.status, 202)
+  assert.equal(install.body.data.installing, true)
+  const clear = await handler(root, { accountBrowserRuntime: runtime, body: { key: null } })(
+    'PUT',
+    '/api/panel/account-browser/key',
+  )
+  assert.equal(clear.body.data.key_set, false)
+})
+
+test('browser management failures never echo raw provider output', async (t) => {
+  const root = fixture(t)
+  const out = await handler(root, {
+    accountBrowserRuntime: {
+      check() {
+        throw new Error('license cb_secret provider output')
+      },
+    },
+  })('POST', '/api/panel/account-browser/check')
+  assert.equal(out.status, 502)
+  assert.equal(JSON.stringify(out.body).includes('cb_secret'), false)
+})
+
 test('Claude slots cannot reach generic browser state, tickets, login or close operations', async (t) => {
   const root = fixture(t)
   const vmPath = path.join(root, 'vms', 'vm-api.json')

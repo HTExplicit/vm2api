@@ -159,6 +159,8 @@ jobs:
             test/unit/openai-platform-navigation.test.mjs \
             test/unit/openai-key-handoff.test.mjs \
             test/unit/platform-browser.test.mjs \
+            test/unit/account-browser-runtime.test.mjs \
+            test/unit/headed-display.test.mjs \
             test/unit/panel-openai-api.test.mjs \
             test/unit/api-account-routing.test.mjs \
             test/unit/api-scheduler.test.mjs \
@@ -298,6 +300,7 @@ jobs:
           pnpm exec vitest run src/features/models/model-mapping.test.ts src/features/models/policy.test.ts
           pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx src/features/vm/openai-api-actions.test.tsx src/features/settings/openai-api-balance-section.test.tsx
           pnpm exec vitest run src/features/vm/openai-platform-browser-dialog.test.tsx
+          pnpm exec vitest run src/features/settings/account-browser-section.test.tsx
           pnpm exec vitest run src/features/vm/codex-browser-finish.test.ts src/features/vm/codex-credential-browser-completion.test.tsx
           pnpm exec vitest run src/features/vm/claude-credential-panel.test.tsx
           pnpm exec vitest run src/features/openai-apikey src/features/logs/account-api-logs.test.tsx src/components/layout/data/sidebar-data.test.ts
@@ -375,7 +378,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: build control plane and smoke the pinned fingerprint browser
+      - name: build public control plane without browser binaries or license keys
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -385,6 +388,21 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=vm2api-amd64
           cache-to: type=gha,scope=vm2api-amd64,mode=max
+      - name: Download stock Chromium into a disposable fixture cache
+        run: |
+          mkdir -p "$RUNNER_TEMP/browser-fixture-cache"
+          docker run --rm --entrypoint node \
+            -e PLAYWRIGHT_BROWSERS_PATH=/browser-test-cache \
+            --mount "type=bind,src=$RUNNER_TEMP/browser-fixture-cache,dst=/browser-test-cache" \
+            ghcr.io/htexplicit/vm2api:validation-${{ github.event.pull_request.head.sha || github.sha }} \
+            node_modules/playwright-core/cli.js install chromium --no-shell
+      - name: Verify public image and offline Chromium page fixtures
+        run: |
+          docker run --rm --network none --entrypoint sh \
+            -e PLAYWRIGHT_BROWSERS_PATH=/browser-test-cache \
+            --mount "type=bind,src=$RUNNER_TEMP/browser-fixture-cache,dst=/browser-test-cache,readonly" \
+            ghcr.io/htexplicit/vm2api:validation-${{ github.event.pull_request.head.sha || github.sha }} \
+            -c 'set -eu; node scripts/check-browser-image.mjs; node scripts/smoke-platform-browser.mjs; node scripts/smoke-platform-setup.mjs; node scripts/smoke-platform-balance.mjs; node scripts/smoke-browser-cleanup.mjs'
       - name: Manual Claude OAuth helper against offline TLS and SOCKS fixtures
         run: |
           docker run --rm --network none --entrypoint sh \

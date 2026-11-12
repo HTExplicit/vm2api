@@ -149,14 +149,13 @@ function fixture(t, { balanceError = null, automaticExpiration = false } = {}) {
     }
   }
   const manager = new OpenaiApiManager({
-    cfg: {},
+    cfg: { paths: { project: directory } },
     repo,
     credits,
     apiEndpointStore: store,
     apiScheduler: { reload() {} },
     Adapter,
-    createSession: async ({ onFingerprint }) => {
-      await onFingerprint({ device: 'handoff-fixture' })
+    createSession: async () => {
       return {
         page,
         context: {},

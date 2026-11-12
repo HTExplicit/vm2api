@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { BrowserStream } from '../src/lib/browser/browser-stream.mjs'
-import { createPlatformBrowserSession } from '../src/lib/openai-api/platform-browser.mjs'
+import { createBrowserFixture } from './browser-fixture.mjs'
 
 async function verifyBrowserInput(page) {
   await page.goto('data:text/html,<iframe style="position:absolute;left:200px;top:100px;border:0"></iframe>')
@@ -58,48 +61,80 @@ async function verifyBrowserInput(page) {
   }
 }
 
-// Build-time offline launch check. No real account, website or proxy is used.
-const options = { proxyUrl: 'socks5h://127.0.0.1:1' }
-const deps = {
-  proxyLocation: async () => ({
-    ip: '198.51.100.10',
-    country_code: 'US',
-    timezone: 'America/New_York',
-    latitude: 40.71,
-    longitude: -74.01,
-  }),
-}
-let fingerprint
-let firstFingerprint
-for (let attempt = 0; attempt < 3; attempt++) {
-  if (attempt === 2) fingerprint = null
-  const session = await createPlatformBrowserSession(
-    {
-      ...options,
-      fingerprint,
-      onFingerprint: (value) => {
-        if (fingerprint) assert.deepEqual(value, fingerprint)
-        fingerprint = value
-        if (attempt === 0) firstFingerprint = structuredClone(value)
-        if (attempt === 2) assert.notDeepEqual(value, firstFingerprint)
-      },
-    },
-    deps,
-  )
-  try {
-    await session.page.goto('data:text/html,<title>vm2api browser smoke</title><p>ready</p>')
-    const identity = await session.page.evaluate(() => ({
-      userAgent: navigator.userAgent,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    }))
-    assert.match(identity.userAgent, /Firefox/)
-    assert.equal(identity.timezone, 'America/New_York')
-    assert.ok(await session.page.screenshot({ type: 'jpeg' }))
-    if (attempt === 0) await verifyBrowserInput(session.page)
-  } finally {
-    await session.close()
+// Run in a disposable CI container after building the public image. These
+// stock Chromium checks do not claim to validate CloakBrowser fingerprints.
+const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vm2api-profile-smoke-'))
+try {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const session = await createBrowserFixture({ profileDir: path.join(root, attempt === 2 ? 'slot-b' : 'slot-a') })
+    try {
+      await session.context.route('http://fixture.test/**', (route) =>
+        route.fulfill({ contentType: 'text/html', body: '<title>Browser fixture</title><p>ready</p>' }),
+      )
+      await session.page.goto('http://fixture.test/')
+      const identity = await session.page.evaluate(() => ({
+        userAgent: navigator.userAgent,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        saved: localStorage.getItem('slot'),
+      }))
+      assert.match(identity.userAgent, /Chrom(?:e|ium)/)
+      assert.equal(identity.timezone, 'America/New_York')
+      assert.equal(identity.saved, attempt === 1 ? 'slot-a' : null)
+      const cookie = (await session.context.cookies()).find((value) => value.name === 'slot')
+      assert.equal(cookie?.value, attempt === 1 ? 'slot-a' : undefined)
+      if (attempt === 0) {
+        await session.context.addCookies([
+          { name: 'slot', value: 'slot-a', url: 'http://fixture.test/', expires: Math.floor(Date.now() / 1000) + 3600 },
+        ])
+        await session.page.evaluate(async () => {
+          localStorage.setItem('slot', 'slot-a')
+          await new Promise((resolve, reject) => {
+            const open = indexedDB.open('fixture', 1)
+            open.onupgradeneeded = () => open.result.createObjectStore('state')
+            open.onerror = () => reject(open.error)
+            open.onsuccess = () => {
+              const tx = open.result.transaction('state', 'readwrite')
+              tx.objectStore('state').put('slot-a', 'slot')
+              tx.oncomplete = () => {
+                open.result.close()
+                resolve()
+              }
+              tx.onerror = () => reject(tx.error)
+            }
+          })
+        })
+        await verifyBrowserInput(session.page)
+      } else if (attempt === 1) {
+        const indexed = await session.page.evaluate(
+          () =>
+            new Promise((resolve, reject) => {
+              const open = indexedDB.open('fixture', 1)
+              open.onerror = () => reject(open.error)
+              open.onsuccess = () => {
+                const request = open.result.transaction('state').objectStore('state').get('slot')
+                request.onsuccess = () => {
+                  open.result.close()
+                  resolve(request.result)
+                }
+                request.onerror = () => reject(request.error)
+              }
+            }),
+        )
+        assert.equal(indexed, 'slot-a')
+      } else {
+        assert.deepEqual(
+          await session.page.evaluate(async () => (await indexedDB.databases()).map((db) => db.name)),
+          [],
+        )
+      }
+      assert.ok(await session.page.screenshot({ type: 'jpeg' }))
+    } finally {
+      await session.close()
+    }
   }
+} finally {
+  await fs.rm(root, { recursive: true, force: true })
 }
 console.log(
-  'Camoufox launch, fixed identity restore, independent slot identity, screenshot and actual iframe input passed',
+  'Stock Chromium: persistent Cookie/localStorage/IndexedDB, isolated profiles, screenshot and iframe input passed',
 )

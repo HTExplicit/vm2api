@@ -1,10 +1,13 @@
 import crypto from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
 import { WebSocketServer } from 'ws'
 import { getVm as readVm } from '../vm/vm-registry.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
 import { hasBoundExit } from '../vm/egress.mjs'
 import { createPlatformBrowserSession } from '../openai-api/platform-browser.mjs'
 import { BrowserStream } from './browser-stream.mjs'
+import { isValidVmId } from '../vm/vm-file.mjs'
 
 const BROWSER_PATH = /^\/api\/panel\/vms\/([^/]+)\/(?:openai-api\/)?browser$/
 const IDLE_TIMEOUT = 15 * 60_000
@@ -26,7 +29,7 @@ function deferred() {
 
 function safeMessage(error) {
   return String(error?.message || '浏览器启动失败')
-    .replace(/sk-[A-Za-z0-9_-]+/g, '[key]')
+    .replace(/(?:sk-|cb_)[A-Za-z0-9_-]+/g, '[key]')
     .slice(0, 300)
 }
 
@@ -57,6 +60,7 @@ export class SlotBrowserManager {
   constructor({
     cfg,
     profileRepo,
+    runtime = null,
     getVm = (id) => readVm(cfg.paths.project, id),
     getAccountIdentity = (_id, vm) => vm.codex?.chatgpt_account_id || '',
     resolveProxy = hostProxyUrlForVm,
@@ -64,7 +68,17 @@ export class SlotBrowserManager {
     Stream = BrowserStream,
     now = Date.now,
   } = {}) {
-    Object.assign(this, { cfg, profileRepo, getVm, getAccountIdentity, resolveProxy, createSession, Stream, now })
+    Object.assign(this, {
+      cfg,
+      profileRepo,
+      runtime,
+      getVm,
+      getAccountIdentity,
+      resolveProxy,
+      createSession,
+      Stream,
+      now,
+    })
     this.jobs = new Map()
     this.states = new Map()
     this.queue = []
@@ -186,10 +200,10 @@ export class SlotBrowserManager {
   }
 
   async drain() {
-    if (this.draining) return
+    if (this.draining || this.runtime?.isInstalling) return
     this.draining = true
     try {
-      while (this.queue.length && !this.stopped) {
+      while (this.queue.length && !this.stopped && !this.runtime?.isInstalling) {
         const live = this.queue.shift()
         if (live.closeSignal.aborted) continue
         this.active = live
@@ -199,7 +213,7 @@ export class SlotBrowserManager {
         } catch (error) {
           if (live.closing) await live.closing.catch(() => {})
           else if (!live.closeSignal.aborted) {
-            this.setStatus(live, 'error', safeMessage(error))
+            this.setStatus(live, 'error', safeMessage(error), { error: error.code || 'browser_start_failed' })
             await this.finishClose(live, 'error', error).catch(() => {})
           }
         }
@@ -225,21 +239,20 @@ export class SlotBrowserManager {
   }
 
   async startSession(live) {
-    const { vm } = this.assertCurrent(live)
+    this.assertCurrent(live)
     const profile = this.profileRepo.get(live.vmId)
     this.setStatus(live, 'starting', '正在启动槽位浏览器')
     let browser
     try {
+      const launchConfig = this.runtime ? await this.runtime.launchConfig() : {}
+      this.assertCurrent(live)
+      if (!profile) this.profileRepo.upsert(live.vmId, { account_id: live.accountId || '' })
       browser = await this.createSession({
-        fingerprint: profile?.fingerprint,
+        ...launchConfig,
+        profileDir: this.profileDirectory(live.vmId),
         storageState: profile?.storage_state,
         proxyUrl: live.proxyUrl,
-        locale: vm.locale,
         signal: live.closeSignal,
-        onFingerprint: (fingerprint) => {
-          this.assertCurrent(live)
-          this.profileRepo.upsert(live.vmId, { fingerprint })
-        },
       })
     } catch (error) {
       if (error.pendingSession) {
@@ -253,6 +266,7 @@ export class SlotBrowserManager {
     if (live.closeSignal.aborted) return
     live.page = browser.page
     live.context = browser.context
+    if (profile?.storage_state?.cookies_pending) await this.persist(live)
     await browser.context.route?.('**/*', async (route) => {
       try {
         this.assertCurrent(live)
@@ -325,11 +339,21 @@ export class SlotBrowserManager {
     if (!live.retained && this.jobs.get(live.vmId) === live) await this.close(live.vmId)
   }
 
+  profileDirectory(vmId) {
+    if (!isValidVmId(vmId)) throw problem('invalid_vm_id', '非法槽位 ID', 400)
+    return path.join(this.cfg.paths.project, 'vms', vmId, 'browser-profile')
+  }
+
+  forgetProfile(vmId) {
+    fs.rmSync(this.profileDirectory(vmId), { recursive: true, force: true })
+    this.profileRepo.remove(vmId)
+  }
+
   async close(vmId, { reason = 'closed', forget = false } = {}) {
     const live = this.jobs.get(vmId)
     if (!live) {
       if (forget) {
-        this.profileRepo.remove(vmId)
+        this.forgetProfile(vmId)
         this.states.delete(vmId)
       }
       return this.state(vmId)
@@ -351,7 +375,6 @@ export class SlotBrowserManager {
       if (live.starting) await live.starting.catch(() => {})
       await this.finishClose(live, reason)
       if (live.forget) {
-        this.profileRepo.remove(vmId)
         this.states.delete(vmId)
       }
       return this.state(vmId)
@@ -394,6 +417,7 @@ export class SlotBrowserManager {
         throw failure
       }
       await live.browser?.close()
+      if (live.forget) this.forgetProfile(live.vmId)
       if (live.browser?.warning && !live.warning?.includes(live.browser.warning))
         live.warning = [live.warning, live.browser.warning].filter(Boolean).join(' ')
     } catch (closeError) {
@@ -417,6 +441,7 @@ export class SlotBrowserManager {
       status,
       purpose: live.purpose,
       ...(message ? { message } : {}),
+      ...(error ? { error: error.code || 'browser_start_failed' } : {}),
       ...(live.warning ? { warning: live.warning } : {}),
     })
     for (const ws of live.clients) ws.close()
@@ -430,6 +455,7 @@ export class SlotBrowserManager {
       status,
       purpose: live.purpose,
       message,
+      ...(error ? { error: error.code || 'browser_start_failed' } : {}),
       ...(live.warning ? { warning: live.warning } : {}),
     })
     live.rejectReady(error || problem('browser_closed', '浏览器已关闭'))

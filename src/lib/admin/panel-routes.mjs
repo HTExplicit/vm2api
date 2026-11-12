@@ -714,6 +714,7 @@ export function createPanelHandler(ctx) {
   const openaiApiManager = ctx.openaiApiManager
   const openaiApiCredits = ctx.openaiApiCredits
   const slotBrowserManager = ctx.slotBrowserManager
+  const accountBrowserRuntime = ctx.accountBrowserRuntime
   const codexBrowserLogin = ctx.codexBrowserLogin
   const slotBrowserRepo = ctx.slotBrowserRepo
   const openaiApiRepo = ctx.openaiApiRepo
@@ -1017,9 +1018,8 @@ export function createPanelHandler(ctx) {
   async function cleanupChangedBrowserAccount(vmId, accountId) {
     await codexBrowserLogin?.cancel(vmId)
     await openaiApiManager?.cancel(vmId)
-    await slotBrowserManager?.close(vmId)
-    if (slotBrowserRepo?.get(vmId))
-      slotBrowserRepo.upsert(vmId, { account_id: accountId, storage_state: null, billing_session: null })
+    await slotBrowserManager?.close(vmId, { forget: true })
+    slotBrowserRepo?.upsert(vmId, { account_id: accountId, storage_state: null, billing_session: null })
     openaiApiRepo?.cleanupForVm(vmId)
   }
 
@@ -1628,6 +1628,37 @@ export function createPanelHandler(ctx) {
         denyIfUserMissesProxy(req, res, { proxyPool, json, path: p })
       ) {
         return true
+      }
+      const accountBrowserRoute = /^\/api\/panel\/account-browser(?:\/(key|check|install))?$/.exec(p)
+      if (accountBrowserRoute) {
+        const action = accountBrowserRoute[1]
+        try {
+          let result
+          let status = 200
+          if (req.method === 'GET' && !action) result = accountBrowserRuntime.status()
+          else if (req.method === 'PUT' && action === 'key') {
+            const body = await readBody(req, 8192)
+            if (!body || !Object.hasOwn(body, 'key') || (body.key !== null && typeof body.key !== 'string'))
+              return json(res, 400, {
+                ok: false,
+                error: { code: 'invalid_browser_key', message: '请输入授权 key，或明确清除已保存的 key' },
+              })
+            result = await accountBrowserRuntime.setKey(body.key)
+          } else if (req.method === 'POST' && action === 'check') result = await accountBrowserRuntime.check()
+          else if (req.method === 'POST' && action === 'install') {
+            result = accountBrowserRuntime.install()
+            status = 202
+          } else return json(res, 404, { ok: false, error: { code: 'not_found', message: '接口不存在' } })
+          return json(res, status, panel.ok(result))
+        } catch (error) {
+          return json(res, error.status || 502, {
+            ok: false,
+            error: {
+              code: error.code || 'account_browser_failed',
+              message: error.publicMessage || '账号浏览器操作失败，请查看安装状态',
+            },
+          })
+        }
       }
       // Cold slot moves are administrator-only (not a tenant placement edit).
       const migrationRoute = /^\/api\/panel\/vms\/([^/]+)\/migration$/.exec(p)
@@ -4257,8 +4288,7 @@ export function createPanelHandler(ctx) {
           prev.id = prev.id || id
           await codexBrowserLogin?.cancel(id)
           await openaiApiManager?.cancel(id)
-          await slotBrowserManager?.close(id)
-          if (slotBrowserRepo?.get(id)) slotBrowserRepo.upsert(id, { account_id: '', storage_state: null })
+          await slotBrowserManager?.close(id, { forget: true })
           openaiApiRepo?.cleanupForVm(id)
           if (isCodexVm(prev)) resetOpenaiAuth(cfg.paths.project, id)
           const slotDir = path.join(cfg.paths.project, 'vms', id)

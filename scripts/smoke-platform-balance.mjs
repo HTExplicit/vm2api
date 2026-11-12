@@ -1,10 +1,6 @@
 import assert from 'node:assert/strict'
-import * as camoufox from 'camoufox'
-import { launchPath } from 'camoufox/dist/pkgman.js'
-import { getEnvVars, getPrefEnvVars } from 'camoufox/dist/utils.js'
-import { isModelInstalled } from 'camoufox/dist/fpgen/index.js'
 import { PlatformAdapter, BILLING_CREDIT_GRANTS_URL } from '../src/lib/openai-api/platform-adapter.mjs'
-import { createPlatformBrowserSession, PLATFORM_BROWSER_BUILD } from '../src/lib/openai-api/platform-browser.mjs'
+import { createBrowserFixture } from './browser-fixture.mjs'
 
 const EMAIL = 'billing-fixture@example.test'
 const ORGANIZATION_ID = 'org-balance-fixture'
@@ -29,24 +25,9 @@ function fixturePage(billing, delay) {
   </script></body></html>`
 }
 
-// Install-time assets only. A dead bound proxy and a complete route allowlist
-// keep this fixture from contacting an account, official key API or model.
-const directory = camoufox.findInstalledVersion(PLATFORM_BROWSER_BUILD)
-assert.ok(directory && isModelInstalled(), 'the image must already contain the pinned browser and model')
-const executable = launchPath(directory)
-const browser = await createPlatformBrowserSession(
-  { proxyUrl: 'socks5h://127.0.0.1:1' },
-  {
-    runtime: async () => ({ ...camoufox, executable, getEnvVars, getPrefEnvVars }),
-    proxyLocation: async () => ({
-      ip: '198.51.100.10',
-      country_code: 'US',
-      timezone: 'America/New_York',
-      latitude: 40.71,
-      longitude: -74.01,
-    }),
-  },
-)
+// Stock Chromium in the disposable fixture runtime. A dead proxy and complete
+// route allowlist prevent contact with an account, official key API or model.
+const browser = await createBrowserFixture()
 
 const page = browser.page
 const originalGoto = page.goto.bind(page)
@@ -136,7 +117,7 @@ try {
   page.goto = async (url, options) => {
     const result = await originalGoto(url, options)
     if (url === PLATFORM_ORIGIN + BILLING_PATH && interruptedNavigations++ === 0)
-      throw new Error('page.goto: NS_BINDING_ABORTED (offline continuation fixture)')
+      throw new Error('page.goto: net::ERR_ABORTED (offline continuation fixture)')
     return result
   }
   try {
@@ -155,7 +136,7 @@ try {
   console.log(
     JSON.stringify({
       offline: true,
-      pinnedBrowser: PLATFORM_BROWSER_BUILD,
+      testBrowser: `stock-chromium/${browser.version}`,
       delayedResponseMs: DELAY_MS,
       delayedElapsedMs,
       sharedDeadlineMs: 30_000,

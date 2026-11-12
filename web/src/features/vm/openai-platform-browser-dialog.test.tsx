@@ -257,6 +257,21 @@ afterEach(() => {
 })
 
 describe('Platform key setup handoff', () => {
+  it('links missing browser configuration to settings without redirecting account errors', async () => {
+    const socket = await mount()
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'status',
+        status: 'error',
+        error: 'browser_key_missing',
+        message: '请先配置 CloakBrowser key',
+      }),
+    })
+    expect(render()).toContain('href="#/settings/openai"')
+    socket.status('error', '账号授权未完成')
+    expect(render()).not.toContain('href="#/settings/openai"')
+  })
+
   it.each([
     ['awaiting_key_input', '检查创建结果'],
     ['key_save_failed', '重试保存'],

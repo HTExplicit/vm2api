@@ -494,7 +494,7 @@ export class OpenaiApiManager {
             throw problem('platform_browser_busy', '账号浏览器正在操作，请关闭后刷新余额', 409)
           const currentProfile = this.profileRepo.get(job.vmId)
           this.profileRepo.upsert(job.vmId, {
-            storage_state: { ...currentProfile.storage_state, cookies },
+            storage_state: { ...currentProfile.storage_state, cookies, cookies_pending: true },
           })
           this.saveBalance(job, record.organization_id, summary)
           this.repo.upsertAccount(job.accountId, { setup_status: 'ready', last_error: null })

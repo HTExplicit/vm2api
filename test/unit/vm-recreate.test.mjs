@@ -103,12 +103,16 @@ test('recreated records leave a missing or invalid timezone unset', () => {
   }
 })
 
-test('recreateVmFiles wipes home leftover and reseeds settings', () => {
+test('traits rebuild removes browser profile and home leftovers and reseeds settings', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-recreate-'))
   const id = 'vm-03'
   const home = path.join(root, 'vms', id, 'cli-home', '.claude')
   fs.mkdirSync(home, { recursive: true })
   fs.writeFileSync(path.join(home, 'credentials.json'), '{"claudeAiOauth":{}}')
+  const browserProfile = path.join(root, 'vms', id, 'browser-profile')
+  fs.mkdirSync(path.join(browserProfile, 'Default', 'Network'), { recursive: true })
+  fs.writeFileSync(path.join(browserProfile, '.cloakbrowser-seed'), '42137')
+  fs.writeFileSync(path.join(browserProfile, 'Default', 'Network', 'Cookies'), Buffer.from([0, 1, 127, 255]))
   fs.writeFileSync(path.join(root, 'vms', `${id}-chat.json`), '{"x":1}')
   fs.writeFileSync(
     path.join(root, 'vms', `${id}.json`),
@@ -125,10 +129,13 @@ test('recreateVmFiles wipes home leftover and reseeds settings', () => {
       created_at: '2026-02-01T00:00:00.000Z',
     }),
   )
-  const { vm } = recreateVmFiles(root, JSON.parse(fs.readFileSync(path.join(root, 'vms', `${id}.json`), 'utf8')))
+  const { vm } = recreateVmFiles(root, JSON.parse(fs.readFileSync(path.join(root, 'vms', `${id}.json`), 'utf8')), {
+    mode: 'traits',
+  })
   assert.equal(vm.id, id)
   assert.equal(vm.claude.email, undefined)
   assert.equal(fs.existsSync(path.join(home, 'credentials.json')), false)
+  assert.equal(fs.existsSync(browserProfile), false)
   assert.equal(fs.existsSync(path.join(root, 'vms', `${id}-chat.json`)), false)
   const settings = JSON.parse(
     fs.readFileSync(path.join(root, 'vms', id, 'cli-home', '.claude', 'settings.json'), 'utf8'),
@@ -147,7 +154,7 @@ test('recreateVmFiles wipes home leftover and reseeds settings', () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('keep rebuild retains the account, fingerprint and credential file', () => {
+test('keep rebuild retains the account, fingerprint, credentials and complete browser profile', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-recreate-keep-'))
   const id = 'vm-11'
   const cred = path.join(root, 'vms', id, 'cli-home', '.claude', 'credentials.json')
@@ -167,6 +174,16 @@ test('keep rebuild retains the account, fingerprint and credential file', () => 
   }
   for (const [rel, content] of Object.entries(nativeFiles)) {
     const file = path.join(root, 'vms', id, rel)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, content)
+  }
+  const browserFiles = {
+    '.cloakbrowser-seed': Buffer.from('42137'),
+    'Default/Network/Cookies': Buffer.from([0, 1, 127, 255]),
+    'Default/Local Storage/leveldb/000003.log': Buffer.from([255, 0, 42, 13, 10]),
+  }
+  for (const [rel, content] of Object.entries(browserFiles)) {
+    const file = path.join(root, 'vms', id, 'browser-profile', rel)
     fs.mkdirSync(path.dirname(file), { recursive: true })
     fs.writeFileSync(file, content)
   }
@@ -202,6 +219,9 @@ test('keep rebuild retains the account, fingerprint and credential file', () => 
   assert.equal(vm.seed_policy.telemetry_disabled, true)
   for (const [rel, content] of Object.entries(nativeFiles)) {
     assert.equal(fs.readFileSync(path.join(root, 'vms', id, rel), 'utf8'), content, rel)
+  }
+  for (const [rel, content] of Object.entries(browserFiles)) {
+    assert.deepEqual(fs.readFileSync(path.join(root, 'vms', id, 'browser-profile', rel)), content, rel)
   }
   const settings = JSON.parse(
     fs.readFileSync(path.join(root, 'vms', id, 'cli-home', '.claude', 'settings.json'), 'utf8'),
