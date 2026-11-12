@@ -269,7 +269,7 @@ This is the [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api) maintenanc
 
 The **linux/amd64** control-plane image defaults to `ghcr.io/htexplicit/vm2api`, configured through `VM2API_IMAGE`. Release checks, installer commands, and console links use this fork, with `VM2API_GITHUB_REPO` selecting the release repository. The pinned upstream slot payload, size and SHA256 checks, guest image sources, attribution, and [LICENSE](LICENSE) are retained. Historical descriptions and benchmark results below came from upstream and apply to their recorded versions.
 
-Releases prepare a draft with 10 fixed assets, build and push the versioned image, then verify anonymous GHCR access before updating `latest` and publishing the release. If a new package is private, a maintainer must make it Public; a failed access check leaves the draft unpublished, and the failed `publish` job can be rerun after correcting package visibility. ARM64 control-plane images are not currently published.
+For the current asset manifest, provenance checks, and draft-to-publication workflow, see the [fork release instructions](#本-fork-的发布来源). ARM64 control-plane images are not currently published.
 
 > **Sponsor**: [ProxyLane](https://proxylane.dev/zh-cn/isp-proxies?utm_source=vm2api&utm_medium=affiliate&utm_campaign=vm2api_sponsor_202610&utm_content=github_readme_en) native static residential ISP IPs built for AI accounts: low Scamalytics fraud scores, a dedicated IP with unlimited traffic, from $3.90. Bind one IP per slot: paste the SOCKS5 line `host:port:user:pass` into 代理池 → 添加代理 (Proxy pool → Add proxy). Code `VM2API30` gives 30% off your first purchase.
 
