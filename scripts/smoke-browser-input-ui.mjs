@@ -7,9 +7,9 @@ import { chromium } from 'playwright-core'
 import { WebSocketServer } from 'ws'
 import { createServer } from '../web/node_modules/vite/dist/node/index.js'
 import { BrowserStream } from '../src/lib/browser/browser-stream.mjs'
-import { createPlatformBrowserSession } from '../src/lib/openai-api/platform-browser.mjs'
+import { createBrowserFixture } from './browser-fixture.mjs'
 
-// Exercise the real React dialog, binary frames, WebSocket input and Camoufox
+// Exercise the real React dialog, binary frames, WebSocket input and stock Chromium
 // against an offline ordinary form. No account, website or usable proxy.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const executablePath =
@@ -35,18 +35,8 @@ let remote, stream, client, vite
 const wire = []
 const errors = []
 try {
-  remote = await createPlatformBrowserSession(
-    { proxyUrl: 'socks5h://127.0.0.1:1' },
-    {
-      proxyLocation: async () => ({
-        ip: '198.51.100.10',
-        country_code: 'US',
-        timezone: 'America/New_York',
-        latitude: 40.71,
-        longitude: -74.01,
-      }),
-    },
-  )
+  // Keep the target and both scroll axes inside a deterministic large canvas.
+  remote = await createBrowserFixture({ executablePath, viewport: { width: 1920, height: 1080 } })
   await remote.page.goto('data:text/html,' + encodeURIComponent(html))
   stream = new BrowserStream({ page: remote.page })
   vite = await createServer({
@@ -107,6 +97,15 @@ try {
   const remoteButton = form.locator('#button')
   const remoteInput = form.locator('#text')
   async function clickRemote(locator, hold = 100) {
+    // Manual mouse coordinates do not get Playwright locator actionability
+    // waits. Let the dialog finish reflow after viewport/quality changes.
+    let previousBounds
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const bounds = await image.boundingBox()
+      if (JSON.stringify(bounds) === JSON.stringify(previousBounds)) break
+      previousBounds = bounds
+      await sleep(100)
+    }
     const target = await locator.boundingBox()
     const dimensions = await remote.page.evaluate(() => ({ width: innerWidth, height: innerHeight }))
     const viewport = page.getByRole('application')
@@ -135,7 +134,7 @@ try {
     assert.ok(down, 'the real dialog forwards mouse press')
     assert.ok(
       Math.abs(down.x - expected.x) <= 1 && Math.abs(down.y - expected.y) <= 1,
-      'the real dialog maps the displayed frame to the correct target',
+      `the real dialog maps the displayed frame to the correct target: ${JSON.stringify({ expected, down, dimensions, imageBox })}`,
     )
     return { before, expected, sent: { x: down.x, y: down.y } }
   }

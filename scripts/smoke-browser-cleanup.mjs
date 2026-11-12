@@ -7,13 +7,13 @@ import path from 'node:path'
 import { createBrowserTempCleanup } from '../src/lib/browser/temp-cleanup.mjs'
 
 // This isolated child owns only a dummy profile, never a browser or account.
-// Linux /proc sees its real -profile argument; killing it models a missing
+// Linux /proc sees its real --user-data-dir argument; killing it models a missing
 // Playwright parent cleanup handler without touching a production process.
 if (process.platform !== 'linux') {
   console.log(JSON.stringify({ offline: true, skipped: 'Linux process ownership smoke runs in the image' }))
 } else {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-browser-cleanup-smoke-'))
-  const profile = path.join(root, 'playwright_firefoxdev_profile-Ab12Cd')
+  const profile = path.join(root, 'browser-profile')
   const artifact = path.join(root, 'playwright-artifacts-Zy98Xw')
   fs.mkdirSync(profile)
   fs.mkdirSync(artifact)
@@ -21,7 +21,7 @@ if (process.platform !== 'linux') {
   fs.writeFileSync(path.join(artifact, 'fixture'), 'isolated temporary artifact')
   const child = spawn(
     process.execPath,
-    ['-e', "process.send('ready');setInterval(()=>{},1000)", '--', '-profile', profile],
+    ['-e', "process.send('ready');setInterval(()=>{},1000)", '--', '--user-data-dir', profile],
     {
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     },
@@ -31,17 +31,17 @@ if (process.platform !== 'linux') {
     const cleanup = createBrowserTempCleanup({ tmpDir: root, enabled: true })
     const retained = await cleanup.cleanup()
     assert.equal(retained.removed, 0)
-    assert.ok(retained.skipped.some((row) => row.reason === 'process_reference'))
+    assert.ok(retained.skipped.length > 0)
     assert.ok(fs.existsSync(profile))
     assert.ok(fs.existsSync(artifact))
     const stopped = once(child, 'exit')
     child.kill('SIGKILL')
     await stopped
     const reclaimed = await cleanup.cleanup()
-    assert.equal(reclaimed.removed, 2)
+    assert.equal(reclaimed.removed, 1)
     assert.deepEqual(reclaimed.failed, [])
     assert.deepEqual(reclaimed.skipped, [])
-    assert.equal(fs.existsSync(profile), false)
+    assert.equal(fs.existsSync(profile), true, 'persistent profiles never belong to temporary-artifact cleanup')
     assert.equal(fs.existsSync(artifact), false)
     console.log(
       JSON.stringify({

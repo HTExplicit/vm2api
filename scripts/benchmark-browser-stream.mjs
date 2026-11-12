@@ -3,11 +3,11 @@ import { EventEmitter } from 'node:events'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { performance } from 'node:perf_hooks'
 import { BrowserStream } from '../src/lib/browser/browser-stream.mjs'
-import { createPlatformBrowserSession } from '../src/lib/openai-api/platform-browser.mjs'
+import { createBrowserFixture } from './browser-fixture.mjs'
 
 // Real rendering/encoding benchmark with synthetic content only. The proxy has
 // no upstream listener and the sole page is data:, so no account or web request
-// can leave this process. Browser assets must already be installed in the image.
+// can leave this process. Stock Chromium must be installed in the test runtime.
 const VIEWPORT = { width: 1920, height: 1080 }
 const PHASES = [0, 40, 120, 220, 350, 500, 650, 710]
 const PAGE = `<!doctype html><html><head><meta charset="utf-8"><style>
@@ -27,20 +27,6 @@ document.querySelector('#marker').style.background=state?'rgb(205,36,83)':'rgb(2
 document.querySelector('#result').textContent='Visible state '+state;};
 </script></body></html>`
 const URL = 'data:text/html;charset=utf-8,' + encodeURIComponent(PAGE)
-const SESSION_DEPS = {
-  proxyLocation: async () => ({
-    ip: '198.51.100.10',
-    country_code: 'US',
-    timezone: 'America/New_York',
-    latitude: 40.71,
-    longitude: -74.01,
-  }),
-}
-
-async function createSession(fingerprint) {
-  return createPlatformBrowserSession({ proxyUrl: 'socks5h://127.0.0.1:1', fingerprint }, SESSION_DEPS)
-}
-
 function rounded(value) {
   return Math.round(value * 100) / 100
 }
@@ -166,9 +152,9 @@ function oldStream(page, receiver) {
   }
 }
 
-async function run(kind, fingerprint) {
+async function run(kind) {
   const launchAt = performance.now()
-  const session = await createSession(fingerprint)
+  const session = await createBrowserFixture()
   let stream
   try {
     await session.page.setViewportSize(VIEWPORT)
@@ -214,7 +200,7 @@ async function run(kind, fingerprint) {
     await stream.close()
     stream = null
     return {
-      fingerprint: session.fingerprint,
+      browserVersion: session.version,
       result: {
         browser_ready_ms: rounded(browserReadyMs),
         first_frame_ms: rounded(firstFrameMs),
@@ -238,22 +224,16 @@ async function run(kind, fingerprint) {
   }
 }
 
-const prepared = await createSession()
-let fingerprint
-try {
-  fingerprint = prepared.fingerprint
-} finally {
-  await prepared.close()
-}
-const original = await run('old', fingerprint)
-const optimized = await run('new', original.fingerprint)
-assert.deepEqual(optimized.fingerprint, original.fingerprint, 'benchmark sessions must share the same saved identity')
+const original = await run('old')
+const optimized = await run('new')
+assert.equal(optimized.browserVersion, original.browserVersion, 'benchmark sessions must share the same browser build')
 console.log(
   JSON.stringify({
     page: 'offline-data-url',
     viewport: VIEWPORT,
     samples: PHASES.length,
-    note: 'Server input to fresh JPEG ready to send; receiver does not decode or resize. No network RTT or frontend decode. Node process CPU excludes Firefox child CPU. No account, model or upstream network request.',
+    testBrowser: `stock-chromium/${original.browserVersion}`,
+    note: 'Server input to fresh JPEG ready to send; receiver does not decode or resize. No network RTT or frontend decode. Node process CPU excludes Chromium child CPU. No account, model or upstream network request.',
     old: original.result,
     optimized: optimized.result,
     improvement: {

@@ -39,6 +39,7 @@ type BrowserStatus = {
   purpose?: BrowserPurpose
   result?: CommitResult
   warning?: string | null
+  error?: string
 }
 
 type BrowserState = {
@@ -176,6 +177,7 @@ export function SlotBrowserDialog({
     canReturnToAuthorization: false,
   })
   const [navigationReceived, setNavigationReceived] = useState(false)
+  const [errorCode, setErrorCode] = useState('')
   const closeFailed = status === 'close_failed'
   const inputBlocked = closing || closeFailed
   const navigationBlocked =
@@ -353,6 +355,7 @@ export function SlotBrowserDialog({
     setNavigationReceived(false)
     setFrame(null)
     setError('')
+    setErrorCode('')
     setMessage('正在连接槽位浏览器…')
     async function connect() {
       await closeRequests.current.get(vmId)?.catch(() => {})
@@ -481,9 +484,13 @@ export function SlotBrowserDialog({
             frames.close()
             ws?.close()
             setError(payload.message || '浏览器清理未完成，请重试关闭。')
-          } else if (payload.status === 'error')
+          } else if (payload.status === 'error') {
             setError(payload.message || '浏览器任务失败，请重新连接。')
-          else setError('')
+            setErrorCode(payload.error || '')
+          } else {
+            setError('')
+            setErrorCode('')
+          }
           if (purpose === 'oauth' && payload.status === 'oauth_complete') {
             const previous = finishRef.current
             updateFinish({
@@ -527,6 +534,7 @@ export function SlotBrowserDialog({
           setMessage('浏览器清理未完成，请重试关闭。')
         }
         setError(reason.message)
+        setErrorCode((reason as { code?: string }).code || '')
       }
     })
     const stop = () => {
@@ -778,6 +786,18 @@ export function SlotBrowserDialog({
           <p role='alert' className='m-0 text-sm text-destructive'>
             {finish.error || error}
           </p>
+        ) : null}
+        {error &&
+        ['browser_not_installed', 'browser_key_required'].includes(
+          errorCode
+        ) ? (
+          <a
+            href='#/settings/openai'
+            className='text-sm text-primary underline underline-offset-4'
+            onClick={() => void dismiss()}
+          >
+            前往账号浏览器设置，填写 key 并安装内核
+          </a>
         ) : null}
         <div className='space-y-1.5'>
           <div className='flex flex-wrap items-center gap-2'>

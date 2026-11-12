@@ -1,344 +1,215 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import net from 'node:net'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import http from 'node:http'
+import net from 'node:net'
 import { once } from 'node:events'
-import vm from 'node:vm'
-import {
-  createBoundProxyRelay,
-  createPlatformBrowserSession,
-  fingerprintAtLocation,
-  fingerprintFromLaunch,
-  localeForLocation,
-} from '../../src/lib/openai-api/platform-browser.mjs'
+import { createBoundProxyRelay, createPlatformBrowserSession } from '../../src/lib/openai-api/platform-browser.mjs'
 
-const original = {
-  config: {
-    'navigator.userAgent': 'Mozilla/5.0 Linux Firefox/156',
-    'navigator.hardwareConcurrency': 4,
-    'screen.width': 1920,
-    'screen.height': 1080,
-    'webGl:renderer': 'independent-device',
-    'audio:seed': 18973,
-    fonts: ['Arial', 'Noto Sans'],
-    voices: [],
-    timezone: 'America/New_York',
-    'locale:language': 'en',
-    'locale:region': 'US',
-    'webrtc:ipv4': '192.0.2.1',
-  },
-  firefoxUserPrefs: { 'webgl.force-enabled': true },
-}
-const location = {
-  ip: '198.51.100.1',
-  country_code: 'GB',
-  timezone: 'Europe/London',
-  latitude: 51.5,
-  longitude: -0.1,
-}
-
-test('location locale uses a launcher-supported language-region without an inferred script', async () => {
-  const { normalizeLocale } = await import('camoufox/dist/locales.js')
-  for (const requested of [undefined, 'C', 'en-Latn-US', 'en-US', 'de-DE']) {
-    const result = localeForLocation({ country_code: 'US' }, undefined, requested)
-    assert.equal(result, 'en-US')
-    assert.equal(normalizeLocale(result).asString, 'en-US')
-  }
-  assert.equal(localeForLocation({ country_code: 'TW' }, undefined, 'zh-Hant-TW'), 'zh-TW')
-})
-
-test('concrete identity storage excludes proxy, environment and machine paths', () => {
-  const json = JSON.stringify({ ...original.config, addons: ['/absolute/addon'] })
-  const split = Math.floor(json.length / 3)
-  const result = fingerprintFromLaunch({
-    env: {
-      CAMOU_CONFIG_3: json.slice(split * 2),
-      HOME: 'private',
-      CAMOU_CONFIG_1: json.slice(0, split),
-      CAMOU_CONFIG_2: json.slice(split, split * 2),
-    },
-    proxy: { server: 'socks5://secret:secret@host' },
-    executablePath: '/machine/path',
-    firefoxUserPrefs: original.firefoxUserPrefs,
-  })
-  assert.deepEqual(result, original)
-})
-
-test('changing exit location preserves the full hardware identity and original record', () => {
-  const result = fingerprintAtLocation(original, location, 'en-US')
-  assert.equal(original.config.timezone, 'America/New_York')
-  assert.equal(result.config.timezone, 'Europe/London')
-  assert.equal(result.config['locale:region'], 'GB')
-  assert.equal(result.config['webrtc:ipv4'], location.ip)
-  assert.equal(result.config['audio:seed'], original.config['audio:seed'])
-  assert.equal(result.config['screen.width'], 1920)
-  assert.deepEqual(result.config.fonts, original.config.fonts)
-  assert.equal(result.config['webGl:renderer'], 'independent-device')
-  assert.equal(result.firefoxUserPrefs['network.proxy.socks_remote_dns'], true)
-})
-
-test('restoring the account uses saved identity and storage state before any navigation', async () => {
+function fixture(t, changes = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-browser-test-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const calls = []
-  const storageState = { cookies: [], origins: [] }
+  const page = { url: () => 'about:blank' }
   const context = {
-    newPage: async () => ({ name: 'page' }),
-    storageState: async (options) => ({ ...storageState, options }),
-  }
-  const overrides = {
-    runtime: async () => ({
-      executable: 'paired-browser',
-      launchOptions() {
-        throw new Error('must not regenerate saved identity')
-      },
-      getEnvVars: () => ({ CAMOU_CONFIG_1: '{}' }),
-      getPrefEnvVars: () => ({}),
-      Camoufox: async (options) => {
-        calls.push(['launch', options])
-        return {
-          newContext: async (opts) => {
-            calls.push(['context', opts])
-            return context
-          },
-          close: async () => {
-            calls.push(['browser.close'])
-          },
-        }
-      },
-    }),
-    proxyLocation: async (proxy) => {
-      calls.push(['location', proxy])
-      return location
-    },
-    createRelay: async (proxy) => ({
-      url: 'http://127.0.0.1:12345',
-      close: async () => calls.push(['relay.close', proxy]),
-    }),
-  }
-  const session = await createPlatformBrowserSession(
-    {
-      fingerprint: original,
-      storageState,
-      proxyUrl: 'socks5://bound:password@proxy.invalid:1080',
-      onFingerprint: async (fp) => calls.push(['save', fp]),
-    },
-    overrides,
-  )
-  assert.equal(calls[0][1], 'socks5h://bound:password@proxy.invalid:1080')
-  assert.deepEqual(
-    calls.map((x) => x[0]),
-    ['location', 'save', 'launch', 'context'],
-  )
-  const launch = calls.find((x) => x[0] === 'launch')[1].from_options
-  assert.equal(launch.executablePath, 'paired-browser')
-  assert.equal(launch.headless, true)
-  assert.deepEqual(launch.proxy, { server: 'http://127.0.0.1:12345' })
-  assert.deepEqual(calls.at(-1)[1].storageState, storageState)
-  assert.deepEqual(await session.storageState(), { ...storageState, options: { indexedDB: true } })
-  await session.close()
-  await session.close()
-  assert.deepEqual(
-    calls.slice(-2).map((x) => x[0]),
-    ['browser.close', 'relay.close'],
-  )
-})
-
-test('failed identity persistence closes the relay without launching an unrecorded browser', async () => {
-  let closed = false
-  await assert.rejects(
-    createPlatformBrowserSession(
-      {
-        fingerprint: original,
-        proxyUrl: 'socks5://127.0.0.1:1080',
-        onFingerprint: () => {
-          throw new Error('save failed')
-        },
-      },
-      {
-        runtime: async () => ({
-          Camoufox: () => {
-            throw new Error('must not launch')
-          },
-        }),
-        proxyLocation: async () => location,
-        createRelay: async () => ({
-          close: async () => {
-            closed = true
-          },
-        }),
-      },
-    ),
-    /save failed/,
-  )
-  assert.equal(closed, true)
-})
-
-test('new slots request complete randomly selected desktop identities while restored slots never regenerate', async () => {
-  const generated = []
-  const deps = {
-    runtime: async () => ({
-      executable: 'paired-browser',
-      async launchOptions(options) {
-        generated.push(options)
-        return {
-          env: { CAMOU_CONFIG_1: JSON.stringify({ ...original.config, identity: generated.length }) },
-          firefoxUserPrefs: {},
-        }
-      },
-      getEnvVars: () => ({}),
-      getPrefEnvVars: () => ({}),
-      Camoufox: async () => ({
-        newContext: async () => ({
-          newPage: async () => ({}),
-          storageState: async () => ({ cookies: [], origins: [] }),
-        }),
-        close: async () => {},
-      }),
-    }),
-    proxyLocation: async () => location,
-    createRelay: async () => ({ url: 'http://127.0.0.1:12345', close: async () => {} }),
-  }
-  let saved
-  const a = await createPlatformBrowserSession(
-    {
-      proxyUrl: 'socks5h://127.0.0.1:1080',
-      onFingerprint: (fp) => {
-        saved = fp
-      },
-    },
-    deps,
-  )
-  const b = await createPlatformBrowserSession({ proxyUrl: 'socks5h://127.0.0.1:1081' }, deps)
-  const restored = await createPlatformBrowserSession(
-    { proxyUrl: 'socks5h://127.0.0.1:1080', fingerprint: saved },
-    deps,
-  )
-  assert.equal(generated.length, 2)
-  assert.deepEqual(generated[0].os, ['windows', 'macos', 'linux'])
-  assert.notDeepEqual(a.fingerprint, b.fingerprint)
-  assert.deepEqual(a.fingerprint, restored.fingerprint)
-  await Promise.all([a.close(), b.close(), restored.close()])
-})
-
-test('cancellation during launch closes browser and relay before any page can open', async () => {
-  const controller = new AbortController()
-  const calls = []
-  await assert.rejects(
-    createPlatformBrowserSession(
-      { fingerprint: original, proxyUrl: 'socks5h://127.0.0.1:1080', signal: controller.signal },
-      {
-        runtime: async () => ({
-          executable: 'paired-browser',
-          getEnvVars: () => ({}),
-          getPrefEnvVars: () => ({}),
-          Camoufox: async () => {
-            controller.abort(new Error('cancelled'))
-            return {
-              newContext: () => {
-                throw Error('must not create context')
-              },
-              close: async () => calls.push('browser'),
-            }
-          },
-        }),
-        proxyLocation: async () => location,
-        createRelay: async () => ({ close: async () => calls.push('relay') }),
-      },
-    ),
-    /cancelled/,
-  )
-  assert.deepEqual(calls, ['browser', 'relay'])
-})
-
-test('session storage is restored only for matching origins and saved with the encrypted browser state', async () => {
-  let script
-  let values
-  let observed
-  let restored
-  const state = { cookies: [], origins: [], sessionStorage: { 'https://auth.openai.com': { step: 'same-slot' } } }
-  const page = { evaluate: async () => ({ origin: 'https://platform.openai.com', values: { project: 'selected' } }) }
-  const context = {
-    exposeBinding: async (_name, callback) => {
-      observed = callback
-    },
-    addInitScript: async (callback, argument) => {
-      script = callback
-      values = argument
-    },
-    newPage: async () => page,
-    storageState: async () => ({ cookies: [], origins: [] }),
     pages: () => [page],
+    clearCookies: async () => calls.push(['clearCookies']),
+    addCookies: async (cookies) => calls.push(['addCookies', cookies]),
+    storageState: async (options) => ({ cookies: [], origins: [], options }),
+    close: async () => calls.push(['context.close']),
+    ...changes.context,
   }
+  const report = () => ({ removed: 0, failed: [], skipped: [], warning: null })
+  const options = {
+    profileDir: path.join(root, 'profile'),
+    cacheDir: path.join(root, 'runtime'),
+    licenseKey: 'fixture-license',
+    proxyUrl: 'socks5h://127.0.0.1:1080',
+  }
+  const dependencies = {
+    runtime: async (cacheDir) => {
+      calls.push(['runtime', cacheDir])
+      return {
+        executable: '/fixture/chrome',
+        version: 'fixture-version',
+        launchPersistentContext: async (value) => {
+          calls.push(['launch', value])
+          await changes.launch?.()
+          return context
+        },
+      }
+    },
+    createRelay: async (proxy) => {
+      calls.push(['relay', proxy])
+      return { url: 'http://127.0.0.1:54321', close: async () => calls.push(['relay.close']) }
+    },
+    createDisplay: async () => {
+      calls.push(['display'])
+      return { env: { DISPLAY: ':42' }, close: async () => calls.push(['display.close']) }
+    },
+    tempCleanup: { enabled: true, cleanup: async () => report(), snapshot: () => new Set(), createdSince: () => [] },
+  }
+  return { options, dependencies, calls, context, page }
+}
+
+test('headed persistent launch leaves seed and viewport to CloakBrowser and replaces the HTTP cookie snapshot', async (t) => {
+  const f = fixture(t)
+  const cookies = [
+    { name: 'session', value: 'fresh', domain: 'example.test', path: '/', expires: -1 },
+    { name: 'live', value: 'value', domain: 'example.test', path: '/', expires: 2001 },
+    { name: 'expired', value: 'old', domain: 'example.test', path: '/', expires: 2000 },
+  ]
   const session = await createPlatformBrowserSession(
-    { fingerprint: original, storageState: state, proxyUrl: 'socks5h://127.0.0.1:1080' },
     {
-      runtime: async () => ({
-        executable: 'paired-browser',
-        getEnvVars: () => ({}),
-        getPrefEnvVars: () => ({}),
-        Camoufox: async () => ({
-          newContext: async (options) => {
-            restored = options.storageState
-            return context
-          },
-          close: async () => {},
-        }),
-      }),
-      proxyLocation: async () => location,
-      createRelay: async () => ({ close: async () => {} }),
+      ...f.options,
+      storageState: {
+        cookies,
+        cookies_pending: true,
+        origins: [{ origin: 'https://example.test' }],
+        sessionStorage: { old: true },
+      },
     },
+    { ...f.dependencies, now: () => 2_000_000 },
   )
-  assert.equal(typeof script, 'function')
-  assert.deepEqual(values, state.sessionStorage)
-  assert.deepEqual(restored, { cookies: [], origins: [] })
-  const webStorage = new Map()
-  const storage = {
-    get length() {
-      return webStorage.size
-    },
-    setItem(key, value) {
-      webStorage.set(key, value)
-    },
-  }
-  const execute = (origin) =>
-    vm.runInNewContext(`(${script.toString()})(origins)`, {
-      origins: values,
-      location: { origin, protocol: 'https:' },
-      sessionStorage: storage,
-      addEventListener() {},
-    })
-  execute('https://unrelated.example')
-  assert.equal(webStorage.size, 0)
-  execute('https://auth.openai.com')
-  assert.equal(webStorage.get('step'), 'same-slot')
-  webStorage.set('step', 'new-step-written-by-page')
-  execute('https://auth.openai.com')
-  assert.equal(webStorage.get('step'), 'new-step-written-by-page')
-  const frame = { url: () => 'https://auth.openai.com/log-in' }
-  await observed({ page: { mainFrame: () => frame }, frame }, 'https://auth.openai.com', { step: 'updated' })
-  await observed({ page: { mainFrame: () => frame }, frame }, 'https://wrong-account.test', { private: 'rejected' })
-  const saved = await session.storageState()
-  assert.deepEqual(saved.sessionStorage, {
-    'https://auth.openai.com': { step: 'updated' },
-    'https://platform.openai.com': { project: 'selected' },
+  assert.deepEqual(f.calls.find(([name]) => name === 'launch')[1], {
+    userDataDir: f.options.profileDir,
+    licenseKey: 'fixture-license',
+    headless: false,
+    geoip: true,
+    proxy: 'http://127.0.0.1:54321',
+    launchOptions: { env: { DISPLAY: ':42' } },
   })
-  assert.deepEqual(state.sessionStorage, { 'https://auth.openai.com': { step: 'same-slot' } })
+  assert.deepEqual(f.calls.slice(-2), [['clearCookies'], ['addCookies', cookies.slice(0, 2)]])
+  assert.equal(session.page, f.page)
+  assert.equal(session.context, f.context)
+  assert.equal(session.version, 'fixture-version')
+  assert.deepEqual(await session.storageState(), { cookies: [], origins: [], options: { indexedDB: true } })
+  await session.close()
+  assert.deepEqual(
+    f.calls.slice(-3).map(([name]) => name),
+    ['context.close', 'relay.close', 'display.close'],
+  )
+})
+
+test('ordinary DB snapshots cannot overwrite newer native profile cookies', async (t) => {
+  const cookies = [{ name: 'session', value: 'old-db-value', domain: 'example.test', path: '/', expires: -1 }]
+  for (const storageState of [undefined, { cookies: [] }, { cookies }, { cookies, cookies_pending: false }]) {
+    const f = fixture(t)
+    const session = await createPlatformBrowserSession({ ...f.options, storageState }, f.dependencies)
+    assert.equal(f.calls.filter(([name]) => name === 'clearCookies').length, 0)
+    assert.equal(f.calls.filter(([name]) => name === 'addCookies').length, 0)
+    await session.close()
+  }
+})
+
+test('a pending empty HTTP snapshot clears cookies removed by the server', async (t) => {
+  const f = fixture(t)
+  const session = await createPlatformBrowserSession(
+    { ...f.options, storageState: { cookies: [], cookies_pending: true } },
+    f.dependencies,
+  )
+  assert.equal(f.calls.filter(([name]) => name === 'clearCookies').length, 1)
+  assert.equal(f.calls.filter(([name]) => name === 'addCookies').length, 0)
   await session.close()
 })
 
-test('a missing or unsupported account proxy never starts browser resources', async () => {
-  for (const proxyUrl of ['', 'ftp://127.0.0.1']) {
-    await assert.rejects(
-      createPlatformBrowserSession(
-        { proxyUrl },
-        {
-          runtime: () => {
-            throw new Error('must not load runtime')
-          },
-        },
-      ),
-      (error) => ['proxy_required', 'proxy_unsupported'].includes(error.code),
-    )
+test('required proxy, key and directories are checked before loading runtime resources', async (t) => {
+  const f = fixture(t)
+  for (const [patch, code] of [
+    [{ proxyUrl: '' }, 'proxy_required'],
+    [{ proxyUrl: 'ftp://127.0.0.1' }, 'proxy_unsupported'],
+    [{ licenseKey: '' }, 'browser_key_required'],
+    [{ profileDir: 'relative' }, 'browser_path_required'],
+    [{ cacheDir: '' }, 'browser_path_required'],
+  ]) {
+    await assert.rejects(createPlatformBrowserSession({ ...f.options, ...patch }, f.dependencies), { code })
   }
+  assert.deepEqual(f.calls, [])
+})
+
+test('cancellation during launch closes the context before its relay and display', async (t) => {
+  const controller = new AbortController()
+  const f = fixture(t, { launch: () => controller.abort() })
+  await assert.rejects(createPlatformBrowserSession({ ...f.options, signal: controller.signal }, f.dependencies), {
+    name: 'AbortError',
+  })
+  assert.deepEqual(
+    f.calls.slice(-3).map(([name]) => name),
+    ['context.close', 'relay.close', 'display.close'],
+  )
+})
+
+test('a failed context close retains relay and display until a successful retry', async (t) => {
+  const f = fixture(t)
+  let attempts = 0
+  f.context.close = async () => {
+    f.calls.push(['context.close'])
+    if (++attempts === 1) throw new Error('fixture')
+  }
+  const session = await createPlatformBrowserSession(f.options, f.dependencies)
+  await assert.rejects(session.close(), { code: 'browser_close_failed' })
+  assert.equal(
+    f.calls.some(([name]) => name === 'relay.close' || name === 'display.close'),
+    false,
+  )
+  await session.close()
+  await session.close()
+  assert.equal(attempts, 2)
+  assert.equal(f.calls.filter(([name]) => name === 'relay.close').length, 1)
+  assert.equal(f.calls.filter(([name]) => name === 'display.close').length, 1)
+})
+
+test('startup failure exposes unfinished cleanup so the shared manager can retry it', async (t) => {
+  const f = fixture(t)
+  let closeFailed = true
+  f.context.clearCookies = async () => {
+    throw new Error('fixture cookie failure')
+  }
+  f.context.close = async () => {
+    if (closeFailed) throw new Error('fixture close failure')
+    f.calls.push(['context.close'])
+  }
+  let pending
+  await assert.rejects(
+    createPlatformBrowserSession(
+      { ...f.options, storageState: { cookies: [], cookies_pending: true } },
+      f.dependencies,
+    ),
+    (error) => {
+      assert.equal(error.code, 'browser_close_failed')
+      pending = error.pendingSession
+      return !!pending?.close
+    },
+  )
+  assert.equal(
+    f.calls.some(([name]) => name === 'relay.close'),
+    false,
+  )
+  closeFailed = false
+  await pending.close()
+  assert.deepEqual(
+    f.calls.slice(-3).map(([name]) => name),
+    ['context.close', 'relay.close', 'display.close'],
+  )
+})
+
+test('launcher failures do not expose private diagnostics and release supporting processes', async (t) => {
+  const f = fixture(t, {
+    launch: () => {
+      throw new Error('fixture-license private upstream diagnostics')
+    },
+  })
+  await assert.rejects(createPlatformBrowserSession(f.options, f.dependencies), (error) => {
+    assert.equal(error.code, 'browser_start_failed')
+    assert.equal(error.message.includes('fixture-license'), false)
+    return true
+  })
+  assert.deepEqual(
+    f.calls.slice(-2).map(([name]) => name),
+    ['relay.close', 'display.close'],
+  )
 })
 
 test('loopback CONNECT relay authenticates to bound SOCKS and sends hostname for remote DNS', async (t) => {
@@ -405,149 +276,4 @@ test('closing relay also closes an HTTP proxy socket waiting for CONNECT respons
   await relay.close()
   await closed
   assert.equal(upstream.destroyed, true)
-})
-
-function cleanupSessionFixture({ closeBrowser, createPage, cleanup } = {}) {
-  const calls = { browser: 0, relay: 0, captures: 0, cleanup: [] }
-  const paths = ['/tmp/playwright-artifacts-abcdef', '/tmp/playwright_firefoxdev_profile-ghijkl']
-  const report = () => ({ removed: 0, reclaimed_bytes: 0, failed: [], skipped: [], warning: null })
-  const temporary = {
-    enabled: true,
-    snapshot: () => new Set(),
-    createdSince: () => {
-      calls.captures += 1
-      return [...paths]
-    },
-    async cleanup(options = {}) {
-      calls.cleanup.push(options.paths)
-      return (await cleanup?.(options)) || report()
-    },
-  }
-  const overrides = {
-    tempCleanup: temporary,
-    proxyLocation: async () => location,
-    createRelay: async () => ({
-      close: async () => {
-        calls.relay += 1
-      },
-    }),
-    runtime: async () => ({
-      executable: 'paired-browser',
-      getEnvVars: () => ({}),
-      getPrefEnvVars: () => ({}),
-      Camoufox: async () => ({
-        newContext: async () => ({
-          newPage: createPage || (async () => ({})),
-        }),
-        close: async () => {
-          calls.browser += 1
-          await closeBrowser?.()
-        },
-      }),
-    }),
-  }
-  return {
-    calls,
-    paths,
-    temporary,
-    open: () =>
-      createPlatformBrowserSession({ fingerprint: original, proxyUrl: 'socks5h://127.0.0.1:1080' }, overrides),
-  }
-}
-
-test('a browser exit failure closes its relay and permits a real exit retry without widening owned paths', async () => {
-  let failed = false
-  const f = cleanupSessionFixture({
-    closeBrowser: async () => {
-      if (!failed) {
-        failed = true
-        throw Error('private browser failure')
-      }
-    },
-  })
-  const session = await f.open()
-  f.paths.push('/tmp/playwright-artifacts-FOREIG')
-  await assert.rejects(session.close(), { code: 'browser_close_failed' })
-  assert.equal(f.calls.relay, 1)
-  assert.equal(f.calls.cleanup.length, 1)
-  await session.close()
-  await session.close()
-  assert.equal(f.calls.browser, 2)
-  assert.equal(f.calls.relay, 1)
-  assert.equal(f.calls.captures, 1)
-  assert.deepEqual(f.calls.cleanup.at(-1), [
-    '/tmp/playwright-artifacts-abcdef',
-    '/tmp/playwright_firefoxdev_profile-ghijkl',
-  ])
-  assert.equal(f.calls.cleanup.length, 2)
-})
-
-test('failed or unconfirmed owned temporary cleanup stays retryable after browser exit', async () => {
-  for (const blocked of ['failed', 'skipped']) {
-    let fail = true
-    const f = cleanupSessionFixture({
-      cleanup: ({ paths }) => {
-        if (!paths || !fail) return
-        return {
-          removed: 0,
-          reclaimed_bytes: 0,
-          failed: blocked === 'failed' ? [{ name: 'playwright-artifacts-abcdef', code: 'EACCES' }] : [],
-          skipped: blocked === 'skipped' ? [{ name: 'playwright-artifacts-abcdef', reason: 'process_reference' }] : [],
-          warning: 'temporary directory remains',
-        }
-      },
-    })
-    const session = await f.open()
-    await assert.rejects(session.close(), { code: 'browser_temp_cleanup_failed' })
-    fail = false
-    await session.close()
-    assert.equal(f.calls.browser, 1)
-    assert.equal(f.calls.relay, 1)
-    assert.equal(f.calls.cleanup.length, 3)
-  }
-})
-
-test('initialization failure carries its unfinished cleanup handle for the manager to retain', async () => {
-  let attempts = 0
-  const f = cleanupSessionFixture({
-    createPage: async () => {
-      throw Error('page initialization failed')
-    },
-    closeBrowser: async () => {
-      if (++attempts === 1) throw Error('exit failed')
-    },
-  })
-  let failure
-  try {
-    await f.open()
-  } catch (error) {
-    failure = error
-  }
-  assert.equal(failure.code, 'browser_close_failed')
-  assert.match(failure.startupError.message, /page initialization failed/)
-  assert.equal(typeof failure.pendingSession.close, 'function')
-  await failure.pendingSession.close()
-  assert.equal(f.calls.browser, 2)
-  assert.equal(f.calls.relay, 1)
-  assert.equal(f.calls.cleanup.length, 2)
-})
-
-test('non-dedicated runtime reports temporary paths without treating reporting as a close failure', async () => {
-  const f = cleanupSessionFixture({
-    cleanup: ({ paths }) =>
-      paths
-        ? {
-            removed: 0,
-            reclaimed_bytes: 0,
-            failed: [],
-            skipped: [{ name: 'playwright-artifacts-abcdef', reason: 'reported_only' }],
-            warning: null,
-          }
-        : undefined,
-  })
-  f.temporary.enabled = false
-  const session = await f.open()
-  await session.close()
-  assert.equal(f.calls.browser, 1)
-  assert.equal(f.calls.relay, 1)
 })

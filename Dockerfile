@@ -38,18 +38,15 @@ COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 WORKDIR /opt/vm2api
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
-ENV XDG_CACHE_HOME=/opt/vm2api/browser-cache
-# camoufox@0.5.8 pins its paired Firefox build and fpgen model. Install all
-# browser assets while building; account requests never run an installer.
-RUN npx playwright-core install-deps firefox \
-  && npx camoufox fetch \
-  && node --input-type=module -e "import {findInstalledVersion} from 'camoufox'; import {isModelInstalled} from 'camoufox/dist/fpgen/index.js'; import {getMmdbPath} from 'camoufox/dist/geolocation.js'; import fs from 'node:fs'; if (!findInstalledVersion('official/156.0.1-beta.36') || !isModelInstalled() || !fs.existsSync(getMmdbPath())) process.exit(1)"
+# The public image contains only the launcher and system libraries. The admin
+# installs CloakBrowser into the data volume after configuring a license key.
+ENV CLOAKBROWSER_AUTO_UPDATE=false
+RUN node node_modules/playwright-core/cli.js install-deps chromium \
+  && apt-get install -y --no-install-recommends xvfb openbox x11-utils \
+  && rm -rf /var/lib/apt/lists/*
 COPY src ./src
 COPY scripts ./scripts
-RUN node scripts/smoke-platform-browser.mjs \
-  && node scripts/smoke-platform-setup.mjs \
-  && node scripts/smoke-platform-balance.mjs \
-  && node scripts/smoke-browser-cleanup.mjs
+RUN node scripts/check-browser-image.mjs
 COPY VERSION CHANGELOG.md ./
 COPY deploy/payload.json ./deploy/payload.json
 COPY docker/kin-os ./docker/kin-os

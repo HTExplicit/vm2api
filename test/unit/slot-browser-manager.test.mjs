@@ -2,10 +2,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
 import http from 'node:http'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { WebSocket } from 'ws'
 import { SlotBrowserManager } from '../../src/lib/browser/slot-browser-manager.mjs'
 
 function fixture(t, options = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-browser-manager-'))
   const sessionOverrides = options.sessionOverrides
   const records = new Map()
   const vms = new Map(
@@ -45,7 +49,7 @@ function fixture(t, options = {}) {
     }
   }
   const manager = new SlotBrowserManager({
-    cfg: { paths: { project: '/test' } },
+    cfg: { paths: { project: root } },
     profileRepo: repo,
     getVm: (id) => vms.get(id),
     resolveProxy: (vm) => vm.proxy?.url,
@@ -53,7 +57,6 @@ function fixture(t, options = {}) {
     async createSession(options) {
       calls.launched.push(options)
       if (options.signal?.aborted) throw Error('closed')
-      await options.onFingerprint(options.fingerprint || { unique: calls.launched.length })
       if (options.signal?.aborted) throw Error('closed')
       const page = new EventEmitter()
       const context = {
@@ -75,8 +78,11 @@ function fixture(t, options = {}) {
     },
     ...options,
   })
-  t.after(() => manager.stop())
-  return { manager, vms, records, repo, calls }
+  t.after(async () => {
+    await manager.stop()
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+  return { root, manager, vms, records, repo, calls }
 }
 
 test('slot identities persist and a retained same-slot session is reused without relaunch or duplicate routing', async (t) => {
@@ -94,9 +100,61 @@ test('slot identities persist and a retained same-slot session is reused without
   assert.equal(f.records.get('a').account_id, 'account-a')
   assert.deepEqual(f.records.get('a').storage_state.cookies, [])
   const restored = await f.manager.acquire('a')
-  assert.deepEqual(f.calls.launched[1].fingerprint, { unique: 1 })
+  assert.equal(f.calls.launched[1].profileDir, f.calls.launched[0].profileDir)
   assert.deepEqual(f.calls.launched[1].storageState, f.records.get('a').storage_state)
   await f.manager.release(restored)
+})
+
+test('installation pauses queued browsers and resumes them with the installed runtime', async (t) => {
+  const runtime = { isInstalling: true, launchConfig: () => ({ licenseKey: 'cb_test', cacheDir: '/cache' }) }
+  const f = fixture(t, { runtime })
+  const ready = f.manager.acquire('a', { interactive: true })
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(f.calls.launched.length, 0)
+  assert.equal(f.manager.state('a').status, 'queued')
+  runtime.isInstalling = false
+  void f.manager.drain()
+  const live = await ready
+  assert.equal(f.calls.launched[0].licenseKey, 'cb_test')
+  assert.equal(f.calls.launched[0].cacheDir, '/cache')
+  await f.manager.close(live.vmId)
+})
+
+test('ordinary close retains the profile while forget removes only its own slot profile', async (t) => {
+  const f = fixture(t)
+  for (const id of ['a', 'b']) {
+    fs.mkdirSync(f.manager.profileDirectory(id), { recursive: true })
+    fs.writeFileSync(path.join(f.manager.profileDirectory(id), '.cloakbrowser-seed'), `seed-${id}`)
+  }
+  const first = await f.manager.acquire('a', { interactive: true })
+  await f.manager.close(first.vmId)
+  assert.equal(fs.readFileSync(path.join(f.manager.profileDirectory('a'), '.cloakbrowser-seed'), 'utf8'), 'seed-a')
+  await f.manager.close('a', { forget: true })
+  assert.equal(fs.existsSync(f.manager.profileDirectory('a')), false)
+  assert.equal(fs.readFileSync(path.join(f.manager.profileDirectory('b'), '.cloakbrowser-seed'), 'utf8'), 'seed-b')
+  assert.throws(() => f.manager.forgetProfile('../outside'), { code: 'invalid_vm_id' })
+})
+
+test('a pending HTTP cookie update is acknowledged by a fresh native snapshot after launch', async (t) => {
+  const f = fixture(t)
+  f.records.set('a', { storage_state: { cookies: [{ name: 'new', value: 'http' }], cookies_pending: true } })
+  await f.manager.acquire('a', { interactive: true })
+  assert.equal(f.calls.launched[0].storageState.cookies_pending, true)
+  assert.equal(f.records.get('a').storage_state.cookies_pending, undefined)
+  assert.deepEqual(f.records.get('a').storage_state.cookies, [])
+})
+
+test('missing runtime configuration remains a typed browser state for the settings link', async (t) => {
+  const f = fixture(t, {
+    runtime: {
+      launchConfig() {
+        throw Object.assign(new Error('configure browser'), { code: 'browser_key_required' })
+      },
+    },
+  })
+  await assert.rejects(f.manager.acquire('a'), { code: 'browser_key_required' })
+  assert.equal(f.manager.state('a').error, 'browser_key_required')
+  assert.equal(f.calls.launched.length, 0)
 })
 
 test('navigation reuses the live OAuth return callback and tracks Platform input locks without replacing status', async (t) => {
@@ -258,7 +316,7 @@ test('a changed proxy closes the old session without persisting stale account st
   assert.equal(f.records.get('a').storage_state, undefined)
   const restored = await f.manager.acquire('a')
   assert.equal(restored.proxyUrl, 'socks5h://127.0.0.1:9999')
-  assert.deepEqual(f.calls.launched[1].fingerprint, { unique: 1 })
+  assert.equal(f.calls.launched[1].profileDir, f.calls.launched[0].profileDir)
 })
 
 test('unknown or unbound slots cannot launch or obtain browser tickets', async (t) => {

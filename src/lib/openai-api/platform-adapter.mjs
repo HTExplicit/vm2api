@@ -35,7 +35,7 @@ function expectedPlatformNavigation(value, target) {
   )
 }
 
-/** A Firefox navigation abort is provisional only when this window actually continues. */
+/** A Chromium navigation abort is provisional only when this window actually continues. */
 export async function navigatePlatformForObservation(page, url, { timeout = 30_000, signal, observed } = {}) {
   signal?.throwIfAborted()
   if (page.isClosed?.()) throw problem('platform_browser_closed', '账号浏览器已关闭')
@@ -86,7 +86,7 @@ export async function navigatePlatformForObservation(page, url, { timeout = 30_0
         () => finish(),
         (error) => {
           if (finished) return
-          if (!/NS_BINDING_ABORTED/.test(error?.message || '')) return finish(error)
+          if (!/net::ERR_ABORTED/.test(error?.message || '')) return finish(error)
           abortedNavigation = true
           if (
             observed

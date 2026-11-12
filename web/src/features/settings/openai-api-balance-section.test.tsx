@@ -4,6 +4,9 @@ import { OpenaiApiBalanceSection } from './openai-api-balance-section'
 import { OpenaiPane } from './openai-pane'
 
 vi.mock('./openai-quota-section', () => ({ OpenaiQuotaSection: () => null }))
+vi.mock('./account-browser-section', () => ({
+  AccountBrowserSection: () => null,
+}))
 
 describe('account API balance refresh settings', () => {
   it('shows the default interval and preserves explicit manual-only zero', () => {

@@ -1,10 +1,6 @@
 import assert from 'node:assert/strict'
-import * as camoufox from 'camoufox'
-import { launchPath } from 'camoufox/dist/pkgman.js'
-import { getEnvVars, getPrefEnvVars } from 'camoufox/dist/utils.js'
-import { isModelInstalled } from 'camoufox/dist/fpgen/index.js'
 import { PlatformAdapter } from '../src/lib/openai-api/platform-adapter.mjs'
-import { createPlatformBrowserSession, PLATFORM_BROWSER_BUILD } from '../src/lib/openai-api/platform-browser.mjs'
+import { createBrowserFixture } from './browser-fixture.mjs'
 
 const EMAIL = 'fixture@example.test'
 const ORGANIZATION_ID = 'org-fixture'
@@ -82,30 +78,7 @@ function generalFixturePage(delay) {
 
 // Every page request is fulfilled below. A dead loopback proxy is retained as
 // the transport boundary, so this smoke cannot contact a real account or site.
-const directory = camoufox.findInstalledVersion(PLATFORM_BROWSER_BUILD)
-assert.ok(directory && isModelInstalled(), 'the image must already contain the pinned browser and model')
-const executable = launchPath(directory)
-const browser = await createPlatformBrowserSession(
-  { proxyUrl: 'socks5h://127.0.0.1:1' },
-  {
-    runtime: async () => ({
-      ...camoufox,
-      executable,
-      getEnvVars,
-      getPrefEnvVars,
-      // A fresh test identity uses the launcher's coherent desktop window
-      // sizing. Production identities and viewport:null remain untouched.
-      launchOptions: (options) => camoufox.launchOptions({ ...options, window: [781, 816] }),
-    }),
-    proxyLocation: async () => ({
-      ip: '198.51.100.10',
-      country_code: 'US',
-      timezone: 'America/New_York',
-      latitude: 40.71,
-      longitude: -74.01,
-    }),
-  },
-)
+const browser = await createBrowserFixture({ viewport: { width: 781, height: 816 } })
 
 const page = browser.page
 let scenario = {}
@@ -275,12 +248,12 @@ try {
   }
 
   const dimensions = await page.evaluate(() => ({ outerWidth, innerWidth }))
-  assert.equal(dimensions.outerWidth, 781)
-  assert.ok(dimensions.innerWidth > 0 && dimensions.innerWidth <= 781)
+  assert.equal(dimensions.innerWidth, 781, 'the fixture exercises the narrow content viewport')
   assert.deepEqual(unhandled, [])
   console.log(
     JSON.stringify({
       offline: true,
+      testBrowser: `stock-chromium/${browser.version}`,
       ...dimensions,
       delayedEntryMs: 16_000,
       delayedSetupElapsedMs,

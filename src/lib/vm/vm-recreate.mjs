@@ -26,6 +26,7 @@ import {
 import { assignComputerFingerprint } from '../identity/slot-computer.mjs'
 
 const KEEP_HOME = [
+  'browser-profile',
   'cli-home/.claude.json',
   'cli-home/.claude/.claude.json',
   'cli-home/.claude/settings.json',

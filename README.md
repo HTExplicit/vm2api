@@ -53,6 +53,8 @@
 
 普通 CLI/Codex 集群槽不依赖可选 CRAG 包，cc-node 继续可选。镜像入口校验并发布完整可信 CRAG 出厂包，常规安装与面板升级统一收尾会从当前 fork 的配套 Release 拉取、校验固定 CRAG 归档，即使没有槽选择 CRAG；显式请求其他 CRAG 标签仍从官方供应仓拉取。包分发不会激活授权或改变现有内核选择。wrap Claude 按当前 fork 标签拉取 CLI，仅有差异的目标走排空、重启与健康核验；原停机保持停机、人工调度关闭保持。入口不再后台执行另一轮同步。本地 Codex 随控制面替换由启动恢复器补起新内核，无需重建 GPT 槽。手工仅替换 Compose 镜像后，仍需在内核页更新 Claude。
 
+GPT 登录与 OpenAI Platform 共用 CloakBrowser。管理员在「设置 → OpenAI → 账号浏览器」保存授权 key 后安装内核；公开镜像只含启动器和系统依赖，内核由部署端从官方获取。采用有头浏览器与虚拟显示，全局一次一个窗口，每槽保留完整 profile；内核仅由面板手动更新，更新前需关闭当前窗口。升级到 1.4.7302 会清除旧 Camoufox 网页状态，保留 Codex 授权、API key 和业务记录；后续网页按需重新登录。浏览器二进制遵循 [CloakBrowser 独立许可](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md)，向第三方提供浏览器控制须另核对应授权。
+
 ## 目录
 - [💡 项目概览](#-项目概览)
 - [🆕 近期更新](#-近期更新)

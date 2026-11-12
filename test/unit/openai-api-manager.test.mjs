@@ -116,7 +116,7 @@ function fixture(t) {
     dispose() {}
   }
   let manager = new OpenaiApiManager({
-    cfg: {},
+    cfg: { paths: { project: directory } },
     repo,
     credits,
     apiEndpointStore: store,
@@ -135,8 +135,6 @@ function fixture(t) {
     },
     async createSession(options) {
       calls.sessions.push(options)
-      const fingerprint = options.fingerprint || { independentDevice: options.proxyUrl }
-      await options.onFingerprint(fingerprint)
       calls.liveBrowsers++
       calls.maxLiveBrowsers = Math.max(calls.maxLiveBrowsers, calls.liveBrowsers)
       let closed = false
@@ -155,7 +153,6 @@ function fixture(t) {
       return {
         page,
         context: {},
-        fingerprint,
         async storageState() {
           return { cookies: [], origins: [{ origin: options.proxyUrl }] }
         },
@@ -214,7 +211,6 @@ function fixture(t) {
   const cacheBilling = (entry, patch = {}) => {
     profiles.upsert(entry.vm.id, {
       account_id: entry.accountId,
-      fingerprint: { independentDevice: entry.vm.id },
       billing_session: {
         organization_id: repo.getAccount(entry.accountId).organization_id,
         headers: { authorization: 'Bearer saved-session', 'user-agent': 'saved-browser' },
@@ -229,7 +225,6 @@ function fixture(t) {
             indexedDB: [{ name: 'db' }],
           },
         ],
-        sessionStorage: { 'https://platform.openai.com': { transient: 'preserve' } },
       },
       ...patch,
     })
@@ -262,7 +257,7 @@ function fixture(t) {
       await manager.stop()
       const previous = manager
       manager = new OpenaiApiManager({
-        cfg: {},
+        cfg: { paths: { project: directory } },
         repo,
         credits,
         apiEndpointStore: store,
@@ -364,7 +359,7 @@ test('API resolver follows current identity and proxy, independently of OAuth li
   assert.equal(f.manager.resolveAccountKey(key), null)
 })
 
-test('two accounts get separate saved fingerprints, sessions and keys while sharing one organization project', async (t) => {
+test('two accounts use separate persistent profiles, sessions and keys while sharing one organization project', async (t) => {
   const f = fixture(t)
   const a = f.add()
   const b = f.add('vm-b', 'account-b')
@@ -375,7 +370,9 @@ test('two accounts get separate saved fingerprints, sessions and keys while shar
   const second = f.repo.getAccount(b.accountId)
   const firstProfile = f.profiles.get(a.vm.id)
   const secondProfile = f.profiles.get(b.vm.id)
-  assert.notDeepEqual(firstProfile.fingerprint, secondProfile.fingerprint)
+  assert.equal(f.calls.sessions[0].profileDir, path.join(f.directory, 'vms', a.vm.id, 'browser-profile'))
+  assert.equal(f.calls.sessions[1].profileDir, path.join(f.directory, 'vms', b.vm.id, 'browser-profile'))
+  assert.notEqual(f.calls.sessions[0].profileDir, f.calls.sessions[1].profileDir)
   assert.notDeepEqual(firstProfile.storage_state, secondProfile.storage_state)
   assert.notEqual(first.key_id, second.key_id)
   assert.equal(f.repo.getKey(first.key_id).source_account_id, a.accountId)
@@ -388,7 +385,7 @@ test('two accounts get separate saved fingerprints, sessions and keys while shar
   f.manager.enqueue(f.credits.accountForVm(a.vm.id), 'setup', false)
   await f.settle()
   assert.equal(f.calls.configured.length, 2, 'reopening configuration must reuse the saved key')
-  assert.deepEqual(f.calls.sessions[2].fingerprint, firstProfile.fingerprint)
+  assert.equal(f.calls.sessions[2].profileDir, f.calls.sessions[0].profileDir)
   assert.deepEqual(f.calls.sessions[2].storageState, firstProfile.storage_state)
   assert.equal(f.calls.closed.length, 3)
 })
@@ -469,7 +466,7 @@ test('an error can retry immediately in the retained browser after the old job i
   assert.equal(states.filter((status) => status === 'configuring').length, 2)
   assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
   assert.equal(f.repo.getAccount(entry.accountId).last_error, null)
-  assert.deepEqual(f.profiles.get(entry.vm.id).fingerprint, { independentDevice: f.calls.sessions[0].proxyUrl })
+  assert.equal(f.calls.sessions[0].profileDir, path.join(f.directory, 'vms', entry.vm.id, 'browser-profile'))
 })
 
 test('same-window retry with an already saved key never creates or replaces it', async (t) => {
@@ -484,7 +481,7 @@ test('same-window retry with an already saved key never creates or replaces it',
   f.manager.setup(entry.vm.id)
   await f.settle()
   const browser = f.manager.browserManager.jobs.get(entry.vm.id)
-  const fingerprint = f.profiles.get(entry.vm.id).fingerprint
+  const profileDir = f.calls.sessions[0].profileDir
   assert.equal(f.manager.browserManager.state(entry.vm.id).status, 'error')
   f.manager.setup(entry.vm.id)
   await f.settle()
@@ -493,7 +490,7 @@ test('same-window retry with an already saved key never creates or replaces it',
   assert.equal(f.calls.configured.length, 0)
   assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
   assert.equal(f.repo.getKey(key.id).api_key, key.api_key)
-  assert.deepEqual(f.profiles.get(entry.vm.id).fingerprint, fingerprint)
+  assert.equal(f.calls.sessions[0].profileDir, profileDir)
   assert.equal(f.repo.getAccount(entry.accountId).setup_status, 'ready')
 })
 
@@ -556,7 +553,7 @@ test('a same-window general navigation continuation still verifies identity, reu
       setUrl(url)
       page.emit('framenavigated', page.mainFrame())
     }, 5)
-    throw new Error('page.goto: NS_BINDING_ABORTED')
+    throw new Error('page.goto: net::ERR_ABORTED')
   }
   f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'balance', false)
   await f.settle()
@@ -581,7 +578,7 @@ test('a continued general navigation cannot accept a different account identity'
   f.behavior.goto = (url, page, setUrl) => {
     setUrl(url)
     page.emit('framenavigated', page.mainFrame())
-    throw new Error('page.goto: NS_BINDING_ABORTED')
+    throw new Error('page.goto: net::ERR_ABORTED')
   }
   f.behavior.inspect = () => ({ authenticated: true, email: 'wrong@example.test', organizationId: 'org-test' })
   f.manager.enqueue(f.credits.accountForVm(entry.vm.id), 'balance', false)
@@ -1096,8 +1093,7 @@ test('cached Billing HTTP survives manager restart and updates only the canonica
   const after = f.profiles.get(entry.vm.id)
   assert.deepEqual(after.storage_state.cookies, [{ name: 'session', value: 'updated' }])
   assert.deepEqual(after.storage_state.origins, before.storage_state.origins)
-  assert.deepEqual(after.storage_state.sessionStorage, before.storage_state.sessionStorage)
-  assert.deepEqual(after.fingerprint, before.fingerprint)
+  assert.equal(after.account_id, before.account_id)
   assert.deepEqual(after.billing_session, before.billing_session)
   assert.equal(f.repo.getAccount(entry.accountId).key_id, key.id)
   assert.equal(JSON.stringify(f.manager.view(entry.vm)).includes('saved-session'), false)

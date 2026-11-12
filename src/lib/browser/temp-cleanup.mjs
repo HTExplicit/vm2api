@@ -2,8 +2,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-const TEMP_NAME = /^(?:playwright-artifacts-|playwright_firefoxdev_profile-)[A-Za-z0-9]{6}$/
-const BROWSER_NAME = /^(?:firefox|camoufox)(?:-bin)?$/
+const TEMP_NAME = /^playwright-artifacts-[A-Za-z0-9]{6}$/
+const BROWSER_NAME = /^(?:chrome|chromium|cloakbrowser)(?:\.exe)?$/
 
 export function isBrowserExecutable(executable) {
   return BROWSER_NAME.test(path.basename(executable || ''))
@@ -36,7 +36,7 @@ function browserProcesses({ executablePath, uid }) {
       const command = fs.readFileSync(path.join(root, 'comm'), 'utf8').trim()
       const args = fs.readFileSync(path.join(root, 'cmdline'), 'utf8').split('\0').filter(Boolean)
       const profiles = args.flatMap((arg, index) => {
-        if (['-profile', '--profile', '--user-data-dir'].includes(arg)) return args[index + 1] || []
+        if (arg === '--user-data-dir') return args[index + 1] || []
         return arg.startsWith('--user-data-dir=') ? [arg.slice(16)] : []
       })
       let executable
@@ -79,7 +79,8 @@ function warningFor(report) {
 }
 
 /**
- * Only the dedicated control container owns these Playwright temporary paths.
+ * Only the dedicated control container owns these Playwright artifact paths.
+ * Persistent account profiles are never candidates for temporary cleanup.
  * Calls are serialized with browser launch/close; no periodic collector runs.
  * readProcesses returns { activeBrowser, references: string[], unknown }.
  */

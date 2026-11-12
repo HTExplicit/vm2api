@@ -68,11 +68,11 @@ function publish(page, response) {
 }
 
 for (const continuation of [GENERAL_URL, 'https://auth.openai.com/log-in']) {
-  test(`Firefox aborted entry accepts actual same-window continuation to ${continuation}`, async () => {
+  test(`Chromium aborted entry accepts actual same-window continuation to ${continuation}`, async () => {
     const page = pageFixture()
     page.goto = async () => {
       setImmediate(() => page.navigate(continuation))
-      throw new Error('page.goto: NS_BINDING_ABORTED')
+      throw new Error('page.goto: net::ERR_ABORTED')
     }
     await navigatePlatformForObservation(page, GENERAL_URL, { timeout: 100 })
     assert.equal(page.listenerCount('framenavigated'), 0)
@@ -85,7 +85,7 @@ test('an old matching Platform page and unrelated frame navigation do not confir
   page.navigate(GENERAL_URL)
   page.goto = async () => {
     page.emit('framenavigated', { url: () => GENERAL_URL })
-    throw new Error('NS_BINDING_ABORTED')
+    throw new Error('net::ERR_ABORTED')
   }
   await assert.rejects(navigatePlatformForObservation(page, GENERAL_URL, { timeout: 15 }), {
     code: 'platform_navigation_timeout',
@@ -97,7 +97,7 @@ test('a changed but unrelated main-frame URL does not confirm aborted entry', as
   const page = pageFixture()
   page.goto = async () => {
     page.navigate('https://platform.openai.com/docs')
-    throw new Error('NS_BINDING_ABORTED')
+    throw new Error('net::ERR_ABORTED')
   }
   await assert.rejects(navigatePlatformForObservation(page, GENERAL_URL, { timeout: 15 }), {
     code: 'platform_navigation_timeout',
@@ -122,7 +122,7 @@ for (const mode of ['cancel', 'close']) {
     const page = pageFixture()
     const controller = new AbortController()
     page.goto = async () => {
-      throw new Error('NS_BINDING_ABORTED')
+      throw new Error('net::ERR_ABORTED')
     }
     const pending = navigatePlatformForObservation(page, GENERAL_URL, { signal: controller.signal })
     const rejected = assert.rejects(pending, mode === 'close' ? { code: 'platform_browser_closed' } : /cancel fixture/)
@@ -164,7 +164,7 @@ test('Billing aborted navigation accepts this read exact-org success and recheck
       page.navigate(url)
       publish(page, billingResponse())
     })
-    throw new Error('NS_BINDING_ABORTED')
+    throw new Error('net::ERR_ABORTED')
   }
   assert.equal((await adapter.readBalance()).balance, '37.1234567890123456789')
   assert.equal(navigations, 1)
@@ -209,7 +209,7 @@ for (const scenario of ['wrong organization', 'old sample', 'non-JSON response',
         response.headers = () => ({ 'content-type': 'text/html' })
         publish(page, response)
       }
-      throw new Error('NS_BINDING_ABORTED')
+      throw new Error('net::ERR_ABORTED')
     }
     const rejected = assert.rejects(adapter.readBalance(), { code: 'platform_balance_unavailable' })
     await nextTurn()
@@ -248,7 +248,7 @@ for (const mode of ['cancel', 'close']) {
     const { page, adapter } = adapterFixture()
     const controller = new AbortController()
     page.goto = async () => {
-      throw new Error('NS_BINDING_ABORTED')
+      throw new Error('net::ERR_ABORTED')
     }
     const pending = adapter.readBalance({ signal: controller.signal })
     const rejected = assert.rejects(pending, mode === 'close' ? { code: 'platform_browser_closed' } : /cancel fixture/)
