@@ -107,6 +107,8 @@ jobs:
             ${{ steps.meta.outputs.image }}:${{ github.ref_name }}-amd64
           cache-from: type=gha,scope=vm2api-amd64
           cache-to: type=gha,scope=vm2api-amd64,mode=max
+      - name: install release verification dependencies
+        run: npm ci --omit=dev --ignore-scripts
       - name: extract and verify all 23 draft assets from that image
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -201,6 +203,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: install release verification dependencies
+        run: npm ci --omit=dev --ignore-scripts
       - name: refill and verify the draft from the exact validation image
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
