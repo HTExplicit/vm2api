@@ -130,7 +130,10 @@ jobs:
             test/unit/database.test.mjs \
             test/unit/backup-service.test.mjs \
             test/unit/go-worker-client.test.mjs \
+            test/unit/go-worker-client-codec.test.mjs \
+            test/unit/inference-codec.test.mjs \
             test/unit/outbound-log-envelope.test.mjs \
+            test/unit/outbound-official-capture.test.mjs \
             test/unit/panel-billing-lookup.test.mjs \
             test/unit/sqlite-pool.test.mjs \
             test/unit/write-behind.test.mjs \
@@ -161,6 +164,9 @@ jobs:
             test/unit/api-scheduler.test.mjs \
             test/unit/failover-runner.test.mjs \
             test/unit/pool-scheduler.test.mjs \
+            test/unit/scheduler-fastpath.test.mjs \
+            test/unit/seat-planner.test.mjs \
+            test/unit/quota-critical-band.test.mjs \
             test/unit/api-endpoints.test.mjs \
             test/unit/api-channel-routing.test.mjs \
             test/unit/anthropic-console.test.mjs \
@@ -196,6 +202,9 @@ jobs:
             test/unit/crag-v2-credential-health.test.mjs \
             test/unit/guest-oauth-transparent-egress.test.mjs \
             test/unit/kvm-runtime.test.mjs \
+            test/unit/kernel-cpu.test.mjs \
+            test/unit/guest-identity-reader.test.mjs \
+            test/unit/telemetry-status.test.mjs \
             test/unit/panel-subscription.test.mjs \
             test/unit/jev-account-scope.test.mjs \
             test/unit/jev-intercept.test.mjs \
@@ -298,6 +307,7 @@ jobs:
           pnpm exec vitest run src/features/vm/engine-editor.test.tsx src/lib/slash-line.test.ts src/features/vm/engine-contract.test.ts src/features/vm/persona-contract.test.ts src/lib/wrap-health.test.ts src/features/system/compat-patch.test.ts
           pnpm exec vitest run src/config/nav.test.ts src/features/auth/route-guard.test.ts src/features/users/user-concurrency.test.ts src/features/vm/vm-perms.test.ts
           pnpm exec vitest run src/lib/session-cache.test.ts src/lib/api.test.ts src/features/vm/use-vm-test-chat.test.tsx
+          pnpm exec vitest run src/lib/random-uuid.test.ts
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx
           pnpm exec vitest run src/features/cluster/model.test.ts src/features/cluster/connection-rows.test.ts
           pnpm build

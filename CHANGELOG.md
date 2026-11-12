@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.4.7301 — 2026-11-12
+
+- 合入官方 1.4.073（`85ddba03`）：调度执行许可原子交接、大包 JSON 异步编解码、Codex kernel 0.1.2、0.167.1 兼容画像与 ultra、Claude CLI 文件监看修复、工具 reference 改写，以及 CRAG 实时能力、cwd 和认证网关策略。
+- 保留 6902 空容器前不提交流、同号重试、真实 Responses 终态及失败用量；保留账号 API、权限、脱敏/JEV、鹈鹕、备份恢复、性能优化和现用登录分工。既有槽不因 CPU 启动策略而重建。
+- 22 个载荷附件从同一最终镜像 digest 提取（21 个上游固定资产、源码 egress），另附 build-provenance.json，共 23 个附件。新增配套签名 CRAG 归档，来源区分官方 072 构建记录与 073 CRAG 签名/发布出处；cc-node 继续可选，仅发布 amd64。
+- CRAG 默认拉取当前 fork 的固定配套 Release；显式其他标签仍从供应仓获取。零 CRAG 槽仍下载并校验，不激活授权或切换现有内核。统一收尾仅对变化的 wrap Claude 执行一次排空安装；Codex 通过正常控制面替换和启动恢复激活新进程。
+
+使用正常面板升级并核对实际运行二进制。保留原启停、人工调度、凭据及配置；不覆盖 routing、vms、data、.env。无新增数据库迁移或依赖变更，不增加重试，不自动登录或调用模型。已保存的 Codex UA 不随源码默认覆盖，需显式保存新画像；Analytics 与 client_features 沿用现值。
+
 ## 1.4.6902 — 2026-11-11
 
 - 修复 Codex 空 message/reasoning 容器事件过早提交流的问题：真正生成内容前保留现有同号重试机会，失败首轮的元数据不下发给客户端；真实文本、思考、工具及图像输出后保持单次交付。
@@ -18,6 +27,43 @@
 - 升级统一收尾：可信厂包触发一次官方 CRAG 供应包更新，CLI 拉取当前 fork 标签，变化的 wrap Claude 走一次排空重启安装；取消入口后台同步与安装器重复调用。原停机保持停机，无凭据运行槽恢复实际健康内核；CRAG 更新失败保留本次维护锁。
 
 使用正常面板升级，收尾会更新所选缓存与实际槽内文件，恢复原启停和人工调度意图；不覆盖 routing、vms、data、.env，不重装 Codex。手工仅替换 Compose 镜像后仍须通过内核页更新。无新增数据库迁移或依赖版本变化，不自动登录或发起模型调用。
+## 1.4.073 — 2026-11-12
+
+- 修复 CRAG 按候选槽旧快照组包、导致 `crag_prompt` 等字段在发送时丢失的问题。按本次发送所用 worker 的健康能力分别启用 append、replace、模型指令和 `caller_cwd`；旧 worker 不接收未声明支持的字段。
+- 从本轮原始 Anthropic 顶层 `system` 提取有效的 `<cwd>` 声明，只从 CRAG 提示词投影移除原声明，不删除同值历史。脱敏后仍有效的目录通过已认证的内部 envelope 传给原生内核，仅用于模型环境事实，不改变实际工作目录。
+- 发布 CRAG 原生内核 `98807b69` 的签名加密包，内置官方 Claude Code 2.1.321。健康 worker 按 vm2api 的队列、超时和热会话保留设置执行；旧 worker 保留原逻辑。升级网关并切换目标槽的运行内核后才生效。
+
+## 1.4.072 — 2026-11-12
+
+- 管理端在非安全上下文（HTTP）下生成 Idempotency-Key 等 UUID 时不再依赖 `crypto.randomUUID`，限额重置确认框可正常打开（#970）。
+- 升级时以槽位容器默认用户（而非 root）停止旧的 `kin-worker telemetry`，避免 `cap-drop ALL` 下 `legacy_telemetry_stop_failed`（#954）。
+- 第三方出站工具名改写为 `mcp__` 时，同步改写历史 `tool_result` 内 `tool_reference.tool_name` 与 `tool_search_tool_result.tool_references[].tool_name`，修复工具搜索下一轮 400（#953）。
+- 全量重新打包 Linux payload：重编 Claude wrap kernel / CLI、Codex kernel、OAuth / computer helper 和 Go worker / egress / slot gate，同步更新 ARM64 CLI 双重摘要。Codex 从相同提交复编，产物摘要不变。第三方 glibc、已签名 CRAG 包及兼容附件沿用校验过的上游字节。
+
+## 1.4.071 — 2026-11-12
+
+- 以云端最新主分支和最新正式版 `v1.4.070` 的完整合并结果发版，不用独立内核 Release 替代应用交付。应用版本、全量 payload 清单、完整附件和 amd64/arm64 控制面镜像统一到本版本；发布工作流上传全部 pinned 资产，不再只列九个 amd64 文件。
+- 全量 payload 纳入 Codex kernel `0.1.2`，`fetch:payload` 不再恢复旧 `0.1.0`。包括 SSE 字节/CRLF 与跨 chunk UTF-8 解码、严格事件终态判定、20 MiB WebSocket 图像帧完整性及内部命名迁移；历史组件资产保持不变。来源与完整资产列表见 `docs/releases/v1.4.071-binaries.json`。
+- Codex 客户端兼容 pin 为官方 `0.167.1`，补齐 Astra、6.1 Sol/Terra 和 5.6 家族回退目录，账号实时目录仍优先、新增型号默认关闭，不虚构 6.2 ID 或能力。修复 `ultra` 降级及 Completions 推理参数丢失，槽位测试、计划和日志同步支持。
+- Codex Analytics 使用槽内采集的 OS、`VERSION_ID` 和架构，经每请求选项热传递，不读取控制面宿主环境。缺失时仅跳过上报，保留官方事件、账号鉴权和槽位出口，不上传硬件标识或正文，沿用已保存的隐私开关。
+- 出站身份从已选 UA 构造 originator/version，调用方不能覆盖，正确解析 `Codex Desktop/...`。协议页 `cc_entrypoint` 在公共出站头和 worker envelope 实际生效，不再被槽位旧入口覆盖；保留版本 pin 和 inference-only 凭证边界。
+- 保留 `v1.4.070` 的 Claude `2.1.321` 文件监看崩溃修复、匹配的 ARM64 CLI/源码双重 pin，以及 CRAG 集群发布签名清单的修复；其余已发布 kernel/helper、CRAG 包与签名权威不变。
+- 请求执行许可由单个调度器同步授予；归还时先把许可交给通过实时准入的排队请求，再唤醒它。会话席位和粘性绑定不占用执行许可；取消、请求准备失败和故障转移按各次尝试归还自己的许可。
+- 面板最多使用两个按需 worker 处理大包推理 JSON 编码与缓冲回包解码；小包和超预算任务留在原线程，成功 SSE 的提交与回调顺序不变。worker 失败仅回退编解码，不重发请求。
+- 新建的 Claude Docker 槽和新装的 KVM guest 启动时按可用 CPU 设置 Tokio worker 数；不改变 CPU 配额、KVM vCPU 数或账号并发。Docker 兼容原启动命令，既有 KVM 磁盘不自动迁移。
+
+已部署机升级：完整更新 Node 源码、前端、VERSION 与全部 pinned 出厂文件，再重启 Node。官方 Claude CLI 必须持久切换到本版包，并对明确选中的槽位排空、同步和重启 dataplane；只换出厂文件或临时替换 current 不等于激活。保留用户自定义内核、账号、授权、配置与运行数据，已停止槽不强启；远端槽需另行明确维护范围，不做无差别重建。不要覆盖 `routing.json`、`.env`、`vms/`、`data/`，不要 `docker rm` 槽。
+
+验证边界：按要求不等待 GitHub CI；发布构建、附件校验和线上验收分别留证。ARM64 镜像冒烟不等同于原生 ARM 大并发验收，未通过调大既有 stdin 保护超时掩盖性能限制。
+
+## 1.4.070 - 2026-11-11
+
+- 更新 cli-node 2.1.321：文件监看事件未提供 filename 时，按完整配置失效处理，避免 undefined.toString() 导致 CLI 退出、槽位自动恢复耗尽。
+- 同步固定 amd64 CLI 的大小、SHA256 与 ARM64 原生 CLI 的嵌入源码 SHA256，修复只更新二进制 pin 后 ARM64 构建失败的问题。
+- 为 v1.4.057-v1.4.069 追加同一修复 CLI 及保持各版其他 payload 不变的升级清单；保留原 tag、附件和历史镜像，不破坏旧清单的完整性校验。用法见 docs/releases/cli321-watchfix/README.md。
+
+升级后仍需通过面板排空并重启所选 Claude 槽位，确认运行中 CLI 已更换；仅更新出厂文件不等于已修复现有进程。本次不修改恢复次数，也不处理独立的 OOM 问题。
+
 
 ## 1.4.069 — 2026-11-11
 
@@ -29,7 +75,6 @@
 ## 1.4.068 - 2026-11-11
 
 - 修正 ARM64 原生 CLI 构建 pin，与 2.1.321 UPX payload 的精确 SHA 一致；发布 payload tag 使用标准 vm2api 版本格式，避免内核页拒绝非版本 tag。
-
 
 ## 1.4.067 — 2026-11-11
 
