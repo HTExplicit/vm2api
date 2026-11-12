@@ -788,11 +788,9 @@ export function SlotBrowserDialog({
           </p>
         ) : null}
         {error &&
-        [
-          'browser_not_installed',
-          'browser_key_missing',
-          'key_missing',
-        ].includes(errorCode) ? (
+        ['browser_not_installed', 'browser_key_required'].includes(
+          errorCode
+        ) ? (
           <a
             href='#/settings/openai'
             className='text-sm text-primary underline underline-offset-4'

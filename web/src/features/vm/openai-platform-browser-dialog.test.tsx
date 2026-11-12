@@ -263,7 +263,7 @@ describe('Platform key setup handoff', () => {
       data: JSON.stringify({
         type: 'status',
         status: 'error',
-        error: 'browser_key_missing',
+        error: 'browser_key_required',
         message: '请先配置 CloakBrowser key',
       }),
     })

@@ -204,6 +204,11 @@ for (const cleanupFails of [false, true]) {
         },
       },
       openaiApiManager: stop('account-api'),
+      accountBrowserRuntime: {
+        shutdown: async () => {
+          events.push('browser-runtime')
+        },
+      },
       stopVmWatch() {
         events.push('watch')
       },
@@ -233,9 +238,10 @@ for (const cleanupFails of [false, true]) {
       })
       response.end()
       await pending
-      for (const service of ['oauth', 'browser', 'account-api'])
+      for (const service of ['oauth', 'browser', 'account-api', 'browser-runtime'])
         assert.equal(events.filter((name) => name === service).length, 1)
       assert.ok(events.indexOf('database') > events.indexOf('account-api'))
+      assert.ok(events.indexOf('database') > events.indexOf('browser-runtime'))
       assert.ok(events.indexOf('jev-recorder-off') < events.indexOf('database'))
       assert.equal(events.at(-1), `exit:${cleanupFails ? 1 : 0}`)
       persisted = new DatabaseSync(path.join(dir, 'kin.db'), { readOnly: true })

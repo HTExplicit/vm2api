@@ -473,10 +473,11 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       .prepare('SELECT * FROM api_endpoints WHERE id = ?')
       .get('legacy')
     assert.equal(beforeRisk, 0)
-    const legacyMigration = db
-      .prepare("SELECT checksum, applied_at FROM schema_migrations WHERE version = '054'")
-      .get()
-    assert.deepEqual(applyMigrations(db, { migrationsDir: src }), ['054_api_keys_allowed_models.sql'])
+    const legacyMigration = db.prepare("SELECT checksum, applied_at FROM schema_migrations WHERE version = '054'").get()
+    assert.deepEqual(applyMigrations(db, { migrationsDir: src }), [
+      '054_api_keys_allowed_models.sql',
+      '056_cloakbrowser_web_sessions.sql',
+    ])
     const { risk_review_enabled, ...after } = db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy')
     assert.equal(risk_review_enabled, 0)
     assert.deepEqual(after, before)
