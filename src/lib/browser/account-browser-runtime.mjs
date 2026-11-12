@@ -400,6 +400,8 @@ export async function runLocalBrowserFixture({ signal } = {}) {
     signal?.throwIfAborted()
     await context.route('**/*', (route) => route.abort())
     const page = context.pages()[0] || (await context.newPage())
+    await page.bringToFront()
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
     await page.setContent(
       '<!doctype html><meta charset="utf-8"><label>Name <input id="name"></label><button onclick="document.querySelector(\'output\').textContent=document.querySelector(\'input\').value">Check</button><output></output>',
     )

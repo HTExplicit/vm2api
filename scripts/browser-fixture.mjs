@@ -32,9 +32,14 @@ export async function createBrowserFixture({
     // Scenario-specific handlers override this catch-all. The dead proxy also
     // prevents unmatched requests from reaching a real account or website.
     await context.route('**/*', (route) => route.abort())
+    const page = context.pages()[0] || (await context.newPage())
+    // Persistent-context launch can resolve before the headed window has
+    // presented a frame, especially when restoring a maximized profile.
+    await page.bringToFront()
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
     return {
       context,
-      page: context.pages()[0] || (await context.newPage()),
+      page,
       version: context.browser().version(),
       storageState: () => context.storageState({ indexedDB: true }),
       close,
