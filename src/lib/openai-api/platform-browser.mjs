@@ -181,10 +181,10 @@ export async function createPlatformBrowserSession(
       if (!temporaryCleared) {
         captureTemporaryPaths()
         const report = await temporary.cleanup({ paths: temporaryPaths || [] })
-        if (temporary.enabled && (report.failed.length || report.skipped.length)) {
-          throw problem('browser_temp_cleanup_failed', report.warning || '浏览器临时文件清理未完成，请重试关闭。')
-        }
-        if (report.warning) warning = [warning, report.warning].filter(Boolean).join(' ')
+        const cleanupWarning =
+          report.warning ||
+          (report.failed.length || report.skipped.length ? '浏览器已关闭，部分临时文件未清理。' : null)
+        if (cleanupWarning) warning = [warning, cleanupWarning].filter(Boolean).join(' ')
         temporaryCleared = true
       }
     })().finally(() => {
@@ -231,7 +231,9 @@ export async function createPlatformBrowserSession(
       get warning() {
         return warning
       },
-      storageState: () => context.storageState({ indexedDB: true }),
+      // The persistent profile owns localStorage and IndexedDB. Billing only
+      // needs cookies; a blocked IndexedDB upgrade must not delay browser close.
+      storageState: async () => ({ cookies: await context.cookies(), origins: [] }),
       close,
     }
   } catch (error) {

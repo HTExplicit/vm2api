@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Download, Monitor, RefreshCw } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -24,6 +24,16 @@ const PHASE_LABELS: Record<string, string> = {
   testing: '正在验证浏览器',
   ready: '安装与验证完成',
   failed: '安装未完成',
+}
+
+function compareVersions(left: string, right: string) {
+  const a = left.split('.').map(Number)
+  const b = right.split('.').map(Number)
+  for (let index = 0; index < Math.max(a.length, b.length); index++) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0)
+    if (difference) return Math.sign(difference)
+  }
+  return 0
 }
 
 export function AccountBrowserSection() {
@@ -78,10 +88,42 @@ export function AccountBrowserSection() {
     onError,
     onSuccess: updateStatus,
   })
+  const { reset: resetCheck } = check
+  const { reset: resetInstall } = install
+  const installationFinished = install.isSuccess && data?.installing === false
+  const installationSucceeded = data?.phase === 'ready' && !data.last_error
+  useEffect(() => {
+    if (!installationFinished) return
+    if (installationSucceeded) resetCheck()
+    resetInstall()
+  }, [installationFinished, installationSucceeded, resetCheck, resetInstall])
   const changingKey = save.isPending || clear.isPending
   const installing = data?.installing || install.isPending
+  const checkFailed =
+    check.isError ||
+    status.isError ||
+    data?.last_error?.code === 'browser_update_check_failed'
+  const versionOrder =
+    data?.installed_version &&
+    data.latest_version &&
+    !checkFailed &&
+    !check.isPending
+      ? compareVersions(data.latest_version, data.installed_version)
+      : null
+  const updateLabel = !data?.installed_version
+    ? '安装浏览器'
+    : versionOrder === null
+      ? '请先检查更新'
+      : versionOrder === 0
+        ? '已是最新'
+        : versionOrder < 0
+          ? '无需更新'
+          : '更新浏览器'
   const error =
-    actionError || status.error?.message || data?.last_error?.message
+    actionError ||
+    check.error?.message ||
+    status.error?.message ||
+    data?.last_error?.message
   const stateLabel = installing
     ? '安装中'
     : !data
@@ -115,7 +157,10 @@ export function AccountBrowserSection() {
             ['启动器版本', data.launcher_version],
             ['已安装内核', data.installed_version || '尚未安装'],
             ['运行中版本', data.running_version || '未运行'],
-            ['最新稳定版', data.latest_version || '尚未检查'],
+            [
+              '最新稳定版',
+              checkFailed ? '检查失败' : data.latest_version || '尚未检查',
+            ],
           ].map(([label, value]) => (
             <div key={label} className='min-w-0 space-y-1'>
               <dt className='text-xs text-muted-foreground'>{label}</dt>
@@ -199,14 +244,15 @@ export function AccountBrowserSection() {
               data.browser_busy ||
               installing ||
               changingKey ||
-              check.isPending
+              check.isPending ||
+              (!!data.installed_version && versionOrder !== 1)
             }
             loading={installing}
-            aria-label={data?.installed_version ? '更新浏览器' : '安装浏览器'}
+            aria-label={updateLabel}
             onClick={() => install.mutate()}
           >
             <Download aria-hidden />
-            {data?.installed_version ? '更新浏览器' : '安装浏览器'}
+            {updateLabel}
           </Button>
         </div>
         {data?.browser_busy ? (

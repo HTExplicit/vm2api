@@ -20,6 +20,16 @@ function problem(code, message, status = 409) {
   return Object.assign(new Error(message), { code, status, publicMessage: message })
 }
 
+function compareVersions(left, right) {
+  const a = left.split('.').map(Number)
+  const b = right.split('.').map(Number)
+  for (let index = 0; index < Math.max(a.length, b.length); index++) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0)
+    if (difference) return difference
+  }
+  return 0
+}
+
 export function safeAccountBrowserError(error) {
   const code = /^[a-z][a-z0-9_]{0,63}$/.test(error?.code || '') ? error.code : 'browser_runtime_error'
   const message = String(error?.message || '账号浏览器操作失败')
@@ -163,6 +173,7 @@ export class AccountBrowserRuntime {
     }
     this.task = null
     this.controller = null
+    this.selectorRestoreError = null
     this.stopped = false
   }
 
@@ -206,6 +217,7 @@ export class AccountBrowserRuntime {
       installed_version: installed.installed ? installed.version : null,
       running_version: this.getActiveVersion() || null,
       ...this.state,
+      last_error: this.selectorRestoreError || this.state.last_error,
       key_set: Boolean(this.repo().get(ACCOUNT_BROWSER_KEY_SETTING)),
       browser_busy: Boolean(this.getBusy()),
     }
@@ -257,11 +269,18 @@ export class AccountBrowserRuntime {
       await this.latest()
       if (this.state.phase === 'checking') this.state.phase = 'idle'
     } catch (error) {
+      const failure = problem(
+        'browser_update_check_failed',
+        safeAccountBrowserError(error).message,
+        error.status || 502,
+      )
       if (this.state.phase === 'checking') {
         this.state.phase = 'failed'
-        this.state.last_error = safeAccountBrowserError(error)
+        this.state.latest_version = null
+        this.state.checked_at = null
+        this.state.last_error = safeAccountBrowserError(failure)
       }
-      throw error
+      throw failure
     }
     return this.status()
   }
@@ -273,7 +292,7 @@ export class AccountBrowserRuntime {
     const licenseKey = this.key()
     if (!licenseKey) throw problem('browser_key_required', '请先保存 CloakBrowser 密钥', 400)
     this.state.installing = true
-    this.state.phase = 'downloading'
+    this.state.phase = 'checking'
     this.state.progress = null
     this.state.last_error = null
     this.controller = new AbortController()
@@ -299,6 +318,11 @@ export class AccountBrowserRuntime {
       markerPath = path.join(this.cacheDir, `latest_pro_version_${before.platform}`)
       if (fs.existsSync(markerPath)) previousMarker = fs.readFileSync(markerPath, 'utf8')
       const target = await this.latest(signal)
+      signal.throwIfAborted()
+      if (before.installed && compareVersions(before.version, target) >= 0) {
+        this.state.phase = this.selectorRestoreError ? 'failed' : 'idle'
+        return
+      }
       fs.mkdirSync(this.cacheDir, { recursive: true, mode: 0o700 })
       // These are query caches, not the active binary marker or account data.
       for (const name of [
@@ -308,6 +332,7 @@ export class AccountBrowserRuntime {
         fs.rmSync(path.join(this.cacheDir, name), { force: true })
       }
       signal.throwIfAborted()
+      this.state.phase = 'downloading'
       await this.runUpdate({ cacheDir: this.cacheDir, licenseKey, signal, onOutput: (text) => this.progress(text) })
       signal.throwIfAborted()
       const installed = localBinaryInfo(this.cacheDir)
@@ -319,6 +344,7 @@ export class AccountBrowserRuntime {
       await this.runFixture({ cacheDir: this.cacheDir, licenseKey, binaryPath: installed.binaryPath, signal })
       signal.throwIfAborted()
       verified = true
+      this.selectorRestoreError = null
       this.removeOldBinaries(installed.version)
       this.state.phase = 'ready'
       this.state.progress = 100
@@ -340,6 +366,7 @@ export class AccountBrowserRuntime {
       this.state.phase = 'failed'
       this.state.progress = null
       this.state.last_error = safeAccountBrowserError(failure)
+      if (failure.code === 'browser_selector_restore_failed') this.selectorRestoreError = this.state.last_error
     } finally {
       this.state.installing = false
       this.controller = null
@@ -360,8 +387,8 @@ export class AccountBrowserRuntime {
   launchConfig() {
     if (this.stopped) throw problem('browser_runtime_stopped', '账号浏览器服务正在关闭', 503)
     if (this.isInstalling) throw problem('browser_installing', '账号浏览器正在安装更新')
-    if (this.state.last_error?.code === 'browser_selector_restore_failed') {
-      throw problem('browser_selector_restore_failed', this.state.last_error.message, 503)
+    if (this.selectorRestoreError) {
+      throw problem('browser_selector_restore_failed', this.selectorRestoreError.message, 503)
     }
     const licenseKey = this.key()
     if (!licenseKey) throw problem('browser_key_required', '请先在账号浏览器设置中保存 CloakBrowser 密钥', 400)

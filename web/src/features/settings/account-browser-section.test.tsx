@@ -1,5 +1,10 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes } from 'react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import {
+  QueryClient,
+  QueryClientProvider,
+  type MutationObserver,
+  type UseMutationOptions,
+} from '@tanstack/react-query'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -10,16 +15,48 @@ import { AccountBrowserSection } from './account-browser-section'
 
 const controls = vi.hoisted(() => ({
   cursor: 0,
+  mutationCursor: 0,
+  mutations: [] as MutationObserver<unknown, Error, void, unknown>[],
   hooks: [] as unknown[],
+  effects: [] as (() => void)[],
   buttons: [] as ButtonHTMLAttributes<HTMLButtonElement>[],
   inputs: [] as InputHTMLAttributes<HTMLInputElement>[],
   api: vi.fn(),
 }))
 
+// Manual server renders have no mounted hook subscriptions. Retain the real
+// mutation observers so explicit rerenders can exercise their pending/error state.
+vi.mock('@tanstack/react-query', async (original) => {
+  const query = await original<typeof import('@tanstack/react-query')>()
+  return {
+    ...query,
+    useMutation: (
+      options: UseMutationOptions<unknown, Error, void, unknown>
+    ) => {
+      const index = controls.mutationCursor++
+      const observer = (controls.mutations[index] ||=
+        new query.MutationObserver(client, options))
+      observer.setOptions(options)
+      return {
+        ...observer.getCurrentResult(),
+        mutate: () => void observer.mutate().catch(() => {}),
+      }
+    },
+  }
+})
+
 vi.mock('react', async (original) => {
   const react = await original<typeof import('react')>()
   return {
     ...react,
+    useEffect: (effect: () => void, deps: readonly unknown[]) => {
+      const index = controls.cursor++
+      const previous = controls.hooks[index] as readonly unknown[] | undefined
+      if (!previous || deps.some((value, item) => value !== previous[item])) {
+        controls.hooks[index] = deps
+        controls.effects.push(effect)
+      }
+    },
     useState: (initial: unknown) => {
       const index = controls.cursor++
       if (!(index in controls.hooks))
@@ -78,13 +115,16 @@ function setStatus(patch: Partial<AccountBrowserStatus> = {}) {
 
 function render() {
   controls.cursor = 0
+  controls.mutationCursor = 0
   controls.buttons = []
   controls.inputs = []
-  return renderToStaticMarkup(
+  const html = renderToStaticMarkup(
     <QueryClientProvider client={client}>
       <AccountBrowserSection />
     </QueryClientProvider>
   )
+  for (const effect of controls.effects.splice(0)) effect()
+  return html
 }
 
 function button(label: string) {
@@ -95,9 +135,45 @@ function button(label: string) {
   return found!
 }
 
+async function installAfterFailedCheck() {
+  setStatus({ key_set: true })
+  render()
+  controls.api.mockRejectedValueOnce(new Error('此前版本检查失败'))
+  button('检查更新').onClick!({} as never)
+  await vi.waitFor(() => expect(render()).toContain('此前版本检查失败'))
+  controls.api.mockResolvedValueOnce({
+    ...initial,
+    key_set: true,
+    installing: true,
+    phase: 'downloading',
+  })
+  button('安装浏览器').onClick!({} as never)
+  await vi.waitFor(() =>
+    expect(
+      client.getQueryData<AccountBrowserStatus>(['account-browser'])?.installing
+    ).toBe(true)
+  )
+  expect(render()).toContain('此前版本检查失败')
+}
+
+function completeInstallation() {
+  setStatus({
+    key_set: true,
+    installed_version: '156.0.8078.47.1',
+    latest_version: '156.0.8078.47.1',
+    installing: false,
+    phase: 'ready',
+    last_error: null,
+  })
+  render()
+  return render()
+}
+
 beforeEach(() => {
   controls.cursor = 0
+  controls.mutations = []
   controls.hooks = []
+  controls.effects = []
   controls.api.mockReset()
   client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -107,6 +183,50 @@ beforeEach(() => {
 afterEach(() => client.clear())
 
 describe('account browser management', () => {
+  it('clears an earlier failed check only after the accepted installation finishes successfully', async () => {
+    await installAfterFailedCheck()
+    const html = completeInstallation()
+    expect(html).not.toContain('此前版本检查失败')
+    expect(html).not.toContain('检查失败')
+    expect(html).toContain('浏览器已就绪')
+    expect(button('已是最新').disabled).toBe(true)
+  })
+
+  it('keeps a new failed check after an installation has already completed', async () => {
+    await installAfterFailedCheck()
+    completeInstallation()
+    controls.api.mockRejectedValueOnce(new Error('新一次版本检查失败'))
+    button('检查更新').onClick!({} as never)
+    await vi.waitFor(() => expect(render()).toContain('新一次版本检查失败'))
+    const html = render()
+    expect(html).toContain('新一次版本检查失败')
+    expect(html).not.toContain('已是最新')
+    expect(button('请先检查更新').disabled).toBe(true)
+  })
+
+  it.each([
+    [null, null, '安装浏览器', false],
+    ['156.0.8078.47.1', null, '请先检查更新', true],
+    ['156.0.8078.47.1', '156.0.8078.47.1', '已是最新', true],
+    ['156.0.1', '156.0.1.0', '已是最新', true],
+    ['156.0.10', '156.0.9', '无需更新', true],
+    ['156.0.9', '156.0.10', '更新浏览器', false],
+    ['156.0.1', '156.0.1.0.1', '更新浏览器', false],
+  ] as const)(
+    'compares installed %s with latest %s before offering an update',
+    (installed, latest, label, disabled) => {
+      setStatus({
+        key_set: true,
+        installed_version: installed,
+        latest_version: latest,
+      })
+      render()
+      const action = button(label)
+      expect(action.disabled).toBe(disabled)
+      expect(action['aria-label']).toBe(label)
+    }
+  )
+
   it('shows setup and versions without installing or checking upstream on render', () => {
     const html = render()
     expect(html).toContain('待配置')
@@ -241,5 +361,73 @@ describe('account browser management', () => {
     const html = render()
     expect(html).toContain('无法查询官方版本，请重试')
     expect(html).not.toContain('已是最新')
+    expect(button('请先检查更新').disabled).toBe(true)
+    controls.inputs[0].onChange!({
+      target: { value: 'replacement-key' },
+    } as never)
+    expect(render()).toContain('无法查询官方版本，请重试')
+    controls.api.mockResolvedValue({
+      ...initial,
+      key_set: true,
+      installed_version: '156.0.1',
+      latest_version: '156.0.2',
+    })
+    button('检查更新').onClick!({} as never)
+    await vi.waitFor(() =>
+      expect(
+        client.getQueryData<AccountBrowserStatus>(['account-browser'])
+          ?.latest_version
+      ).toBe('156.0.2')
+    )
+    expect(render()).not.toContain('无法查询官方版本，请重试')
+    expect(button('更新浏览器').disabled).toBe(false)
+  })
+
+  it('requires a successful check after a persisted check failure, including remounts', async () => {
+    const checked = {
+      ...initial,
+      key_set: true,
+      installed_version: '156.0.9',
+      latest_version: '156.0.10',
+      checked_at: '2026-11-13T02:00:00Z',
+    }
+    setStatus({
+      ...checked,
+      phase: 'failed',
+      last_error: {
+        code: 'browser_update_check_failed',
+        message: '官方版本检查超时',
+      },
+    })
+    expect(render()).toContain('官方版本检查超时')
+    expect(button('请先检查更新').disabled).toBe(true)
+    controls.api.mockResolvedValue({
+      ...checked,
+      phase: 'idle',
+      last_error: null,
+    })
+    button('检查更新').onClick!({} as never)
+    await vi.waitFor(() =>
+      expect(
+        client.getQueryData<AccountBrowserStatus>(['account-browser'])
+          ?.last_error
+      ).toBe(null)
+    )
+    const html = render()
+    expect(html).not.toContain('官方版本检查超时')
+    expect(button('更新浏览器').disabled).toBe(false)
+  })
+
+  it('allows retrying a newer installation after a non-check failure', () => {
+    setStatus({
+      key_set: true,
+      installed_version: '156.0.9',
+      latest_version: '156.0.10',
+      phase: 'failed',
+      last_error: { code: 'browser_install_failed', message: '内核下载失败' },
+    })
+    const html = render()
+    expect(html).toContain('内核下载失败')
+    expect(button('更新浏览器').disabled).toBe(false)
   })
 })

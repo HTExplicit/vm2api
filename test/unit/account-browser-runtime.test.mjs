@@ -106,6 +106,96 @@ test('status is local and fresh update checking sends platform only', async (t) 
   assert.equal(calls[0].url, 'https://cloakbrowser.dev/api/download/version')
 })
 
+test('a failed check invalidates the old comparison until a new check succeeds', async (t) => {
+  let failing = false
+  const { runtime, binary } = fixture(t, {
+    fetch: async () => {
+      if (failing) throw new Error('version service unavailable')
+      return { ok: true, json: async () => ({ version: NEW }) }
+    },
+  })
+  binary(NEW)
+  await runtime.check()
+  failing = true
+  await assert.rejects(runtime.check(), {
+    code: 'browser_update_check_failed',
+    publicMessage: 'version service unavailable',
+  })
+  assert.equal(runtime.status().latest_version, null)
+  assert.equal(runtime.status().checked_at, null)
+  assert.equal(runtime.status().last_error.code, 'browser_update_check_failed')
+  runtime.setKey('cb_test_key')
+  assert.equal(runtime.status().latest_version, null)
+  failing = false
+  const state = await runtime.check()
+  assert.equal(state.latest_version, NEW)
+  assert.equal(state.last_error, null)
+})
+
+test('same or older targets end after a fresh check without updating, testing or cleaning', async (t) => {
+  for (const [installed, target] of [
+    [NEW, NEW],
+    [NEW, OLD],
+    ['156.0.8078.47', '156.0.8078.47.0'],
+    ['156.0.8078.47.0', '156.0.8078.47'],
+  ]) {
+    await t.test(`${installed} -> ${target}`, async (t) => {
+      let checks = 0
+      let wakeups = 0
+      const { runtime, binary } = fixture(t, {
+        fetch: async () => {
+          checks++
+          return { ok: true, json: async () => ({ version: target }) }
+        },
+        runUpdate: async () => assert.fail('must not invoke updater'),
+        runFixture: async () => assert.fail('must not launch a test browser'),
+        onIdle: () => wakeups++,
+      })
+      runtime.removeOldBinaries = () => assert.fail('must not clean older binaries')
+      runtime.setKey('cb_test_key')
+      binary(installed)
+      const cache = path.join(runtime.cacheDir, `.last_pro_version_check_${PLATFORM}`)
+      fs.writeFileSync(cache, 'keep existing cache')
+      runtime.state.latest_version = '999.0.0.0.1'
+      assert.equal(runtime.install().phase, 'checking')
+      await runtime.task
+      const state = runtime.status()
+      assert.equal(checks, 1)
+      assert.equal(wakeups, 1)
+      assert.equal(state.latest_version, target)
+      assert.equal(state.installed_version, installed)
+      assert.equal(state.installing, false)
+      assert.equal(state.phase, 'idle')
+      assert.equal(state.progress, null)
+      assert.equal(state.last_error, null)
+      assert.equal(fs.readFileSync(cache, 'utf8'), 'keep existing cache')
+      assert.equal(fs.readFileSync(path.join(runtime.cacheDir, `latest_pro_version_${PLATFORM}`), 'utf8'), installed)
+    })
+  }
+})
+
+test('version components compare numerically when installing a newer target', async (t) => {
+  const target = '156.0.8078.10.1'
+  let updates = 0
+  let tests = 0
+  const { runtime, binary } = fixture(t, {
+    fetch: async () => ({ ok: true, json: async () => ({ version: target }) }),
+    runUpdate: async () => {
+      updates++
+      binary(target)
+    },
+    runFixture: async () => tests++,
+  })
+  runtime.setKey('cb_test_key')
+  binary('156.0.8078.9.1')
+  runtime.install()
+  await runtime.task
+  assert.equal(updates, 1)
+  assert.equal(tests, 1)
+  assert.equal(runtime.status().installed_version, target)
+  assert.equal(runtime.status().phase, 'ready')
+})
+
 test('installation reserves synchronously and only removes old binaries after fixture closes', async (t) => {
   let release
   let fixtureFinished = false
@@ -213,6 +303,49 @@ test('selector restoration failure is recorded without rejecting the background 
   assert.equal(runtime.status().last_error.code, 'browser_selector_restore_failed')
   assert.equal(runtime.isInstalling, false)
   assert.throws(() => runtime.launchConfig(), { code: 'browser_selector_restore_failed' })
+})
+
+test('a same-version no-op or successful check cannot clear unresolved selector recovery failure', async (t) => {
+  let target = NEW
+  let updates = 0
+  let fixtures = 0
+  let fixtureFails = true
+  const { runtime, binary } = fixture(t, {
+    fetch: async () => ({ ok: true, json: async () => ({ version: target }) }),
+    runUpdate: async () => {
+      updates++
+      binary(target)
+    },
+    runFixture: async () => {
+      fixtures++
+      if (fixtureFails) throw new Error('fixture failed')
+    },
+  })
+  runtime.setKey('cb_test_secret')
+  binary(OLD)
+  runtime.restoreSelector = () => {
+    throw new Error('disk full')
+  }
+  runtime.install()
+  await runtime.task
+  assert.equal(runtime.status().last_error.code, 'browser_selector_restore_failed')
+  runtime.install()
+  await runtime.task
+  assert.equal(updates, 1)
+  assert.equal(fixtures, 1)
+  assert.equal(runtime.status().phase, 'failed')
+  await runtime.check()
+  runtime.setKey('cb_replacement')
+  assert.equal(runtime.status().last_error.code, 'browser_selector_restore_failed')
+  assert.throws(() => runtime.launchConfig(), { code: 'browser_selector_restore_failed' })
+  target = '156.0.8078.48.1'
+  fixtureFails = false
+  runtime.install()
+  await runtime.task
+  assert.equal(runtime.status().phase, 'ready')
+  assert.equal(runtime.status().last_error, null)
+  assert.equal(fixtures, 2)
+  assert.doesNotThrow(() => runtime.launchConfig())
 })
 
 test('busy browsers prevent install before any work and shutdown aborts its own task', async (t) => {

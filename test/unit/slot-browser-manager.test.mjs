@@ -458,6 +458,24 @@ test('session save failure remains a warning after resources close and the queue
   assert.equal((await next).vmId, 'b')
 })
 
+test('cleanup warnings after resource exit close the slot and release the browser queue', async (t) => {
+  const f = fixture(t, {
+    sessionOverrides: {
+      warning: null,
+      async close() {
+        this.warning = '浏览器已关闭，部分临时文件未清理。'
+      },
+    },
+  })
+  await f.manager.acquire('a', { interactive: true })
+  const next = f.manager.acquire('b')
+  const state = await f.manager.close('a')
+  assert.equal(state.status, 'closed')
+  assert.equal(state.active, false)
+  assert.match(state.warning, /部分临时文件未清理/)
+  assert.equal((await next).vmId, 'b')
+})
+
 test('concurrent close requests share one cleanup and persist the session once', async (t) => {
   let release
   let saves = 0
