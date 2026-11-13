@@ -20,6 +20,16 @@ function problem(code, message, status = 409) {
   return Object.assign(new Error(message), { code, status, publicMessage: message })
 }
 
+function compareVersions(left, right) {
+  const a = left.split('.').map(Number)
+  const b = right.split('.').map(Number)
+  for (let index = 0; index < Math.max(a.length, b.length); index++) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0)
+    if (difference) return difference
+  }
+  return 0
+}
+
 export function safeAccountBrowserError(error) {
   const code = /^[a-z][a-z0-9_]{0,63}$/.test(error?.code || '') ? error.code : 'browser_runtime_error'
   const message = String(error?.message || '账号浏览器操作失败')
@@ -259,7 +269,9 @@ export class AccountBrowserRuntime {
     } catch (error) {
       if (this.state.phase === 'checking') {
         this.state.phase = 'failed'
-        this.state.last_error = safeAccountBrowserError(error)
+        this.state.latest_version = null
+        this.state.checked_at = null
+        this.state.last_error = { ...safeAccountBrowserError(error), code: 'browser_update_check_failed' }
       }
       throw error
     }
@@ -273,7 +285,7 @@ export class AccountBrowserRuntime {
     const licenseKey = this.key()
     if (!licenseKey) throw problem('browser_key_required', '请先保存 CloakBrowser 密钥', 400)
     this.state.installing = true
-    this.state.phase = 'downloading'
+    this.state.phase = 'checking'
     this.state.progress = null
     this.state.last_error = null
     this.controller = new AbortController()
@@ -299,6 +311,11 @@ export class AccountBrowserRuntime {
       markerPath = path.join(this.cacheDir, `latest_pro_version_${before.platform}`)
       if (fs.existsSync(markerPath)) previousMarker = fs.readFileSync(markerPath, 'utf8')
       const target = await this.latest(signal)
+      signal.throwIfAborted()
+      if (before.installed && compareVersions(before.version, target) >= 0) {
+        this.state.phase = 'idle'
+        return
+      }
       fs.mkdirSync(this.cacheDir, { recursive: true, mode: 0o700 })
       // These are query caches, not the active binary marker or account data.
       for (const name of [
@@ -308,6 +325,7 @@ export class AccountBrowserRuntime {
         fs.rmSync(path.join(this.cacheDir, name), { force: true })
       }
       signal.throwIfAborted()
+      this.state.phase = 'downloading'
       await this.runUpdate({ cacheDir: this.cacheDir, licenseKey, signal, onOutput: (text) => this.progress(text) })
       signal.throwIfAborted()
       const installed = localBinaryInfo(this.cacheDir)

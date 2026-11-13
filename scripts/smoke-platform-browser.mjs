@@ -8,6 +8,42 @@ import { BrowserStream } from '../src/lib/browser/browser-stream.mjs'
 import { verifyLocalBrowserPage } from '../src/lib/browser/local-browser-fixture.mjs'
 import { createBrowserFixture } from './browser-fixture.mjs'
 
+async function completes(promise, message) {
+  let timer
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), 5000)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function blockIndexedDbUpgrade(page) {
+  return page.evaluate(
+    () =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open('fixture', 1)
+        open.onerror = () => reject(open.error)
+        open.onsuccess = () => {
+          // Keep the v1 connection alive instead of closing on versionchange.
+          globalThis.fixtureHeldDatabase = open.result
+          const upgrade = indexedDB.open('fixture', 2)
+          globalThis.fixtureUpgrade = upgrade
+          upgrade.onblocked = () => {
+            globalThis.fixtureUpgradeBlocked = true
+            resolve(open.result.version)
+          }
+          upgrade.onupgradeneeded = () => reject(new Error('the fixture upgrade must remain blocked'))
+          upgrade.onerror = () => reject(upgrade.error)
+        }
+      }),
+  )
+}
+
 async function verifyBrowserInput(page) {
   await page.goto('data:text/html,<iframe style="position:absolute;left:200px;top:100px;border:0"></iframe>')
   const frame = page.frames().find((value) => value.parentFrame())
@@ -106,11 +142,24 @@ try {
           })
         })
         await verifyBrowserInput(session.page)
+        await session.page.goto('http://fixture.test/')
+        assert.equal(await completes(blockIndexedDbUpgrade(session.page), 'IndexedDB upgrade did not block'), 1)
+        const snapshot = await completes(session.storageState(), 'Cookie snapshot stalled behind blocked IndexedDB')
+        assert.equal(snapshot.cookies.find((value) => value.name === 'slot')?.value, 'slot-a')
+        assert.deepEqual(snapshot.origins, [], 'the HTTP snapshot must not export localStorage or IndexedDB')
+        assert.deepEqual(
+          await session.page.evaluate(() => ({
+            blocked: globalThis.fixtureUpgradeBlocked,
+            state: globalThis.fixtureUpgrade.readyState,
+          })),
+          { blocked: true, state: 'pending' },
+          'Cookie export must complete without releasing the blocked upgrade',
+        )
       } else if (attempt === 1) {
         const indexed = await session.page.evaluate(
           () =>
             new Promise((resolve, reject) => {
-              const open = indexedDB.open('fixture', 1)
+              const open = indexedDB.open('fixture')
               open.onerror = () => reject(open.error)
               open.onsuccess = () => {
                 const request = open.result.transaction('state').objectStore('state').get('slot')
@@ -131,12 +180,12 @@ try {
       }
       assert.ok(await session.page.screenshot({ type: 'jpeg' }))
     } finally {
-      await session.close()
+      await completes(session.close(), 'Browser close stalled behind blocked IndexedDB')
     }
   }
 } finally {
   await fs.rm(root, { recursive: true, force: true })
 }
 console.log(
-  'Stock Chromium: persistent Cookie/localStorage/IndexedDB, isolated profiles, screenshot and iframe input passed',
+  'Stock Chromium: blocked IndexedDB permits Cookie snapshot and close; persistent storage, isolated profiles, screenshot and iframe input passed',
 )

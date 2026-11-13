@@ -17,7 +17,8 @@ function fixture(t, changes = {}) {
     pages: () => [page],
     clearCookies: async () => calls.push(['clearCookies']),
     addCookies: async (cookies) => calls.push(['addCookies', cookies]),
-    storageState: async (options) => ({ cookies: [], origins: [], options }),
+    cookies: async () => [],
+    storageState: async () => assert.fail('native profile storage must not be exported'),
     close: async () => calls.push(['context.close']),
     ...changes.context,
   }
@@ -85,12 +86,20 @@ test('headed persistent launch leaves seed and viewport to CloakBrowser and repl
   assert.equal(session.page, f.page)
   assert.equal(session.context, f.context)
   assert.equal(session.version, 'fixture-version')
-  assert.deepEqual(await session.storageState(), { cookies: [], origins: [], options: { indexedDB: true } })
+  assert.deepEqual(await session.storageState(), { cookies: [], origins: [] })
   await session.close()
   assert.deepEqual(
     f.calls.slice(-3).map(([name]) => name),
     ['context.close', 'relay.close', 'display.close'],
   )
+})
+
+test('Billing export reads only cookies and never traverses native profile storage', async (t) => {
+  const cookies = [{ name: 'session', value: 'current', domain: 'example.test', path: '/', expires: -1 }]
+  const f = fixture(t, { context: { cookies: async () => cookies } })
+  const session = await createPlatformBrowserSession(f.options, f.dependencies)
+  assert.deepEqual(await session.storageState(), { cookies, origins: [] })
+  await session.close()
 })
 
 test('ordinary DB snapshots cannot overwrite newer native profile cookies', async (t) => {
@@ -159,6 +168,62 @@ test('a failed context close retains relay and display until a successful retry'
   assert.equal(attempts, 2)
   assert.equal(f.calls.filter(([name]) => name === 'relay.close').length, 1)
   assert.equal(f.calls.filter(([name]) => name === 'display.close').length, 1)
+})
+
+test('artifact cleanup failures and skips only warn after browser resources exit', async (t) => {
+  for (const outcome of ['failed', 'skipped']) {
+    const f = fixture(t)
+    const artifact = path.join(path.dirname(f.options.profileDir), 'playwright-artifacts-test')
+    fs.mkdirSync(artifact)
+    fs.writeFileSync(path.join(artifact, 'retain.txt'), outcome)
+    let cleanupCalls = 0
+    f.dependencies.tempCleanup.createdSince = () => [artifact]
+    f.dependencies.tempCleanup.cleanup = async ({ paths } = {}) => {
+      const report = { failed: [], skipped: [], warning: null }
+      if (paths) {
+        cleanupCalls++
+        f.calls.push(['temp.cleanup'])
+        assert.deepEqual(paths, [artifact])
+        report[outcome].push({ name: path.basename(artifact) })
+      }
+      return report
+    }
+    const session = await createPlatformBrowserSession(f.options, f.dependencies)
+    await session.close()
+    assert.match(session.warning, /部分临时文件未清理/)
+    assert.deepEqual(
+      f.calls.slice(-4).map(([name]) => name),
+      ['context.close', 'relay.close', 'display.close', 'temp.cleanup'],
+    )
+    assert.equal(fs.readFileSync(path.join(artifact, 'retain.txt'), 'utf8'), outcome)
+    await session.close()
+    assert.equal(cleanupCalls, 1)
+  }
+})
+
+test('relay and display exit failures remain retryable before artifact cleanup', async (t) => {
+  for (const resource of ['relay', 'display']) {
+    const f = fixture(t)
+    let attempts = 0
+    let cleanups = 0
+    const close = async () => {
+      f.calls.push([`${resource}.close`])
+      if (++attempts === 1) throw new Error('resource still running')
+    }
+    if (resource === 'relay') f.dependencies.createRelay = async () => ({ url: 'http://127.0.0.1:54321', close })
+    else f.dependencies.createDisplay = async () => ({ env: { DISPLAY: ':42' }, close })
+    f.dependencies.tempCleanup.cleanup = async ({ paths } = {}) => {
+      if (paths) cleanups++
+      return { failed: [], skipped: [], warning: null }
+    }
+    const session = await createPlatformBrowserSession(f.options, f.dependencies)
+    await assert.rejects(session.close())
+    assert.equal(cleanups, 0)
+    await session.close()
+    assert.equal(attempts, 2)
+    assert.equal(f.calls.filter(([name]) => name === 'context.close').length, 1)
+    assert.equal(cleanups, 1)
+  }
 })
 
 test('startup failure exposes unfinished cleanup so the shared manager can retry it', async (t) => {
