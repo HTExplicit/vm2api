@@ -26,9 +26,9 @@ async function until(predicate, message = 'key handoff did not reach the expecte
 function formPage() {
   const page = new EventEmitter()
   const calls = { navigations: [], opens: 0, submits: 0, name: '' }
-  const element = (properties) => ({ visible: true, ...properties })
+  const element = (properties) => ({ visible: true, matches: () => true, ...properties })
   const nameInput = element({ tagName: 'INPUT', fill: async (value) => (calls.name = value) })
-  const projectInput = element({ tagName: 'BUTTON', textContent: 'Default project' })
+  const projectInput = element({ tagName: 'BUTTON', innerText: 'Default project' })
   const nameLabel = element({ textContent: 'Name Optional', control: nameInput })
   const projectLabel = element({ textContent: 'Project', control: projectInput })
   const create = element({ textContent: 'Create new secret key', click: async () => calls.opens++ })
@@ -39,53 +39,44 @@ function formPage() {
       await calls.submitAction?.()
     },
   })
-  const dialog = element({ tagName: 'DIV' })
+  const dialog = element({
+    tagName: 'DIV',
+    querySelectorAll: (selector) => {
+      if (selector === 'label') return [nameLabel, projectLabel]
+      if (selector === 'aria/[role="button"]') return [submit]
+      return []
+    },
+  })
   let revealed = []
-
-  const matches = (pattern, value) => (typeof pattern === 'string' ? pattern === value : pattern.test(value))
-  function locator(values) {
+  function handle(node) {
     return {
-      count: async () => values.length,
-      first: () => locator(values.slice(0, 1)),
-      nth: (index) => locator(values.slice(index, index + 1)),
-      isVisible: async () => !!values[0]?.visible,
-      waitFor: async ({ state } = {}) => {
-        if (state !== 'hidden' && values.length !== 1) throw new Error('fixture control is absent')
+      node,
+      isVisible: async () => node.visible,
+      dispose: async () => {},
+      asElement() {
+        return node ? this : null
       },
-      filter: ({ hasText, visible } = {}) =>
-        locator(
-          values.filter(
-            (value) => (!hasText || matches(hasText, value.textContent || '')) && (!visible || value.visible),
-          ),
-        ),
-      locator: (selector) => {
-        if (selector === '..') return locator(values.map((value) => ({ ...value, parent: true })))
-        if (selector === 'label') return locator([nameLabel, projectLabel])
-        return locator(values.filter((value) => value.parent && value.control).map((value) => value.control))
-      },
-      getByLabel: () => locator([]),
-      getByText: () => locator([]),
-      getByRole: (role, { name } = {}) => {
-        if (role === 'button' && (!name || matches(name, submit.textContent))) return locator([submit])
-        return locator([])
-      },
-      fill: async (value) => values[0].fill(value),
-      click: async () => values[0]?.click?.(),
-      innerText: async () => values[0]?.textContent || '',
-      inputValue: async () => values[0]?.value || '',
-      evaluate: async (fn) => fn(values[0]),
-      evaluateAll: async () => (typeof revealed === 'function' ? revealed() : revealed),
+      evaluate: async (fn, ...args) => fn(node, ...args),
+      evaluateHandle: async (fn, ...args) => handle(fn(node, ...args)),
+      $$: async (selector) => (node.querySelectorAll?.(selector) || []).map(handle),
+      click: async () => node.click(),
+      asLocator: () => ({ click: async () => node.click(), fill: async (value) => node.fill(value) }),
     }
   }
   page.url = () => 'https://platform.openai.com/api-keys'
   page.goto = async (url) => calls.navigations.push(url)
-  page.getByRole = (role, { name } = {}) => {
-    if (role === 'dialog') return locator([dialog])
-    if (role === 'button' && (!name || matches(name, create.textContent))) return locator([create])
-    return locator([])
+  page.$$ = async (selector) => {
+    if (selector === 'dialog, [role="dialog"]') return [handle(dialog)]
+    if (selector === 'aria/[role="button"]') return [handle(create)]
+    return []
   }
-  page.locator = () => locator([element({})])
-  page.waitForTimeout = (milliseconds) => sleep(Math.min(milliseconds, 5))
+  page.accessibility = { snapshot: async ({ root }) => ({ name: root.node.textContent || '' }) }
+  page.waitForSelector = async () => handle(dialog)
+  page.waitForFunction = async () => ({ dispose: async () => {} })
+  page.$$eval = async (selector) => {
+    assert.equal(selector, 'dialog, [role="dialog"]')
+    return typeof revealed === 'function' ? revealed() : revealed
+  }
   return { page, calls, reveal: (secrets) => (revealed = secrets) }
 }
 
@@ -159,7 +150,7 @@ function fixture(t, { balanceError = null, automaticExpiration = false } = {}) {
       return {
         page,
         context: {},
-        storageState: async () => ({ cookies: [], origins: [] }),
+        exportCookies: async () => [],
         close: async () => page.emit('close'),
       }
     },
@@ -188,10 +179,19 @@ function fixture(t, { balanceError = null, automaticExpiration = false } = {}) {
           : 'https://api.openai.com/dashboard/user/api_keys',
       method: () => 'POST',
       headers: () => ({ 'openai-organization': organizationId, ...extraHeaders }),
-      postDataJSON: () =>
-        scopedPath
-          ? { action: 'create', name, scopes: ['api.all'], admin_key: false, creation_source: 'platform', ...extraBody }
-          : { name, project_id: projectId, ...extraBody },
+      fetchPostData: async () =>
+        JSON.stringify(
+          scopedPath
+            ? {
+                action: 'create',
+                name,
+                scopes: ['api.all'],
+                admin_key: false,
+                creation_source: 'platform',
+                ...extraBody,
+              }
+            : { name, project_id: projectId, ...extraBody },
+        ),
     }
     const response = {
       url: request.url,
@@ -271,7 +271,7 @@ test('the official URL-scoped creation request without project body or header sa
   const f = fixture(t)
   const live = await f.start()
   const created = f.emitCreation({ scopedPath: true })
-  assert.equal(Object.hasOwn(created.request.postDataJSON(), 'project_id'), false)
+  assert.equal(Object.hasOwn(JSON.parse(await created.request.fetchPostData()), 'project_id'), false)
   assert.equal(Object.hasOwn(created.request.headers(), 'openai-project'), false)
   f.page.emit('response', created.response)
   await f.settle()
