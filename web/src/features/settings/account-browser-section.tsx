@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Download, Monitor, RefreshCw } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -88,6 +88,15 @@ export function AccountBrowserSection() {
     onError,
     onSuccess: updateStatus,
   })
+  const { reset: resetCheck } = check
+  const { reset: resetInstall } = install
+  const installationFinished = install.isSuccess && data?.installing === false
+  const installationSucceeded = data?.phase === 'ready' && !data.last_error
+  useEffect(() => {
+    if (!installationFinished) return
+    if (installationSucceeded) resetCheck()
+    resetInstall()
+  }, [installationFinished, installationSucceeded, resetCheck, resetInstall])
   const changingKey = save.isPending || clear.isPending
   const installing = data?.installing || install.isPending
   const checkFailed =

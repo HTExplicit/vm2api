@@ -305,6 +305,49 @@ test('selector restoration failure is recorded without rejecting the background 
   assert.throws(() => runtime.launchConfig(), { code: 'browser_selector_restore_failed' })
 })
 
+test('a same-version no-op or successful check cannot clear unresolved selector recovery failure', async (t) => {
+  let target = NEW
+  let updates = 0
+  let fixtures = 0
+  let fixtureFails = true
+  const { runtime, binary } = fixture(t, {
+    fetch: async () => ({ ok: true, json: async () => ({ version: target }) }),
+    runUpdate: async () => {
+      updates++
+      binary(target)
+    },
+    runFixture: async () => {
+      fixtures++
+      if (fixtureFails) throw new Error('fixture failed')
+    },
+  })
+  runtime.setKey('cb_test_secret')
+  binary(OLD)
+  runtime.restoreSelector = () => {
+    throw new Error('disk full')
+  }
+  runtime.install()
+  await runtime.task
+  assert.equal(runtime.status().last_error.code, 'browser_selector_restore_failed')
+  runtime.install()
+  await runtime.task
+  assert.equal(updates, 1)
+  assert.equal(fixtures, 1)
+  assert.equal(runtime.status().phase, 'failed')
+  await runtime.check()
+  runtime.setKey('cb_replacement')
+  assert.equal(runtime.status().last_error.code, 'browser_selector_restore_failed')
+  assert.throws(() => runtime.launchConfig(), { code: 'browser_selector_restore_failed' })
+  target = '156.0.8078.48.1'
+  fixtureFails = false
+  runtime.install()
+  await runtime.task
+  assert.equal(runtime.status().phase, 'ready')
+  assert.equal(runtime.status().last_error, null)
+  assert.equal(fixtures, 2)
+  assert.doesNotThrow(() => runtime.launchConfig())
+})
+
 test('busy browsers prevent install before any work and shutdown aborts its own task', async (t) => {
   let busy = true
   let started = false
