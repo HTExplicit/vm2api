@@ -941,14 +941,25 @@ test('kernel installation resets an open request circuit only after verified rea
   })
   assert.equal(failed.ok, false)
   assert.equal(unitCircuit.view(account).state, 'open')
-  const repaired = await installKernelTargets({
+  const parked = await installKernelTargets({
     projectRoot: root,
     targets: target('cli-node'),
     ops: {
       ...lifecycle(root).ops,
       stopSlot: () => ({ ok: true }),
+      startSlotReady: () => assert.fail('a stopped-slot install must not start or verify the kernel'),
     },
   })
+  assert.equal(parked.ok, true, JSON.stringify(parked))
+  assert.equal(parked.items[0].restarted, false)
+  assert.equal(unitCircuit.view(account).state, 'open', 'package installation alone is not verified readiness')
+  const { root: runningRoot } = fixture(t)
+  const repaired = await installKernelTargets({
+    projectRoot: runningRoot,
+    targets: target('cli-node'),
+    ops: lifecycle(runningRoot).ops,
+  })
   assert.equal(repaired.ok, true, JSON.stringify(repaired))
+  assert.equal(repaired.items[0].restarted, true)
   assert.equal(unitCircuit.view(account).state, 'closed')
 })

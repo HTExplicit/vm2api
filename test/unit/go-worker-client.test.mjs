@@ -1081,6 +1081,7 @@ unixTest('a reset after empty Responses items uses the existing same-account ret
         args: {
           exec: fx.exec,
           envelope: { body: { model: 'gpt-5.4', input }, stream: true },
+          requestPath: '/internal/v1/codex/responses',
           onCommit: () => commits++,
         },
         onEvent: (line) => lines.push(line),
@@ -1132,6 +1133,7 @@ for (const [type, terminal] of [
       const result = await streamGoWorker({
         exec: fx.exec,
         envelope: { body: { model: 'gpt-5.4', input: 'hi' }, stream: true },
+        requestPath: '/internal/v1/codex/responses',
         onEvent() {},
       })
       assert.equal(result.ok, terminal === 'completed')
@@ -1166,6 +1168,7 @@ unixTest('streamGoWorker accepts a completed Responses terminal with zero tokens
     const result = await streamGoWorker({
       exec: fx.exec,
       envelope: { body: { model: 'gpt-5.4', input: 'hi' }, stream: true },
+      requestPath: '/internal/v1/codex/responses',
       onEvent() {},
     })
     assert.equal(result.ok, true)
@@ -1190,7 +1193,10 @@ unixTest('streamGoWorker retains models declared in HTTP error JSON without chan
         ...declaration,
         error: { type: 'invalid_request_error', code: 'bad_request', message: 'original upstream message' },
       }
-      const result = await streamGoWorker({ exec: fx.exec, envelope: { body: { model: 'sent-model' } } })
+      const result = await streamGoWorker({
+        exec: fx.exec,
+        envelope: { body: { model: 'sent-model', messages: [{ role: 'user', content: 'hi' }] } },
+      })
       assert.equal(result.ok, false)
       assert.equal(result.status, 400)
       assert.equal(result.upstreamResponseModel, declaration.model || declaration.response?.model || null)
