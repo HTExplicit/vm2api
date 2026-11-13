@@ -56,7 +56,7 @@ function fixture(t) {
       }
       return { ok: true, failed_count: 0, changed_count: 2 }
     }
-    return { paused: 2, restored: 2, drained: true, inflight: 0 }
+    return { ok: true }
   }
   const pull = async () => ({ ok: true, release: { tag: 'v2.0.1' } })
   const coreHashes = async () => [JSON.parse(fs.readFileSync(path.join(pkg, 'manifest.json'))).payload.plaintext_sha256]
@@ -85,33 +85,19 @@ test('CRAG update refreshes every existing copy and keeps wrappers, selections a
     fs.readFileSync(path.join(cache, 'manifest.json')),
     fs.readFileSync(path.join(f.pkg, 'manifest.json')),
   )
-  assert.match(f.calls[1].body.reason, /^crag_update_/)
-  assert.equal(f.calls.at(-1).body.reason, f.calls[1].body.reason)
+  assert.equal(f.calls.some(({ endpoint }) => endpoint.includes('/schedule/')), false)
   assert.equal(fs.existsSync(path.join(f.root, 'share/crag/kernels/v2/.update-lock')), false)
 })
 
-for (const field of ['active_requests', 'continuations', 'queued']) {
-  test(`CRAG update rejects occupied ${field}, retains its hold and never restarts`, async (t) => {
-    const f = fixture(t)
-    await assert.rejects(
-      updateCrag(f.root, { ...f, health: async () => ({ ...(await f.health()), [field]: 1 }) }),
-      (error) => {
-        assert.match(error.message, /not_idle/)
-        const ownReason = f.calls.find(({ endpoint }) => endpoint.endsWith('/hold')).body.reason
-        assert.ok(error.message.includes(`hold_reason=${ownReason}`))
-        return true
-      },
-    )
-    assert.equal(
-      f.calls.some(({ body }) => body.restart === true),
-      false,
-    )
-    assert.equal(f.calls.at(-1).endpoint, '/api/panel/vms/schedule/hold')
-    assert.equal(f.calls.some(({ endpoint }) => endpoint.endsWith('/resume')), false)
-  })
-}
+test('CRAG update restarts busy slots without pausing scheduling', async (t) => {
+  const f = fixture(t)
+  const result = await updateCrag(f.root, { ...f, health: async () => ({ ...(await f.health()), active_requests: 1 }) })
+  assert.equal(result.ok, true)
+  assert.ok(f.calls.some(({ body }) => body.restart === true))
+  assert.equal(f.calls.some(({ endpoint }) => endpoint.includes('/schedule/')), false)
+})
 
-test('CRAG download failure never holds scheduling or changes installed bytes', async (t) => {
+test('CRAG download failure never calls the panel or changes installed bytes', async (t) => {
   const f = fixture(t)
   await assert.rejects(
     updateCrag(f.root, { ...f, pull: async () => ({ ok: false, code: 'crag_v2_authority_mismatch' }) }),
@@ -144,7 +130,7 @@ test('local KVM CRAG update replaces active and stopped packages through the man
   assert.equal(result.ok, true)
   assert.equal(result.items.find((item) => item.id === 'vm-stop').status, 'stopped')
   assert.ok(f.calls.some(({ body }) => body.restart === true))
-  assert.equal(f.calls.at(-1).endpoint, '/api/panel/vms/schedule/resume')
+  assert.equal(f.calls.some(({ endpoint }) => endpoint.includes('/schedule/')), false)
 })
 
 for (const type of ['docker', 'kvm']) {
@@ -196,7 +182,6 @@ test('matching installed files cannot hide a stale running memfd core', async (t
   const api = async (endpoint, body) => {
     f.calls.push({ endpoint, body })
     if (endpoint.endsWith('/reload')) reloaded = true
-    if (endpoint.endsWith('/hold')) return { drained: true, inflight: 0 }
     return { ok: true, changed_count: 0, failed_count: 0 }
   }
   const coreHashes = async () => (reloaded ? f.coreHashes() : ['0'.repeat(64)])

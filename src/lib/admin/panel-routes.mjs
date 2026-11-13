@@ -155,15 +155,9 @@ import {
   setActiveVm,
   clearActiveVm,
   setScheduleOff,
-  setScheduleHold,
   markUnschedulable,
   clearUnschedulable,
   clearScheduleHold,
-  isMaintenanceHold,
-  holdSchedulableSlots,
-  resumeSchedulableSlots,
-  waitForSlotDrain,
-  KERNEL_UPDATE_HOLD,
   markKernelRestartPending,
   clearKernelRestartPending,
   bindVmProxy,
@@ -179,13 +173,7 @@ import {
   persistVmOwner,
   persistVmTimezone,
 } from '../vm/vm-registry.mjs'
-import {
-  HOLD_MAINTENANCE,
-  HOLD_PROXY,
-  applyScheduleOff,
-  applyUnschedulable,
-  migrateScheduleRecord,
-} from '../pool/schedule-state.mjs'
+import { HOLD_PROXY, applyScheduleOff, applyUnschedulable, migrateScheduleRecord } from '../pool/schedule-state.mjs'
 import { fillVmTimezoneFromExit, syncVmTimezoneFromProxy } from '../vm/proxy-timezone.mjs'
 import { validTimezone } from '../core/timezone.mjs'
 import { stampVmKind, isCodexVm } from '../vm/vm-kind.mjs'
@@ -732,11 +720,10 @@ export function createPanelHandler(ctx) {
   const refreshWorkerCredentialForVm = (...args) => ctx.refreshWorkerCredentialForVm(...args)
   const fetchWorkerModels = (...args) => ctx.fetchWorkerModels(...args)
   /**
-   * A worker reload finished: lift its maintenance hold. `by` names the operator
-   * action that caused the reload; only that may also clear 不可调度.
+   * A worker reload finished. `by` names the operator action that caused the
+   * reload; only that may also clear 不可调度.
    */
   function restoreSchedulableIfReady(vmId, { by = null } = {}) {
-    clearScheduleHold(cfg.paths.project, vmId, HOLD_MAINTENANCE)
     const vm = getVm(cfg.paths.project, vmId)
     if (!vmHasSchedulableCredential(vm, cfg.paths.project)) {
       markUnschedulable(cfg.paths.project, vmId, 'no_credential')
@@ -1244,7 +1231,6 @@ export function createPanelHandler(ctx) {
     }
     if (kernelSwitch && current.status === 'running' && !maintenance) {
       return withSlotMaintenance({
-        projectRoot: cfg.paths.project,
         id,
         watchdog: ctx.kernelWatchdog,
         poolScheduler: ctx.poolScheduler,
@@ -3072,7 +3058,6 @@ export function createPanelHandler(ctx) {
                 const operation = switchAll
                 switchAll = () =>
                   withSlotMaintenance({
-                    projectRoot: cfg.paths.project,
                     id,
                     watchdog: ctx.kernelWatchdog,
                     poolScheduler: ctx.poolScheduler,
@@ -4093,29 +4078,6 @@ export function createPanelHandler(ctx) {
         return json(res, 200, panel.ok(payload))
       }
 
-      if (req.method === 'POST' && p === '/api/panel/vms/schedule/hold') {
-        const body = await readBody(req, 8192).catch(() => ({}))
-        const reason = String(body?.reason || KERNEL_UPDATE_HOLD).slice(0, 64)
-        const ids = holdSchedulableSlots(cfg.paths.project, reason)
-        const drain = await waitForSlotDrain(ctx.poolScheduler, ids)
-        if (!drain.ok) {
-          const restored = resumeSchedulableSlots(cfg.paths.project, ids, reason)
-          return json(res, 409, {
-            ok: false,
-            error: { code: 'slots_busy', message: '在途请求未结束，已恢复调度' },
-            data: { paused: ids.length, restored: restored.length, inflight: drain.inflight, drained: false },
-          })
-        }
-        return json(res, 200, panel.ok({ paused: ids.length, inflight: 0, drained: true }))
-      }
-      if (req.method === 'POST' && p === '/api/panel/vms/schedule/resume') {
-        const body = await readBody(req, 8192).catch(() => ({}))
-        const reason = String(body?.reason || KERNEL_UPDATE_HOLD).slice(0, 64)
-        const ids = (listVms(cfg.paths.project) || []).filter((vm) => isMaintenanceHold(vm, reason)).map((vm) => vm.id)
-        const restored = resumeSchedulableSlots(cfg.paths.project, ids, reason)
-        return json(res, 200, panel.ok({ restored: restored.length }))
-      }
-
       // POST /api/panel/vms/:id/schedulable — sub2api-style schedule toggle
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/schedulable$/.test(p)) {
         const id = p.split('/')[4]
@@ -4845,7 +4807,6 @@ export function createPanelHandler(ctx) {
         let worker = null
         // The package may swap credentials or exit; a running worker keeps the old ones until reloaded.
         if (ctx.packageImportBringUp !== false && result.vm.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
-          setScheduleHold(cfg.paths.project, id, HOLD_MAINTENANCE, { tag: 'package_update_worker_reload' })
           worker = await reloadSlotReady(getVm(cfg.paths.project, id), cfg.paths.project, {
             routing: ctx.routingConfig,
           })
@@ -6651,7 +6612,6 @@ export function createPanelHandler(ctx) {
             })
             const vm = getVm(cfg.paths.project, bindVmId)
             if (vm?.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
-              setScheduleHold(cfg.paths.project, bindVmId, HOLD_MAINTENANCE, { tag: 'proxy_rebind_worker_reload' })
               worker = await reloadSlotReady(getVm(cfg.paths.project, bindVmId), cfg.paths.project, {
                 routing: ctx.routingConfig,
               })
@@ -6756,7 +6716,6 @@ export function createPanelHandler(ctx) {
           bindVmProxy(cfg.paths.project, vmId, proxyPool.getProxyByIdWithAuth(id))
           const vm = getVm(cfg.paths.project, vmId)
           if (vm?.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
-            setScheduleHold(cfg.paths.project, vmId, HOLD_MAINTENANCE, { tag: 'proxy_edit_worker_reload' })
             const reloaded = await reloadSlotReady(getVm(cfg.paths.project, vmId), cfg.paths.project, {
               routing: ctx.routingConfig,
             })
@@ -6907,7 +6866,6 @@ export function createPanelHandler(ctx) {
         const timezone = await syncVmTimezoneFromProxy(cfg.paths.project, proxyPool, vmId, { proxyId: id })
         const vm = getVm(cfg.paths.project, vmId)
         if (vm?.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
-          setScheduleHold(cfg.paths.project, vmId, HOLD_MAINTENANCE, { tag: 'proxy_rebind_worker_reload' })
           worker = await reloadSlotReady(getVm(cfg.paths.project, vmId), cfg.paths.project, {
             routing: ctx.routingConfig,
           })
@@ -6976,7 +6934,6 @@ export function createPanelHandler(ctx) {
         })
         const vm = getVm(cfg.paths.project, vmId)
         if (vm?.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
-          setScheduleHold(cfg.paths.project, vmId, HOLD_MAINTENANCE, { tag: 'proxy_rebind_worker_reload' })
           worker = await reloadSlotReady(getVm(cfg.paths.project, vmId), cfg.paths.project, {
             routing: ctx.routingConfig,
           })

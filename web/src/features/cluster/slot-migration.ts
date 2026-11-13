@@ -11,7 +11,6 @@ export function migrationPhase(phase: string): string {
   const labels: Record<string, string> = {
     queued: '等待槽位操作完成',
     preflight: '检查节点容量、镜像和磁盘',
-    draining: '暂停调度，等待在途请求结束',
     stopping: '关闭原槽',
     copying: '限速复制并校验稀疏磁盘',
     switching: '切换节点记录',

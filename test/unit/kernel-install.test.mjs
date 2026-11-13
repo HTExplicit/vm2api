@@ -93,7 +93,6 @@ function lifecycle(root, extra = {}) {
       },
       startSlotReady(vm) {
         assert.equal(getVm(root, vm.id).status, 'stopped')
-        assert.equal(getVm(root, vm.id).schedule_hold.reason, 'maintenance')
         return { ok: true, rust_ok: true, runtime: { ...vm.runtime, pid: 123, stopped: false } }
       },
       ...extra,
@@ -194,7 +193,7 @@ test('free switch removes native selection without admitting paid license or req
   assert.equal(JSON.parse(fs.readFileSync(path.join(run, 'kernel.json'))).dataplane, 'wrap')
 })
 
-test('restart intent is durable before stop and success restores scheduling after readiness', async (t) => {
+test('restart intent is durable before stop and scheduling stays untouched', async (t) => {
   const { root, vm } = fixture(t)
   const life = lifecycle(root, {
     stopSlot() {
@@ -202,8 +201,8 @@ test('restart intent is durable before stop and success restores scheduling afte
       assert.equal(record.kernel_operation.phase, 'pending')
       assert.equal(record.kernel_operation.kernel, 'cli-node')
       assert.equal(record.kernel_operation.was_running, true)
-      assert.equal(record.schedulable, false)
-      assert.equal(record.schedule_hold.detail.tag, record.kernel_operation.id)
+      assert.notEqual(record.schedulable, false)
+      assert.equal(record.schedule_hold, undefined)
       return { ok: true }
     },
   })
@@ -232,7 +231,7 @@ for (const health of [
     const result = await installKernelTargets({ projectRoot: root, targets: target('cli-node'), ops: life.ops })
     assert.equal(result.ok, false)
     const saved = getVm(root, vm.id)
-    assert.equal(saved.schedulable, false)
+    assert.equal(saved.status, 'stopped')
     assert.equal(saved.kernel_operation.phase, 'failed')
     const replay = await resumePendingKernelInstalls({ projectRoot: root, ops: life.ops })
     assert.equal(replay.total, 0, 'known failures require operator action')
@@ -244,8 +243,6 @@ for (const wasRunning of [true, false]) {
     const { root, vm, run } = fixture(t, { node_id: 'node-recovery', status: 'stopped' })
     patchVmRecord(root, vm.id, {
       kernel_operation: { id: 'lost-command', kernel: 'cli-node', phase: 'pending', recovery_attempts: 0, was_running: wasRunning },
-      schedule_hold: { reason: 'maintenance', detail: { tag: 'lost-command' } },
-      schedulable: false,
     })
     let ready = false
     const life = lifecycle(root, {
@@ -347,7 +344,7 @@ test('lost cluster restart acknowledgement retains durable intent and converges 
   const first = await installKernelTargets({ projectRoot: root, targets: target('cli-node'), ops: life.ops })
   assert.equal(first.ok, false)
   assert.equal(getVm(root, vm.id).kernel_operation.phase, 'pending')
-  assert.equal(getVm(root, vm.id).schedulable, false)
+  assert.equal(getVm(root, vm.id).status, 'stopped')
   const resumed = await resumePendingKernelInstalls({ projectRoot: root, ops: life.ops })
   assert.equal(resumed.ok, true, JSON.stringify(resumed))
   assert.equal(starts, 2)
@@ -355,28 +352,23 @@ test('lost cluster restart acknowledgement retains durable intent and converges 
   assert.equal(getVm(root, vm.id).schedulable, true)
 })
 
-test('maintenance admission drains inflight requests before stopping the slot', async (t) => {
+test('install stops a busy slot at once without pausing scheduling', async (t) => {
   const { root, vm } = fixture(t)
   const inflight = new Map([[vm.id, 1]])
-  let stopped = false
   const life = lifecycle(root, {
     stopSlot() {
-      assert.equal(inflight.get(vm.id), 0)
-      stopped = true
+      assert.equal(inflight.get(vm.id), 1)
+      assert.notEqual(getVm(root, vm.id).schedulable, false)
       return { ok: true }
     },
   })
-  const operation = installKernelTargets({
+  const result = await installKernelTargets({
     projectRoot: root,
     targets: target('cli-node'),
     ops: life.ops,
     poolScheduler: { vmInflight: inflight },
   })
-  await new Promise((resolve) => setTimeout(resolve, 20))
-  assert.equal(stopped, false)
-  assert.equal(getVm(root, vm.id).schedulable, false)
-  inflight.set(vm.id, 0)
-  assert.equal((await operation).ok, true)
+  assert.equal(result.ok, true, JSON.stringify(result))
 })
 
 for (const patch of [{ recovery_attempts: 3 }, { operatorOff: true }]) {
@@ -638,7 +630,7 @@ for (const stage of ['policy', 'materialize', 'config']) {
     assert.equal(result.items[0].stopped, true)
     const saved = getVm(root, vm.id)
     assert.equal(saved.status, 'stopped')
-    assert.equal(saved.schedule_hold.reason, 'maintenance')
+    assert.equal(saved.schedule_hold, undefined)
     assert.equal(saved.kernel_operation.phase, 'failed')
     assert.equal(saved.runtime.stopped, true)
     assert.equal(saved.dataplane, 'crag')

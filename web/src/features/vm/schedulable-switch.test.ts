@@ -5,12 +5,12 @@ import { vmSchedulableProps } from './schedulable-switch'
 const vm = (over: Partial<Vm>): Vm => ({ id: 'vm-01', ...over })
 
 describe('vmSchedulableProps', () => {
-  it('受限 (incl. a maintenance hold) still reads as 调度开', () => {
+  it('受限 (incl. a proxy hold) still reads as 调度开', () => {
     const props = vmSchedulableProps(
       vm({
         schedule_state: 'restricted',
         schedulable: false,
-        restriction_reason: 'maintenance',
+        restriction_reason: 'proxy_cooldown',
       })
     )
     expect(props.schedulable).toBe(true)

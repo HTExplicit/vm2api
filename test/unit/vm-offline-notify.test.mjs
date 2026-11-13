@@ -38,11 +38,10 @@ test('connectivity uses scheduler node links and kernel faults without credentia
   assert.equal(rows[5].reason, 'runtime_stopped')
 })
 
-test('manual shutdowns and maintenance do not produce connectivity alarms', () => {
+test('manual shutdowns do not produce connectivity alarms', () => {
   const rows = snapshotVmConnectivity(
     [
       { id: 'manual', status: 'stopped', schedule_off: true },
-      { id: 'maintenance', status: 'stopped', schedule_hold: { reason: 'maintenance' } },
       { id: 'disabled', status: 'disabled' },
     ],
     { nodeReady: () => false, faults: new Map() },

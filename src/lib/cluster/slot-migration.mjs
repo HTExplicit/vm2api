@@ -1,10 +1,9 @@
-/** Administrator-initiated, cold KVM migration. Persistent holds fail closed on controller restart. */
+/** Administrator-initiated, cold KVM migration. The persistent journal fails closed on controller restart. */
 import crypto from 'node:crypto'
 import path from 'node:path'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { resolveKernelDataplane } from '../vm/slot-engine.mjs'
-import { applyHold } from '../pool/schedule-state.mjs'
-import { getVm, patchVmRecord, clearScheduleHold } from '../vm/vm-registry.mjs'
+import { getVm, patchVmRecord } from '../vm/vm-registry.mjs'
 import { isValidVmId, withVmLock } from '../vm/vm-file.mjs'
 import { slotMemory, VM_MEMORY_OPTIONS } from '../vm/machine-spec.mjs'
 import { runtimeKind } from '../vm/runtime-kind.mjs'
@@ -42,7 +41,7 @@ export function slotMigrationJob(projectRoot, id) {
     return {
       ...view,
       status: 'needs_attention',
-      error: '主控在迁移中重启；调度保持暂停，请按迁移文档核对两端后恢复，勿同时启动两份槽位',
+      error: '主控在迁移中重启，请按迁移文档核对两端后恢复，勿同时启动两份槽位',
     }
   return view
 }
@@ -52,8 +51,7 @@ export function migrationRequest(vm, body, routing) {
   if (!vm.node_id || runtimeKind(vm) !== 'kvm' || isCodexVm(vm) || resolveKernelDataplane(vm, routing) === 'crag')
     throw migrationError('migration_unsupported', '首版仅支持远程 Linux 节点上的 Claude KVM 槽（不含 crag）')
   if (vm.status !== 'running') throw migrationError('migration_not_running', '请先确认原槽已正常运行')
-  if (migrationActive(vm) || vm.schedule_hold)
-    throw migrationError('migration_busy', '槽位正在迁移或维护中，请先完成原任务')
+  if (migrationActive(vm)) throw migrationError('migration_busy', '槽位正在迁移，请先完成原任务')
   if (!body || typeof body !== 'object' || Object.keys(body).some((k) => !['target_node_id', 'memory'].includes(k)))
     throw migrationError('migration_invalid', '仅接受 target_node_id 和 memory', 400)
   const targetNodeId = body.target_node_id
@@ -66,20 +64,6 @@ export function migrationRequest(vm, body, routing) {
   if (targetNodeId === vm.node_id && memory === current)
     throw migrationError('migration_no_change', '请选择其他节点或更大的内存', 400)
   return { targetNodeId, memory }
-}
-
-async function drain(scheduler, id, { wait = sleep, now = Date.now } = {}) {
-  if (!(scheduler?.vmInflight instanceof Map))
-    throw migrationError('migration_drain_unavailable', '无法确认在途请求，未停止原槽')
-  const deadline = now() + 120_000
-  let quiet = 0
-  do {
-    if ((Number(scheduler.vmInflight.get(id)) || 0) === 0) quiet++
-    else quiet = 0
-    if (quiet >= 2) return
-    await wait(3000)
-  } while (now() < deadline)
-  throw migrationError('migration_slots_busy', '在途请求未排空，已放弃迁移')
 }
 
 export function startSlotMigration(args) {
@@ -108,7 +92,7 @@ export function startSlotMigration(args) {
 }
 
 async function runMigration(args, job) {
-  const { projectRoot, id, body, routing, proxyPool, watchdog, poolScheduler, ops = {} } = args
+  const { projectRoot, id, body, routing, proxyPool, watchdog, ops = {} } = args
   const preflight = ops.preflight || preflightMigration
   const power = ops.powerOn || powerOnSlot
   const wait = ops.wait || sleep
@@ -145,17 +129,10 @@ async function runMigration(args, job) {
       runtime: structuredClone(vm.runtime || {}),
       status: vm.status,
     }
-    job.public = { ...job.public, ...plan.summary, phase: 'draining' }
-    // Journal + maintenance hold are one atomic record write: no restart gap.
-    patchVmRecord(projectRoot, id, (record) => {
-      if (record.schedule_hold) throw migrationError('migration_busy', '槽位已有维护任务')
-      applyHold(record, 'maintenance', { tag: `migration:${job.public.id}` })
-      return { slot_migration: { ...job.public, rollback: original } }
-    })
+    job.public = { ...job.public, ...plan.summary, phase: 'stopping' }
+    patchVmRecord(projectRoot, id, () => ({ slot_migration: { ...job.public, rollback: original } }))
     held = true
     await watchdog?.hold?.(id)
-    await drain(poolScheduler, id, { wait, now: ops.now || Date.now })
-    update({ phase: 'stopping' })
     // A persistent marker also excludes the slot from watchdog/revive after a process restart.
     patchVmRecord(projectRoot, id, { status: 'stopped' })
     touched = true
@@ -222,14 +199,11 @@ async function runMigration(args, job) {
         update({
           status: 'needs_attention',
           phase: 'rollback_failed',
-          error: '自动回滚未完成；保持维护暂停，请按文档核对两端，禁止同时启动两份槽位',
+          error: '自动回滚未完成，请按文档核对两端，禁止同时启动两份槽位',
         })
       }
     } else update({ status: 'failed', phase: 'failed', error: redactSecrets(err.message) })
   } finally {
-    if (held && job.public.status !== 'needs_attention') {
-      clearScheduleHold(projectRoot, id, 'maintenance', { tag: `migration:${job.public.id}` })
-    }
     if (held) watchdog?.release?.(id)
   }
 }

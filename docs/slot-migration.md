@@ -44,9 +44,8 @@ existing VM file lock. Do not use the raw Docker console to override the task.
 1. Preflight without stopping the original: image/base identity, KVM, Python,
    owners, actual disk allocation, free disk and memory. No image is built by
    the preflight. Missing capacity/image means failure without downtime.
-2. Atomically persist the job journal and an owned maintenance hold. Hold the
-   watchdog, require two idle scheduler observations three seconds apart, and
-   give draining at most 120 seconds. Missing in-flight accounting fails closed.
+2. Persist the job journal and hold the watchdog. Scheduling is not paused and
+   in-flight requests are not awaited; requests running on the slot are cut.
 3. Stop the original. Disable its automatic restart and rename its container for
    rollback. Leave its full disk untouched.
 4. Stream regular files, metadata and symlinks over the existing SSH connections
@@ -57,15 +56,15 @@ existing VM file lock. Do not use the raw Docker console to override the task.
    a new task-owned directory, fsyncs every 256 KiB and publishes by rename only
    after verification. It never merges into an existing destination.
 5. Patch only placement/memory/runtime, boot the pinned image and diagnose the
-   kernel, container and exit. Keep the maintenance hold until this succeeds.
+   kernel, container and exit.
 6. Remove the old stopped container and unused egress resources. For a cross-node
    move, retain the original disk as
    `<source-root>/migration-backups/<slot-id>-<job-id>`. This is intentional cold
    rollback material owned by the administrator, not an active slot or temporary
    staging directory. Delete it only after the administrator's retention period
    and a confirmed usable independent backup. Same-node expansion makes no copy.
-7. Clear **only this job's** hold and release the watchdog. Existing operator
-   schedule-off and other policy restrictions remain in effect.
+7. Release the watchdog. Existing operator schedule-off and other policy
+   restrictions remain in effect.
 
 Transfer processes have a 30-minute wall-clock limit and run at nice 19. The
 sender limits the entire stream to 1 MiB/s; sparse holes cost metadata, not their
@@ -81,7 +80,7 @@ Before target verification, failures first stop/remove the replacement and clean
 only directories carrying this job's ownership token, then restore original
 placement/memory/runtime and boot the original. The original is never started
 when stopping the replacement is uncertain. A failed rollback remains
-`needs_attention`, with its maintenance hold and persisted journal; watchdog
+`needs_attention`, stopped, with its persisted journal; watchdog
 recovery and boot revival exclude these slots even after a controller restart.
 
 **There is no automatic crash recovery or force-unlock endpoint in this first

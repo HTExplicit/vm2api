@@ -14,7 +14,7 @@ git 里只有源码。`bin/`、`web/dist`、`share/crag` 与 `share/wrap-cli` �
 3. 提交完整清单、构建来源及应用 `VERSION` / `CHANGELOG.md`，创建并合并 PR。tag 必须落在包含上述提交的云端合并结果，不能重打历史 tag。
 4. 对自指同版本 Release 的清单，先上传完整资产到草稿 Release，再推送 tag 并发布该草稿；避免工作流下载尚不存在的资产。首次发布保持 prerelease / 非 Latest，构建完成后才切换正式版与应用 Latest。
 5. `release` 工作流必须完成全部 amd64 payload 资产、ARM64 helper、amd64/arm64 控制面镜像及多架构 manifest。必要时在同一不可变 tag 上手动触发 `gh workflow run release.yml --ref v<VERSION>`。不等待 CI 检查不等于省略发布构建。
-6. 核对完整附件、`payload.json`、`SHA256SUMS`、构建来源与两种镜像架构，再发布正式版并部署完整源码、前端和出厂 payload。槽内已有选择/缓存仍需排空并通过内核安装流程激活；仅换出厂文件不能证明运行中 CLI 已更新。
+6. 核对完整附件、`payload.json`、`SHA256SUMS`、构建来源与两种镜像架构，再发布正式版并部署完整源码、前端和出厂 payload。槽内已有选择/缓存仍需通过内核安装流程激活；仅换出厂文件不能证明运行中 CLI 已更新。
 
 `v1.4.071` 的全量 payload 纳入 Codex kernel `0.1.2`，`fetch:payload` 不再恢复旧 `0.1.0`。其余 kernel/helper、Claude `2.1.321` watch 修复版及签名 CRAG 包沿用云端 `v1.4.070` 的已发布字节，不混入本地并行工作区产物。
 

@@ -91,7 +91,6 @@ test('deterministic failures are 不可调度, self-healing ones are 受限', ()
     'proxy_transport_failure',
     'node_offline',
     'kernel_faulted',
-    'maintenance',
     'rest_period',
   ]) {
     const row = stateOfReason(code)
@@ -169,8 +168,13 @@ test('migration maps every legacy reason and is idempotent', () => {
       'unschedulable',
       'runtime_start_failed',
     ],
-    [{ schedulable: false, schedule_disabled_reason: 'kernel_update' }, 'hold', 'maintenance'],
-    [{ schedulable: false, schedule_disabled_reason: 'proxy_edit_worker_reload' }, 'hold', 'maintenance'],
+    [{ schedulable: false, schedule_disabled_reason: 'kernel_update' }, 'on', null],
+    [{ schedulable: false, schedule_disabled_reason: 'proxy_edit_worker_reload' }, 'on', null],
+    [
+      { schedulable: false, schedule_disabled_reason: 'maintenance', schedule_hold: { reason: 'maintenance' } },
+      'on',
+      null,
+    ],
     [{ schedulable: false, schedule_disabled_reason: 'egress_down|proxy=p9' }, 'hold', 'proxy_cooldown'],
     [{ schedulable: false, schedule_disabled_reason: 'quota_5h_header' }, 'on', null],
     [{ schedulable: false, schedule_disabled_reason: 'quota_refresh_failed' }, 'on', null],
@@ -249,8 +253,9 @@ test('resolveSlotState: off > unschedulable > restricted > on', () => {
   assert.equal(resolveSlotState({ vm: { schedulable: true }, sessions: { active: 3, max: 0 } }).schedule_state, 'on')
 
   const held = { schedulable: true }
-  applyHold(held, 'maintenance', { tag: 'kernel_update' })
-  assert.equal(resolveSlotState({ vm: held, availability: { key: 'off' } }).restriction_text, '维护中')
+  applyHold(held, 'proxy_cooldown', { tag: 'p1' })
+  assert.equal(resolveSlotState({ vm: held, availability: { key: 'off' } }).restriction_text, '代理异常')
+  assert.throws(() => applyHold({}, 'maintenance'), /not a hold reason/)
 
   const dead = resolveSlotState({ vm: { schedulable: true }, availability: { key: 'bad', reason: 'oauth_revoked' } })
   assert.equal(dead.schedule_state, 'unschedulable')

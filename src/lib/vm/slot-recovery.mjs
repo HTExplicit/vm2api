@@ -526,7 +526,6 @@ export async function recoverSlot({
   recovering.add(id)
   try {
     return await withSlotMaintenance({
-      projectRoot,
       id,
       watchdog,
       poolScheduler,

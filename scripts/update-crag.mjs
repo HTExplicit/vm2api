@@ -89,9 +89,6 @@ export async function updateCrag(
   fs.mkdirSync(base, { recursive: true })
   const lock = path.join(base, '.update-lock')
   fs.mkdirSync(lock, { mode: 0o700 })
-  const reason = `crag_update_${crypto.randomUUID()}`
-  let held = false
-  let completed = false
   try {
     const routing = JSON.parse(fs.readFileSync(path.join(root, 'src/config/routing.json'), 'utf8'))
     const inventory = cragUpdateInventory(root, routing)
@@ -118,23 +115,7 @@ export async function updateCrag(
         (!verifyCragV2Tree(installed).ok || !fs.readFileSync(path.join(installed, 'manifest.json')).equals(manifest)),
     )
     if (check.changed_count || cached.length || staleRuntime.length) {
-      // Own a unique hold; cleanup must not clear another operator's hold.
-      held = true
-      const drain = await api('/api/panel/vms/schedule/hold', { reason })
-      if (drain.drained !== true || drain.inflight !== 0) throw new Error('crag_slots_not_drained')
-      for (const { vm } of running) {
-        const h = await health(slotExec(root, vm), { timeoutMs: 3000 })
-        if (
-          h?.healthy !== true ||
-          h.runtime_variant !== 'crag-v2' ||
-          h.license_valid !== true ||
-          h.active_requests !== 0 ||
-          h.continuations !== 0 ||
-          h.queued !== 0
-        )
-          throw new Error(`crag_slot_not_idle:${vm.id}`)
-      }
-      // Fail if an operator changed selections during download/drain.
+      // Fail if an operator changed selections during download.
       const current = cragUpdateInventory(root, routing)
       if (
         JSON.stringify(current.map(({ vm, action }) => [vm.id, action, vm.status])) !==
@@ -179,22 +160,14 @@ export async function updateCrag(
       }
     })
     if (items.some((item) => !item.ok)) throw new Error('crag_installed_hash_mismatch')
-    completed = true
     return {
       ok: true,
       release: pulled.release,
       manifest_sha256: crypto.createHash('sha256').update(manifest).digest('hex'),
       items,
     }
-  } catch (error) {
-    if (held && !completed) error.message += `; hold_reason=${reason}`
-    throw error
   } finally {
-    try {
-      if (held && completed) await api('/api/panel/vms/schedule/resume', { reason })
-    } finally {
-      fs.rmdirSync(lock)
-    }
+    fs.rmdirSync(lock)
   }
 }
 

@@ -92,7 +92,7 @@ test('pelican rejects disabled, stopped and wrong-platform accounts before loopb
   for (const [patch, code] of [
     [{ schedulable: false }, 'vm_unschedulable'],
     [{ schedule_off: true, unschedulable: { reason: 'credential_blocked' } }, 'vm_unschedulable'],
-    [{ schedule_off: true, schedule_hold: { reason: 'maintenance' } }, 'vm_unschedulable'],
+    [{ schedule_off: true, schedule_hold: { reason: 'proxy_cooldown' } }, 'vm_unschedulable'],
     [{ schedule_off: true, policy: { allowed_models: ['gpt-6-sol'] } }, 'model_not_allowed'],
     [
       {

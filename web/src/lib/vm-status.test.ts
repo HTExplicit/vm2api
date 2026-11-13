@@ -790,12 +790,12 @@ describe('four-state schedule model (backend resolveSlotState)', () => {
   it('restriction text comes from the backend table', () => {
     const vm = liveVm({
       schedule_state: 'restricted',
-      restriction_reason: 'maintenance',
-      restriction_text: '维护中',
+      restriction_reason: 'proxy_cooldown',
+      restriction_text: '代理异常',
       restriction_scope: 'slot',
     })
-    expect(poolStatus(vm).text).toBe('维护中')
-    expect(restrictionCopy(vm)).toBe('维护中')
+    expect(poolStatus(vm).text).toBe('代理异常')
+    expect(restrictionCopy(vm)).toBe('代理异常')
     expect(fleetGroup(vm)).toBe('restricted')
   })
 

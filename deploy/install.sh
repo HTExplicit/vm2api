@@ -416,36 +416,6 @@ read_env_key() {
   grep -E "^${name}=" "${INSTALL_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d "'" | tr -d '"'
 }
 
-pause_schedulable_slots() {
-  local key="$1" port="$2" response
-  info "暂停可调度槽，等待在途请求"
-  response="$(curl -fsS -X POST "http://127.0.0.1:${port}/api/panel/vms/schedule/hold" \
-    -H "Authorization: Bearer ${key}" \
-    -H "Content-Type: application/json" \
-    -d '{"reason":"kernel_update"}')" || return 1
-  printf '%s' "$response" | python3 -c 'import json, sys
-d = json.load(sys.stdin)
-r = d.get("data") or {}
-paused = int(r.get("paused") or 0)
-inflight = int(r.get("inflight") or 0)
-print(f"schedule hold: paused={paused} inflight={inflight}")
-raise SystemExit(0 if d.get("ok") else 1)'
-}
-
-resume_schedulable_slots() {
-  local key="$1" port="$2" response
-  response="$(curl -fsS -X POST "http://127.0.0.1:${port}/api/panel/vms/schedule/resume" \
-    -H "Authorization: Bearer ${key}" \
-    -H "Content-Type: application/json" \
-    -d '{"reason":"kernel_update"}')" || return 1
-  printf '%s' "$response" | python3 -c 'import json, sys
-d = json.load(sys.stdin)
-r = d.get("data") or {}
-restored = int(r.get("restored") or 0)
-print(f"schedule resume: restored={restored}")
-raise SystemExit(0 if d.get("ok") else 1)'
-}
-
 sync_wrap_cli() {
   local key port response probe
   key="$(read_env_key VM2API_API_KEY || true)"
@@ -473,16 +443,14 @@ if not d.get("ok") or failed:
     raise SystemExit(2)
 print("1" if changed else "0")')" || return 1
   if [ "$probe" != "1" ]; then
-    ok "槽内二进制未变化，跳过停调度和重启"
+    ok "槽内二进制未变化，跳过重启"
     return 0
   fi
-  pause_schedulable_slots "$key" "$port" || { resume_schedulable_slots "$key" "$port" || true; return 1; }
   info "二进制已变化，更新本机槽并重建变化的集群槽镜像"
   response="$(curl -fsS -X POST "http://127.0.0.1:${port}/api/panel/wrap-cli/sync" \
     -H "Authorization: Bearer ${key}" \
     -H "Content-Type: application/json" \
-    -d '{"restart":true}')" || { resume_schedulable_slots "$key" "$port" || true; return 1; }
-  resume_schedulable_slots "$key" "$port" || return 1
+    -d '{"restart":true}')" || return 1
   printf '%s' "$response" | python3 -c 'import json, sys
 d = json.load(sys.stdin)
 r = d.get("data") or {}

@@ -7,7 +7,7 @@ import { kernelFaults } from '../transport/rust-kernel-client.mjs'
 export function snapshotVmConnectivity(vms, { nodeReady = vmNodeReady, faults = kernelFaults } = {}) {
   return vms.map((vm) => {
     const status = String(vm.status || '').toLowerCase()
-    const ignored = vm.schedule_off === true || vm.schedule_hold?.reason === 'maintenance' || status === 'disabled'
+    const ignored = vm.schedule_off === true || status === 'disabled'
     let reason = null
     let detail = null
     if (!ignored) {

@@ -112,34 +112,7 @@ node() { printf 'node:%s\n' "$*" >> "$TRACE"; }
             with self.subTest(snippet=i):
                 ast.parse(code, feature_version=(3, 8))
 
-    def test_hold_and_resume_responses(self):
-        for function, data, message in (
-            ("pause_schedulable_slots", {"paused": 2, "inflight": 1},
-             "schedule hold: paused=2 inflight=1"),
-            ("resume_schedulable_slots", {"restored": 2},
-             "schedule resume: restored=2"),
-            ("pause_schedulable_slots", {},
-             "schedule hold: paused=0 inflight=0"),
-            ("resume_schedulable_slots", {"restored": None},
-             "schedule resume: restored=0"),
-        ):
-            for ok in (True, False):
-                with self.subTest(function=function, data=data, ok=ok):
-                    result = run_installer(
-                        function + " test-key 16801", {"ok": ok, "data": data}
-                    )
-                    self.assertEqual(result.returncode, 0 if ok else 1, result.stderr)
-                    self.assertIn(message, result.stdout)
-
-    def test_http_failure_is_propagated(self):
-        for function in ("pause_schedulable_slots", "resume_schedulable_slots"):
-            with self.subTest(function=function):
-                result = run_installer(
-                    function + " test-key 16801", mock="curl() { return 22; }"
-                )
-                self.assertEqual(result.returncode, 1, result.stderr)
-
-    def test_sync_sequence_and_recovery(self):
+    def test_sync_restarts_changed_slots_without_pausing(self):
         mock = r'''
 read_env_key() {
   case "$1" in
@@ -150,14 +123,6 @@ read_env_key() {
 curl() {
   local args="$*" step
   case "$args" in
-    */schedule/hold*)
-      step=hold
-      printf '%s' '{"ok":true,"data":{"paused":2,"inflight":0}}'
-      ;;
-    */schedule/resume*)
-      step=resume
-      printf '%s' '{"ok":true,"data":{"restored":2}}'
-      ;;
     *'"restart":false'*)
       step=check
       printf '%s' '{"ok":true,"data":{"total":2,"changed_count":2,"failed_count":0}}'
@@ -183,9 +148,7 @@ curl() {
                     extra_env={"TRACE": str(trace), "FAIL_SYNC": str(int(fail))},
                 )
                 self.assertEqual(result.returncode, int(fail), result.stderr)
-                self.assertEqual(trace.read_text().splitlines(),
-                                 ["check", "hold", "sync", "resume"])
-                self.assertIn("schedule resume: restored=2", result.stdout)
+                self.assertEqual(trace.read_text().splitlines(), ["check", "sync"])
                 if not fail:
                     self.assertIn("wrap-cli/sync: 2/2, failed=0", result.stdout)
 

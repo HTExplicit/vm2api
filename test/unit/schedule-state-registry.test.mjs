@@ -7,14 +7,11 @@ import {
   clearScheduleHold,
   clearUnschedulable,
   getVm,
-  holdSchedulableSlots,
   markUnschedulable,
   migrateScheduleFields,
-  resumeSchedulableSlots,
   setScheduleHold,
   setScheduleOff,
   setVmSchedulable,
-  waitForSlotDrain,
 } from '../../src/lib/vm/vm-registry.mjs'
 import { restoreScheduleAfterLiveCredential } from '../../src/lib/oauth/oauth-credentials.mjs'
 
@@ -90,29 +87,9 @@ test('org pause records the upstream error and only an operator action resumes i
   assert.equal('unschedulable' in read(root, 'vm-01'), false)
 })
 
-test('kernel update hold is a maintenance hold its owner lifts', async (t) => {
-  const root = project([
-    { id: 'vm-01', status: 'running', schedulable: true },
-    { id: 'vm-02', status: 'running', schedulable: false, schedule_manual: true, schedule_disabled_reason: 'disabled' },
-  ])
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  const held = holdSchedulableSlots(root, 'kernel_update')
-  assert.deepEqual(held, ['vm-01'])
-  assert.equal(getVm(root, 'vm-01').schedule_hold.reason, 'maintenance')
-  assert.equal(getVm(root, 'vm-01').schedulable, false)
-  assert.equal(setVmSchedulable(root, 'vm-01', true).schedulable, false, 'auto on does not lift a hold')
-  const drain = await waitForSlotDrain({ vmInflight: new Map([['vm-01', 1]]) }, held, { timeoutMs: 1 })
-  assert.equal(drain.ok, false)
-  assert.deepEqual(resumeSchedulableSlots(root, held, 'kernel_update'), ['vm-01'])
-  assert.equal(getVm(root, 'vm-01').schedulable, true)
-  assert.equal(getVm(root, 'vm-02').schedule_disabled_reason, 'disabled')
-})
-
 test('setVmSchedulable routes legacy reasons onto the owned fields', (t) => {
   const root = project([{ id: 'vm-01', status: 'running', schedulable: true }])
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  assert.equal(setVmSchedulable(root, 'vm-01', false, 'proxy_edit_worker_reload').schedule_hold.reason, 'maintenance')
-  clearScheduleHold(root, 'vm-01', 'maintenance')
   assert.equal(setVmSchedulable(root, 'vm-01', false, 'egress_down|proxy=p7').schedule_hold.detail.tag, 'p7')
   clearScheduleHold(root, 'vm-01', 'proxy_cooldown', { tag: 'p7' })
   const failed = setVmSchedulable(root, 'vm-01', false, 'boot timed out')

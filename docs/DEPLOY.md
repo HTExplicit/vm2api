@@ -54,13 +54,13 @@ sudo bash /opt/vm2api/deploy/install.sh crag-update
 
 需要包含 `scripts/update-crag.mjs` 的消费端源码/镜像；只下载一个新版 shell 到旧镜像不足以补齐 Node 更新器。支持已有 Docker 控制面和主机 Node 部署；读取进程环境或 `.env` 的 `VM2API_API_KEY` / `KIN_API_KEY`。无 `.env` 的主机 systemd 部署可由 root 从既有 `vm2api.service` 进程环境读取 key/port，不复制或打印完整环境；也可用进程环境 `PORT` 指定本地控制面端口。本 fork 的安装器与面板升级共用 `fleet-services.mjs` 收尾：可信 CRAG 出厂包存在时先执行一次供应包拉取与校验，即使当前没有 CRAG 槽也更新下载缓存，不改变槽位内核选择或授权。安装器的 `--no-start` / `--no-sync-wrap` 跳过收尾，显式 `crag-update --no-start` 报错。
 
-更新顺序：供应仓完整包下载和原信任锚签名/成员 SHA/ELF 校验 → 原子切换下载指针 → 全槽清点 → 检查已有 CRAG V2 槽 → 有变化时以唯一标记暂停调度并排空在途请求 → 确认原生 `active_requests`、`queued`、`continuations` 全为 0 → 受管同步/必要时重载对应槽 → 核验实际运行 memfd SHA 与签名 payload 承诺一致。安装目录哈希相同不能视为已更新运行进程。
+更新顺序：供应仓完整包下载和原信任锚签名/成员 SHA/ELF 校验 → 原子切换下载指针 → 全槽清点 → 检查已有 CRAG V2 槽 → 有变化时直接受管同步/必要时重载对应槽（不暂停调度、不等待在途请求） → 核验实际运行 memfd SHA 与签名 payload 承诺一致。安装目录哈希相同不能视为已更新运行进程。
 
 不改变内核选择：本机 Docker/KVM 的 CRAG V2 槽更新运行内核；已停止槽只更新磁盘，不开机；非 CRAG 本地槽若留有 `crag-v2` 缓存，仅原子更新该目录，不碰 wrapper、配置和进程；无副本的槽、Codex 槽不安装 CRAG。非 CRAG 集群槽标为 skip；选用 CRAG 的集群槽须通过内核页指定目标安装或重装，独立更新器在下载和停调度前拒绝处理。报告逐槽列出 `sync` / `cache` / `skip`，KVM 操作见 [CRAG KVM 部署](crag-kvm.md)。
 
 下载或信任校验失败不覆盖旧包、不停槽；未完成工具续接时拒绝强制重启。更新锁为 `share/crag/kernels/v2/.update-lock`，并发更新失败；强杀后须先确认无更新进程再清理锁。调度 hold 使用本次唯一 `crag_update_*` 标记，仅完整成功后恢复自己的 hold；取得 hold 后失败则保留该标记，按错误报告核对包与槽状态后定向恢复，不清除其他操作的 hold。断电/强杀不承诺自动恢复。失败返回非零，不伪装成功。回滚用保留的前一完整包，仍须验证原发行公钥、空闲/续接状态并显式重载；禁止轮换授权身份、用 legacy ELF 降级或仅改指针后宣称已回滚。
 
-内核安装接口先保留原启停意图和人工调度设置，再暂停调度、排空并停止服务，替换所选内核。原运行槽在实际健康核验后恢复运行和原调度设置；原停机槽安装后保持停止，下次显式启动生效。失败保留必要的维护 hold；集群断连或控制面中断后的 pending 操作沿用已保存意图恢复，不把未健康的槽放回调度。重装保留家目录、凭据、指纹和工作区。
+内核安装接口先保留原启停意图和人工调度设置，再直接停止服务，替换所选内核；不暂停调度、不等待在途请求。原运行槽在实际健康核验后恢复运行和原调度设置；原停机槽安装后保持停止，下次显式启动生效。失败的槽保持停止；集群断连或控制面中断后的 pending 操作沿用已保存意图恢复，不把未健康的槽放回调度。重装保留家目录、凭据、指纹和工作区。
 
 ## 安装
 
@@ -98,7 +98,7 @@ docker compose up -d
 curl -sS --noproxy '*' http://127.0.0.1:8787/health
 ```
 
-`bin/` 与 `share/wrap-cli` 由镜像入口写入挂载目录，完整签名 CRAG 出厂包发布到 `share/crag/kernels/v2/amd64`，保留发行公钥和已有下载缓存选择；`src/config` 缺文件时用镜像内默认值补齐。入口不再按 `KIN_AUTO_SYNC_WRAP` 后台启动旧同步。安装器/面板统一收尾按当前 fork Release 拉取 CLI pair，检查 wrap Claude 的实际差异，仅对变化槽执行一次排空重启安装，CRAG 由独立更新器处理，其他槽沿原同步路径；不额外重装 Codex。手工 Compose 更换镜像后，通过内核页显式拉取并安装所选槽，不能仅凭出厂文件变化认定槽内副本已更新。
+`bin/` 与 `share/wrap-cli` 由镜像入口写入挂载目录，完整签名 CRAG 出厂包发布到 `share/crag/kernels/v2/amd64`，保留发行公钥和已有下载缓存选择；`src/config` 缺文件时用镜像内默认值补齐。入口不再按 `KIN_AUTO_SYNC_WRAP` 后台启动旧同步。安装器/面板统一收尾按当前 fork Release 拉取 CLI pair，检查 wrap Claude 的实际差异，仅对变化槽执行一次重启安装，CRAG 由独立更新器处理，其他槽沿原同步路径；不额外重装 Codex。手工 Compose 更换镜像后，通过内核页显式拉取并安装所选槽，不能仅凭出厂文件变化认定槽内副本已更新。
 KVM / Docker 槽位将宿主 `data/run/slot-guest-bin/`（仅含 `kin-worker`、`kin-kernel` 两个文件，**不会**挂载整个 `bin/`）只读挂进容器，避免单文件 bind mount 在升级替换二进制后仍粘旧 inode，也避免把 `kin-egress`、`kin-api-kernel` 等其它 helper 暴露进槽位 PATH。此后升级 worker/kernel **不必重建槽位**；若容器仍是旧版单文件挂载创建的，须 **重建该槽位容器一次** 才能切换到 staging 目录挂载。
 槽位系统镜像优先 `docker pull ghcr.io/dofastted/kin-os-*`，拉不到时在建槽阶段用仓内 Dockerfile 兜底构建（启动不阻塞）。
 
