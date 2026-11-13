@@ -111,7 +111,7 @@ test('traits rebuild removes browser profile and home leftovers and reseeds sett
   fs.writeFileSync(path.join(home, 'credentials.json'), '{"claudeAiOauth":{}}')
   const browserProfile = path.join(root, 'vms', id, 'browser-profile')
   fs.mkdirSync(path.join(browserProfile, 'Default', 'Network'), { recursive: true })
-  fs.writeFileSync(path.join(browserProfile, '.cloakbrowser-seed'), '42137')
+  fs.writeFileSync(path.join(browserProfile, 'fingerprint.json'), '42137')
   fs.writeFileSync(path.join(browserProfile, 'Default', 'Network', 'Cookies'), Buffer.from([0, 1, 127, 255]))
   fs.writeFileSync(path.join(root, 'vms', `${id}-chat.json`), '{"x":1}')
   fs.writeFileSync(
@@ -178,7 +178,7 @@ test('keep rebuild retains the account, fingerprint, credentials and complete br
     fs.writeFileSync(file, content)
   }
   const browserFiles = {
-    '.cloakbrowser-seed': Buffer.from('42137'),
+    'fingerprint.json': Buffer.from('42137'),
     'Default/Network/Cookies': Buffer.from([0, 1, 127, 255]),
     'Default/Local Storage/leveldb/000003.log': Buffer.from([255, 0, 42, 13, 10]),
   }

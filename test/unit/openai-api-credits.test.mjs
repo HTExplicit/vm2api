@@ -488,7 +488,7 @@ test('proxy rebind during link response leaves only the persisted operation for 
   assert.equal(mock.tools().filter((call) => call.params.name === 'link_api_org').length, 1)
 })
 
-test('replacing the OAuth account does not inherit the previous account claim, key, session or balance', async (t) => {
+test('replacing the OAuth account does not inherit the previous account claim, key or balance', async (t) => {
   const slot = fixture(t)
   slot.repo.upsertOrg(ORG_ID, { display_name: 'Personal', balance: '37.00' })
   slot.repo.upsertAccount(ACCOUNT_ID, {
@@ -497,8 +497,6 @@ test('replacing the OAuth account does not inherit the previous account claim, k
     claim_status: 'claimed',
     key_id: 'ek-previous',
     enabled: true,
-    storage_state: { cookies: [{ name: 'session', value: 'previous' }] },
-    fingerprint: { device: 'previous' },
   })
   writeCodexAccounts(slot.projectRoot, slot.vmId, [
     {
@@ -522,9 +520,8 @@ test('replacing the OAuth account does not inherit the previous account claim, k
   assert.equal(slot.repo.getAccount(ACCOUNT_ID).key_id, 'ek-previous', 'old account data remains preserved')
 })
 
-test('account patches preserve independent key, browser and claim state while balances stay organization-owned', (t) => {
+test('account patches preserve independent key and claim state while balances stay organization-owned', (t) => {
   const slot = fixture(t)
-  const storageState = { cookies: [{ name: 'session', value: 'account-private-session' }], origins: [] }
   slot.repo.upsertOrg(ORG_ID, {
     display_name: 'Shared organization',
     project_id: 'proj-vm2api',
@@ -537,15 +534,11 @@ test('account patches preserve independent key, browser and claim state while ba
     key_id: 'ek-saved',
     claim_status: 'claimed',
     operation_id: '01234567-89ab-cdef-0123-456789abcdef',
-    fingerprint: { navigator: { platform: 'Linux x86_64' } },
-    storage_state: storageState,
   })
   slot.repo.upsertAccount(ACCOUNT_ID, { enabled: true, setup_status: 'ready' })
   const saved = slot.repo.getAccount(ACCOUNT_ID)
   assert.equal(saved.claim_status, 'claimed')
   assert.equal(saved.key_id, 'ek-saved')
-  assert.deepEqual(saved.storage_state, storageState)
-  assert.deepEqual(saved.fingerprint, { navigator: { platform: 'Linux x86_64' } })
   assert.equal(saved.enabled, true)
   slot.repo.upsertAccount('account-second', { organization_id: ORG_ID })
   slot.repo.upsertOrg(ORG_ID, { balance: '31.20' })
@@ -557,22 +550,26 @@ test('account patches preserve independent key, browser and claim state while ba
   assert.equal(saved.balance, undefined, 'organization balances are not copied to every account row')
 })
 
-test('Platform storageState is encrypted at the DB boundary and transparently restored', (t) => {
-  const previousSecret = process.env.VM2API_DB_SECRET
-  process.env.VM2API_DB_SECRET = 'isolated-test-secret-for-platform-session'
-  t.after(() => {
-    if (previousSecret === undefined) delete process.env.VM2API_DB_SECRET
-    else process.env.VM2API_DB_SECRET = previousSecret
-  })
+test('legacy account web fields are no longer read or written by account operations', (t) => {
   const slot = fixture(t)
   const state = { cookies: [{ name: 'session', value: 'never-plain-in-db' }], origins: [] }
-  slot.repo.upsertAccount(ACCOUNT_ID, { vm_id: slot.vmId, storage_state: state })
+  slot.repo.upsertAccount(ACCOUNT_ID, { vm_id: slot.vmId, storage_state: state, fingerprint: { legacy: true } })
   const raw = slot.repo.db
-    .prepare('SELECT storage_state_enc FROM openai_api_accounts WHERE account_id = ?')
+    .prepare('SELECT storage_state_enc, fingerprint_json FROM openai_api_accounts WHERE account_id = ?')
     .get(ACCOUNT_ID)
-  assert.match(raw.storage_state_enc, /^enc:v1:/)
-  assert.equal(raw.storage_state_enc.includes('never-plain-in-db'), false)
-  assert.deepEqual(slot.repo.getAccount(ACCOUNT_ID).storage_state, state)
+  assert.equal(raw.storage_state_enc, null)
+  assert.equal(raw.fingerprint_json, null)
+  slot.repo.db
+    .prepare('UPDATE openai_api_accounts SET storage_state_enc = ?, fingerprint_json = ? WHERE account_id = ?')
+    .run('unreadable legacy storage', 'unreadable legacy fingerprint', ACCOUNT_ID)
+  const saved = slot.repo.getAccount(ACCOUNT_ID)
+  assert.equal(Object.hasOwn(saved, 'storage_state'), false)
+  assert.equal(Object.hasOwn(saved, 'fingerprint'), false)
   slot.repo.upsertAccount(ACCOUNT_ID, { enabled: true })
-  assert.deepEqual(slot.repo.getAccount(ACCOUNT_ID).storage_state, state)
+  assert.equal(slot.repo.getAccount(ACCOUNT_ID).enabled, true)
+  assert.equal(
+    slot.repo.db.prepare('SELECT storage_state_enc FROM openai_api_accounts WHERE account_id = ?').get(ACCOUNT_ID)
+      .storage_state_enc,
+    'unreadable legacy storage',
+  )
 })

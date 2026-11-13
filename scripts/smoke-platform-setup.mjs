@@ -20,6 +20,7 @@ function fixturePage({ delay = 0, duplicate = false, existing = [] } = {}) {
   </style></head><body><main>
   <h1>API keys</h1>
   <button class="zero-size" onclick="document.body.dataset.hiddenClicks=String(Number(document.body.dataset.hiddenClicks)+1)">Create new secret key</button>
+  <button style="visibility:hidden" onclick="document.body.dataset.hiddenClicks=String(Number(document.body.dataset.hiddenClicks)+1)">Create new secret key</button>
   <button id="create" style="display:none" onclick="openKeyDialog()">Create new secret key</button>
   ${duplicate ? '<button onclick="openKeyDialog()">Create new secret key</button>' : ''}
   <table><tbody>${existing.map((status) => `<tr data-existing-key><td>${KEY_NAME}</td><td>${status}</td></tr>`).join('')}</tbody></table>
@@ -86,30 +87,31 @@ const submissions = []
 const unhandled = []
 let organizationMenuClicks = 0
 try {
-  await browser.context.route('**/*', async (route) => {
-    const request = route.request()
+  await page.setRequestInterception(true)
+  page.on('request', async (request) => {
     const url = new URL(request.url())
     if (url.origin !== 'https://platform.openai.com') {
       unhandled.push(url.origin)
-      return route.abort()
+      return request.abort()
     }
     if (url.pathname === '/fixture' || url.pathname === '/api-keys')
-      return route.fulfill({ status: 200, contentType: 'text/html', body: fixturePage(scenario) })
+      return request.respond({ status: 200, contentType: 'text/html', body: fixturePage(scenario) })
     if (url.pathname === '/settings/organization/general')
-      return route.fulfill({
+      return request.respond({
         status: 200,
         contentType: 'text/html',
         body: generalFixturePage(scenario.generalOrganizationDelay),
       })
     if (url.pathname === '/fixture/menu-click') {
       organizationMenuClicks++
-      return route.fulfill({ status: 204 })
+      return request.respond({ status: 204 })
     }
-    if (url.pathname === '/favicon.ico') return route.fulfill({ status: 204 })
+    if (url.pathname === '/favicon.ico') return request.respond({ status: 204 })
     if (url.pathname === '/dashboard/onboarding')
-      return route.fulfill({
+      return request.respond({
         status: 200,
-        json: {
+        contentType: 'application/json',
+        body: JSON.stringify({
           ...(scenario.currentOrganization === false ? {} : { organization_id: ORGANIZATION_ID }),
           user: {
             email: EMAIL,
@@ -123,16 +125,17 @@ try {
               ],
             },
           },
-        },
+        }),
       })
     if (url.pathname === KEY_CREATE_PATH && request.method() === 'POST') {
-      const body = request.postDataJSON()
+      const body = JSON.parse(await request.fetchPostData())
       assert.equal(request.headers()['openai-organization'], ORGANIZATION_ID)
       assert.equal(Object.hasOwn(body, 'project_id'), false, 'the project scope comes from the official URL')
       submissions.push(body)
-      return route.fulfill({
+      return request.respond({
         status: 200,
-        json: {
+        contentType: 'application/json',
+        body: JSON.stringify({
           result: 'success',
           key: {
             id: 'key_fixture',
@@ -141,11 +144,11 @@ try {
             organization: ORGANIZATION_ID,
             project: PROJECT_ID,
           },
-        },
+        }),
       })
     }
     unhandled.push(url.pathname)
-    return route.abort()
+    return request.abort()
   })
 
   async function adapterFor(options) {
@@ -178,7 +181,7 @@ try {
     assert.equal(configured.projectId, PROJECT_ID)
     assert.equal(configured.apiKey, FAKE_KEY)
     assert.equal(saved.length, 1)
-    const state = await page.locator('body').evaluate((body) => ({ ...body.dataset }))
+    const state = await page.$eval('body', (body) => ({ ...body.dataset }))
     assert.ok(delayedSetupElapsedMs >= 15_000, 'the fixture must appear after the former 15 second deadline')
     assert.equal(state.hiddenClicks, '0')
     assert.equal(state.opened, '1')
@@ -193,7 +196,7 @@ try {
   adapter = await adapterFor({ duplicate: true })
   try {
     await assert.rejects(adapter.configure({ keyName: KEY_NAME }), { code: 'platform_page_changed' })
-    assert.equal(await page.locator('body').getAttribute('data-opened'), '0')
+    assert.equal(await page.$eval('body', (body) => body.dataset.opened), '0')
     assert.equal(submissions.length, 1, 'ambiguous entry must not submit another key')
   } finally {
     adapter.dispose()
@@ -207,11 +210,11 @@ try {
       const configured = await adapter.configure({ keyName: KEY_NAME, onKey: (key) => savedExisting.push(key) })
       assert.equal(configured.apiKey, FAKE_KEY)
       assert.equal(savedExisting.length, 1, 'the new complete secret must be saved exactly once')
-      assert.equal(await page.locator('body').getAttribute('data-opened'), '1')
-      assert.equal(await page.locator('body').getAttribute('data-submitted'), '1')
+      assert.equal(await page.$eval('body', (body) => body.dataset.opened), '1')
+      assert.equal(await page.$eval('body', (body) => body.dataset.submitted), '1')
       assert.equal(submissions.length, before + 1, 'existing remote records must not block one new creation')
       assert.deepEqual(
-        await page.locator('[data-existing-key] td:nth-child(2)').allTextContents(),
+        await page.$$eval('[data-existing-key] td:nth-child(2)', (cells) => cells.map((cell) => cell.textContent)),
         existing,
         'the original remote records remain untouched',
       )
@@ -253,7 +256,7 @@ try {
   console.log(
     JSON.stringify({
       offline: true,
-      testBrowser: `stock-chromium/${browser.version}`,
+      testBrowser: browser.version,
       ...dimensions,
       delayedEntryMs: 16_000,
       delayedSetupElapsedMs,

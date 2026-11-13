@@ -677,7 +677,7 @@ export class OpenaiApiManager {
     const billingSession = live.adapter.billingSessionFor(organizationId)
     if (!billingSession)
       throw problem('platform_billing_session_missing', '官方 Billing 尚未返回可复用会话，请重试连接 Platform', 409)
-    const storage = await live.browser.storageState()
+    const storage = { cookies: await live.browser.exportCookies() }
     this.assertCurrent(live.job)
     this.profileRepo.upsert(live.vmId, {
       account_id: live.job.accountId,

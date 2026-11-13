@@ -4,10 +4,21 @@ import { api } from '@/lib/api'
 export type AccountBrowserStatus = {
   launcher_version: string
   installed_version: string | null
+  installed_build: string | null
   running_version: string | null
   latest_version: string | null
+  latest_build: string | null
   checked_at: string | null
-  key_set: boolean
+  update_status:
+    | 'not_installed'
+    | 'unchecked'
+    | 'current'
+    | 'update_available'
+    | 'components_available'
+    | 'newer_installed'
+    | 'application_update_required'
+    | 'check_failed'
+    | 'retry_required'
   installing: boolean
   phase: string
   progress: number | null

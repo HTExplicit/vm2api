@@ -1,63 +1,69 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import fs from 'node:fs'
+import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { createBrowserTempCleanup } from '../src/lib/browser/temp-cleanup.mjs'
+import { createBrowserFixture } from './browser-fixture.mjs'
+import { SlotBrowserManager } from '../src/lib/browser/slot-browser-manager.mjs'
 
-// This isolated child owns only a dummy profile, never a browser or account.
-// Linux /proc sees its real --user-data-dir argument; killing it models a missing
-// Playwright parent cleanup handler without touching a production process.
-if (process.platform !== 'linux') {
-  console.log(JSON.stringify({ offline: true, skipped: 'Linux process ownership smoke runs in the image' }))
-} else {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-browser-cleanup-smoke-'))
-  const profile = path.join(root, 'browser-profile')
-  const artifact = path.join(root, 'playwright-artifacts-Zy98Xw')
-  fs.mkdirSync(profile)
-  fs.mkdirSync(artifact)
-  fs.writeFileSync(path.join(profile, 'fixture'), 'isolated temporary state')
-  fs.writeFileSync(path.join(artifact, 'fixture'), 'isolated temporary artifact')
-  const child = spawn(
-    process.execPath,
-    ['-e', "process.send('ready');setInterval(()=>{},1000)", '--', '--user-data-dir', profile],
-    {
-      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+// A real child exit must notify the production manager and release its queue.
+// The scenario never manually closes the crashed slot to advance the next one.
+const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vm2api-browser-close-'))
+const records = new Map()
+const vms = new Map(['a', 'b'].map((id) => [id, { id, proxy: { url: 'http://127.0.0.1:1' } }]))
+const manager = new SlotBrowserManager({
+  cfg: { paths: { project: root } },
+  getVm: (id) => vms.get(id),
+  resolveProxy: (vm) => vm.proxy.url,
+  resolveTimezone: () => 'America/New_York',
+  profileRepo: {
+    get: (id) => records.get(id),
+    upsert(id, patch) {
+      records.set(id, { ...records.get(id), ...patch })
+      return records.get(id)
     },
+    remove: (id) => records.delete(id),
+  },
+  createSession: (options) => createBrowserFixture({ profileDir: options.profileDir }),
+})
+let timer
+try {
+  const first = await manager.acquire('a', { interactive: true })
+  await first.page.goto('data:text/html,<title>Local lifecycle fixture</title>')
+  const waiting = manager.acquire('b', { interactive: true })
+  assert.equal(manager.state('b').status, 'queued')
+  const child = first.browser.browser.process()
+  const stopped = once(child, 'exit')
+  child.kill('SIGKILL')
+  await stopped
+  assert.equal(child.signalCode, 'SIGKILL')
+  const second = await Promise.race([
+    waiting,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('crashed slot did not release the browser queue')), 15_000)
+    }),
+  ])
+  clearTimeout(timer)
+  assert.equal(manager.state('a').active, false)
+  assert.match(manager.state('a').warning, /异常退出/)
+  assert.ok(await fs.stat(manager.profileDirectory('a')), 'a crash does not delete the native persistent profile')
+  await second.page.goto('data:text/html,<title>Next session ready</title>')
+  assert.equal(await second.page.title(), 'Next session ready')
+  const next = second.browser.browser.process()
+  await Promise.all([manager.close('b'), manager.close('b')])
+  assert.equal(next.exitCode, 0, 'the subsequent browser exits normally')
+  assert.equal(next.signalCode, null)
+  console.log(
+    JSON.stringify({
+      offline: true,
+      crashedProcessReleased: true,
+      managerQueueAdvancedWithoutManualClose: true,
+      profilePreserved: true,
+      subsequentSessionClosed: true,
+    }),
   )
-  try {
-    await once(child, 'message')
-    const cleanup = createBrowserTempCleanup({ tmpDir: root, enabled: true })
-    const retained = await cleanup.cleanup()
-    assert.equal(retained.removed, 0)
-    assert.ok(retained.skipped.length > 0)
-    assert.ok(fs.existsSync(profile))
-    assert.ok(fs.existsSync(artifact))
-    const stopped = once(child, 'exit')
-    child.kill('SIGKILL')
-    await stopped
-    const reclaimed = await cleanup.cleanup()
-    assert.equal(reclaimed.removed, 1)
-    assert.deepEqual(reclaimed.failed, [])
-    assert.deepEqual(reclaimed.skipped, [])
-    assert.equal(fs.existsSync(profile), true, 'persistent profiles never belong to temporary-artifact cleanup')
-    assert.equal(fs.existsSync(artifact), false)
-    console.log(
-      JSON.stringify({
-        offline: true,
-        liveProfilePreserved: true,
-        killedChildReclaimed: true,
-        removed: reclaimed.removed,
-        modelCalls: 0,
-      }),
-    )
-  } finally {
-    if (child.exitCode == null && child.signalCode == null) {
-      const stopped = once(child, 'exit')
-      child.kill('SIGKILL')
-      await stopped
-    }
-    fs.rmSync(root, { recursive: true, force: true })
-  }
+} finally {
+  clearTimeout(timer)
+  await manager.stop()
+  await fs.rm(root, { recursive: true, force: true })
 }

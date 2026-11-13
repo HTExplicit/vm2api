@@ -148,13 +148,21 @@ export class CodexBrowserLoginService {
       job.sessionId = generated.session_id
       const authorize = new URL(new URL(generated.auth_url).searchParams.get('authorize_url'))
       job.state = authorize.searchParams.get('state')
-      job.routeMatch = (url) => url.origin === REDIRECT.origin && url.pathname === REDIRECT.pathname
-      job.routeHandler = (route) => {
-        const callback = this.acceptCallback(job, route)
+      job.callbackSession = await job.live.page.createCDPSession()
+      job.callbackHandler = (event) => {
+        const callback = this.acceptCallback(job, event)
         job.callbackPromise ||= callback
         return callback
       }
-      await job.live.context.route(job.routeMatch, job.routeHandler)
+      job.callbackSession.on('Fetch.requestPaused', job.callbackHandler)
+      const callbackUrl = `${REDIRECT.origin}${REDIRECT.pathname}`
+      await job.callbackSession.send('Fetch.enable', {
+        patterns: [callbackUrl, `${callbackUrl}\\?*`].map((urlPattern) => ({
+          urlPattern,
+          requestStage: 'Request',
+          resourceType: 'Document',
+        })),
+      })
       job.timer = setTimeout(
         () => {
           job.abort.abort(problem('session_expired', 'OpenAI 授权已过期，请重新登录。'))
@@ -219,26 +227,37 @@ export class CodexBrowserLoginService {
       if (navigationChanged) job.live.stream?.sendNavigation()
       if (job.sessionId) this.cancelAuthSession(job.sessionId)
       job.live?.closeSignal?.removeEventListener('abort', onClosed)
-      if (job.routeMatch) await job.live.context.unroute(job.routeMatch, job.routeHandler).catch(() => {})
       // A callback can still be awaiting the shared credential commit after the
       // browser closes. Deletion must wait until it can no longer write state.
       await job.callbackPromise
+      if (job.callbackSession) {
+        job.callbackSession.off('Fetch.requestPaused', job.callbackHandler)
+        await job.callbackSession.send('Fetch.disable').catch(() => {})
+        await job.callbackSession.detach().catch(() => {})
+      }
       if (this.jobs.get(job.vmId) === job) this.jobs.delete(job.vmId)
     }
   }
 
-  async acceptCallback(job, route) {
-    if (job.exchanging || job.saved) {
-      await route
-        .fulfill({ status: 409, contentType: 'text/plain; charset=utf-8', body: '正在保存授权，请稍候。' })
+  async acceptCallback(job, { requestId, request }) {
+    const respond = (status, body, contentType = 'text/plain; charset=utf-8') =>
+      job.callbackSession
+        .send('Fetch.fulfillRequest', {
+          requestId,
+          responseCode: status,
+          responseHeaders: [{ name: 'Content-Type', value: contentType }],
+          body: Buffer.from(body).toString('base64'),
+        })
         .catch(() => {})
+    if (job.exchanging || job.saved) {
+      await respond(409, '正在保存授权，请稍候。')
       return
     }
     job.exchanging = true
     job.live.stream?.sendNavigation()
     try {
       this.assertCurrent(job)
-      const callback = parseCodexBrowserCallback(route.request().url(), job.state)
+      const callback = parseCodexBrowserCallback(request.url, job.state)
       const account = await this.exchangeCode({
         sessionId: job.sessionId,
         code: callback,
@@ -268,9 +287,7 @@ export class CodexBrowserLoginService {
         !committedVm ||
         !sameIdentity(committedIdentity, expectedIdentity)
       ) {
-        await route
-          .fulfill({ status: 200, contentType: 'text/plain; charset=utf-8', body: '授权处理已结束，请返回面板。' })
-          .catch(() => {})
+        await respond(200, '授权处理已结束，请返回面板。')
         job.completed.resolve(result)
         return
       }
@@ -284,25 +301,17 @@ export class CodexBrowserLoginService {
         message =
           'OpenAI 凭据已保存；网页会话保存失败，需要时可重新登录 Platform。请点击“开机并完成”启动此槽并开启调度。'
       }
-      await route
-        .fulfill({
-          status: 200,
-          contentType: 'text/html; charset=utf-8',
-          body: '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>OpenAI 授权成功</title><body><h1>OpenAI 授权成功</h1><p>凭据已保存。请返回面板点击“开机并完成”，启动此槽并开启调度。</p></body></html>',
-        })
-        .catch(() => {})
+      await respond(
+        200,
+        '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>OpenAI 授权成功</title><body><h1>OpenAI 授权成功</h1><p>凭据已保存。请返回面板点击“开机并完成”，启动此槽并开启调度。</p></body></html>',
+        'text/html; charset=utf-8',
+      )
       if (!job.live.closeSignal?.aborted) {
         this.browserManager.setStatus(job.live, 'oauth_complete', message, { result })
       }
       job.completed.resolve(result)
     } catch (error) {
-      await route
-        .fulfill({
-          status: 400,
-          contentType: 'text/plain; charset=utf-8',
-          body: error.publicMessage || 'OpenAI 授权处理失败，请返回面板重新登录。',
-        })
-        .catch(() => {})
+      await respond(400, error.publicMessage || 'OpenAI 授权处理失败，请返回面板重新登录。')
       job.completed.reject(error)
     }
   }

@@ -93,9 +93,9 @@ try {
   await page.goto(url)
   const image = page.getByRole('img', { name: 'OpenAI 官方登录与账号网页' })
   await image.waitFor({ state: 'visible', timeout: 45000 })
-  const form = remote.page.frameLocator('#form')
-  const remoteButton = form.locator('#button')
-  const remoteInput = form.locator('#text')
+  const form = await (await remote.page.$('#form')).contentFrame()
+  const remoteButton = await form.$('#button')
+  const remoteInput = await form.$('#text')
   async function clickRemote(locator, hold = 100) {
     // Manual mouse coordinates do not get Playwright locator actionability
     // waits. Let the dialog finish reflow after viewport/quality changes.
@@ -116,11 +116,11 @@ try {
       y: imageBox.y + (expected.y / dimensions.height) * imageBox.height,
     }
     const before = await viewport.evaluate((element) => ({ x: element.scrollLeft, y: element.scrollTop }))
-    const previousDown = await form.locator('body').evaluate(() => document.body.dataset.downAt)
+    const previousDown = await form.evaluate(() => document.body.dataset.downAt)
     await page.mouse.move(click.x, click.y)
     await page.mouse.down()
     const deadline = Date.now() + 10000
-    while ((await form.locator('body').evaluate(() => document.body.dataset.downAt)) === previousDown) {
+    while ((await form.evaluate(() => document.body.dataset.downAt)) === previousDown) {
       assert.ok(Date.now() < deadline, 'the forwarded press reaches the iframe')
       await sleep(20)
     }
@@ -139,8 +139,8 @@ try {
     return { before, expected, sent: { x: down.x, y: down.y } }
   }
   const fit = await clickRemote(remoteButton)
-  assert.equal(await form.locator('body').getAttribute('data-clicks'), '1')
-  const held = await form.locator('body').evaluate(() => Number(document.body.dataset.held))
+  assert.equal(await form.evaluate(() => document.body.dataset.clicks), '1')
+  const held = await form.evaluate(() => Number(document.body.dataset.held))
   assert.ok(held >= 50, 'remote down/up retains a real press interval')
   await clickRemote(remoteInput)
   await page.keyboard.type('hello')
@@ -150,7 +150,7 @@ try {
     element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, clipboardData }))
   })
   await sleep(250)
-  assert.equal(await remoteInput.inputValue(), 'hello中文')
+  assert.equal(await remoteInput.evaluate((element) => element.value), 'hello中文')
   await page.getByRole('button', { name: '流畅画面 · 切原图' }).click()
   await sleep(500)
   await page.setViewportSize({ width: 1000, height: 750 })
@@ -162,11 +162,11 @@ try {
   await page.getByRole('button', { name: '原图画面 · 切流畅' }).focus()
   const scrolled = await clickRemote(remoteButton)
   assert.ok(scrolled.before.x > 0 && scrolled.before.y > 0, 'regression test really scrolls both axes')
-  assert.equal(await form.locator('body').getAttribute('data-clicks'), '2')
+  assert.equal(await form.evaluate(() => document.body.dataset.clicks), '2')
   await page.getByRole('button', { name: '原图画面 · 切流畅' }).click()
   await sleep(400)
   const smooth = await clickRemote(remoteButton)
-  assert.equal(await form.locator('body').getAttribute('data-clicks'), '3')
+  assert.equal(await form.evaluate(() => document.body.dataset.clicks), '3')
   assert.deepEqual(errors, [])
   console.log(
     JSON.stringify({

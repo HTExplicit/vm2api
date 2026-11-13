@@ -18,6 +18,32 @@ async function resizeJpeg(image, { width, height, maxDimension }) {
   return { image: data, width: info.width, height: info.height }
 }
 
+async function imageDimensions(image) {
+  const { default: sharp } = await import('sharp')
+  const { width, height } = await sharp(image).metadata()
+  return { width, height }
+}
+
+async function pressKey(keyboard, value) {
+  let key = String(value)
+  const modifiers = []
+  let prefix
+  while ((prefix = /^(Control|Meta|Alt|Shift)\+/.exec(key))) {
+    modifiers.push(prefix[1])
+    key = key.slice(prefix[0].length)
+  }
+  const held = []
+  try {
+    for (const modifier of modifiers) {
+      await keyboard.down(modifier)
+      held.push(modifier)
+    }
+    await keyboard.press(key)
+  } finally {
+    for (const modifier of held.reverse()) await keyboard.up(modifier)
+  }
+}
+
 function message(error) {
   return String(error?.message || '浏览器操作失败')
     .replace(/sk-[A-Za-z0-9_-]+/g, '[key]')
@@ -38,6 +64,7 @@ export class BrowserStream {
     isAuthorizationCompleting = () => false,
     now = Date.now,
     resize = resizeJpeg,
+    measure = imageDimensions,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
   }) {
@@ -53,6 +80,7 @@ export class BrowserStream {
       isAuthorizationCompleting,
       now,
       resize,
+      measure,
       setTimer,
       clearTimer,
     })
@@ -178,11 +206,12 @@ export class BrowserStream {
         this.viewportDirty = false
       }
       const { width, height } = this.viewport
-      const image = await this.page.screenshot({ type: 'jpeg', quality: 70, scale: 'css' })
+      const image = Buffer.from(await this.page.screenshot({ type: 'jpeg', quality: 70 }))
+      const pixels = await this.measure(image)
       if (this.closed) return
-      const encoded = new Map([['native', { image, width, height }]])
+      const encoded = new Map([['native', { image, ...pixels }]])
       if (ready.some(([, client]) => client.mode === 'smooth')) {
-        encoded.set('smooth', await this.resize(image, { width, height, maxDimension: MAX_DIMENSION }))
+        encoded.set('smooth', await this.resize(image, { ...pixels, maxDimension: MAX_DIMENSION }))
       }
       const seq = ++this.sequence
       for (const [ws, client] of ready) {
@@ -338,9 +367,11 @@ export class BrowserStream {
         }
       } else if (input.type === 'move') await this.page.mouse.move(Number(input.x), Number(input.y))
       else if (input.type === 'scroll')
-        await this.page.mouse.wheel(Number(input.deltaX) || 0, Number(input.deltaY) || 0)
-      else if (input.type === 'key') await this.page.keyboard.press(String(input.key))
-      else if (input.type === 'text') await this.page.keyboard.insertText(String(input.text))
+        await this.page.mouse.wheel({ deltaX: Number(input.deltaX) || 0, deltaY: Number(input.deltaY) || 0 })
+      else if (input.type === 'key') {
+        await pressKey(this.page.keyboard, input.key)
+        this.viewportDirty = true
+      } else if (input.type === 'text') await this.page.keyboard.sendCharacter(String(input.text))
       else return
       if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'input_ack', seq: input.seq ?? null }))
       if (input.type !== 'move') this.requestFrame()

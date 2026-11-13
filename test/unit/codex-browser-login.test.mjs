@@ -37,16 +37,48 @@ function fixture(t, options = {}) {
     cancelled: [],
     navigationUpdates: [],
     navigations: [],
+    protocol: [],
+    replies: [],
   }
-  let routeMatch, routeHandler, rejectAcquire
+  let callbackHandler,
+    rejectAcquire,
+    callbackNumber = 0
   let current = vm
   let tokenIdentity = options.tokenIdentity
+  const cdp = {
+    on(event, handler) {
+      assert.equal(event, 'Fetch.requestPaused')
+      callbackHandler = handler
+    },
+    off(event, handler) {
+      assert.equal(event, 'Fetch.requestPaused')
+      assert.equal(handler, callbackHandler)
+      callbackHandler = null
+    },
+    async send(method, params) {
+      calls.protocol.push({ method, params })
+      if (method === 'Fetch.enable') {
+        if (options.enableError) throw Error('callback interception unavailable')
+        calls.enabled = params
+      }
+      if (closeController.signal.aborted) throw Error('CDP session closed')
+      if (method === 'Fetch.fulfillRequest') calls.replies.push(params)
+      if (method === 'Fetch.disable') calls.disabled = true
+    },
+    async detach() {
+      calls.detached = true
+    },
+  }
   const live = {
     vmId: vm.id,
     proxyUrl: 'socks5h://bound-proxy.test:1080',
     closeSignal: closeController.signal,
     persistable: true,
     page: {
+      async createCDPSession() {
+        calls.cdpCreated = (calls.cdpCreated || 0) + 1
+        return cdp
+      },
       async goto(url, navigationOptions) {
         calls.navigation = url
         calls.navigations.push({ url, options: navigationOptions })
@@ -56,18 +88,6 @@ function fixture(t, options = {}) {
     stream: {
       sendNavigation() {
         calls.navigationUpdates.push(live.canReturnToAuthorization?.() || false)
-      },
-    },
-    context: {
-      async route(match, handler) {
-        routeMatch = match
-        routeHandler = handler
-      },
-      async unroute(match, handler) {
-        assert.equal(match, routeMatch)
-        assert.equal(handler, routeHandler)
-        routeHandler = null
-        calls.unrouted = true
       },
     },
   }
@@ -142,22 +162,25 @@ function fixture(t, options = {}) {
     remove: () => (current = null),
     setTokenIdentity: (identity) => (tokenIdentity = identity),
     async waiting() {
-      await until(() => routeHandler && calls.navigation)
+      await until(() => callbackHandler && calls.navigation)
     },
     async callback(parameters = {}) {
       const authorize = new URL(new URL(calls.navigation).searchParams.get('authorize_url'))
       const url = new URL('http://localhost:1455/auth/callback')
       url.searchParams.set('code', parameters.code ?? 'private-code')
       url.searchParams.set('state', parameters.state ?? authorize.searchParams.get('state'))
-      assert.equal(routeMatch(url), true)
-      const replies = []
-      await routeHandler({
-        request: () => ({ url: () => url.href }),
-        async fulfill(value) {
-          replies.push(value)
-        },
+      const requestId = `callback-${++callbackNumber}`
+      await callbackHandler({
+        requestId,
+        request: { url: url.href },
       })
-      return replies
+      return calls.replies
+        .filter((reply) => reply.requestId === requestId)
+        .map((reply) => ({
+          status: reply.responseCode,
+          contentType: reply.responseHeaders.find((header) => header.name === 'Content-Type')?.value,
+          body: Buffer.from(reply.body, 'base64').toString('utf8'),
+        }))
     },
   }
 }
@@ -199,7 +222,54 @@ test('first login commits through the shared chain, binds the slot profile and r
   assert.equal(replies[0].status, 200)
   assert.match(replies[0].body, /开机并完成.*开启调度/)
   assert.equal(f.live.closeSignal.aborted, false)
-  assert.equal(f.calls.unrouted, true)
+  assert.equal(f.calls.disabled, true)
+  assert.equal(f.calls.detached, true)
+})
+
+test('OAuth intercepts only documents at the exact callback path and its query string', async (t) => {
+  const f = fixture(t)
+  f.service.start(f.vm.id)
+  await f.waiting()
+  assert.equal(f.calls.cdpCreated, 1)
+  assert.deepEqual(f.calls.enabled, {
+    patterns: [
+      { urlPattern: 'http://localhost:1455/auth/callback', requestStage: 'Request', resourceType: 'Document' },
+      { urlPattern: 'http://localhost:1455/auth/callback\\?*', requestStage: 'Request', resourceType: 'Document' },
+    ],
+  })
+  await f.service.cancel(f.vm.id)
+  assert.equal(f.calls.disabled, true)
+  assert.equal(f.calls.detached, true)
+})
+
+test('callback interception failure prevents authorization navigation and releases the CDP session', async (t) => {
+  const f = fixture(t, { enableError: true })
+  f.service.start(f.vm.id)
+  await until(() => !f.service.jobs.size)
+  assert.equal(f.calls.navigations.length, 0)
+  assert.equal(f.calls.committed.length, 0)
+  assert.equal(f.calls.cancelled.length, 1)
+  assert.equal(f.calls.detached, true)
+  assert.equal(f.calls.statuses.at(-1).error, 'oauth_browser_failed')
+})
+
+test('a duplicate paused callback receives conflict while the first exchange commits once', async (t) => {
+  let finish
+  const pending = new Promise((resolve) => (finish = resolve))
+  const f = fixture(t, { exchange: () => pending })
+  f.service.start(f.vm.id)
+  await f.waiting()
+  const first = f.callback()
+  await until(() => f.calls.exchanged.length)
+  const duplicate = await f.callback()
+  assert.equal(duplicate[0].status, 409)
+  assert.equal(f.calls.exchanged.length, 1)
+  finish(tokens())
+  const reply = await first
+  await until(() => !f.service.jobs.size)
+  assert.equal(reply[0].status, 200)
+  assert.equal(reply[0].contentType, 'text/html; charset=utf-8')
+  assert.equal(f.calls.committed.length, 1)
 })
 
 test('returning from an email page reuses the original OpenAI authorization and callback session', async (t) => {
@@ -474,14 +544,18 @@ test('cancelling a queued login removes its pending browser request', async (t) 
   assert.equal(f.service.jobs.size, 0)
 })
 
-test('closing a waiting browser removes its callback route and authorization session', async (t) => {
+test('closing a waiting browser detaches its callback CDP session and authorization session', async (t) => {
   const f = fixture(t)
   f.service.start(f.vm.id)
   await f.waiting()
   const sessionId = f.calls.grant.session_id
   f.close()
   await until(() => !f.service.jobs.size)
-  assert.equal(f.calls.unrouted, true)
+  assert.equal(f.calls.detached, true)
+  assert.equal(
+    f.calls.protocol.some((entry) => entry.method === 'Fetch.disable'),
+    true,
+  )
   assert.deepEqual(f.calls.cancelled, [sessionId])
   await assert.rejects(
     exchangeCodexAuthCode({

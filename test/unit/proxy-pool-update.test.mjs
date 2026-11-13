@@ -167,3 +167,86 @@ test('labelOf 只给名称，不带账密；未知代理返回 null', () => {
   assert.equal(pool.labelOf(p.id), 'tw-box')
   assert.equal(pool.labelOf('px-missing'), null)
 })
+
+test('connection changes invalidate both geo caches; labels and identical endpoints preserve them', () => {
+  const pool = makePool()
+  const p = seed(pool)
+  Object.assign(p, {
+    geo_timezone: 'Asia/Tokyo',
+    geo_ip: '203.0.113.1',
+    geo_checked_at: '2026-01-01',
+    geo_v6_timezone: 'Asia/Tokyo',
+    geo_v6_ip: '2001:db8::1',
+  })
+  assert.equal(pool.update(p.id, { label: 'Tokyo' }).connection_changed, false)
+  assert.equal(
+    pool.update(p.id, { host: p.host, port: String(p.port), username: p.username, password: p.password })
+      .connection_changed,
+    false,
+  )
+  assert.equal(p.geo_timezone, 'Asia/Tokyo')
+  assert.equal(p.geo_v6_ip, '2001:db8::1')
+  const preview = pool.update(p.id, { password: 'next-password' }, { dryRun: true })
+  assert.equal(preview.connection_changed, true)
+  assert.equal(p.password, 's3cret')
+  assert.equal(p.geo_timezone, 'Asia/Tokyo')
+  pool.update(p.id, { password: 'next-password' })
+  assert.equal(p.geo_timezone ?? null, null)
+  assert.equal(p.geo_ip, null)
+  assert.equal(p.geo_v6_ip, null)
+})
+
+test('bind validation and dry runs leave the old binding intact', () => {
+  const pool = makePool()
+  pool.importLines('10.0.0.1:1080\n10.0.0.2:1080')
+  pool.updateConfig({ bind_limit: 1 })
+  const [a, b] = pool.state.proxies
+  pool.bind(a.id, 'vm-a')
+  pool.bind(b.id, 'vm-b')
+  assert.equal(pool.bind(b.id, 'vm-a', { dryRun: true }).error, 'proxy_bind_limit')
+  assert.equal(pool.bind(b.id, 'vm-a').error, 'proxy_bind_limit')
+  assert.equal(pool.getProxyForVm('vm-a').id, a.id)
+  pool.unbind(b.id)
+  assert.equal(pool.bind(b.id, 'vm-a', { dryRun: true }).connection_changed, true)
+  assert.equal(pool.getProxyForVm('vm-a').id, a.id)
+  assert.equal(pool.bind(a.id, 'vm-a', { dryRun: true }).connection_changed, false)
+})
+
+test('browser timezone uses saved data and only queries the actual proxy when missing', async () => {
+  const pool = makePool()
+  const p = seed(pool)
+  p.geo_timezone = 'Asia/Tokyo'
+  const seen = []
+  pool.geoLookup = async (url, options) => {
+    seen.push({ url, options })
+    return { ok: true, geo: { timezone: 'Europe/London', ip: '203.0.113.2' } }
+  }
+  const relay = 'socks5h://127.0.0.1:19000'
+  assert.equal(await pool.browserTimezone(p.id, relay), 'Asia/Tokyo')
+  assert.equal(seen.length, 0)
+  pool.update(p.id, { port: 1090 })
+  assert.equal(await pool.browserTimezone(p.id, relay), 'Europe/London')
+  assert.equal(seen[0].url, relay)
+  assert.equal(seen[0].options.ipv6Mode, 'proxy')
+  assert.equal(p.geo_timezone, 'Europe/London')
+  await assert.rejects(pool.browserTimezone(p.id, ''), { code: 'proxy_required' })
+})
+
+test('browser timezone rejects missing location and does not save an old connection lookup', async () => {
+  const pool = makePool()
+  const p = seed(pool)
+  pool.geoLookup = async () => ({ ok: false, error: 'offline' })
+  await assert.rejects(pool.browserTimezone(p.id, 'socks5h://127.0.0.1:19000'), {
+    code: 'browser_timezone_unavailable',
+  })
+  let finish
+  pool.geoLookup = () =>
+    new Promise((resolve) => {
+      finish = resolve
+    })
+  const pending = pool.browserTimezone(p.id, 'socks5h://127.0.0.1:19000')
+  pool.update(p.id, { host: 'new.proxy.test' })
+  finish({ ok: true, geo: { timezone: 'Asia/Tokyo' } })
+  await assert.rejects(pending, { code: 'browser_proxy_changed' })
+  assert.equal(p.geo_timezone ?? null, null)
+})

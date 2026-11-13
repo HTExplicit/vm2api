@@ -57,6 +57,7 @@ import { OpenaiApiManager } from './lib/openai-api/manager.mjs'
 import { SlotBrowserRepo } from './lib/db/repos/slot-browser-repo.mjs'
 import { SlotBrowserManager } from './lib/browser/slot-browser-manager.mjs'
 import { AccountBrowserRuntime } from './lib/browser/account-browser-runtime.mjs'
+import { migrateBrowserData, SHARD_BROWSER_MIGRATION_SETTING } from './lib/browser/browser-data-migration.mjs'
 import { CodexBrowserLoginService } from './lib/oauth/codex-browser-login.mjs'
 import { commitImportedCodexVm } from './lib/admin/panel-routes.mjs'
 import { resolveInferenceBackend } from './lib/pool/api-protocol.mjs'
@@ -326,6 +327,23 @@ const apiScheduler = new ApiScheduler({ getRouting: () => routingConfig })
 apiScheduler.reload(apiEndpointStore.listRaw())
 const openaiApiRepo = new OpenaiApiRepo()
 const slotBrowserRepo = new SlotBrowserRepo()
+const prepareBrowserData = () => {
+  const settingsRepo = new SettingsRepo()
+  if (settingsRepo.get(SHARD_BROWSER_MIGRATION_SETTING) === true) return
+  migrateBrowserData({
+    projectRoot: cfg.paths.project,
+    dataDir: cfg.paths.data,
+    settingsRepo,
+    vmIds: [
+      ...new Set([...listVms(cfg.paths.project).map((vm) => vm.id), ...slotBrowserRepo.list().map((row) => row.vm_id)]),
+    ],
+  })
+}
+try {
+  prepareBrowserData()
+} catch (error) {
+  console.error('[browser] data migration failed:', error.code || 'browser_data_migration_failed')
+}
 const slotAccountIdentity = (id) => {
   try {
     const current = openaiApiCredits.accountForVm(id)
@@ -336,7 +354,6 @@ const slotAccountIdentity = (id) => {
 }
 const accountBrowserRuntime = new AccountBrowserRuntime({
   dataDir: cfg.paths.data,
-  settingsRepo: () => new SettingsRepo(),
   getBusy: () => !!slotBrowserManager.active,
   getActiveVersion: () => slotBrowserManager.active?.browser?.version || null,
   onIdle: () => {
@@ -347,6 +364,8 @@ const slotBrowserManager = new SlotBrowserManager({
   cfg,
   profileRepo: slotBrowserRepo,
   runtime: accountBrowserRuntime,
+  prepareData: prepareBrowserData,
+  resolveTimezone: (vm, proxyUrl) => proxyPool.browserTimezone(vm.proxy?.id, proxyUrl),
   getAccountIdentity: (id) => slotAccountIdentity(id).accountId || '',
 })
 let openaiApiManager

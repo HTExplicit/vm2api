@@ -577,7 +577,7 @@ kin-egress 的 UDP DNS 与 TCP 一致：上游全部不可达或解析失败时�
 
 另可改 `label`（面板上叫「代理名称」，trim 后最长 64 字，传空串清除，列表响应回显 `label`）。它只影响显示：**只改 `label`** 时不校验地址、不改 `raw`、不重载任何槽位，响应里 `workers` 恒为空数组。名称只存在池里：槽位接口的 `proxy.label` 和授权链接的 `proxy_hint`（`名称 · host:port`）都实时读池，不写进 `vms/<id>.json`。
 
-代理凭据在系统里存三份（池 → `vms/<id>.json` → `worker.json`），所以本端点会对每个已绑槽位回写槽位文件并重载 worker（停调度 → reload → 恢复），reason 记为 `proxy_edit_worker_reload`。单个槽位重载失败不会让请求失败——池已经改了，回滚更乱；失败信息逐槽位放在响应里由运维决定是否重试。
+代理凭据在池、槽位文件和 worker 配置中保持一致。连接信息确实改变时，先结束受影响槽位的浏览器业务并关闭窗口，再写入新连接、清除旧地理缓存并重载对应 worker；不暂停调度。单个 worker 重载失败逐槽返回，由管理员决定是否重试。
 
 响应 `{ proxy, workers: [{ vm_id, ok, error }] }`。错误：`404 proxy_not_found`、`400 invalid_proxy`、`400 no_editable_fields`、`400 invalid_label`、`400 label_too_long`、`400 password_without_username`（SOCKS5 没有只有密码的认证方式，`socks5Record()` 见用户名为空就丢弃密码，所以这个组合直接拒掉而不是静默存成「仍无账密」）。
 
@@ -601,11 +601,11 @@ sessionKey / 授权码导入必须走该槽 SOCKS5。
 
 基址 `/vms/:id`。POST `/browser/open` 接收 `{ purpose: "oauth" | "platform" }`，立即返回公开状态并在后台排队、启动；GET `/browser` 读取当前 `active/status/purpose/message` 及可选 `warning`。POST `/browser-ticket` 返回 `{ ticket, url }`，30 秒单次票据可在排队时连接 WebSocket `/browser?ticket=…`。POST `/browser/close` 取消该槽登录及配置任务，保存会话并释放浏览器。`/openai-api/browser-ticket` 与 WebSocket `/openai-api/browser` 保留兼容。
 
-关闭时停止画面、输入和 ticket，浏览器、代理 relay 与本次临时目录释放成功后才推进队列。失败返回 `browser_close_failed` 或 `browser_temp_cleanup_failed`，状态为 `close_failed/active:true`，保留串行占用；管理员再次 POST `/browser/close` 只重试未完成的步骤。主动关闭失败保留弹窗并显示“重试关闭”，离开页面失败用全局提示；重新打开失败态只显示状态，不重启浏览器。会话保存失败但资源释放成功时返回 `closed` 和 `warning`。删槽遇到关闭失败会停止删除，保留身份、key 及槽资料。
+关闭时停止画面、输入和 ticket，仅保存 Cookie，然后由 Puppeteer 关闭浏览器，确认进程退出并关闭代理 relay、虚拟显示后推进队列。Puppeteer 自带的异常关闭终止行为保留；异常进程退出也会触发资源回收。真实退出失败返回 `browser_close_failed`，状态为 `close_failed/active:true`；管理员再次 POST `/browser/close` 重试未完成的步骤。主动关闭失败保留弹窗并显示“重试关闭”。Cookie 保存失败但资源释放成功时返回 `closed` 和 `warning`。删槽遇到关闭失败会停止删除。
 
-专用 Linux 控制容器在服务开放前、真实浏览器启动前回收实际临时根下的两种直属 Playwright 目录，正常关闭和初始化失败后复核本次启动新增目录；只处理当前 UID 的普通目录，符号链接、活跃浏览器引用和无法核对的进程清单均保留。其他运行环境仅报告，失败说明进入日志及浏览器警告；无周期 GC，不扫描共享安装、固定指纹、数据库会话、证据或备份。截图仍只在内存和 WebSocket 传输，关闭后的旧帧和 Blob URL 正常释放。
+管理员通过 GET `/account-browser` 读取本地状态，POST `/account-browser/check` 查询官方最新清单，POST `/account-browser/install` 安装、更新或人工重试；原授权 key 接口已删除。设置显示已安装／运行／最新版本、build、后端统一更新判断及错误。安装会暂停新开窗，仅核对文件、实际版本与组件，不执行页面自检，不保留额外旧内核副本或自动回滚。公开镜像不含浏览器内核；运行期缓存在 data 卷，应用升级保留。截图仅在内存和 WebSocket 传输。
 
-一个槽位固定一套首次随机生成的 Camoufox 身份，OAuth 与 Platform 共用加密网页会话，所有网页及换票请求使用当前绑定代理；改绑后须重新打开。同账号 OAuth 回调自动换票、保存并推送 `oauth_complete`，仅表示凭据已保存。登录窗口保留，点击“开机并完成”依次调用 `POST /vms/:id/start`、`{ ensure_kernel: true }`，`GET /vms/:id/health` 核验目标 GPT 内核，再调用 `POST /vms/:id/schedulable`、`{ schedulable: true }` 开启调度；全部成功后点击“完成”才结束向导，也可继续进入 Platform。失败保留凭据并允许重试，直接关闭不报告向导完成。API 配置完成为 `api_ready`，`ready` 仅表示浏览器已就绪。未关联赠额的账号打开 Platform 只导航，不自动领取。
+一个槽位固定一套首次从上游 Linux 模板生成的 ShardBrowser 身份，采用 Puppeteer 原生持久 profile、英文界面及绑定代理时区，Cookie 与 Billing 会话加密保存。所有网页及换票请求使用当前绑定代理；连接或绑定变更先关闭受影响窗口，连接信息改变清除旧地理缓存。同账号 OAuth 回调自动换票、保存并推送 `oauth_complete`，仅表示凭据已保存。登录窗口保留，点击“开机并完成”依次调用 `POST /vms/:id/start`、`{ ensure_kernel: true }`，`GET /vms/:id/health` 核验目标 GPT 内核，再调用 `POST /vms/:id/schedulable`、`{ schedulable: true }` 开启调度；全部成功后点击“完成”才结束向导，也可继续进入 Platform。失败保留凭据并允许重试，直接关闭不报告向导完成。API 配置完成为 `api_ready`，`ready` 仅表示浏览器已就绪。未关联赠额的账号打开 Platform 只导航，不自动领取。
 
 账号邮箱确认后，组织可由官方请求或 General 页唯一只读 `Organization ID` 字段核对；字段必须属于已观测的当前账号组织列表。身份先返回时，组织选择最多等待 10 秒供页面及网络信息就绪，取消或关窗立即退出，不从用户菜单名称推断组织。
 

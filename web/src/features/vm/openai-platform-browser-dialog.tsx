@@ -788,7 +788,7 @@ export function SlotBrowserDialog({
           </p>
         ) : null}
         {error &&
-        ['browser_not_installed', 'browser_key_required'].includes(
+        ['browser_not_installed', 'browser_install_unverified'].includes(
           errorCode
         ) ? (
           <a
@@ -796,7 +796,7 @@ export function SlotBrowserDialog({
             className='text-sm text-primary underline underline-offset-4'
             onClick={() => void dismiss()}
           >
-            前往账号浏览器设置，填写 key 并安装内核
+            前往账号浏览器设置，安装或重试安装
           </a>
         ) : null}
         <div className='space-y-1.5'>

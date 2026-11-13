@@ -5,352 +5,326 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   AccountBrowserRuntime,
-  ACCOUNT_BROWSER_KEY_SETTING,
+  SHARD_MANIFEST_URL,
+  SHARD_SDK_VERSION,
+  browserUpdateStatus,
+  compareBrowserVersions,
+  localShardInfo,
   safeAccountBrowserError,
+  verifyShardInstall,
 } from '../../src/lib/browser/account-browser-runtime.mjs'
 
-const OLD = '155.0.8059.39.1'
-const NEW = '156.0.8078.47.1'
-const PLATFORM =
-  process.platform === 'win32'
-    ? 'windows-x64'
-    : `${process.platform === 'darwin' ? 'macos' : process.platform}-${process.arch}`
-
-function fixture(t, options = {}) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'account-browser-runtime-'))
-  const previous = process.env.VM2API_DB_SECRET
-  process.env.VM2API_DB_SECRET = 'unit-test-browser-key-encryption'
-  const rows = new Map()
-  const repo = {
-    get: (key) => rows.get(key),
-    set: (key, value) => rows.set(key, value),
-    remove: (key) => rows.delete(key),
+const OLD = '156.0.8078.47'
+const NEW = '157.0.8103.50'
+function release(version = NEW, build = '1', components = {}) {
+  return {
+    version,
+    build,
+    minSdkVersion: '2.1.0',
+    components: {
+      browser: `browser-${version}-${build}`,
+      fingerprints: 'profiles-1',
+      widevine: 'widevine-1',
+      ...components,
+    },
   }
+}
+function remote(value) {
+  return {
+    chromium_version: value.version,
+    engine_build: value.build,
+    min_sdk_version: value.minSdkVersion,
+    archives: {
+      'ShardX-Linux.zip': value.components.browser,
+      'ShardX-Fingerprints.zip': value.components.fingerprints,
+      'ShardX-Widevine-Linux.zip': value.components.widevine,
+    },
+  }
+}
+function installedIdentity(value) {
+  return { version: value.version, build: value.build, components: value.components }
+}
+function fixture(t, options = {}) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'shard-runtime-'))
   const runtime = new AccountBrowserRuntime({
     dataDir: directory,
-    settingsRepo: () => repo,
-    fetch: async () => ({ ok: true, json: async () => ({ version: NEW }) }),
+    fetch: async () => ({ ok: true, json: async () => remote(release()) }),
+    verifyInstall: async ({ target }) => installedIdentity(target),
     ...options,
   })
-  const binary = (version, activate = true) => {
-    const dir = path.join(runtime.cacheDir, `chromium-${version}-pro`)
-    const file =
-      process.platform === 'darwin'
-        ? path.join(dir, 'Chromium.app', 'Contents', 'MacOS', 'Chromium')
-        : path.join(dir, process.platform === 'win32' ? 'chrome.exe' : 'chrome')
-    fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, 'test fixture executable', { mode: 0o755 })
-    if (activate) fs.writeFileSync(path.join(runtime.cacheDir, `latest_pro_version_${PLATFORM}`), version)
-    return { dir, file }
+  const binary = (value = release(), verified = true) => {
+    const root = path.join(runtime.cacheDir, 'ShardX-Linux')
+    fs.mkdirSync(root, { recursive: true })
+    for (const name of ['chrome', 'icudtl.dat', 'resources.pak', 'libEGL.so', 'libGLESv2.so', 'libvk_swiftshader.so'])
+      fs.writeFileSync(path.join(root, name), 'fixture file')
+    fs.mkdirSync(path.join(root, 'WidevineCdm', '_platform_specific', 'linux_x64'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'WidevineCdm', 'manifest.json'), '{}')
+    fs.writeFileSync(
+      path.join(root, 'WidevineCdm', '_platform_specific', 'linux_x64', 'libwidevinecdm.so'),
+      'fixture CDM',
+    )
+    fs.writeFileSync(path.join(root, 'shardx-build'), value.build)
+    fs.mkdirSync(path.join(runtime.cacheDir, 'fingerprints'), { recursive: true })
+    fs.writeFileSync(path.join(runtime.cacheDir, 'fingerprints', 'linux.json'), '{}')
+    fs.writeFileSync(
+      path.join(runtime.cacheDir, 'manifest.json'),
+      JSON.stringify({
+        installed_chromium_version: value.version,
+        installed_engine_build: value.build,
+        browser_etag: value.components.browser,
+        fingerprints_etag: value.components.fingerprints,
+        widevine_etag: value.components.widevine,
+      }),
+    )
+    if (verified) {
+      runtime.receipt = { verified: installedIdentity(value), pending: false, last_error: null }
+      runtime.saveReceipt()
+    }
+    return root
   }
   t.after(async () => {
     await runtime.shutdown()
-    if (previous === undefined) delete process.env.VM2API_DB_SECRET
-    else process.env.VM2API_DB_SECRET = previous
     fs.rmSync(directory, { recursive: true, force: true })
   })
-  return { runtime, rows, repo, binary }
+  return { runtime, binary, directory }
 }
 
-test('key has one encrypted DB value, follows the repository getter and never appears in status', (t) => {
-  const { runtime, rows, binary } = fixture(t)
-  runtime.setKey('cb_example_secret')
-  assert.match(rows.get(ACCOUNT_BROWSER_KEY_SETTING), /^enc:v1:/)
-  assert.equal(rows.get(ACCOUNT_BROWSER_KEY_SETTING).includes('cb_example_secret'), false)
-  assert.equal(JSON.stringify(runtime.status()).includes('cb_example_secret'), false)
-  binary(OLD)
-  assert.deepEqual(runtime.launchConfig(), { licenseKey: 'cb_example_secret', cacheDir: runtime.cacheDir })
-  const replacement = new Map()
-  runtime.settingsRepo = () => ({ get: (key) => replacement.get(key), remove: (key) => replacement.delete(key) })
-  assert.equal(runtime.status().key_set, false)
-  assert.throws(() => runtime.launchConfig(), { code: 'browser_key_required' })
-  runtime.settingsRepo = () => ({ get: (key) => rows.get(key), remove: (key) => rows.delete(key) })
-  runtime.setKey(null)
-  assert.equal(rows.has(ACCOUNT_BROWSER_KEY_SETTING), false)
+test('local status neither contacts upstream nor creates cache; no license API remains', (t) => {
+  const { runtime } = fixture(t, { fetch: () => assert.fail('status must be local') })
+  const state = runtime.status()
+  assert.equal(state.update_status, 'not_installed')
+  assert.equal(state.launcher_version, SHARD_SDK_VERSION)
+  assert.equal('key_set' in state, false)
+  assert.equal(runtime.setKey, undefined)
+  assert.equal(fs.existsSync(runtime.cacheDir), false)
+  assert.throws(() => runtime.launchConfig(), { code: 'browser_not_installed' })
 })
 
-test('key save refuses unencrypted storage while deletion still works', (t) => {
-  const { runtime, rows } = fixture(t)
-  runtime.setKey('cb_secret')
-  const kin = process.env.KIN_DB_SECRET
-  delete process.env.VM2API_DB_SECRET
-  delete process.env.KIN_DB_SECRET
-  try {
-    assert.throws(() => runtime.setKey('cb_other'), { code: 'browser_key_encryption_required' })
-    runtime.setKey(null)
-    assert.equal(rows.size, 0)
-  } finally {
-    process.env.VM2API_DB_SECRET = 'unit-test-browser-key-encryption'
-    if (kin !== undefined) process.env.KIN_DB_SECRET = kin
-  }
-})
-
-test('status is local and fresh update checking sends platform only', async (t) => {
+test('fresh checking uses the public manifest and local installed build is visible', async (t) => {
   const calls = []
   const { runtime, binary } = fixture(t, {
-    fetch: async (url, options) => {
-      calls.push({ url, options })
-      return { ok: true, json: async () => ({ version: NEW }) }
+    fetch: async (...args) => {
+      calls.push(args)
+      return { ok: true, json: async () => remote(release()) }
     },
     now: () => Date.UTC(2026, 10, 13),
   })
-  binary(OLD)
-  assert.equal(runtime.status().installed_version, OLD)
-  assert.equal(runtime.status().phase, 'idle')
-  assert.equal(calls.length, 0)
-  const state = await runtime.check()
-  assert.equal(state.latest_version, NEW)
-  assert.equal(state.checked_at, '2026-11-13T00:00:00.000Z')
-  assert.deepEqual(Object.keys(calls[0].options.headers), ['X-Platform'])
-  assert.equal(calls[0].options.headers['X-Platform'], PLATFORM)
-  assert.equal(calls[0].url, 'https://cloakbrowser.dev/api/download/version')
+  binary(release(OLD))
+  assert.equal(runtime.status().update_status, 'unchecked')
+  assert.deepEqual(runtime.launchConfig(), { cacheDir: runtime.cacheDir })
+  const status = await runtime.check()
+  assert.equal(status.update_status, 'update_available')
+  assert.equal(status.installed_build, '1')
+  assert.equal(status.latest_build, '1')
+  assert.equal(status.checked_at, '2026-11-13T00:00:00.000Z')
+  assert.equal(calls[0][0], SHARD_MANIFEST_URL)
+  assert.equal(calls[0][1].headers, undefined)
 })
 
-test('a failed check invalidates the old comparison until a new check succeeds', async (t) => {
+test('update decisions include builds and component identities without downgrading', () => {
+  const current = { installed: true, ...release() }
+  assert.equal(browserUpdateStatus(current, release()), 'current')
+  assert.equal(browserUpdateStatus(current, release(NEW, '2')), 'update_available')
+  assert.equal(browserUpdateStatus(current, release(NEW, '1', { browser: 'repacked' })), 'components_available')
+  assert.equal(browserUpdateStatus(current, release(NEW, '1', { fingerprints: 'profiles-2' })), 'components_available')
+  assert.equal(browserUpdateStatus(current, release(NEW, '1', { widevine: 'widevine-2' })), 'components_available')
+  assert.equal(browserUpdateStatus(current, release(OLD, '99')), 'newer_installed')
+  assert.equal(browserUpdateStatus({ ...current, build: '2' }, release()), 'newer_installed')
+  assert.equal(browserUpdateStatus(current, { ...release(), minSdkVersion: '2.2.0' }), 'application_update_required')
+  assert.equal(compareBrowserVersions('1.2', '1.2.0'), 0)
+})
+
+test('check failure invalidates cached comparison and a later check recovers', async (t) => {
   let failing = false
   const { runtime, binary } = fixture(t, {
     fetch: async () => {
-      if (failing) throw new Error('version service unavailable')
-      return { ok: true, json: async () => ({ version: NEW }) }
+      if (failing) throw new Error('manifest unavailable')
+      return { ok: true, json: async () => remote(release()) }
     },
   })
-  binary(NEW)
+  binary()
   await runtime.check()
   failing = true
-  await assert.rejects(runtime.check(), {
-    code: 'browser_update_check_failed',
-    publicMessage: 'version service unavailable',
-  })
+  await assert.rejects(runtime.check(), { code: 'browser_update_check_failed' })
+  assert.equal(runtime.status().update_status, 'check_failed')
   assert.equal(runtime.status().latest_version, null)
   assert.equal(runtime.status().checked_at, null)
-  assert.equal(runtime.status().last_error.code, 'browser_update_check_failed')
-  runtime.setKey('cb_test_key')
-  assert.equal(runtime.status().latest_version, null)
+  assert.doesNotThrow(() => runtime.launchConfig())
   failing = false
-  const state = await runtime.check()
-  assert.equal(state.latest_version, NEW)
-  assert.equal(state.last_error, null)
-})
-
-test('same or older targets end after a fresh check without updating, testing or cleaning', async (t) => {
-  for (const [installed, target] of [
-    [NEW, NEW],
-    [NEW, OLD],
-    ['156.0.8078.47', '156.0.8078.47.0'],
-    ['156.0.8078.47.0', '156.0.8078.47'],
-  ]) {
-    await t.test(`${installed} -> ${target}`, async (t) => {
-      let checks = 0
-      let wakeups = 0
-      const { runtime, binary } = fixture(t, {
-        fetch: async () => {
-          checks++
-          return { ok: true, json: async () => ({ version: target }) }
-        },
-        runUpdate: async () => assert.fail('must not invoke updater'),
-        runFixture: async () => assert.fail('must not launch a test browser'),
-        onIdle: () => wakeups++,
-      })
-      runtime.removeOldBinaries = () => assert.fail('must not clean older binaries')
-      runtime.setKey('cb_test_key')
-      binary(installed)
-      const cache = path.join(runtime.cacheDir, `.last_pro_version_check_${PLATFORM}`)
-      fs.writeFileSync(cache, 'keep existing cache')
-      runtime.state.latest_version = '999.0.0.0.1'
-      assert.equal(runtime.install().phase, 'checking')
-      await runtime.task
-      const state = runtime.status()
-      assert.equal(checks, 1)
-      assert.equal(wakeups, 1)
-      assert.equal(state.latest_version, target)
-      assert.equal(state.installed_version, installed)
-      assert.equal(state.installing, false)
-      assert.equal(state.phase, 'idle')
-      assert.equal(state.progress, null)
-      assert.equal(state.last_error, null)
-      assert.equal(fs.readFileSync(cache, 'utf8'), 'keep existing cache')
-      assert.equal(fs.readFileSync(path.join(runtime.cacheDir, `latest_pro_version_${PLATFORM}`), 'utf8'), installed)
-    })
-  }
-})
-
-test('version components compare numerically when installing a newer target', async (t) => {
-  const target = '156.0.8078.10.1'
-  let updates = 0
-  let tests = 0
-  const { runtime, binary } = fixture(t, {
-    fetch: async () => ({ ok: true, json: async () => ({ version: target }) }),
-    runUpdate: async () => {
-      updates++
-      binary(target)
-    },
-    runFixture: async () => tests++,
-  })
-  runtime.setKey('cb_test_key')
-  binary('156.0.8078.9.1')
-  runtime.install()
-  await runtime.task
-  assert.equal(updates, 1)
-  assert.equal(tests, 1)
-  assert.equal(runtime.status().installed_version, target)
-  assert.equal(runtime.status().phase, 'ready')
-})
-
-test('installation reserves synchronously and only removes old binaries after fixture closes', async (t) => {
-  let release
-  let fixtureFinished = false
-  let wakeups = 0
-  const pending = new Promise((resolve) => {
-    release = resolve
-  })
-  const { runtime, binary } = fixture(t, {
-    onIdle: () => {
-      wakeups++
-    },
-    runUpdate: async ({ onOutput }) => {
-      assert.equal(runtime.isInstalling, true)
-      assert.equal(fs.existsSync(path.join(runtime.cacheDir, `.last_pro_version_check_${PLATFORM}`)), false)
-      onOutput('[cloakbrowser] Download progress: 50% (100/200 MB)')
-      assert.equal(runtime.status().progress, 50)
-      binary(NEW)
-    },
-    runFixture: async () => {
-      assert.equal(runtime.status().phase, 'testing')
-      assert.equal(fs.existsSync(path.join(runtime.cacheDir, `chromium-${OLD}-pro`)), true)
-      await pending
-      fixtureFinished = true
-    },
-  })
-  runtime.setKey('cb_test_key')
-  const old = binary(OLD)
-  const geo = path.join(runtime.cacheDir, 'geoip')
-  fs.mkdirSync(geo)
-  fs.writeFileSync(path.join(geo, 'GeoLite2-City.mmdb'), 'keep')
-  fs.writeFileSync(path.join(runtime.cacheDir, `.last_pro_version_check_${PLATFORM}`), OLD)
-  const state = runtime.install()
-  assert.equal(state.installing, true)
-  assert.throws(() => runtime.install(), { code: 'browser_installing' })
-  assert.throws(() => runtime.launchConfig(), { code: 'browser_installing' })
-  assert.throws(() => runtime.setKey(null), { code: 'browser_installing' })
-  await new Promise((resolve) => setImmediate(resolve))
-  assert.equal(fixtureFinished, false)
-  assert.equal(fs.existsSync(old.dir), true)
-  release()
-  await runtime.task
-  assert.equal(fixtureFinished, true)
-  assert.equal(fs.existsSync(old.dir), false)
-  assert.equal(fs.existsSync(geo), true)
-  assert.equal(runtime.status().installed_version, NEW)
-  assert.equal(runtime.status().phase, 'ready')
-  assert.equal(runtime.status().installing, false)
-  assert.equal(wakeups, 1)
-})
-
-test('failed local acceptance restores the selector and keeps both installations without copying', async (t) => {
-  const { runtime, binary } = fixture(t, {
-    runUpdate: async () => binary(NEW),
-    runFixture: async () => {
-      throw new Error('fixture failed for cb_test_secret')
-    },
-  })
-  runtime.setKey('cb_test_secret')
-  const old = binary(OLD)
-  runtime.install()
-  await runtime.task
-  const state = runtime.status()
-  assert.equal(state.installed_version, OLD)
-  assert.equal(state.phase, 'failed')
-  assert.equal(state.last_error.message, 'fixture failed for [license key]')
-  assert.equal(fs.existsSync(old.dir), true)
-  assert.equal(fs.existsSync(path.join(runtime.cacheDir, `chromium-${NEW}-pro`)), true)
-  assert.equal(
-    fs.readdirSync(runtime.cacheDir).some((name) => /backup|snapshot/.test(name)),
-    false,
-  )
-})
-
-test('a CLI success without the requested version is not accepted', async (t) => {
-  let tested = false
-  const { runtime, binary } = fixture(t, {
-    runUpdate: async () => {},
-    runFixture: async () => {
-      tested = true
-    },
-  })
-  runtime.setKey('cb_test_secret')
-  binary(OLD)
-  runtime.install()
-  await runtime.task
-  assert.equal(runtime.status().last_error.code, 'browser_version_mismatch')
-  assert.equal(runtime.status().installed_version, OLD)
-  assert.equal(tested, false)
-})
-
-test('selector restoration failure is recorded without rejecting the background task', async (t) => {
-  const { runtime, binary } = fixture(t, {
-    runUpdate: async () => binary(NEW),
-    runFixture: async () => {
-      throw new Error('fixture failed')
-    },
-  })
-  runtime.setKey('cb_test_secret')
-  binary(OLD)
-  runtime.restoreSelector = () => {
-    throw new Error('disk full')
-  }
-  runtime.install()
-  await assert.doesNotReject(runtime.task)
-  assert.equal(runtime.status().last_error.code, 'browser_selector_restore_failed')
-  assert.equal(runtime.isInstalling, false)
-  assert.throws(() => runtime.launchConfig(), { code: 'browser_selector_restore_failed' })
-})
-
-test('a same-version no-op or successful check cannot clear unresolved selector recovery failure', async (t) => {
-  let target = NEW
-  let updates = 0
-  let fixtures = 0
-  let fixtureFails = true
-  const { runtime, binary } = fixture(t, {
-    fetch: async () => ({ ok: true, json: async () => ({ version: target }) }),
-    runUpdate: async () => {
-      updates++
-      binary(target)
-    },
-    runFixture: async () => {
-      fixtures++
-      if (fixtureFails) throw new Error('fixture failed')
-    },
-  })
-  runtime.setKey('cb_test_secret')
-  binary(OLD)
-  runtime.restoreSelector = () => {
-    throw new Error('disk full')
-  }
-  runtime.install()
-  await runtime.task
-  assert.equal(runtime.status().last_error.code, 'browser_selector_restore_failed')
-  runtime.install()
-  await runtime.task
-  assert.equal(updates, 1)
-  assert.equal(fixtures, 1)
-  assert.equal(runtime.status().phase, 'failed')
   await runtime.check()
-  runtime.setKey('cb_replacement')
-  assert.equal(runtime.status().last_error.code, 'browser_selector_restore_failed')
-  assert.throws(() => runtime.launchConfig(), { code: 'browser_selector_restore_failed' })
-  target = '156.0.8078.48.1'
-  fixtureFails = false
+  assert.equal(runtime.status().update_status, 'current')
+  assert.equal(runtime.status().last_error, null)
+})
+
+test('same or older release skips installer and verification after fresh query', async (t) => {
+  for (const offered of [release(), release(OLD), release(NEW, '0')]) {
+    let fetched = 0,
+      idle = 0
+    const { runtime, binary } = fixture(t, {
+      fetch: async () => {
+        fetched++
+        return { ok: true, json: async () => remote(offered) }
+      },
+      runUpdate: () => assert.fail('must not download'),
+      verifyInstall: () => assert.fail('must not reverify'),
+      onIdle: () => idle++,
+    })
+    binary()
+    assert.equal(runtime.install().installing, true)
+    assert.throws(() => runtime.install(), { code: 'browser_installing' })
+    await runtime.task
+    assert.equal(fetched, 1)
+    assert.equal(idle, 1)
+    assert.equal(runtime.status().phase, 'idle')
+    assert.equal(runtime.status().installing, false)
+  }
+})
+
+test('new release and components update run installer then file/version verification only', async (t) => {
+  const offered = release(NEW, '2', { widevine: 'widevine-2' })
+  const calls = []
+  const setup = fixture(t, {
+    fetch: async () => ({ ok: true, json: async () => remote(offered) }),
+    runUpdate: async (options) => {
+      calls.push('install')
+      assert.equal(options.refreshWidevine, true)
+      assert.equal(options.force, false)
+      assert.equal(options.signal.aborted, false)
+      options.onProgress({ phase: 'downloading', progress: 45 })
+      assert.equal(setup.runtime.status().progress, 45)
+      assert.throws(() => setup.runtime.launchConfig(), { code: 'browser_installing' })
+      setup.binary(offered, false)
+    },
+    verifyInstall: async ({ target }) => {
+      calls.push('verify-files')
+      assert.equal(setup.runtime.status().phase, 'verifying')
+      assert.equal(localShardInfo(setup.runtime.cacheDir).build, '2')
+      return installedIdentity(target)
+    },
+  })
+  setup.binary(release())
+  setup.runtime.install()
+  await setup.runtime.task
+  assert.deepEqual(calls, ['install', 'verify-files'])
+  assert.equal(setup.runtime.status().update_status, 'current')
+  assert.equal(setup.runtime.status().phase, 'ready')
+  assert.deepEqual(setup.runtime.launchConfig(), { cacheDir: setup.runtime.cacheDir })
+  const reloaded = new AccountBrowserRuntime({ dataDir: setup.directory })
+  assert.deepEqual(reloaded.launchConfig(), { cacheDir: setup.runtime.cacheDir })
+})
+
+test('component-only update does not force a browser download', async (t) => {
+  const offered = release(NEW, '1', { fingerprints: 'profiles-2' })
+  const setup = fixture(t, {
+    fetch: async () => ({ ok: true, json: async () => remote(offered) }),
+    runUpdate: async ({ force, refreshWidevine }) => {
+      assert.equal(force, false)
+      assert.equal(refreshWidevine, false)
+      setup.binary(offered, false)
+    },
+  })
+  setup.binary()
+  setup.runtime.install()
+  await setup.runtime.task
+  assert.equal(setup.runtime.status().phase, 'ready')
+})
+
+test('minimum SDK mismatch refuses installer but leaves known installed browser usable', async (t) => {
+  const { runtime, binary } = fixture(t, {
+    fetch: async () => ({ ok: true, json: async () => remote({ ...release(), minSdkVersion: '2.2.0' }) }),
+    runUpdate: () => assert.fail('incompatible SDK must not install'),
+  })
+  binary()
   runtime.install()
   await runtime.task
-  assert.equal(runtime.status().phase, 'ready')
-  assert.equal(runtime.status().last_error, null)
-  assert.equal(fixtures, 2)
+  assert.equal(runtime.status().update_status, 'application_update_required')
+  assert.equal(runtime.status().last_error.code, 'browser_application_update_required')
   assert.doesNotThrow(() => runtime.launchConfig())
 })
 
-test('busy browsers prevent install before any work and shutdown aborts its own task', async (t) => {
-  let busy = true
-  let started = false
+test('install failure releases reservation but requires manual retry even when old metadata remains', async (t) => {
+  let idle = 0
+  const { runtime, binary, directory } = fixture(t, {
+    runUpdate: async () => {
+      throw new Error('download unavailable')
+    },
+    onIdle: () => idle++,
+  })
+  binary(release(OLD))
+  runtime.install()
+  await runtime.task
+  assert.equal(idle, 1)
+  assert.equal(runtime.status().phase, 'failed')
+  assert.equal(runtime.status().update_status, 'retry_required')
+  assert.throws(() => runtime.launchConfig(), { code: 'browser_install_unverified' })
+  const restarted = new AccountBrowserRuntime({ dataDir: directory })
+  assert.equal(restarted.status().update_status, 'retry_required')
+  assert.throws(() => restarted.launchConfig(), { code: 'browser_install_unverified' })
+})
+
+test('installer exit success without installing target fails verification', async (t) => {
+  const { runtime, binary } = fixture(t, { runUpdate: async () => {}, verifyInstall: verifyShardInstall })
+  binary(release(OLD))
+  runtime.install()
+  await runtime.task
+  assert.equal(runtime.status().last_error.code, 'browser_version_mismatch')
+  assert.equal(runtime.status().phase, 'failed')
+  assert.throws(() => runtime.launchConfig(), { code: 'browser_install_unverified' })
+})
+
+test('failed verification blocks changed install and explicit same-version retry can repair it', async (t) => {
+  let fail = true
+  const forceFlags = []
+  const setup = fixture(t, {
+    runUpdate: async ({ force }) => {
+      forceFlags.push(force)
+      setup.binary(release(), false)
+    },
+    verifyInstall: async ({ target }) => {
+      if (fail) throw Object.assign(new Error('missing file'), { code: 'browser_install_incomplete' })
+      return installedIdentity(target)
+    },
+  })
+  setup.binary(release(OLD))
+  setup.runtime.install()
+  await setup.runtime.task
+  assert.throws(() => setup.runtime.launchConfig(), { code: 'browser_install_unverified' })
+  await setup.runtime.check()
+  assert.equal(setup.runtime.status().update_status, 'retry_required')
+  fail = false
+  setup.runtime.install()
+  await setup.runtime.task
+  assert.deepEqual(forceFlags, [false, true])
+  assert.equal(setup.runtime.status().phase, 'ready')
+  assert.doesNotThrow(() => setup.runtime.launchConfig())
+})
+
+test('interrupted installation stays visible after restart and same-version retry is available', (t) => {
+  const { runtime, binary, directory } = fixture(t)
+  binary(release(), false)
+  runtime.receipt.pending = true
+  runtime.saveReceipt()
+  const restarted = new AccountBrowserRuntime({ dataDir: directory })
+  assert.equal(restarted.status().last_error.code, 'browser_install_interrupted')
+  assert.equal(restarted.status().update_status, 'retry_required')
+  assert.throws(() => restarted.launchConfig(), { code: 'browser_install_unverified' })
+})
+
+test('interrupted upgrade cannot trust old metadata after the engine directory was swapped', (t) => {
+  const { runtime, binary, directory } = fixture(t)
+  const root = binary(release())
+  runtime.receipt.pending = true
+  runtime.saveReceipt()
+  fs.writeFileSync(path.join(root, 'chrome'), 'replacement executable before manifest update')
+  const restarted = new AccountBrowserRuntime({ dataDir: directory })
+  assert.equal(restarted.status().installed_version, NEW)
+  assert.equal(restarted.status().update_status, 'retry_required')
+  assert.throws(() => restarted.launchConfig(), { code: 'browser_install_unverified' })
+})
+
+test('busy and checking states reject install; shutdown aborts its only install job', async (t) => {
+  let busy = true,
+    started = false
   const { runtime } = fixture(t, {
     getBusy: () => busy,
     runUpdate: async ({ signal }) => {
@@ -360,7 +334,9 @@ test('busy browsers prevent install before any work and shutdown aborts its own 
   })
   assert.throws(() => runtime.install(), { code: 'browser_busy' })
   busy = false
-  runtime.setKey('cb_test_secret')
+  runtime.state.phase = 'checking'
+  assert.throws(() => runtime.install(), { code: 'browser_checking' })
+  runtime.state.phase = 'idle'
   runtime.install()
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(started, true)
@@ -370,11 +346,59 @@ test('busy browsers prevent install before any work and shutdown aborts its own 
   assert.throws(() => runtime.launchConfig(), { code: 'browser_runtime_stopped' })
 })
 
-test('public error formatter removes key and URL credentials', () => {
-  const result = safeAccountBrowserError(
-    new Error('cb_secret Bearer cb_other https://alice:password@example.test/path'),
+test('file verification executes only --version and rejects wrong binary and missing assets', async (t) => {
+  const { runtime, binary } = fixture(t)
+  const root = binary()
+  const target = release()
+  let calls = 0
+  const execVersion = async (file, args) => {
+    calls++
+    assert.equal(file, path.join(root, 'chrome'))
+    assert.deepEqual(args, ['--version'])
+    return { stdout: `Google Chrome ${NEW}\n` }
+  }
+  assert.deepEqual(
+    await verifyShardInstall({ cacheDir: runtime.cacheDir, target, execVersion }),
+    installedIdentity(target),
   )
-  assert.equal(result.message.includes('cb_secret'), false)
-  assert.equal(result.message.includes('cb_other'), false)
-  assert.equal(result.message.includes('password'), false)
+  assert.equal(calls, 1)
+  await assert.rejects(
+    verifyShardInstall({
+      cacheDir: runtime.cacheDir,
+      target,
+      execVersion: async () => ({ stdout: `Chromium ${OLD}` }),
+    }),
+    { code: 'browser_version_mismatch' },
+  )
+  fs.rmSync(path.join(root, 'libvk_swiftshader.so'))
+  await assert.rejects(verifyShardInstall({ cacheDir: runtime.cacheDir, target, execVersion }), {
+    code: 'browser_install_incomplete',
+  })
+  assert.equal(calls, 1)
+})
+
+test('install query failure invalidates stale latest version before any mutation', async (t) => {
+  let fail = false
+  const { runtime, binary } = fixture(t, {
+    fetch: async () => {
+      if (fail) throw new Error('offline')
+      return { ok: true, json: async () => remote(release()) }
+    },
+    runUpdate: () => assert.fail('must not install without fresh manifest'),
+  })
+  binary(release(OLD))
+  await runtime.check()
+  fail = true
+  runtime.install()
+  await runtime.task
+  assert.equal(runtime.status().latest_version, null)
+  assert.equal(runtime.status().update_status, 'check_failed')
+  assert.equal(runtime.receipt.pending, false)
+})
+
+test('public errors redact credentials', () => {
+  const failure = safeAccountBrowserError(
+    new Error('cb_secret sk-private Bearer secret https://alice:password@example.test'),
+  )
+  assert.doesNotMatch(failure.message, /cb_secret|sk-private|Bearer secret|alice:password/)
 })

@@ -1,6 +1,7 @@
-import { request } from 'playwright-core'
-import { createBoundProxyRelay } from './platform-browser.mjs'
+import fetch from 'node-fetch'
+import { createProxyAgent } from '../vm/proxy-agent.mjs'
 import { BILLING_CREDIT_GRANTS_URL, parsePlatformCreditSummary } from './platform-adapter.mjs'
+import { createBillingCookieJar } from './billing-cookies.mjs'
 
 const BILLING_ERROR = Symbol('billingError')
 
@@ -8,15 +9,16 @@ function problem(code, message, status) {
   return Object.assign(new Error(message), { code, ...(status ? { status } : {}), [BILLING_ERROR]: true })
 }
 
-/** A disposable HTTP session shares the slot's cookies without launching a browser. */
+/** Refresh the browser's Billing session over its bound proxy without opening a browser. */
 export async function fetchBillingBalance({
   session,
   storageState,
   proxyUrl,
   organizationId,
   signal,
-  requestImpl = request,
-  createRelay = createBoundProxyRelay,
+  fetchImpl = fetch,
+  createAgent = createProxyAgent,
+  timeoutMs = 30_000,
 } = {}) {
   if (!session?.headers?.authorization || !session.headers['user-agent'])
     throw problem('platform_login_required', '尚未保存 Billing 会话，请恢复账号登录')
@@ -24,60 +26,65 @@ export async function fetchBillingBalance({
     throw problem('platform_organization_unavailable', 'Billing 会话与当前绑定组织不一致')
   if (!proxyUrl) throw problem('proxy_required', '账号未绑定可用代理')
 
-  let relay
-  let context
-  let response
-  const aborted = () => void context?.dispose().catch(() => {})
   const checkCancelled = () => {
     if (signal?.aborted) throw problem('api_task_cancelled', '余额刷新已取消')
   }
+  const deadline = AbortSignal.timeout(timeoutMs)
+  const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline
+  let agent
+  let response
+  const abort = () => agent?.destroy()
   try {
     checkCancelled()
-    relay = await createRelay(proxyUrl)
+    agent = createAgent(String(proxyUrl).replace(/^socks5:/i, 'socks5h:'))
+    // Bound SOCKS' internal handshake timer too; HTTP CONNECT accepts cancellation.
+    agent.timeout = timeoutMs
+    if (agent.connectOpts) agent.connectOpts.signal = requestSignal
+    requestSignal.addEventListener('abort', abort, { once: true })
+    const jar = await createBillingCookieJar(storageState?.cookies)
+    const headers = { ...session.headers, 'openai-organization': organizationId }
+    delete headers.cookie
+    const cookie = await jar.header(BILLING_CREDIT_GRANTS_URL)
+    if (cookie) headers.cookie = cookie
     checkCancelled()
-    context = await requestImpl.newContext({
-      proxy: { server: relay.url },
-      storageState: { cookies: storageState?.cookies || [], origins: [] },
-      extraHTTPHeaders: { ...session.headers, 'openai-organization': organizationId },
-      userAgent: session.headers['user-agent'],
-      timeout: 30_000,
+    response = await fetchImpl(BILLING_CREDIT_GRANTS_URL, {
+      method: 'GET',
+      headers,
+      agent,
+      signal: requestSignal,
+      redirect: 'manual',
     })
-    signal?.addEventListener('abort', aborted, { once: true })
     checkCancelled()
-    response = await context.get(BILLING_CREDIT_GRANTS_URL, {
-      timeout: 30_000,
-      maxRedirects: 0,
-      maxRetries: 0,
-    })
-    checkCancelled()
-    const status = response.status()
+    const status = response.status
     if (status === 401) throw problem('platform_login_required', 'Billing 会话已失效，请恢复账号登录', status)
     if (status !== 200) {
       const payload = await response.json().catch(() => null)
+      requestSignal.throwIfAborted()
       if (['session_expired', 'invalid_session', 'token_expired'].includes(payload?.error?.code))
         throw problem('platform_login_required', 'Billing 会话已失效，请恢复账号登录', status)
       throw problem('billing_http_error', `官方 Billing 请求失败（HTTP ${status}）`, status)
     }
+    const body = await response.text()
     let summary
     try {
-      summary = parsePlatformCreditSummary(await response.text())
+      summary = parsePlatformCreditSummary(body)
     } catch {
       throw problem('platform_balance_missing', '官方 Billing 返回了无效余额数据')
     }
     if (summary.balance == null) throw problem('platform_balance_missing', '官方 Billing 尚未返回可用余额')
-    const state = await context.storageState()
+    await jar.update(response.headers.raw()['set-cookie'] || [], BILLING_CREDIT_GRANTS_URL)
     checkCancelled()
-    return { summary, cookies: state.cookies }
+    requestSignal.throwIfAborted()
+    return { summary, cookies: jar.cookies() }
   } catch (error) {
     checkCancelled()
+    if (deadline.aborted) throw problem('billing_timeout', '官方 Billing 请求超时')
     if (error[BILLING_ERROR]) throw error
-    // Playwright network call logs can contain Authorization. Never retain them.
-    if (error.name === 'TimeoutError') throw problem('billing_timeout', '官方 Billing 请求超时')
+    // Proxy and fetch exceptions may contain credentials. Return only a fixed public error.
     throw problem('billing_network_error', '无法通过账号绑定代理连接官方 Billing')
   } finally {
-    signal?.removeEventListener('abort', aborted)
-    await response?.dispose().catch(() => {})
-    await context?.dispose().catch(() => {})
-    await relay?.close().catch(() => {})
+    requestSignal.removeEventListener('abort', abort)
+    response?.body?.destroy()
+    agent?.destroy()
   }
 }

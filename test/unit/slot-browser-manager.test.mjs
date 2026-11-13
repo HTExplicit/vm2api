@@ -67,8 +67,8 @@ function fixture(t, options = {}) {
       return {
         page,
         context,
-        async storageState() {
-          return { cookies: [], origins: [{ origin: 'https://auth.openai.com' }] }
+        async exportCookies() {
+          return []
         },
         async close() {
           calls.closed.push(options.proxyUrl)
@@ -85,7 +85,7 @@ function fixture(t, options = {}) {
   return { root, manager, vms, records, repo, calls }
 }
 
-test('slot identities persist and a retained same-slot session is reused without relaunch or duplicate routing', async (t) => {
+test('slot identities persist and a retained same-slot session is reused without relaunch or request interception', async (t) => {
   const f = fixture(t)
   const first = await f.manager.acquire('a', { interactive: true, purpose: 'oauth' })
   f.manager.bindAccount(first, 'account-a')
@@ -93,7 +93,7 @@ test('slot identities persist and a retained same-slot session is reused without
   const again = await f.manager.acquire('a', { interactive: true, purpose: 'platform' })
   assert.equal(first, again)
   assert.equal(f.calls.launched.length, 1)
-  assert.equal(f.calls.routes.length, 1)
+  assert.equal(f.calls.routes.length, 0)
   await f.manager.release(first)
   assert.equal(f.manager.state('a').active, true)
   await f.manager.close('a')
@@ -106,7 +106,7 @@ test('slot identities persist and a retained same-slot session is reused without
 })
 
 test('installation pauses queued browsers and resumes them with the installed runtime', async (t) => {
-  const runtime = { isInstalling: true, launchConfig: () => ({ licenseKey: 'cb_test', cacheDir: '/cache' }) }
+  const runtime = { isInstalling: true, launchConfig: () => ({ cacheDir: '/cache' }) }
   const f = fixture(t, { runtime })
   const ready = f.manager.acquire('a', { interactive: true })
   await new Promise((resolve) => setImmediate(resolve))
@@ -115,23 +115,84 @@ test('installation pauses queued browsers and resumes them with the installed ru
   runtime.isInstalling = false
   void f.manager.drain()
   const live = await ready
-  assert.equal(f.calls.launched[0].licenseKey, 'cb_test')
   assert.equal(f.calls.launched[0].cacheDir, '/cache')
   await f.manager.close(live.vmId)
+})
+
+test('proxy mutation excludes new opens until the old session is closed and the new binding is applied', async (t) => {
+  const f = fixture(t)
+  await f.manager.acquire('a', { interactive: true })
+  let finish
+  const changed = f.manager.withProxyChange(['a'], async () => {
+    await f.manager.close('a')
+    await new Promise((resolve) => {
+      finish = resolve
+    })
+    f.vms.get('a').proxy.url = 'socks5h://127.0.0.1:8899'
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+  await assert.rejects(f.manager.acquire('a'), { code: 'browser_proxy_changing' })
+  finish()
+  await changed
+  const reopened = await f.manager.acquire('a')
+  assert.equal(reopened.proxyUrl, 'socks5h://127.0.0.1:8899')
+  await f.manager.close('a')
+  await assert.rejects(
+    f.manager.withProxyChange(['a'], async () => {
+      throw new Error('mutation failed')
+    }),
+    /mutation failed/,
+  )
+  assert.equal(f.manager.proxyChanges.has('a'), false)
+})
+
+test('timezone resolution is passed to the session and a pending migration failure prevents launch', async (t) => {
+  const f = fixture(t, {
+    resolveTimezone: async (vm, proxyUrl) => {
+      assert.equal(vm.id, 'a')
+      assert.equal(proxyUrl, f.vms.get('a').proxy.url)
+      return 'America/New_York'
+    },
+  })
+  await f.manager.acquire('a')
+  assert.equal(f.calls.launched[0].timezone, 'America/New_York')
+  await f.manager.close('a')
+  f.manager.prepareData = () => {
+    throw Object.assign(new Error('migration failed'), { code: 'browser_data_migration_failed' })
+  }
+  await assert.rejects(f.manager.acquire('a'), { code: 'browser_data_migration_failed' })
+  assert.equal(f.calls.launched.length, 1)
+})
+
+test('an owned browser process exiting releases its slot and starts the next queued browser', async (t) => {
+  let exit
+  const exited = new Promise((resolve) => {
+    exit = resolve
+  })
+  const f = fixture(t, { sessionOverrides: { exited } })
+  await f.manager.acquire('a', { interactive: true })
+  const createSession = f.manager.createSession
+  f.manager.createSession = async (options) => ({ ...(await createSession(options)), exited: undefined })
+  const next = f.manager.acquire('b', { interactive: true })
+  assert.equal(f.manager.state('b').status, 'queued')
+  exit({ code: null, signal: 'SIGKILL' })
+  await next
+  assert.equal(f.manager.state('a').active, false)
+  assert.equal(f.calls.closed.length, 1)
 })
 
 test('ordinary close retains the profile while forget removes only its own slot profile', async (t) => {
   const f = fixture(t)
   for (const id of ['a', 'b']) {
     fs.mkdirSync(f.manager.profileDirectory(id), { recursive: true })
-    fs.writeFileSync(path.join(f.manager.profileDirectory(id), '.cloakbrowser-seed'), `seed-${id}`)
+    fs.writeFileSync(path.join(f.manager.profileDirectory(id), 'fingerprint.json'), `seed-${id}`)
   }
   const first = await f.manager.acquire('a', { interactive: true })
   await f.manager.close(first.vmId)
-  assert.equal(fs.readFileSync(path.join(f.manager.profileDirectory('a'), '.cloakbrowser-seed'), 'utf8'), 'seed-a')
+  assert.equal(fs.readFileSync(path.join(f.manager.profileDirectory('a'), 'fingerprint.json'), 'utf8'), 'seed-a')
   await f.manager.close('a', { forget: true })
   assert.equal(fs.existsSync(f.manager.profileDirectory('a')), false)
-  assert.equal(fs.readFileSync(path.join(f.manager.profileDirectory('b'), '.cloakbrowser-seed'), 'utf8'), 'seed-b')
+  assert.equal(fs.readFileSync(path.join(f.manager.profileDirectory('b'), 'fingerprint.json'), 'utf8'), 'seed-b')
   assert.throws(() => f.manager.forgetProfile('../outside'), { code: 'invalid_vm_id' })
 })
 
@@ -148,12 +209,12 @@ test('missing runtime configuration remains a typed browser state for the settin
   const f = fixture(t, {
     runtime: {
       launchConfig() {
-        throw Object.assign(new Error('configure browser'), { code: 'browser_key_required' })
+        throw Object.assign(new Error('configure browser'), { code: 'browser_not_installed' })
       },
     },
   })
-  await assert.rejects(f.manager.acquire('a'), { code: 'browser_key_required' })
-  assert.equal(f.manager.state('a').error, 'browser_key_required')
+  await assert.rejects(f.manager.acquire('a'), { code: 'browser_not_installed' })
+  assert.equal(f.manager.state('a').error, 'browser_not_installed')
   assert.equal(f.calls.launched.length, 0)
 })
 
@@ -296,6 +357,7 @@ test('closing while launch is pending aborts immediately and never leaves a brow
     },
   })
   const ready = f.manager.acquire('a', { interactive: true })
+  await new Promise((resolve) => setImmediate(resolve))
   const live = f.manager.jobs.get('a')
   const closing = f.manager.close('a', { forget: true })
   assert.equal(live.closeSignal.aborted, true)
@@ -439,7 +501,7 @@ test('session save failure remains a warning after resources close and the queue
   const f = fixture(t, {
     sessionOverrides: {
       warning: '启动时有旧临时目录未回收。',
-      async storageState() {
+      async exportCookies() {
         throw new Error('database unavailable')
       },
       async close() {
@@ -482,9 +544,9 @@ test('concurrent close requests share one cleanup and persist the session once',
   let closes = 0
   const f = fixture(t, {
     sessionOverrides: {
-      async storageState() {
+      async exportCookies() {
         saves += 1
-        return { cookies: [], origins: [] }
+        return []
       },
       async close() {
         closes += 1
@@ -511,12 +573,12 @@ test('closing stops input, screenshots and tickets before waiting for session pe
   let closes = 0
   const f = fixture(t, {
     sessionOverrides: {
-      async storageState() {
+      async exportCookies() {
         if (++saves === 1)
           await new Promise((resolve) => {
             save = resolve
           })
-        return { cookies: [], origins: [] }
+        return []
       },
       async close() {
         closes += 1

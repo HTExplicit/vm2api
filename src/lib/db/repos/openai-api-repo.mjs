@@ -1,5 +1,5 @@
 import { getDb, withTransaction } from '../database.mjs'
-import { maybeDecrypt, maybeEncrypt } from '../secure.mjs'
+import { maybeDecrypt } from '../secure.mjs'
 
 const ACCOUNT_FIELDS = {
   vm_id: 'vm_id',
@@ -17,8 +17,6 @@ const ACCOUNT_FIELDS = {
   destinations: 'destinations_json',
   delivery: 'delivery_json',
   setup_status: 'setup_status',
-  fingerprint: 'fingerprint_json',
-  storage_state: 'storage_state_enc',
   last_error: 'last_error',
   call_error: 'call_error_json',
 }
@@ -34,13 +32,12 @@ const ORG_FIELDS = {
   balance_checked_at: 'balance_checked_at',
   balance_error: 'balance_error',
 }
-const JSON_FIELDS = new Set(['offer', 'benefit', 'destinations', 'delivery', 'fingerprint', 'grants', 'call_error'])
+const JSON_FIELDS = new Set(['offer', 'benefit', 'destinations', 'delivery', 'grants', 'call_error'])
 const MONEY_FIELDS = new Set(['balance', 'paid_balance', 'next_expiring_amount'])
 
 function encode(key, value) {
   if (key === 'enabled') return value ? 1 : 0
   if (JSON_FIELDS.has(key)) return value == null ? null : JSON.stringify(value)
-  if (key === 'storage_state') return value == null ? null : maybeEncrypt(JSON.stringify(value))
   if (MONEY_FIELDS.has(key)) return value == null ? null : String(value)
   return value
 }
@@ -57,7 +54,6 @@ function accountRow(row) {
   for (const [key, column] of Object.entries(ACCOUNT_FIELDS)) {
     if (key === 'enabled') value[key] = !!row[column]
     else if (JSON_FIELDS.has(key)) value[key] = row[column] == null ? null : JSON.parse(row[column])
-    else if (key === 'storage_state') value[key] = row[column] == null ? null : JSON.parse(maybeDecrypt(row[column]))
     else value[key] = row[column]
   }
   return value
@@ -151,7 +147,7 @@ export class OpenaiApiRepo {
       }
       const accounts = this.db
         .prepare(`UPDATE openai_api_accounts SET vm_id = '', key_id = '', enabled = 0,
-          fingerprint_json = NULL, storage_state_enc = NULL, setup_status = 'idle', last_error = NULL, call_error_json = NULL,
+          setup_status = 'idle', last_error = NULL, call_error_json = NULL,
           updated_at = ? WHERE vm_id = ?`)
         .run(stamp, vmId).changes
       let endpoints = 0

@@ -157,11 +157,11 @@ async function run(kind) {
   const session = await createBrowserFixture()
   let stream
   try {
-    await session.page.setViewportSize(VIEWPORT)
+    await session.page.setViewport(VIEWPORT)
     await session.page.goto(URL, { waitUntil: 'load' })
     await session.page.evaluate(() => document.fonts.ready)
     const browserReadyMs = performance.now() - launchAt
-    const bounds = await session.page.locator('#toggle').boundingBox()
+    const bounds = await (await session.page.$('#toggle')).boundingBox()
     const point = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }
     const receiver = new Receiver()
     const captures = []

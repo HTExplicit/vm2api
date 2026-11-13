@@ -153,8 +153,8 @@ function fixture(t) {
       return {
         page,
         context: {},
-        async storageState() {
-          return { cookies: [], origins: [{ origin: options.proxyUrl }] }
+        async exportCookies() {
+          return [{ name: 'slot-session', value: path.basename(path.dirname(options.profileDir)) }]
         },
         async close() {
           if (behavior.closeError) throw behavior.closeError
@@ -742,7 +742,7 @@ test('a different logged-in email cannot create a project key or contaminate acc
   assert.equal(saved.setup_status, 'error')
   assert.equal(saved.key_id, '')
   assert.equal(f.calls.configured.length, 0)
-  assert.equal(saved.storage_state, null)
+  assert.equal(Object.hasOwn(saved, 'storage_state'), false)
   await f.manager.browserManager.close(entry.vm.id)
   assert.equal(f.profiles.get(entry.vm.id).storage_state, null)
 })

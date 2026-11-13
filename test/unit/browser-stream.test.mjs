@@ -51,11 +51,13 @@ function fixture(t, options = {}) {
     down: async ({ button }) => calls.input.push(['down', button]),
     up: async ({ button }) => calls.input.push(['up', button]),
     move: async (x, y) => calls.input.push(['move', x, y]),
-    wheel: async (x, y) => calls.input.push(['scroll', x, y]),
+    wheel: async ({ deltaX, deltaY }) => calls.input.push(['scroll', deltaX, deltaY]),
   }
   page.keyboard = {
     press: async (key) => calls.input.push(['key', key]),
-    insertText: async (text) => calls.input.push(['text', text]),
+    sendCharacter: async (text) => calls.input.push(['text', text]),
+    down: async (key) => calls.input.push(['key_down', key]),
+    up: async (key) => calls.input.push(['key_up', key]),
   }
   const stream = new BrowserStream({
     page,
@@ -71,6 +73,7 @@ function fixture(t, options = {}) {
       assert.equal(dimensions.maxDimension, 1280)
       return { image: Buffer.from('small-image-' + calls.resizes), width: 1280, height: 720 }
     },
+    measure: async () => ({ width: 1920, height: 1080 }),
     onClose: () => calls.closed++,
     ...options,
   })
@@ -380,7 +383,7 @@ test('pending input takes priority over a scheduled screenshot and requests one 
   let finish
   f.stream.attach(ws)
   await f.fire()
-  f.page.keyboard.insertText = async () =>
+  f.page.keyboard.sendCharacter = async () =>
     new Promise((resolve) => {
       finish = resolve
     })
@@ -716,4 +719,43 @@ test('input locks and existing admission checks prevent navigation and authoriza
   await rejected.stream.inputTail
   assert.equal(rejected.calls.closed, 1)
   assert.deepEqual(rejected.calls.input, [])
+})
+
+test('native screenshot pixels remain separate from CSS viewport coordinates', async (t) => {
+  const f = fixture(t, { measure: async () => ({ width: 3840, height: 2160 }) })
+  const ws = new Socket()
+  f.stream.attach(ws)
+  ws.input({ type: 'quality', mode: 'native' })
+  await f.fire()
+  const frame = ws.json().find((item) => item.type === 'frame')
+  assert.equal(frame.width, 1920)
+  assert.equal(frame.height, 1080)
+  assert.equal(frame.imageWidth, 3840)
+  assert.equal(frame.imageHeight, 2160)
+})
+
+test('Puppeteer keyboard chords release modifiers and use native wheel parameters', async (t) => {
+  const f = fixture(t)
+  const ws = new Socket()
+  f.stream.attach(ws)
+  ws.input({ type: 'key', key: 'Control+Shift+ArrowLeft' })
+  ws.input({ type: 'scroll', deltaX: 12, deltaY: 34 })
+  await f.stream.inputTail
+  assert.deepEqual(f.calls.input, [
+    ['key_down', 'Control'],
+    ['key_down', 'Shift'],
+    ['key', 'ArrowLeft'],
+    ['key_up', 'Shift'],
+    ['key_up', 'Control'],
+    ['scroll', 12, 34],
+  ])
+  f.page.keyboard.press = async () => {
+    throw new Error('target closed')
+  }
+  ws.input({ type: 'key', key: 'Control+a' })
+  await f.stream.inputTail
+  assert.deepEqual(f.calls.input.slice(-2), [
+    ['key_down', 'Control'],
+    ['key_up', 'Control'],
+  ])
 })

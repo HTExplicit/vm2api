@@ -1,13 +1,9 @@
-import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Download, Monitor, RefreshCw } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   ACCOUNT_BROWSER_PATH as PATH,
@@ -18,109 +14,64 @@ import { PaneSection } from './scheduler-controls'
 
 const PHASE_LABELS: Record<string, string> = {
   checking: '正在检查版本',
-  downloading: '正在下载内核',
-  verifying: '正在校验文件',
-  extracting: '正在安装内核',
-  testing: '正在验证浏览器',
-  ready: '安装与验证完成',
+  downloading: '正在下载组件',
+  installing: '正在安装组件',
+  verifying: '正在核对文件与版本',
+  ready: '安装完成',
   failed: '安装未完成',
 }
 
-function compareVersions(left: string, right: string) {
-  const a = left.split('.').map(Number)
-  const b = right.split('.').map(Number)
-  for (let index = 0; index < Math.max(a.length, b.length); index++) {
-    const difference = (a[index] ?? 0) - (b[index] ?? 0)
-    if (difference) return Math.sign(difference)
-  }
-  return 0
+const UPDATE_ACTIONS: Record<
+  AccountBrowserStatus['update_status'],
+  { label: string; available: boolean }
+> = {
+  not_installed: { label: '安装浏览器', available: true },
+  unchecked: { label: '请先检查更新', available: false },
+  current: { label: '已是最新', available: false },
+  update_available: { label: '更新浏览器', available: true },
+  components_available: { label: '更新组件', available: true },
+  newer_installed: { label: '无需更新', available: false },
+  application_update_required: { label: '请先升级应用', available: false },
+  check_failed: { label: '请重新检查', available: false },
+  retry_required: { label: '重试安装', available: true },
+}
+
+function versionLabel(version: string | null, build: string | null) {
+  return version && build ? `${version} · 构建 ${build}` : version
 }
 
 export function AccountBrowserSection() {
   const client = useQueryClient()
   const status = useQuery(accountBrowserQueryOptions())
-  const [key, setKey] = useState('')
-  const [actionError, setActionError] = useState('')
   const data = status.data
   const updateStatus = (next: AccountBrowserStatus) => {
     client.setQueryData(accountBrowserQueryOptions().queryKey, next)
   }
-  const onError = (error: Error) => setActionError(error.message)
-  const onMutate = () => setActionError('')
-  const save = useMutation({
-    // Read the key from component state, never retain it in mutation variables.
-    mutationFn: () =>
-      api<AccountBrowserStatus>(`${PATH}/key`, {
-        method: 'PUT',
-        body: JSON.stringify({ key: key.trim() }),
-      }),
-    onMutate,
-    onError,
-    onSuccess: (next) => {
-      setKey('')
-      updateStatus(next)
-    },
-  })
-  const clear = useMutation({
-    mutationFn: () =>
-      api<AccountBrowserStatus>(`${PATH}/key`, {
-        method: 'PUT',
-        body: JSON.stringify({ key: null }),
-      }),
-    onMutate,
-    onError,
-    onSuccess: (next) => {
-      setKey('')
-      updateStatus(next)
-    },
-  })
   const check = useMutation({
     mutationFn: () =>
       api<AccountBrowserStatus>(`${PATH}/check`, { method: 'POST' }),
-    onMutate,
-    onError,
-    onSuccess: updateStatus,
+    onSuccess: (next) => {
+      updateStatus(next)
+      install.reset()
+    },
   })
   const install = useMutation({
     mutationFn: () =>
       api<AccountBrowserStatus>(`${PATH}/install`, { method: 'POST' }),
-    onMutate,
-    onError,
-    onSuccess: updateStatus,
+    onSuccess: (next) => {
+      updateStatus(next)
+      check.reset()
+    },
   })
-  const { reset: resetCheck } = check
-  const { reset: resetInstall } = install
-  const installationFinished = install.isSuccess && data?.installing === false
-  const installationSucceeded = data?.phase === 'ready' && !data.last_error
-  useEffect(() => {
-    if (!installationFinished) return
-    if (installationSucceeded) resetCheck()
-    resetInstall()
-  }, [installationFinished, installationSucceeded, resetCheck, resetInstall])
-  const changingKey = save.isPending || clear.isPending
-  const installing = data?.installing || install.isPending
+  const installing = Boolean(data?.installing || install.isPending)
   const checkFailed =
-    check.isError ||
-    status.isError ||
-    data?.last_error?.code === 'browser_update_check_failed'
-  const versionOrder =
-    data?.installed_version &&
-    data.latest_version &&
-    !checkFailed &&
-    !check.isPending
-      ? compareVersions(data.latest_version, data.installed_version)
-      : null
-  const updateLabel = !data?.installed_version
-    ? '安装浏览器'
-    : versionOrder === null
-      ? '请先检查更新'
-      : versionOrder === 0
-        ? '已是最新'
-        : versionOrder < 0
-          ? '无需更新'
-          : '更新浏览器'
+    check.isError || status.isError || data?.update_status === 'check_failed'
+  const updateStatusName = checkFailed
+    ? 'check_failed'
+    : data?.update_status || 'unchecked'
+  const action = UPDATE_ACTIONS[updateStatusName]
   const error =
-    actionError ||
+    install.error?.message ||
     check.error?.message ||
     status.error?.message ||
     data?.last_error?.message
@@ -130,8 +81,8 @@ export function AccountBrowserSection() {
       ? status.isError
         ? '读取失败'
         : '读取中'
-      : !data.key_set
-        ? '待配置'
+      : data.update_status === 'retry_required'
+        ? '安装未完成'
         : !data.installed_version
           ? '待安装'
           : data.browser_busy
@@ -143,23 +94,30 @@ export function AccountBrowserSection() {
     <PaneSection
       icon={Monitor}
       title='账号浏览器'
-      desc='CloakBrowser 用于 GPT 登录与 Platform 操作，同一时间打开一个窗口。'
+      desc='ShardBrowser 用于 GPT 登录与 Platform 操作，同一时间打开一个窗口。'
       aside={<Badge variant='secondary'>{stateLabel}</Badge>}
     >
       {status.isPending ? (
-        <div className='grid grid-cols-2 gap-4' aria-label='正在读取浏览器状态'>
+        <div className='grid grid-cols-2 gap-4' aria-hidden='true'>
           <Skeleton className='h-10' />
           <Skeleton className='h-10' />
         </div>
       ) : data ? (
         <dl className='grid grid-cols-2 gap-x-6 gap-y-3 text-sm'>
           {[
-            ['启动器版本', data.launcher_version],
-            ['已安装内核', data.installed_version || '尚未安装'],
+            ['启动组件版本', data.launcher_version],
+            [
+              '已安装内核',
+              versionLabel(data.installed_version, data.installed_build) ||
+                '尚未安装',
+            ],
             ['运行中版本', data.running_version || '未运行'],
             [
-              '最新稳定版',
-              checkFailed ? '检查失败' : data.latest_version || '尚未检查',
+              '官方最新版本',
+              checkFailed
+                ? '检查失败'
+                : versionLabel(data.latest_version, data.latest_build) ||
+                  '尚未检查',
             ],
           ].map(([label, value]) => (
             <div key={label} className='min-w-0 space-y-1'>
@@ -171,66 +129,11 @@ export function AccountBrowserSection() {
       ) : null}
 
       <div className='space-y-2'>
-        <div className='flex flex-wrap items-center justify-between gap-2'>
-          <Label htmlFor='account-browser-key'>CloakBrowser 授权 key</Label>
-          <span className='text-xs text-muted-foreground' role='status'>
-            {data ? (data.key_set ? '已配置，保存后不回显' : '尚未配置') : ''}
-          </span>
-        </div>
-        <div className='flex flex-wrap gap-2'>
-          <Input
-            id='account-browser-key'
-            type='password'
-            autoComplete='new-password'
-            spellCheck={false}
-            className='min-w-0 basis-full sm:flex-1 sm:basis-48'
-            value={key}
-            disabled={!data || changingKey || installing || data.browser_busy}
-            placeholder={data?.key_set ? '输入新 key 以替换' : '输入免费 key'}
-            onChange={(event) => {
-              setKey(event.target.value)
-              setActionError('')
-            }}
-          />
-          <Button
-            type='button'
-            variant='outline'
-            disabled={
-              !data ||
-              !key.trim() ||
-              changingKey ||
-              installing ||
-              data.browser_busy
-            }
-            loading={save.isPending}
-            onClick={() => save.mutate()}
-          >
-            保存 key
-          </Button>
-          {data?.key_set ? (
-            <Button
-              type='button'
-              variant='ghost'
-              disabled={changingKey || installing || data.browser_busy}
-              loading={clear.isPending}
-              onClick={() => clear.mutate()}
-            >
-              清除 key
-            </Button>
-          ) : null}
-        </div>
-        <p className='text-xs leading-5 text-muted-foreground'>
-          保存 key
-          后，点击安装浏览器。内核仅在此处手动更新，应用升级保留已安装版本与网页登录数据。
-        </p>
-      </div>
-
-      <div className='space-y-2'>
         <div className='flex flex-wrap gap-2'>
           <Button
             type='button'
             variant='outline'
-            disabled={installing || changingKey}
+            disabled={installing}
             loading={check.isPending}
             onClick={() => check.mutate()}
           >
@@ -240,28 +143,33 @@ export function AccountBrowserSection() {
           <Button
             type='button'
             disabled={
-              !data?.key_set ||
+              !data ||
+              !action.available ||
               data.browser_busy ||
               installing ||
-              changingKey ||
-              check.isPending ||
-              (!!data.installed_version && versionOrder !== 1)
+              check.isPending
             }
             loading={installing}
-            aria-label={updateLabel}
             onClick={() => install.mutate()}
           >
             <Download aria-hidden />
-            {updateLabel}
+            {action.label}
           </Button>
         </div>
+        <p className='text-xs leading-5 text-muted-foreground'>
+          内核仅在此处手动更新，应用升级保留已安装版本与网页登录数据。
+        </p>
         {data?.browser_busy ? (
           <p className='text-xs leading-5 text-muted-foreground'>
-            请先关闭正在使用的账号浏览器，再更新内核或修改 key。
+            请先关闭正在使用的账号浏览器，再安装或更新。
           </p>
-        ) : !data?.key_set && data ? (
+        ) : updateStatusName === 'application_update_required' ? (
           <p className='text-xs leading-5 text-muted-foreground'>
-            填写并保存 key 后才能安装浏览器。
+            官方新版需要更新的启动组件，请先升级应用。
+          </p>
+        ) : updateStatusName === 'components_available' ? (
+          <p className='text-xs leading-5 text-muted-foreground'>
+            内核版本未变，官方浏览器组件有更新。
           </p>
         ) : null}
         {data?.checked_at ? (
@@ -272,29 +180,24 @@ export function AccountBrowserSection() {
       </div>
 
       {installing ? (
-        <div className='space-y-2 text-sm' role='status' aria-live='polite'>
+        <div className='space-y-2 text-sm'>
           <p>
             {phaseLabel}
             {data?.progress != null ? ` · ${data.progress}%` : ''}
           </p>
-          {data?.progress != null ? (
-            <Progress
-              aria-label={phaseLabel}
-              aria-valuenow={data.progress}
-              value={data.progress}
-              max={100}
-            />
-          ) : null}
+          <progress
+            className='h-2 w-full accent-primary'
+            aria-label={phaseLabel}
+            value={data?.progress ?? undefined}
+            max={100}
+          />
           <p className='text-xs text-muted-foreground'>
             安装期间暂不打开新窗口。关闭此页面不会取消安装。
           </p>
         </div>
-      ) : data?.phase === 'ready' &&
-        data.key_set &&
-        data.installed_version &&
-        !error ? (
+      ) : data?.phase === 'ready' && data.installed_version && !error ? (
         <p className='text-sm' role='status'>
-          浏览器已就绪。
+          安装完成。
         </p>
       ) : null}
       {error ? (
