@@ -43,7 +43,9 @@
 
 ## 本 fork 的发布来源
 
-本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，维护分支为 `maint`，当前版本见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随 main 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始，合入 031 后从 3101 开始，合入 032 后从 3201 开始，合入 036 后从 3601 开始，合入 038 后从 3801 开始，合入 041 后从 4101 开始。
+本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，主分支为 `main`，当前版本见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随上游 `main` 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始，合入 031 后从 3101 开始，合入 032 后从 3201 开始，合入 036 后从 3601 开始，合入 038 后从 3801 开始，合入 041 后从 4101 开始。
+
+旧 `maint` 分支仅保留已发布版本的安装链接兼容；新开发、PR 和 CI 统一使用 `main`。
 
 上游归属、[LICENSE](LICENSE)、鸣谢与历史文档保留；下方旧版说明和评测为上游历史内容，具体版本以对应记录为准。
 
@@ -207,10 +209,10 @@ vm2api 严格遵循行业最严苛的**纯净度基准**。入站请求不泄露
 
 ```bash
 # 生产环境一键拉取并安装
-curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/main/deploy/install.sh | sudo bash
 
 # 以后更新
-curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/install.sh | sudo bash -s -- upgrade
+curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
 ```
 
 首轮未发布 ARM64（aarch64）镜像；[docs/ARM64.md](docs/ARM64.md) 保留上游实验性方案的说明。
@@ -219,8 +221,8 @@ curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/insta
 
 ```bash
 mkdir -p /opt/vm2api && cd /opt/vm2api
-curl -sSLO https://raw.githubusercontent.com/HTExplicit/vm2api/maint/docker-compose.yml
-curl -sSL -o .env https://raw.githubusercontent.com/HTExplicit/vm2api/maint/.env.example
+curl -sSLO https://raw.githubusercontent.com/HTExplicit/vm2api/main/docker-compose.yml
+curl -sSL -o .env https://raw.githubusercontent.com/HTExplicit/vm2api/main/.env.example
 chmod 600 .env
 
 # 按需修改 .env 中的关键变量（VM2API_API_KEY, VM2API_ADMIN_PASSWORD, VM2API_DB_SECRET）
@@ -267,7 +269,9 @@ vm2api 内置全栈自适应网关，原生支持以下所有主流生态：
 
 # 🇬🇧 English
 
-This is the [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api) maintenance fork on `maint`. See the [latest release](https://github.com/HTExplicit/vm2api/releases/latest) and [CHANGELOG.md](CHANGELOG.md) for the current version. The first release, `v1.4.2801`, is based on [upstream 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974) and improves health checks, billing statistics, and panel upgrades; `v1.4.2802` fixes which upgrade finalization tasks apply to GPT slots. Upstream releases are reviewed before integration; upstream main is not deployed automatically. Revisions on the 028 baseline use 2801, 2802, and so on; integrating 029 starts at 2901.
+This is the [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api) maintenance fork on `main`. See the [latest release](https://github.com/HTExplicit/vm2api/releases/latest) and [CHANGELOG.md](CHANGELOG.md) for the current version. The first release, `v1.4.2801`, is based on [upstream 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974) and improves health checks, billing statistics, and panel upgrades; `v1.4.2802` fixes which upgrade finalization tasks apply to GPT slots. Upstream releases are reviewed before integration; upstream main is not deployed automatically. Revisions on the 028 baseline use 2801, 2802, and so on; integrating 029 starts at 2901.
+
+The old `maint` branch is retained only for installer links in previously published versions. New development, pull requests, and CI use `main`.
 
 The **linux/amd64** control-plane image defaults to `ghcr.io/htexplicit/vm2api`, configured through `VM2API_IMAGE`. Release checks, installer commands, and console links use this fork, with `VM2API_GITHUB_REPO` selecting the release repository. The pinned upstream slot payload, size and SHA256 checks, guest image sources, attribution, and [LICENSE](LICENSE) are retained. Historical descriptions and benchmark results below came from upstream and apply to their recorded versions.
 
@@ -401,7 +405,7 @@ Open a hit and read the body. A false positive means tighten that gate, not dele
 
 ```bash
 # Recommended one-line installation on Ubuntu 24.04 LTS
-curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/main/deploy/install.sh | sudo bash
 ```
 
 After deployment, access:

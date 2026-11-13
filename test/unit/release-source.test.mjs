@@ -34,7 +34,7 @@ test('release checks and installer commands use the fork default or explicit rep
     assert.equal(status.update_available, true)
     assert.equal(
       status.upgrade_command,
-      `curl -sSL https://raw.githubusercontent.com/${expected}/maint/deploy/install.sh | sudo bash -s -- upgrade --version v1.4.2801`,
+      `curl -sSL https://raw.githubusercontent.com/${expected}/main/deploy/install.sh | sudo bash -s -- upgrade --version v1.4.2801`,
     )
   }
 })
