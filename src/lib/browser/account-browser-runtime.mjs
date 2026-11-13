@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { binaryInfo, launchPersistentContext, licenseDenial } from 'cloakbrowser'
 import { decryptString, encryptString, encryptionEnabled, isEncrypted } from '../db/secure.mjs'
 import { createHeadedDisplay } from './headed-display.mjs'
+import { verifyLocalBrowserPage } from './local-browser-fixture.mjs'
 
 export const ACCOUNT_BROWSER_KEY_SETTING = 'account_browser_cloakbrowser_key'
 const VERSION = /^\d+(?:\.\d+){3,4}$/
@@ -402,14 +403,7 @@ export async function runLocalBrowserFixture({ signal } = {}) {
     const page = context.pages()[0] || (await context.newPage())
     await page.bringToFront()
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
-    await page.setContent(
-      '<!doctype html><meta charset="utf-8"><label>Name <input id="name"></label><button onclick="document.querySelector(\'output\').textContent=document.querySelector(\'input\').value">Check</button><output></output>',
-    )
-    await page.locator('#name').fill('vm2api fixture')
-    await page.getByRole('button', { name: 'Check' }).click()
-    if ((await page.locator('output').textContent()) !== 'vm2api fixture') throw new Error('浏览器本地输入验证失败')
-    const screenshot = await page.screenshot({ type: 'png' })
-    if (!screenshot.length) throw new Error('浏览器本地截图验证失败')
+    await verifyLocalBrowserPage(page)
     const denial = licenseDenial(context)
     if (denial) throw denial
   } finally {

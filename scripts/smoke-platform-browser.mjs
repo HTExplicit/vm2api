@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { BrowserStream } from '../src/lib/browser/browser-stream.mjs'
+import { verifyLocalBrowserPage } from '../src/lib/browser/local-browser-fixture.mjs'
 import { createBrowserFixture } from './browser-fixture.mjs'
 
 async function verifyBrowserInput(page) {
@@ -68,6 +69,7 @@ try {
   for (let attempt = 0; attempt < 3; attempt++) {
     const session = await createBrowserFixture({ profileDir: path.join(root, attempt === 2 ? 'slot-b' : 'slot-a') })
     try {
+      if (attempt === 0) assert.ok((await verifyLocalBrowserPage(session.page)).screenshotBytes > 0)
       await session.context.route('http://fixture.test/**', (route) =>
         route.fulfill({ contentType: 'text/html', body: '<title>Browser fixture</title><p>ready</p>' }),
       )
