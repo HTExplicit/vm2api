@@ -117,7 +117,10 @@ test('a failed check invalidates the old comparison until a new check succeeds',
   binary(NEW)
   await runtime.check()
   failing = true
-  await assert.rejects(runtime.check(), /version service unavailable/)
+  await assert.rejects(runtime.check(), {
+    code: 'browser_update_check_failed',
+    publicMessage: 'version service unavailable',
+  })
   assert.equal(runtime.status().latest_version, null)
   assert.equal(runtime.status().checked_at, null)
   assert.equal(runtime.status().last_error.code, 'browser_update_check_failed')

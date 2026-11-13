@@ -267,13 +267,18 @@ export class AccountBrowserRuntime {
       await this.latest()
       if (this.state.phase === 'checking') this.state.phase = 'idle'
     } catch (error) {
+      const failure = problem(
+        'browser_update_check_failed',
+        safeAccountBrowserError(error).message,
+        error.status || 502,
+      )
       if (this.state.phase === 'checking') {
         this.state.phase = 'failed'
         this.state.latest_version = null
         this.state.checked_at = null
-        this.state.last_error = { ...safeAccountBrowserError(error), code: 'browser_update_check_failed' }
+        this.state.last_error = safeAccountBrowserError(failure)
       }
-      throw error
+      throw failure
     }
     return this.status()
   }
