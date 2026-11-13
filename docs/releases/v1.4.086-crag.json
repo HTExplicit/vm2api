@@ -1,0 +1,25 @@
+{
+  "application_release": "v1.4.086",
+  "application_commit": "8c4ab5fb8b4d131fd5657949f7db4c998a2f683b",
+  "artifact_source": "https://github.com/dofastted/vm2api/releases/tag/payload-2026.11.13-crag-2.8.17",
+  "source_publication": {
+    "release": "https://github.com/dofastted/claude-code/releases/tag/v2.8.17",
+    "commit": "b1f9ed3a869c12a51d263f6b7708a4678e8690cb",
+    "statement": "Supplier v2.8.17 provides the original signed encrypted package reused by vm2api v1.4.086; no fork rebuild, resigning, or reproducible-build attestation is claimed."
+  },
+  "signed_manifest": "crag-v2-amd64-v2.8.17-manifest.json",
+  "signed_manifest_sha256": "ab118d1de2dd51840e2b937acfedfb960b584e9758bad39f75d466c5e458f8a7",
+  "core_plaintext_sha256": "462d84890d9684481d058476aca34a431ac744ebdcacfee6883888b571116c61",
+  "official_claude_version": "2.1.321",
+  "assets": {
+    "crag-v2-amd64-LICENSES.txt": "e0127f77b4e8ad7c2233b9079cdaa4d4bc11e79eb03ca880ceb1dbe2fced9068",
+    "crag-v2-amd64-claude-code-2.1.321-LICENSE.md": "8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a",
+    "crag-v2-amd64-claude-code-2.1.321-claude": "426c33815ca6645a772f722fbff10dbf2cbdb124a8aeab733c1365dbf8bbf61f",
+    "crag-v2-amd64-crag-license-public.pem": "a38372fb87af66678f7823538f2cf8b9fa7e0f3cbefcd612a4d5c47ebef10126",
+    "crag-v2-amd64-v2.8.17-crag-v2": "5d3db06e1300359d428fe66936cee1999221baeed0fb0cd54589c8414e9f6efb",
+    "crag-v2-amd64-v2.8.17-crag-v2.payload.enc": "ce6a97ea4537c1da40f94cde446c34ed8ceeefac832589cf31e278c1341bfcf1",
+    "crag-v2-amd64-kernel.json.example": "10c1d364d8dfb3aa773402056ed94c9c35626676c80347b5324683c96db7ada3",
+    "crag-v2-amd64-v2.8.17-manifest.json": "ab118d1de2dd51840e2b937acfedfb960b584e9758bad39f75d466c5e458f8a7",
+    "crag-v2-licensed-amd64.tar.gz": "ade46517d3679ad3f36092096254afb027811770f1b79c4a649e358e1880eee1"
+  }
+}

@@ -76,3 +76,31 @@ func TestLoadTransparentAllowsEmptyProxyURL(t *testing.T) {
 		t.Fatalf("ProxyURL=%q", cfg.ProxyURL)
 	}
 }
+
+func TestLoadProxyProtocols(t *testing.T) {
+	for _, tc := range []struct {
+		url   string
+		valid bool
+	}{
+		{"http://proxy.example", true},
+		{"http://user:pass@proxy.example:8080", true},
+		{"socks5h://proxy.example:1080", true},
+		{"socks5://proxy.example", false},
+		{"https://proxy.example:443", false},
+	} {
+		t.Run(tc.url, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "worker.json")
+			raw := fmt.Sprintf(`{"vm_id":"vm-01","socket_path":%q,"credential_path":%q,"proxy_url":%q,"proxy_required":true}`,
+				filepath.ToSlash(filepath.Join(dir, "worker.sock")),
+				filepath.ToSlash(filepath.Join(dir, "credentials.json")), tc.url)
+			if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(configPath)
+			if (err == nil) != tc.valid {
+				t.Fatalf("Load proxy %q: error=%v, valid=%v", tc.url, err, tc.valid)
+			}
+		})
+	}
+}

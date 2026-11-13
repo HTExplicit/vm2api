@@ -142,6 +142,11 @@ jobs:
             test/unit/database.test.mjs \
             test/unit/backup-service.test.mjs \
             test/unit/go-worker-client.test.mjs \
+            test/unit/native-handoff.test.mjs \
+            test/unit/native-handoff-redaction.test.mjs \
+            test/unit/native-handoff-terminal.test.mjs \
+            test/unit/stream-queue-keepalive.test.mjs \
+            test/unit/stream-truncation.test.mjs \
             test/unit/go-worker-client-codec.test.mjs \
             test/unit/inference-codec.test.mjs \
             test/unit/outbound-log-envelope.test.mjs \
