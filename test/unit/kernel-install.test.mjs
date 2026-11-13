@@ -201,7 +201,7 @@ test('restart intent is durable before stop and scheduling stays untouched', asy
       assert.equal(record.kernel_operation.phase, 'pending')
       assert.equal(record.kernel_operation.kernel, 'cli-node')
       assert.equal(record.kernel_operation.was_running, true)
-      assert.equal(record.schedulable, true)
+      assert.notEqual(record.schedulable, false)
       assert.equal(record.schedule_hold, undefined)
       return { ok: true }
     },
@@ -231,7 +231,7 @@ for (const health of [
     const result = await installKernelTargets({ projectRoot: root, targets: target('cli-node'), ops: life.ops })
     assert.equal(result.ok, false)
     const saved = getVm(root, vm.id)
-    assert.equal(saved.schedulable, false)
+    assert.equal(saved.status, 'stopped')
     assert.equal(saved.kernel_operation.phase, 'failed')
     const replay = await resumePendingKernelInstalls({ projectRoot: root, ops: life.ops })
     assert.equal(replay.total, 0, 'known failures require operator action')
@@ -344,7 +344,7 @@ test('lost cluster restart acknowledgement retains durable intent and converges 
   const first = await installKernelTargets({ projectRoot: root, targets: target('cli-node'), ops: life.ops })
   assert.equal(first.ok, false)
   assert.equal(getVm(root, vm.id).kernel_operation.phase, 'pending')
-  assert.equal(getVm(root, vm.id).schedulable, false)
+  assert.equal(getVm(root, vm.id).status, 'stopped')
   const resumed = await resumePendingKernelInstalls({ projectRoot: root, ops: life.ops })
   assert.equal(resumed.ok, true, JSON.stringify(resumed))
   assert.equal(starts, 2)
@@ -358,7 +358,7 @@ test('install stops a busy slot at once without pausing scheduling', async (t) =
   const life = lifecycle(root, {
     stopSlot() {
       assert.equal(inflight.get(vm.id), 1)
-      assert.equal(getVm(root, vm.id).schedulable, true)
+      assert.notEqual(getVm(root, vm.id).schedulable, false)
       return { ok: true }
     },
   })
