@@ -51,7 +51,7 @@ jobs:
           cat > release-notes.md <<'NOTES'
           HTExplicit/vm2api 维护版。本次变更与升级说明见下方对应版本的 CHANGELOG.md。
 
-          本轮仅支持 linux/amd64。22 个载荷附件均从同一最终控制面镜像提取：21 个按 deploy/payload.json 核验官方 081 配套载荷及 CRAG v2.8.16 签名归档，kin-egress 由本 fork 源码构建；另附 build-provenance.json，共 23 个附件。CRAG 归档与出厂散件核对签名及字节一致。
+          本轮仅支持 linux/amd64。22 个载荷附件均从同一最终控制面镜像提取：21 个按 deploy/payload.json 核验官方 084 沿用的固定载荷及 CRAG v2.8.16 签名归档，kin-egress 由本 fork 源码构建；另附 build-provenance.json，共 23 个附件。CRAG 归档与出厂散件核对签名及字节一致；新版 kin-redact 由源码构建并随镜像交付。
           控制面镜像：`ghcr.io/htexplicit/vm2api:TAG` 和 `ghcr.io/htexplicit/vm2api:TAG-amd64`。
 
           变更与升级说明：[CHANGELOG.md](https://github.com/HTExplicit/vm2api/blob/TAG/CHANGELOG.md)。许可证与上游归属保留。

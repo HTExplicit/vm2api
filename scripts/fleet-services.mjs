@@ -7,7 +7,7 @@
  *
  *   1. wait until every node that hosts a slot has a ready link
  *   2. update the trusted CRAG package, then install changed wrap slots once
- *      through the server's drain/restart transaction; sync other payloads
+ *      through the server's restart transaction; sync other payloads
  *   3. telemetry: publish the saved policy to supported Claude slots and await its acknowledgment
  */
 import fs from 'node:fs/promises'
@@ -16,6 +16,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { verifyCragV2Tree } from '../src/lib/vm/wrap-cli-runtime.mjs'
+import { isCodexVm } from '../src/lib/vm/vm-kind.mjs'
 import { updateCrag } from './update-crag.mjs'
 
 const root = String(process.argv[2] || process.env.KIN_PROJECT_ROOT || '/opt/vm2api').replace(/\/+$/, '')
@@ -137,6 +138,9 @@ function summarizeKernelSync(report) {
 
 /** One post-upgrade pass; the installer owns each changed wrap slot's restart. */
 export async function refreshFleetKernels(projectRoot, vms, { api, cragUpdate = updateCrag, cragVersion = '' } = {}) {
+  if (vms.length && vms.every((vm) => isCodexVm(vm) && !vm.node_id)) {
+    return { ok: true, total: 0, ok_count: 0, failed_count: 0, changed_count: 0, items: [], crag: null }
+  }
   const factory = path.join(projectRoot, 'share/crag/kernels/v2', process.arch === 'arm64' ? 'arm64' : 'amd64')
   let crag = null
   let hasFactory = false

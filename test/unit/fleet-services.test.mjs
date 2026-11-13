@@ -201,7 +201,7 @@ test('fleet refresh with only local slots skips the node link wait', async () =>
   )
 })
 
-test('all-GPT fleets still sync payloads without submitting a telemetry job', async () => {
+test('all-local-GPT fleets skip payload sync and telemetry', async () => {
   const vms = [
     { id: 'gpt-a', family: 'codex', node_id: null },
     { id: 'gpt-b', family: 'codex', node_id: null },
@@ -210,7 +210,6 @@ test('all-GPT fleets still sync payloads without submitting a telemetry job', as
     {
       '/health': () => ({ status: 'ok' }),
       '/api/panel/vms': () => ({ ok: true, data: { items: vms } }),
-      '/api/panel/wrap-cli/sync': () => kernelSync(vms.map((vm) => ({ id: vm.id, ok: true }))),
     },
     async (base, requests) => {
       const result = await runFleet({ KIN_AUTO_SYNC_BASE: base, VM2API_API_KEY: 'test-key' })
@@ -220,16 +219,14 @@ test('all-GPT fleets still sync payloads without submitting a telemetry job', as
         [
           ['GET', '/health'],
           ['GET', '/api/panel/vms'],
-          ['POST', '/api/panel/wrap-cli/sync'],
         ],
       )
-      assert.deepEqual(JSON.parse(requests[2].body), { ids: ['gpt-a', 'gpt-b'], restart: true })
       const report = JSON.parse(result.stdout)
       assert.equal(report.total, 0)
       assert.equal(report.failed_count, 0)
       assert.equal(report.skipped_not_applicable, 2)
       assert.equal(report.kernel_sync.ok, true)
-      assert.equal(report.kernel_sync.total, 2)
+      assert.equal(report.kernel_sync.total, 0)
     },
   )
 })
@@ -299,29 +296,23 @@ test('a supported slot telemetry failure still makes fleet finalization fail', a
   )
 })
 
-test('trusted factory updates CRAG once even in an all-Codex fleet', {
-  skip: process.platform === 'win32' ? 'signed ELF verification requires Unix executable permissions' : false,
-}, async (t) => {
+test('trusted factory stays untouched in an all-local-Codex fleet', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-crag-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   seedEncryptedPackage(root)
-  const calls = []
   const result = await refreshFleetKernels(root, [{ id: 'gpt-a', family: 'codex' }], {
-    api: async (method, endpoint, body) => {
-      calls.push({ method, endpoint, body })
-      return { ok: true, items: [{ id: 'gpt-a', ok: true }] }
-    },
-    cragUpdate: async (_root, { api }) => {
-      assert.equal(_root, root)
-      await api('/crag-pull', { kernel: 'crag' })
-      return { ok: true, items: [{ id: 'gpt-a', action: 'skip', ok: true }] }
-    },
+    api: async () => assert.fail('local Codex has no slot payload to synchronize'),
+    cragUpdate: async () => assert.fail('local Codex must not download CRAG or change its pointer'),
   })
-  assert.equal(result.ok, true)
-  assert.deepEqual(calls, [
-    { method: 'POST', endpoint: '/crag-pull', body: { kernel: 'crag' } },
-    { method: 'POST', endpoint: '/api/panel/wrap-cli/sync', body: { ids: ['gpt-a'], restart: true } },
-  ])
+  assert.deepEqual(result, {
+    ok: true,
+    total: 0,
+    ok_count: 0,
+    failed_count: 0,
+    changed_count: 0,
+    items: [],
+    crag: null,
+  })
 })
 
 test('wrap refresh pulls the running tag and installs changed slots once without legacy overlap', async (t) => {
