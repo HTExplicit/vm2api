@@ -1378,7 +1378,6 @@ unixTest('streamGoWorker stamps TTFT on text and thinking deltas', async () => {
 unixTest('streamGoWorker stamps TTFT on omitted thinking progress before visible output', async (t) => {
   let now = 1_000
   t.mock.method(Date, 'now', () => now)
-  const sawEmpty = gate()
   const sawProgress = gate()
   const fx = await fixture(async (req, res) => {
     res.setHeader('content-type', 'text/event-stream')
@@ -1389,7 +1388,9 @@ unixTest('streamGoWorker stamps TTFT on omitted thinking progress before visible
       index: 0,
       delta: { type: 'thinking_delta', thinking: '', estimated_tokens: 0 },
     })
-    await sawEmpty.ready
+    // Empty progress is intentionally held before commit. Advance the server
+    // clock rather than waiting for that uncommitted frame downstream.
+    now = 2_000
     writeData(res, {
       type: 'content_block_delta',
       index: 0,
@@ -1413,10 +1414,7 @@ unixTest('streamGoWorker stamps TTFT on omitted thinking progress before visible
         messages: [{ role: 'user', content: 'hi' }],
       },
       onEvent: (line) => {
-        if (line.includes('"estimated_tokens":0')) {
-          now = 2_000
-          sawEmpty.release()
-        } else if (line.includes('"estimated_tokens":50')) {
+        if (line.includes('"estimated_tokens":50')) {
           now = 5_000
           sawProgress.release()
         }

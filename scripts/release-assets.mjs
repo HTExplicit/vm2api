@@ -71,8 +71,8 @@ export function verifyCragArchive(manifest, dir) {
 }
 
 export function writeProvenance({ manifest, dir, image, sourceCommit, upstreamBuild, cragBuild, assets }) {
-  const rebuilt = assets.filter((asset) => asset.name !== 'kin-egress' && !asset.name.startsWith('crag-v2-'))
-  for (const asset of rebuilt) {
+  const pinnedAssets = assets.filter((asset) => asset.name !== 'kin-egress')
+  for (const asset of pinnedAssets) {
     const upstream = upstreamBuild.assets.find((item) => item.name === asset.name)
     assert.equal(asset.size, upstream.size, `${asset.name}: upstream provenance size mismatch`)
     assert.equal(asset.digest, `sha256:${upstream.sha256}`, `${asset.name}: upstream provenance mismatch`)
@@ -95,8 +95,8 @@ export function writeProvenance({ manifest, dir, image, sourceCommit, upstreamBu
       release: manifest.release,
       build: {
         ...upstreamBuild,
-        source_record: 'docs/releases/v1.4.072-binaries.json',
-        assets: upstreamBuild.assets.filter((asset) => rebuilt.some((item) => item.name === asset.name)),
+        source_record: 'docs/releases/v1.4.086-binaries.json',
+        assets: upstreamBuild.assets.filter((asset) => pinnedAssets.some((item) => item.name === asset.name)),
       },
       crag: cragBuild,
     },
@@ -170,8 +170,8 @@ function main() {
       dir: opts.dest,
       image: opts.image,
       sourceCommit: capture('git', ['rev-parse', 'HEAD']),
-      upstreamBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.072-binaries.json'), 'utf8')),
-      cragBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.081-crag.json'), 'utf8')),
+      upstreamBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.086-binaries.json'), 'utf8')),
+      cragBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.086-crag.json'), 'utf8')),
       assets: [...expected],
     }),
   )

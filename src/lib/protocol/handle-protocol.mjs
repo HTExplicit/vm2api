@@ -1317,7 +1317,18 @@ export function createHandleProtocol(deps) {
     ctx = { ...ctx, body: converted.claude }
     if (inferenceBackend !== 'api') ctx = applyIntercept(cfg.intercept.rules, 'before_upstream', ctx)
     if (apiOpenAI) {
-      return runApiBackend({ req, res, protocol, inbound, ctx, logBag, logCtx, converted, apiInbound, picked: apiPicked })
+      return runApiBackend({
+        req,
+        res,
+        protocol,
+        inbound,
+        ctx,
+        logBag,
+        logCtx,
+        converted,
+        apiInbound,
+        picked: apiPicked,
+      })
     }
     const officialTraffic = officialInbound
     const requestContext = classifyClaudeRequestPurpose(inbound, { officialTraffic })
@@ -2237,6 +2248,17 @@ export function createHandleProtocol(deps) {
     logBag.account_id = result?.accountId || null
     logBag.final_account_id = result?.accountId || null
     if (result?.threadBetas) logBag.hop_meta = { ...logBag.hop_meta, thread_betas: result.threadBetas }
+    if (result?.nativeHandoff === true) {
+      const provider = result.providerResult
+      logBag.hop_meta = {
+        ...logBag.hop_meta,
+        native_handoff: {
+          message_id: provider?.message_id ?? null,
+          stop_reason: provider?.stop_reason ?? null,
+          usage_complete: provider?.usage_complete === true,
+        },
+      }
+    }
     if (result?.accountId && (result.ok || result.committed))
       recordThinkingOwners(result.body, result.accountId, thinkingOwnerStore)
     // Zero executions is a real 0, not unknown; the VM is the last one that ran.
@@ -2322,13 +2344,20 @@ export function createHandleProtocol(deps) {
         else if (
           protocol === 'anthropic.messages' &&
           !res.writableEnded &&
-          !streamTracker?.hasStarted() &&
+          (result?.nativeHandoff === true || !streamTracker?.hasStarted()) &&
           !streamTracker?.isFinished()
         ) {
-          // Headers already went out (queue ping or an in-attempt ping), so the
-          // status can no longer be 429/529/503. Close with the Anthropic event.
+          // A strict handoff failure must remain an error even after partial
+          // content. Legacy queue pings still receive the mapped SSE error.
           const mapped = mapProtocolClientError(result, logBag, logBag.error_code)
           res.write(buildAnthropicSseError(mapped.body?.error || {}))
+        } else if (
+          result?.nativeHandoff === true &&
+          (protocol === 'openai.chat' || protocol === 'openai.completions') &&
+          !responseClosed(res)
+        ) {
+          const mapped = mapProtocolClientError(result, logBag, logBag.error_code)
+          res.write(`data: ${JSON.stringify({ error: mapped.body.error })}\n\ndata: [DONE]\n\n`)
         }
       }
       rememberRefusal({ inbound, body: ctx.body, headers: req.headers, result, logBag, requestId: logCtx.request_id })
