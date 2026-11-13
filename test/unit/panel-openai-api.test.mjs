@@ -146,20 +146,15 @@ function handler(root, { who = ADMIN, body = {}, manager = {}, credits = {}, ...
   }
 }
 
-test('account browser management is administrator-only and keeps key writes out of public responses', async (t) => {
+test('account browser management is administrator-only and has no key endpoint', async (t) => {
   const root = fixture(t)
   const calls = []
-  const state = { key_set: false, installed_version: null, installing: false, last_error: null }
+  const state = { installed_version: null, installing: false, last_error: null, update_status: 'not_installed' }
   const runtime = {
     status: () => ({ ...state }),
-    setKey(key) {
-      calls.push(['key', key])
-      state.key_set = key !== null
-      return { ...state }
-    },
     async check() {
       calls.push(['check'])
-      return { ...state, latest_version: '156.0.1' }
+      return { ...state, latest_version: '157.0.8103.50' }
     },
     install() {
       calls.push(['install'])
@@ -168,7 +163,6 @@ test('account browser management is administrator-only and keeps key writes out 
   }
   const routes = [
     ['GET', ''],
-    ['PUT', '/key'],
     ['POST', '/check'],
     ['POST', '/install'],
   ]
@@ -177,27 +171,26 @@ test('account browser management is administrator-only and keeps key writes out 
       const denied = await handler(root, {
         accountBrowserRuntime: runtime,
         who: { panelUser: { id: 'u', role }, panelUserId: 'u' },
-        body: { key: 'cb_secret' },
       })(method, `/api/panel/account-browser${suffix}`)
       assert.equal(denied.status, 403)
     }
   }
   assert.equal(calls.length, 0)
   const read = await handler(root, { accountBrowserRuntime: runtime })('GET', '/api/panel/account-browser')
-  assert.equal(read.body.data.key_set, false)
+  assert.equal(read.body.data.update_status, 'not_installed')
   const save = await handler(root, { accountBrowserRuntime: runtime, body: { key: 'cb_secret' } })(
     'PUT',
     '/api/panel/account-browser/key',
   )
-  assert.equal(save.body.data.key_set, true)
+  assert.equal(save.status, 404)
   assert.equal(JSON.stringify(save.body).includes('cb_secret'), false)
   const invalid = await handler(root, { accountBrowserRuntime: runtime, body: {} })(
     'PUT',
     '/api/panel/account-browser/key',
   )
-  assert.equal(invalid.status, 400)
+  assert.equal(invalid.status, 404)
   const check = await handler(root, { accountBrowserRuntime: runtime })('POST', '/api/panel/account-browser/check')
-  assert.equal(check.body.data.latest_version, '156.0.1')
+  assert.equal(check.body.data.latest_version, '157.0.8103.50')
   const install = await handler(root, { accountBrowserRuntime: runtime })('POST', '/api/panel/account-browser/install')
   assert.equal(install.status, 202)
   assert.equal(install.body.data.installing, true)
@@ -205,7 +198,7 @@ test('account browser management is administrator-only and keeps key writes out 
     'PUT',
     '/api/panel/account-browser/key',
   )
-  assert.equal(clear.body.data.key_set, false)
+  assert.equal(clear.status, 404)
 })
 
 test('browser management failures never echo raw provider output', async (t) => {
@@ -227,7 +220,7 @@ test('unconfigured account browsers fail before starting OAuth so the dialog can
     body: { purpose: 'oauth' },
     accountBrowserRuntime: {
       launchConfig() {
-        throw Object.assign(new Error('请先配置浏览器'), { code: 'browser_key_required', status: 400 })
+        throw Object.assign(new Error('请先安装浏览器'), { code: 'browser_not_installed', status: 400 })
       },
     },
     codexBrowserLogin: {
@@ -237,7 +230,7 @@ test('unconfigured account browsers fail before starting OAuth so the dialog can
     },
   })('POST', '/api/panel/vms/vm-api/browser/open')
   assert.equal(out.status, 400)
-  assert.equal(out.body.error.code, 'browser_key_required')
+  assert.equal(out.body.error.code, 'browser_not_installed')
 })
 
 test('Claude slots cannot reach generic browser state, tickets, login or close operations', async (t) => {

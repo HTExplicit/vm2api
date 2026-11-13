@@ -181,8 +181,36 @@ function pageFixture() {
   const page = new EventEmitter()
   page.off = page.removeListener.bind(page)
   page.url = () => 'https://platform.openai.com/api-keys'
-  page.getByRole = () => ({ count: async () => 0 })
+  page.$$ = async () => []
+  page.accessibility = {
+    snapshot: async ({ root }) => ({ name: root.node.accessibleName || root.node.textContent || '' }),
+  }
   return page
+}
+
+function elementHandle(node) {
+  const handle = {
+    node,
+    isVisible: async () => node.visible !== false,
+    dispose: async () => {},
+    evaluate: async (fn, ...args) => fn(node, ...args),
+    evaluateHandle: async (fn, ...args) => elementHandle(fn(node, ...args)),
+    asElement: () => (node ? handle : null),
+    $$: async (selector) => (node.querySelectorAll?.(selector) || []).map(elementHandle),
+    $$eval: async (selector, fn, ...args) => fn(node.querySelectorAll?.(selector) || [], ...args),
+    select: async (...values) => node.select(...values),
+    click: async () => node.click(),
+    asLocator: () => ({ click: async () => node.click(), fill: async (value) => node.fill(value) }),
+  }
+  return handle
+}
+
+function fieldLabel(name, control, linked = true) {
+  return {
+    textContent: name,
+    control: linked ? control : null,
+    parentElement: { querySelectorAll: () => [control] },
+  }
 }
 
 function jsonResponse(path, payload, { method = 'GET', headers = {}, body } = {}) {
@@ -190,7 +218,7 @@ function jsonResponse(path, payload, { method = 'GET', headers = {}, body } = {}
     url: () => `https://api.openai.com${path}`,
     method: () => method,
     headers: () => headers,
-    postDataJSON: () => body,
+    fetchPostData: async () => JSON.stringify(body),
   }
   return {
     url: () => `https://api.openai.com${path}`,
@@ -341,20 +369,24 @@ function generalOrganizationFixture(options = {}) {
   }
   const calls = { menus: 0, reads: 0 }
   const input = {
-    isVisible: async () => state.visible,
-    evaluate: async (fn) => fn({ tagName: state.tagName, readOnly: state.readOnly }),
-    inputValue: async () => {
+    accessibleName: 'Organization ID',
+    get visible() {
+      return state.visible
+    },
+    get tagName() {
+      return state.tagName
+    },
+    get readOnly() {
+      return state.readOnly
+    },
+    get value() {
       calls.reads++
       return state.value
     },
   }
   page.url = () => state.url
-  page.getByRole = (role, { name } = {}) => {
-    if (role === 'textbox')
-      return {
-        count: async () => (name.test('Organization ID') ? state.count : 0),
-        nth: () => input,
-      }
+  page.$$ = async (selector) => {
+    if (selector === 'aria/[role="textbox"]') return Array.from({ length: state.count }, () => elementHandle(input))
     calls.menus++
     assert.fail('matching General organization must not open the organization/user menu')
   }
@@ -647,8 +679,7 @@ test('Billing credentials come only from the successful exact request and requir
   const request = {
     url: response.url,
     method: () => 'GET',
-    headers: () => ({ 'openai-organization': 'org-one' }),
-    allHeaders: async () => headers,
+    headers: () => headers,
   }
   response.request = () => request
   await observeRequestResponse(adapter, response)
@@ -868,7 +899,7 @@ test('the official default marker takes precedence over the display name', async
 
 test('missing or ambiguous default projects cannot trigger project creation', async () => {
   const page = pageFixture()
-  page.getByRole = () => {
+  page.$$ = () => {
     throw new Error('project creation controls must never be queried')
   }
   const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
@@ -884,39 +915,9 @@ test('missing or ambiguous default projects cannot trigger project creation', as
   adapter.dispose()
 })
 
-test('key configuration waits for a delayed entry, dialog and projects before targeting unlabelled fields', async () => {
+test('key configuration waits for entry, dialog and project observations before filling the named fields', async () => {
   const page = pageFixture()
   const calls = []
-  const one = (value) =>
-    Object.assign(value, {
-      count: async () => 1,
-      nth: () => value,
-      first: () => value,
-      filter: (options) => {
-        assert.deepEqual(options, { visible: true })
-        return value
-      },
-      isVisible: async () => true,
-      waitFor: async (options) => assert.ok([3_000, 15_000].includes(options.timeout)),
-    })
-  const projectButton = one({
-    evaluate: async () => false,
-    innerText: async () => 'Default project',
-    click: async () => assert.fail('the already selected default project should not be reopened'),
-  })
-  const nameInput = one({ fill: async (value) => calls.push(['name', value]) })
-  const fieldLabel = (control, selector) =>
-    one({
-      locator: (parent) => {
-        assert.equal(parent, '..')
-        return {
-          locator: (actual) => {
-            assert.equal(actual, selector)
-            return control
-          },
-        }
-      },
-    })
   const adapter = new PlatformAdapter({ page, email: 'owner@example.com', organizationId: 'org-one' })
   adapter.identity = {
     email: 'owner@example.com',
@@ -926,108 +927,103 @@ test('key configuration waits for a delayed entry, dialog and projects before ta
   }
   adapter.goto = async (url) => calls.push(['goto', url])
   let neverSelected = false
-  const dialog = one({
-    getByText: (name) => {
-      if (name.test('Loading projects...'))
-        return {
-          waitFor: async (options) => {
-            assert.equal(options.state, 'hidden')
-            calls.push(['projects-ready'])
-            await adapter.observe(
-              jsonResponse('/v1/dashboard/onboarding/login', {
-                user: {
-                  email: 'owner@example.com',
-                  orgs: {
-                    data: [
-                      {
-                        id: 'org-one',
-                        title: 'Personal',
-                        projects: { data: [{ id: 'proj_default', title: 'Default project', is_initial: true }] },
-                      },
-                    ],
-                  },
-                },
-              }),
-            )
+  const project = {
+    tagName: 'BUTTON',
+    textContent: 'Default project',
+    innerText: 'Default project',
+    matches: () => true,
+    click: () => assert.fail('the selected default project must not be reopened'),
+  }
+  const name = { tagName: 'INPUT', matches: () => true, fill: (value) => calls.push(['name', value]) }
+  const expiration = {
+    accessibleName: 'Expiration',
+    tagName: 'BUTTON',
+    get textContent() {
+      return neverSelected ? 'Never' : 'Expiration'
+    },
+    get innerText() {
+      return neverSelected ? 'Never' : 'Expiration'
+    },
+    click: () => calls.push(['open-expiration']),
+  }
+  const submit = {
+    accessibleName: 'Create secret key',
+    click: async () => {
+      assert.equal(neverSelected, true)
+      calls.push(['submit'])
+      await observeCreation(
+        adapter,
+        jsonResponse(
+          '/dashboard/api_keys',
+          {
+            api_key: { secret: 'sk-proj-default-fixture-secret' },
           },
-        }
-      // Text lookup resolves the inner Name/Project div. Its immediate parent
-      // is a label row, not the field container containing the control.
-      if (name.test('Name') || name.test('Project'))
-        return one({ locator: () => ({ locator: () => ({ count: async () => 0 }) }) })
-      assert.fail('unexpected dialog label')
+          keyRequestOptions,
+        ),
+      )
     },
-    locator: (selector) => {
-      assert.equal(selector, 'label')
-      return {
-        filter: ({ hasText }) => {
-          if (hasText.test('NameOptional')) return fieldLabel(nameInput, 'input[type="text"]')
-          if (hasText.test('Project')) return fieldLabel(projectButton, 'select, [role="button"]')
-          if (hasText.test('Expiration')) return { filter: () => ({ count: async () => 0 }) }
-          assert.fail('unexpected field label')
-        },
-      }
+  }
+  const dialogNode = {
+    querySelectorAll: (selector) => {
+      if (selector === 'label') return [fieldLabel('NameOptional', name), fieldLabel('Project', project)]
+      if (selector === 'aria/[role="button"]') return [expiration, submit]
+      return []
     },
-    getByRole: (role, { name }) => {
-      if (role === 'combobox') return { filter: () => ({ count: async () => 0 }) }
-      assert.equal(role, 'button', 'Name must not be confused with the Expiration textbox')
-      if (name.test('Expiration'))
-        return one({
-          click: async () => calls.push(['open-expiration']),
-          evaluate: async () => false,
-          innerText: async () => (neverSelected ? 'Never' : 'Expiration'),
-        })
-      return one({
-        click: async () => {
-          assert.equal(neverSelected, true, 'the required expiration must be selected before submitting')
-          calls.push(['submit'])
-          await observeCreation(
-            adapter,
-            jsonResponse(
-              '/dashboard/api_keys',
-              { api_key: { secret: 'sk-proj-default-fixture-secret' } },
-              keyRequestOptions,
-            ),
-          )
-        },
-      })
+  }
+  const dialog = elementHandle(dialogNode)
+  const create = elementHandle({ accessibleName: 'Create new secret key', click: () => calls.push(['open-dialog']) })
+  const never = elementHandle({
+    accessibleName: 'Never',
+    click: () => {
+      neverSelected = true
+      calls.push(['expiration', 'Never'])
     },
   })
-  let dialogReady = false
-  dialog.count = async () => (dialogReady ? 1 : 0)
-  dialog.waitFor = async (options) => {
-    assert.equal(options.state, 'visible')
-    await Promise.resolve()
-    dialogReady = true
-    calls.push(['dialog-ready'])
+  let entryReady = false,
+    dialogReady = false
+  page.$$ = async (selector) => {
+    if (selector === 'aria/[role="textbox"]') return []
+    if (selector === 'aria/[role="button"]') return entryReady ? [create] : []
+    if (selector === 'dialog, [role="dialog"]') return dialogReady ? [dialog] : []
+    if (selector === 'aria/[role="option"]') return [never]
+    assert.fail(`unexpected query ${selector}`)
   }
-  let createReady = false
-  const createButton = one({ click: async () => calls.push(['open-dialog']) })
-  createButton.count = async () => (createReady ? 1 : 0)
-  createButton.waitFor = async (options) => {
-    assert.equal(options.state, 'visible')
-    if (options.timeout < 20_000) throw new Error('the cold page is still loading')
-    assert.equal(options.timeout, 30_000)
+  page.waitForFunction = async (_fn, { timeout }, root) => {
     await Promise.resolve()
-    createReady = true
-    calls.push(['create-ready'])
+    if (timeout === 30000) {
+      entryReady = true
+      calls.push(['create-ready'])
+    } else if (timeout === 20000) {
+      assert.equal(root, dialog)
+      calls.push(['projects-ready'])
+      await adapter.observe(
+        jsonResponse('/v1/dashboard/onboarding/login', {
+          user: {
+            email: 'owner@example.com',
+            orgs: {
+              data: [
+                {
+                  id: 'org-one',
+                  title: 'Personal',
+                  projects: { data: [{ id: 'proj_default', title: 'Default project', is_initial: true }] },
+                },
+              ],
+            },
+          },
+        }),
+      )
+    } else assert.equal(timeout, 15000)
+    return { dispose: async () => {} }
   }
-  page.getByRole = (role, options) => {
-    if (role === 'textbox') return { count: async () => 0 }
-    if (role === 'row') assert.fail('remote key records must not decide whether a new local key can be configured')
-    if (role === 'dialog') return dialog
-    if (role === 'button') return createButton
-    if (role === 'option') {
-      assert.equal(options.name.test('Never'), true)
-      return one({
-        waitFor: async (options) => assert.equal(options.timeout, 3_000),
-        click: async () => {
-          neverSelected = true
-          calls.push(['expiration', 'Never'])
-        },
-      })
+  page.waitForSelector = async (selector) => {
+    await Promise.resolve()
+    if (selector === 'dialog, [role="dialog"]') {
+      dialogReady = true
+      calls.push(['dialog-ready'])
+      return dialog
     }
-    assert.fail('unexpected page role')
+    assert.equal(selector, 'aria/[role="option"]')
+    return never
   }
   const saved = []
   const result = await adapter.configure({ keyName: 'vm2api-account', onKey: async (value) => saved.push(value) })
@@ -1050,36 +1046,26 @@ test('key configuration waits for a delayed entry, dialog and projects before ta
 function keyEntryFixture({ visible = [true], remoteKeys = [], timeout = false } = {}) {
   const page = pageFixture()
   const calls = []
-  const entries = visible.map((shown, index) => ({
-    shown,
-    isVisible: async () => shown,
-    waitFor: async (options) => {
-      assert.equal(options.timeout, 30_000)
-      if (timeout) throw new Error('entry wait timed out')
-      assert.equal(shown, true, 'a hidden matching entry must never be awaited')
-      calls.push(['ready', index])
-    },
-    click: async () => calls.push(['click', index]),
-  }))
-  const buttons = {
-    first: () => assert.fail('filter out hidden entries before selecting the first match'),
-    filter: (options) => {
-      assert.deepEqual(options, { visible: true })
-      const shown = entries.filter((entry) => entry.shown)
-      return { count: async () => shown.length, nth: (index) => shown[index], first: () => shown[0] }
-    },
+  const entries = visible.map((shown, index) =>
+    elementHandle({
+      accessibleName: 'Create new secret key',
+      visible: shown,
+      click: () => calls.push(['click', index]),
+    }),
+  )
+  page.waitForFunction = async (_fn, { timeout: deadline }) => {
+    assert.equal(deadline, 30000)
+    if (timeout) throw new Error('entry wait timed out')
+    calls.push(['ready'])
+    return { dispose: async () => {} }
   }
-  page.getByRole = (role, options) => {
-    if (role === 'textbox') return { count: async () => 0 }
-    if (role === 'button') {
-      assert.equal(options.name.test('Create new secret key'), true)
-      assert.equal(options.name.test('Other Create new secret key action'), false)
-      return buttons
-    }
-    if (role === 'row')
-      assert.fail(`remote key records must be retained without gating creation: ${remoteKeys.join(', ')}`)
-    if (role === 'dialog') throw new Error('fixture reached the creation dialog')
-    assert.fail(`unexpected role ${role}`)
+  page.waitForSelector = async () => elementHandle({})
+  page.$$ = async (selector) => {
+    if (selector === 'aria/[role="textbox"]') return []
+    if (selector === 'aria/[role="button"]') return entries
+    if (selector === 'aria/[role="row"]') assert.fail(`remote keys cannot gate creation: ${remoteKeys.join(', ')}`)
+    if (selector === 'dialog, [role="dialog"]') throw new Error('fixture reached the creation dialog')
+    assert.fail(`unexpected query ${selector}`)
   }
   const adapter = new PlatformAdapter({ page, email: 'owner@example.com', organizationId: 'org-one' })
   adapter.identity = {
@@ -1095,10 +1081,7 @@ function keyEntryFixture({ visible = [true], remoteKeys = [], timeout = false } 
 test('key entry ignores a hidden first match and clicks the unique visible control', async () => {
   const f = keyEntryFixture({ visible: [false, true] })
   await assert.rejects(f.configure(), /fixture reached the creation dialog/)
-  assert.deepEqual(f.calls, [
-    ['ready', 1],
-    ['click', 1],
-  ])
+  assert.deepEqual(f.calls, [['ready'], ['click', 1]])
   f.adapter.dispose()
 })
 
@@ -1108,7 +1091,7 @@ test('key entry rejects multiple visible controls without choosing or creating a
     code: 'platform_page_changed',
     message: '官方页面的操作入口不唯一，请核对后重试配置',
   })
-  assert.deepEqual(f.calls, [['ready', 0]])
+  assert.deepEqual(f.calls, [['ready']])
   f.adapter.dispose()
 })
 
@@ -1116,10 +1099,7 @@ for (const remoteKeys of [['Active'], ['Revoked'], ['Active', 'Revoked'], ['Unkn
   test(`remote account key records (${remoteKeys.join(', ')}) do not block a new key when local secret is missing`, async () => {
     const f = keyEntryFixture({ remoteKeys })
     await assert.rejects(f.configure(), /fixture reached the creation dialog/)
-    assert.deepEqual(f.calls, [
-      ['ready', 0],
-      ['click', 0],
-    ])
+    assert.deepEqual(f.calls, [['ready'], ['click', 0]])
     f.adapter.dispose()
   })
 }
@@ -1142,67 +1122,63 @@ function expirationFixture({
   initial = '30 days',
   duplicate = false,
   confirm = true,
+  hiddenMenuText = false,
+  zeroSizeSibling = false,
   choices = ['30 days', 'Never'],
 } = {}) {
-  let selected = initial
-  let opened = false
+  let selected = initial,
+    opened = false
   const calls = []
-  const matches = (pattern, value) => (typeof pattern === 'string' ? pattern === value : pattern.test(value))
-  const options = choices.map((value) => ({ textContent: value, visible: true }))
+  const options = choices.map((value) => ({
+    textContent: value,
+    value,
+    accessibleName: value,
+    click: () => {
+      calls.push(value)
+      if (confirm) selected = value
+    },
+  }))
   const control = {
+    accessibleName: label,
     tagName: native ? 'SELECT' : combo ? 'DIV' : 'BUTTON',
-    visible: true,
-    getAttribute: () => (combo ? 'combobox' : null),
+    matches: () => true,
+    checkVisibility: () => true,
+    getBoundingClientRect: () => ({ width: 150, height: 32 }),
     get selectedOptions() {
       return [{ textContent: selected }]
     },
     get textContent() {
+      return hiddenMenuText ? `${selected} ${choices.join(' ')}` : selected
+    },
+    get innerText() {
       return selected
     },
+    querySelectorAll: (selector) => (selector === 'option' ? options : []),
     click: () => {
       opened = true
       calls.push('open')
     },
-    selectOption: ({ label: value }) => {
+    select: (value) => {
       calls.push(value)
       if (confirm) selected = value
     },
   }
-  const field = { textContent: label, visible: true, control }
-  function locator(rows) {
-    return {
-      count: async () => rows.length,
-      nth: (index) => locator(rows.slice(index, index + 1)),
-      first: () => locator(rows.slice(0, 1)),
-      filter: ({ visible, hasText }) =>
-        locator(rows.filter((row) => (!visible || row.visible) && (!hasText || matches(hasText, row.textContent)))),
-      evaluate: async (fn) => fn(rows[0]),
-      innerText: async () => rows[0].textContent,
-      locator: (selector) =>
-        selector === '..' ? locator(rows) : locator(rows.map((row) => row.control).filter(Boolean)),
-      getByRole: (role, { name }) =>
-        locator(role === 'option' ? options.filter((option) => matches(name, option.textContent)) : []),
-      waitFor: async () => {
-        if (!rows.length) throw new Error('fixture option absent')
-      },
-      selectOption: async (value) => rows[0].selectOption(value),
-      click: async () => {
-        if (rows[0] === control) control.click()
-        else {
-          calls.push(rows[0].textContent)
-          if (confirm) selected = rows[0].textContent
-        }
-      },
-    }
+  const field = fieldLabel(label, control, linked)
+  if (zeroSizeSibling) {
+    field.parentElement.querySelectorAll = () => [
+      control,
+      { checkVisibility: () => true, getBoundingClientRect: () => ({ width: 0, height: 0 }) },
+    ]
   }
-  const dialog = {
-    getByLabel: (name) => locator(linked && matches(name, label) ? (duplicate ? [control, control] : [control]) : []),
-    locator: () => locator([field]),
-    getByRole: () => locator([]),
-  }
+  const dialog = elementHandle({
+    querySelectorAll: (selector) => (selector === 'label' ? (duplicate ? [field, field] : [field]) : []),
+  })
   const page = pageFixture()
-  page.getByRole = (role, { name }) =>
-    locator(role === 'option' && opened ? options.filter((option) => matches(name, option.textContent)) : [])
+  page.$$ = async (selector) => (selector === 'aria/[role="option"]' && opened ? options.map(elementHandle) : [])
+  page.waitForSelector = async () => {
+    if (!opened || !options.length) throw new Error('fixture option absent')
+    return elementHandle(options[0])
+  }
   return { adapter: new PlatformAdapter({ page, email: 'owner@example.com' }), dialog, calls, selected: () => selected }
 }
 
@@ -1210,6 +1186,8 @@ for (const variant of [
   { name: 'native select', native: true },
   { name: 'labelled combobox', combo: true },
   { name: 'label sibling value button', linked: false },
+  { name: 'label sibling with a zero-sized hidden control', linked: false, zeroSizeSibling: true },
+  { name: 'custom control with hidden menu text', hiddenMenuText: true },
   { name: 'Chinese expiration field', native: true, label: '有效期限', choices: ['30 天', '永不过期'] },
   { name: 'Japanese expiration field', label: '有効期限', choices: ['30日', '期限なし'] },
 ]) {
@@ -1243,7 +1221,7 @@ for (const variant of [
 
 test('an unrelated complete secret in a dialog cannot be saved without a matching successful creation response', async () => {
   const page = pageFixture()
-  page.getByRole = () => ({ evaluateAll: async () => ['sk-proj-unrelated-fixture-secret'] })
+  page.$$eval = async () => ['sk-proj-unrelated-fixture-secret']
   const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
   const saved = []
   beginCapture(adapter, { onKey: (key) => saved.push(key) })
@@ -1265,6 +1243,7 @@ test('a delayed creation response from an ended setup cannot contaminate a newer
     })
   page.emit('request', response.request())
   const observing = adapter.observe(response)
+  await new Promise(setImmediate)
   adapter.endKeySetup(previous)
   const next = beginCapture(adapter, { onKey: (key) => saved.push(key) })
   finish({ secret: 'sk-proj-previous-setup-fixture-secret' })
@@ -1288,6 +1267,63 @@ test('a response cannot claim an old request which predates the current setup', 
   await adapter.observe(response)
   assert.equal(setup.request, null)
   assert.equal(setup.responseConfirmed, false)
+  assert.deepEqual(saved, [])
+  adapter.dispose()
+})
+
+test('a creation response waits for the exact asynchronous POST body before saving', async () => {
+  const page = pageFixture()
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  const saved = []
+  const setup = beginCapture(adapter, { onKey: (key) => saved.push(key) })
+  const response = jsonResponse(
+    '/dashboard/api_keys',
+    { secret: 'sk-proj-async-request-fixture-secret' },
+    keyRequestOptions,
+  )
+  let releaseBody
+  response.request().fetchPostData = () =>
+    new Promise((resolve) => {
+      releaseBody = resolve
+    })
+  page.emit('request', response.request())
+  page.emit('response', response)
+  await new Promise(setImmediate)
+  assert.equal(setup.request, null)
+  assert.equal(setup.requestObserved, true, 'an in-flight manual creation already prevents another submit')
+  assert.deepEqual(saved, [])
+  releaseBody(JSON.stringify(keyRequestOptions.body))
+  await adapter.settled()
+  assert.equal(setup.request, response.request())
+  assert.equal(setup.responseConfirmed, true)
+  assert.equal(saved.length, 1)
+  assert.equal(saved[0].apiKey, 'sk-proj-async-request-fixture-secret')
+  adapter.dispose()
+})
+
+test('a POST body resolving after its setup ends cannot attach to a new setup', async () => {
+  const page = pageFixture()
+  const adapter = new PlatformAdapter({ page, email: 'owner@example.com' })
+  const saved = []
+  const previous = beginCapture(adapter, { onKey: (key) => saved.push(key) })
+  const response = jsonResponse(
+    '/dashboard/api_keys',
+    { secret: 'sk-proj-ended-request-fixture-secret' },
+    keyRequestOptions,
+  )
+  let releaseBody
+  response.request().fetchPostData = () =>
+    new Promise((resolve) => {
+      releaseBody = resolve
+    })
+  page.emit('request', response.request())
+  page.emit('response', response)
+  adapter.endKeySetup(previous)
+  const next = beginCapture(adapter, { onKey: (key) => saved.push(key) })
+  releaseBody(JSON.stringify(keyRequestOptions.body))
+  await adapter.settled()
+  assert.equal(next.request, null)
+  assert.equal(next.responseConfirmed, false)
   assert.deepEqual(saved, [])
   adapter.dispose()
 })

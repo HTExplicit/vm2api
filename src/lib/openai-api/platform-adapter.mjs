@@ -323,24 +323,86 @@ function escaped(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-async function visibleOne(locator) {
-  const count = await locator.count()
+async function visibleOne(elements) {
   const visible = []
-  for (let i = 0; i < count; i++) {
-    const item = locator.nth(i)
-    if (await item.isVisible()) visible.push(item)
+  for (const element of elements) {
+    if (await element.isVisible()) visible.push(element)
+    else await element.dispose()
   }
-  return visible.length === 1 ? visible[0] : null
+  if (visible.length === 1) return visible[0]
+  await Promise.all(visible.map((element) => element.dispose()))
+  return null
 }
 
-async function button(scope, name, message, timeout = 15_000) {
-  const locator = scope.getByRole('button', { name }).filter({ visible: true })
+// Chromium computes accessible names; these helpers only enforce this workflow's
+// unique visible control rule, without recreating a locator/auto-wait framework.
+async function roleControl(page, scope, role, name) {
+  const matched = []
+  for (const element of await scope.$$(`aria/[role="${role}"]`)) {
+    const node = await page.accessibility.snapshot({ root: element, interestingOnly: false })
+    if (node && (typeof name === 'string' ? node.name === name : name.test(node.name))) matched.push(element)
+    else await element.dispose()
+  }
+  return visibleOne(matched)
+}
+
+async function labelledControl(scope, labelName, selector) {
+  const labels = []
+  for (const label of await scope.$$('label')) {
+    if (labelName.test(text(await label.evaluate((element) => element.textContent)))) labels.push(label)
+    else await label.dispose()
+  }
+  const label = await visibleOne(labels)
+  if (!label) return null
   try {
-    await locator.first().waitFor({ state: 'visible', timeout })
+    const control = await label.evaluateHandle((element, selector) => {
+      if (element.control?.matches(selector)) return element.control
+      const controls = [...(element.parentElement?.querySelectorAll(selector) || [])].filter((candidate) => {
+        const bounds = candidate.getBoundingClientRect()
+        return bounds.width > 0 && bounds.height > 0 && candidate.checkVisibility({ visibilityProperty: true })
+      })
+      return controls.length === 1 ? controls[0] : null
+    }, selector)
+    const element = control.asElement()
+    if (element && (await element.isVisible())) return element
+    await control.dispose()
+    return null
+  } finally {
+    await label.dispose()
+  }
+}
+
+async function button(page, scope, name, message, timeout = 15_000) {
+  try {
+    const ready = await page.waitForFunction(
+      (root, source, flags) => {
+        const match = new RegExp(source, flags)
+        return [...(root || document).querySelectorAll('button, [role="button"]')].some((element) => {
+          const labelled = (element.getAttribute('aria-labelledby') || '')
+            .split(/\s+/)
+            .map((id) => document.getElementById(id)?.textContent || '')
+            .join(' ')
+            .trim()
+          const name = element.getAttribute('aria-label') || labelled || element.textContent || ''
+          const bounds = element.getBoundingClientRect()
+          return (
+            bounds.width > 0 &&
+            bounds.height > 0 &&
+            element.checkVisibility({ visibilityProperty: true }) &&
+            match.test(name.replace(/\s+/g, ' ').trim())
+          )
+        })
+      },
+      { timeout },
+      scope === page ? null : scope,
+      name.source,
+      name.flags,
+    )
+    await ready.dispose()
   } catch {
     throw problem('platform_page_changed', message)
   }
-  const found = await visibleOne(locator)
+  const found = await roleControl(page, scope, 'button', name)
   if (!found) throw problem('platform_page_changed', '官方页面的操作入口不唯一，请核对后重试配置')
   return found
 }
@@ -365,6 +427,7 @@ export class PlatformAdapter {
     this.keyCallback = null
     this.keySetup = null
     this.pending = new Set()
+    this.keyRequests = new WeakMap()
     this.responseHandler = (response) => {
       const pending = this.observe(response).catch(() => {})
       this.pending.add(pending)
@@ -375,7 +438,13 @@ export class PlatformAdapter {
       try {
         if (request.url().split('?')[0] === BILLING_CREDIT_GRANTS_URL && request.method() === 'GET')
           this.creditRequests.set(request, ++this.creditSequence)
-        this.observeKeyRequest(request)
+        const setup = this.keySetup
+        const pending = this.observeKeyRequest(request).catch((error) => {
+          if (setup && this.keySetup === setup) setup.reject(error)
+        })
+        this.keyRequests.set(request, pending)
+        this.pending.add(pending)
+        pending.finally(() => this.pending.delete(pending))
       } catch (error) {
         this.keySetup?.reject(error)
       }
@@ -404,6 +473,7 @@ export class PlatformAdapter {
     if (!['platform.openai.com', 'api.openai.com'].includes(url.hostname) || !response.ok()) return
     if (!(response.headers()['content-type'] || '').includes('json')) return
     const request = response.request()
+    await this.keyRequests.get(request)
     const headers = request.headers()
     const keySetup = this.keySetup
     const matchingKey = !!keySetup && keySetup.request === request
@@ -414,7 +484,7 @@ export class PlatformAdapter {
       // A response to a request started before this adapter attached is not a new sample.
       if (!sequence) return
       const summary = parsePlatformCreditSummary(await response.text(), this.now())
-      const allHeaders = request.allHeaders ? await request.allHeaders() : headers
+      const allHeaders = request.headers()
       if (sequence > (this.creditSequences.get(organizationId) || 0)) {
         this.creditSummaries.set(organizationId, summary)
         this.creditSequences.set(organizationId, sequence)
@@ -463,7 +533,7 @@ export class PlatformAdapter {
       throw problem('platform_organization_unconfirmed', '当前 Platform 组织已变化，请核对后重新配置。')
   }
 
-  observeKeyRequest(request) {
+  async observeKeyRequest(request) {
     const setup = this.keySetup
     if (!setup || request.method() !== 'POST') return false
     const url = new URL(request.url())
@@ -473,6 +543,9 @@ export class PlatformAdapter {
       !/(?:api[-_]?keys|\/keys)\/?$/i.test(url.pathname)
     )
       return false
+    // Request body retrieval is asynchronous in Puppeteer. Reserve submission
+    // immediately so a manual request cannot race a second automatic click.
+    setup.requestObserved = true
     const pathScope = url.pathname.match(
       /^\/dashboard\/organizations\/(org[-_][a-z\d_-]+)\/projects\/(proj[-_][a-z\d_-]+)\/api_keys\/?$/i,
     )
@@ -490,9 +563,15 @@ export class PlatformAdapter {
     }
     let body
     try {
-      body = request.postDataJSON()
+      body = JSON.parse(await request.fetchPostData())
     } catch {
       setup.domTainted = true
+      return false
+    }
+    if (this.keySetup !== setup) return false
+    if (setup.request && setup.request !== request) {
+      setup.domTainted = true
+      setup.allowDom = false
       return false
     }
     const headers = request.headers()
@@ -612,7 +691,7 @@ export class PlatformAdapter {
         return
       }
       if (!setup.responseConfirmed || !setup.allowDom) return
-      const revealed = await this.page.getByRole('dialog').evaluateAll((dialogs) => {
+      const revealed = await this.page.$$eval('dialog, [role="dialog"]', (dialogs) => {
         const secrets = []
         for (const dialog of dialogs) {
           if (!dialog.getClientRects().length || getComputedStyle(dialog).visibility === 'hidden') continue
@@ -656,7 +735,7 @@ export class PlatformAdapter {
 
   async goto(url) {
     await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 })
-    await this.page.locator('body').waitFor({ state: 'visible', timeout: 15_000 })
+    await this.page.waitForSelector('body', { visible: true, timeout: 15_000 })
     await this.settled()
   }
 
@@ -667,10 +746,14 @@ export class PlatformAdapter {
 
   async readGeneralOrganization() {
     if (this.identity.email !== this.email || !this.isGeneralOrganizationPage()) return null
-    const input = await visibleOne(this.page.getByRole('textbox', { name: /^Organization ID$/i }))
-    if (!input || !(await input.evaluate((element) => element.tagName === 'INPUT' && element.readOnly === true)))
+    const input = await roleControl(this.page, this.page, 'textbox', /^Organization ID$/i)
+    if (!input) return null
+    if (!(await input.evaluate((element) => element.tagName === 'INPUT' && element.readOnly === true))) {
+      await input.dispose()
       return null
-    const id = text(await input.inputValue())
+    }
+    const id = text(await input.evaluate((element) => element.value))
+    await input.dispose()
     if (
       this.identity.email !== this.email ||
       !this.isGeneralOrganizationPage() ||
@@ -782,11 +865,12 @@ export class PlatformAdapter {
     }
     // Profile pages expose an explicitly labelled email input. Never infer the
     // logged-in user from email addresses in a members or usage table.
-    const emailInput = await visibleOne(this.page.getByRole('textbox', { name: /^email(?: address)?$/i }))
+    const emailInput = await roleControl(this.page, this.page, 'textbox', /^email(?: address)?$/i)
     if (emailInput && !this.identity.email) {
-      const actual = text(await emailInput.inputValue()).toLowerCase()
+      const actual = text(await emailInput.evaluate((element) => element.value)).toLowerCase()
       if (EMAIL.test(actual) && /\/(?:profile|account)(?:\/|$)/.test(url.pathname)) this.identity.email = actual
     }
+    await emailInput?.dispose()
     if (this.identity.email && this.identity.email !== this.email) {
       throw problem('platform_account_mismatch', '当前 Platform 登录邮箱与这个账号不一致，请退出后使用对应账号登录。')
     }
@@ -820,15 +904,17 @@ export class PlatformAdapter {
     const current = this.identity.organizations.find((row) => row.id === this.identity.organizationId)
     const names = current ? new RegExp(`organization|${escaped(current.name)}`, 'i') : /organization/i
     const switcher =
-      (await visibleOne(this.page.getByRole('combobox', { name: /organization/i }))) ||
-      (await visibleOne(this.page.getByRole('button', { name: names })))
+      (await roleControl(this.page, this.page, 'combobox', /organization/i)) ||
+      (await roleControl(this.page, this.page, 'button', names))
     if (!switcher) throw problem('platform_organization_selection_required', '请在登录窗口选择目标 API 组织后继续。')
-    await switcher.click()
+    await switcher.asLocator().click()
+    await switcher.dispose()
     const option =
-      (await visibleOne(this.page.getByRole('option', { name: target.name, exact: true }))) ||
-      (await visibleOne(this.page.getByRole('menuitem', { name: target.name, exact: true })))
+      (await roleControl(this.page, this.page, 'option', target.name)) ||
+      (await roleControl(this.page, this.page, 'menuitem', target.name))
     if (!option) throw problem('platform_organization_selection_required', '请在登录窗口选择目标 API 组织后继续。')
-    await option.click()
+    await option.asLocator().click()
+    await option.dispose()
     // A subsequent first-party request must confirm the chosen organization.
     await this.goto(KEYS_URL)
     if (this.identity.organizationId !== id) {
@@ -857,74 +943,81 @@ export class PlatformAdapter {
   }
 
   async selectProject(dialog, project) {
-    const label = await visibleOne(dialog.locator('label').filter({ hasText: /^project$/i }))
-    const select = label && (await visibleOne(label.locator('..').locator('select, [role="button"]')))
+    const select = await labelledControl(dialog, /^project$/i, 'select, [role="button"], [role="combobox"], button')
     if (!select) throw problem('platform_project_selection_required', '请在官方创建 key 对话框中选择 Default project。')
-    const native = await select.evaluate((element) => element.tagName === 'SELECT')
-    if (native) {
-      await select.selectOption({ label: project.name })
-      return
+    try {
+      const native = await select.evaluate((element) => element.tagName === 'SELECT')
+      if (native) {
+        const options = await select.$$eval(
+          'option',
+          (options, name) =>
+            options.filter((option) => option.textContent.trim() === name).map((option) => option.value),
+          project.name,
+        )
+        if (options.length !== 1)
+          throw problem('platform_project_selection_required', '未找到唯一的 Default project 选项。')
+        await select.select(options[0])
+        return
+      }
+      if (text(await select.evaluate((element) => element.innerText)).toLowerCase() === project.name.toLowerCase())
+        return
+      await select.asLocator().click()
+    } finally {
+      await select.dispose()
     }
-    if (text(await select.innerText()).toLowerCase() === project.name.toLowerCase()) return
-    await select.click()
-    const option = await visibleOne(this.page.getByRole('option', { name: project.name, exact: true }))
-    if (!option)
+    const option = await roleControl(this.page, this.page, 'option', project.name)
+    if (!option) {
       throw problem('platform_project_selection_required', '未找到 Default project 选项，请在登录窗口选择后继续。')
-    await option.click()
+    }
+    await option.asLocator().click()
+    await option.dispose()
   }
 
   async selectExpiration(dialog) {
-    const unique = async (locator) => {
-      const visible = locator.filter({ visible: true })
-      const count = await visible.count()
-      if (count > 1)
-        throw problem('platform_expiration_required', '官方 key 期限控件不唯一，请手动选择期限并创建密钥。')
-      return count === 1 ? visible.nth(0) : null
-    }
-    let expiration = dialog.getByLabel ? await unique(dialog.getByLabel(EXPIRATION_LABEL)) : null
-    if (
-      expiration &&
-      !(await expiration.evaluate(
-        (element) =>
-          ['SELECT', 'BUTTON'].includes(element.tagName) ||
-          ['combobox', 'button'].includes(element.getAttribute('role')),
-      ))
-    )
-      expiration = null
-    if (!expiration) {
-      const label = await unique(dialog.locator('label').filter({ hasText: EXPIRATION_LABEL }))
-      if (label)
-        expiration = await unique(label.locator('..').locator('select, [role="combobox"], button, [role="button"]'))
-    }
-    if (!expiration) expiration = await unique(dialog.getByRole('combobox', { name: EXPIRATION_LABEL }))
-    if (!expiration) expiration = await unique(dialog.getByRole('button', { name: EXPIRATION_LABEL }))
+    const expiration =
+      (await labelledControl(dialog, EXPIRATION_LABEL, 'select, [role="combobox"], button, [role="button"]')) ||
+      (await roleControl(this.page, dialog, 'combobox', EXPIRATION_LABEL)) ||
+      (await roleControl(this.page, dialog, 'button', EXPIRATION_LABEL))
     if (!expiration)
       throw problem('platform_expiration_required', '未找到官方 key 到期时间选择框，请手动选择期限并创建密钥。')
-    const native = await expiration.evaluate((element) => element.tagName === 'SELECT')
-    const selected = async () =>
-      text(
-        native
-          ? await expiration.evaluate((element) => element.selectedOptions[0]?.textContent || '')
-          : await expiration.innerText(),
-      )
-        .replace(EXPIRATION_LABEL, '')
-        .trim()
-    if (NEVER.test(await selected())) return
-    if (native) {
-      const option = expiration.getByRole('option', { name: NEVER })
-      if ((await option.count()) !== 1)
-        throw problem('platform_expiration_required', '官方页面未提供唯一的 Never 期限，请手动选择期限并创建密钥。')
-      await expiration.selectOption({ label: text(await option.innerText()) })
-    } else {
-      await expiration.click()
-      const options = this.page.getByRole('option', { name: NEVER }).filter({ visible: true })
-      await options.first().waitFor({ state: 'visible', timeout: 3_000 })
-      const option = await unique(options)
-      if (!option) throw problem('platform_expiration_required', '未找到官方 Never 期限，请手动选择期限并创建密钥。')
-      await option.click()
+    try {
+      const native = await expiration.evaluate((element) => element.tagName === 'SELECT')
+      const selected = async () =>
+        text(
+          await expiration.evaluate((element) =>
+            element.tagName === 'SELECT' ? element.selectedOptions[0]?.textContent || '' : element.innerText,
+          ),
+        )
+          .replace(EXPIRATION_LABEL, '')
+          .trim()
+      if (NEVER.test(await selected())) return
+      if (native) {
+        const options = await expiration.$$eval(
+          'option',
+          (options, source, flags) =>
+            options
+              .filter((option) => new RegExp(source, flags).test(option.textContent.trim()))
+              .map((option) => option.value),
+          NEVER.source,
+          NEVER.flags,
+        )
+        if (options.length !== 1)
+          throw problem('platform_expiration_required', '官方页面未提供唯一的 Never 期限，请手动选择期限并创建密钥。')
+        await expiration.select(options[0])
+      } else {
+        await expiration.asLocator().click()
+        const ready = await this.page.waitForSelector('aria/[role="option"]', { visible: true, timeout: 3_000 })
+        await ready.dispose()
+        const option = await roleControl(this.page, this.page, 'option', NEVER)
+        if (!option) throw problem('platform_expiration_required', '未找到官方 Never 期限，请手动选择期限并创建密钥。')
+        await option.asLocator().click()
+        await option.dispose()
+      }
+      if (!NEVER.test(await selected()))
+        throw problem('platform_expiration_required', '尚未确认官方 key 的期限，请手动选择期限并创建密钥。')
+    } finally {
+      await expiration.dispose()
     }
-    if (!NEVER.test(await selected()))
-      throw problem('platform_expiration_required', '尚未确认官方 key 的期限，请手动选择期限并创建密钥。')
   }
 
   async configure({
@@ -946,75 +1039,98 @@ export class PlatformAdapter {
     if (!name) throw problem('platform_key_name_required', '缺少账号专用 key 名称。')
     const create = await button(
       this.page,
+      this.page,
       /^(?:create (?:new )?secret key|create (?:new )?api key|创建(?:新的)?密钥)$/i,
       '等待官方创建 API key 入口超时，可在当前窗口重试配置',
       30_000,
     )
-    await create.click()
-    const dialogs = this.page.getByRole('dialog')
+    await create.asLocator().click()
+    await create.dispose()
     try {
-      await dialogs.first().waitFor({ state: 'visible', timeout: 15_000 })
+      const ready = await this.page.waitForSelector('dialog, [role="dialog"]', { visible: true, timeout: 15_000 })
+      await ready.dispose()
     } catch {
       throw problem('platform_page_changed', '未找到官方创建 API key 对话框。')
     }
-    const dialog = await visibleOne(dialogs)
+    const dialog = await visibleOne(await this.page.$$('dialog, [role="dialog"]'))
     if (!dialog) throw problem('platform_page_changed', '未找到官方创建 API key 对话框。')
-    await dialog.getByText(/^Loading projects(?:\.{3}|…)?$/i).waitFor({ state: 'hidden', timeout: 20_000 })
-    await this.settled()
-    const project = await this.ensureProject()
-    const nameLabel = await visibleOne(dialog.locator('label').filter({ hasText: /^Name(?:\s*\(?Optional\)?)?$/i }))
-    const nameInput = nameLabel && (await visibleOne(nameLabel.locator('..').locator('input[type="text"]')))
-    if (!nameInput) throw problem('platform_page_changed', '未找到官方 key 名称输入框。')
-    await nameInput.fill(name)
-    await this.selectProject(dialog, project)
-    const setup = this.beginKeySetup({
-      organizationId,
-      organizationName,
-      projectId: project.id,
-      keyName: name,
-      onKey,
-      signal,
-      assertCurrent,
-      onState,
-    })
     try {
+      const loaded = await this.page.waitForFunction(
+        (dialog) =>
+          ![...dialog.querySelectorAll('*')].some(
+            (element) =>
+              element.checkVisibility({ visibilityProperty: true }) &&
+              /^Loading projects(?:\.{3}|…)?$/i.test(element.textContent.trim()),
+          ),
+        { timeout: 20_000 },
+        dialog,
+      )
+      await loaded.dispose()
+      await this.settled()
+      const project = await this.ensureProject()
+      const nameInput = await labelledControl(
+        dialog,
+        /^Name(?:\s*\(?Optional\)?)?$/i,
+        'input[type="text"], input:not([type])',
+      )
+      if (!nameInput) throw problem('platform_page_changed', '未找到官方 key 名称输入框。')
+      await nameInput.asLocator().fill(name)
+      await nameInput.dispose()
+      await this.selectProject(dialog, project)
+      const setup = this.beginKeySetup({
+        organizationId,
+        organizationName,
+        projectId: project.id,
+        keyName: name,
+        onKey,
+        signal,
+        assertCurrent,
+        onState,
+      })
       try {
-        await this.selectExpiration(dialog)
-        this.assertKeySetup(setup)
-        const submit = await button(
-          dialog,
-          /^(?:create secret key|create key|创建密钥)$/i,
-          '未找到官方创建 key 提交按钮。',
-        )
-        if (!setup.request && !this.createdKey) await submit.click()
-      } catch (error) {
-        this.assertKeySetup(setup)
-        if (!onState) throw error
-        if (!this.createdKey) this.setKeyState(setup, 'awaiting_key_input', KEY_INPUT_MESSAGE)
-      }
-      setup.timeout = setTimeout(() => {
-        if (setup.saved || setup.saveFailed) return
         try {
-          if (onState)
-            this.setKeyState(
-              setup,
-              'awaiting_key_input',
-              '尚未取得完整密钥，请核对官方创建结果；不要重复创建，保留完整密钥弹窗后点击“检查创建结果”。',
-            )
-          else
-            setup.reject(
-              problem(
-                'platform_key_unconfirmed',
-                '尚未取得官方新 key 的完整 secret，请核对创建结果后继续，不会自动重复创建。',
-              ),
-            )
+          await this.selectExpiration(dialog)
+          this.assertKeySetup(setup)
+          const submit = await button(
+            this.page,
+            dialog,
+            /^(?:create secret key|create key|创建密钥)$/i,
+            '未找到官方创建 key 提交按钮。',
+          )
+          // This creates a remote credential. Perform one action, without a locator retry.
+          if (!setup.requestObserved && !this.createdKey) await submit.click()
+          await submit.dispose()
         } catch (error) {
-          setup.reject(error)
+          this.assertKeySetup(setup)
+          if (!onState) throw error
+          if (!this.createdKey) this.setKeyState(setup, 'awaiting_key_input', KEY_INPUT_MESSAGE)
         }
-      }, 9_000)
-      return await setup.result
+        setup.timeout = setTimeout(() => {
+          if (setup.saved || setup.saveFailed) return
+          try {
+            if (onState)
+              this.setKeyState(
+                setup,
+                'awaiting_key_input',
+                '尚未取得完整密钥，请核对官方创建结果；不要重复创建，保留完整密钥弹窗后点击“检查创建结果”。',
+              )
+            else
+              setup.reject(
+                problem(
+                  'platform_key_unconfirmed',
+                  '尚未取得官方新 key 的完整 secret，请核对创建结果后继续，不会自动重复创建。',
+                ),
+              )
+          } catch (error) {
+            setup.reject(error)
+          }
+        }, 9_000)
+        return await setup.result
+      } finally {
+        this.endKeySetup(setup)
+      }
     } finally {
-      this.endKeySetup(setup)
+      await dialog.dispose()
     }
   }
 

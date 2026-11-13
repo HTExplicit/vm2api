@@ -37,24 +37,25 @@ const unhandled = []
 const errors = []
 page.on('pageerror', (error) => errors.push(error.message))
 try {
-  await browser.context.route('**/*', async (route) => {
-    const request = route.request()
+  await page.setRequestInterception(true)
+  page.on('request', async (request) => {
     const url = new URL(request.url())
     if (url.origin === PLATFORM_ORIGIN && request.method() === 'GET') {
       if (url.pathname === '/fixture' || url.pathname === BILLING_PATH)
-        return route.fulfill({
+        return request.respond({
           status: 200,
           contentType: 'text/html',
           body: fixturePage(url.pathname === BILLING_PATH, delay),
         })
-      if (url.pathname === '/favicon.ico') return route.fulfill({ status: 204 })
+      if (url.pathname === '/favicon.ico') return request.respond({ status: 204 })
       if (url.pathname === '/dashboard/onboarding')
-        return route.fulfill({
+        return request.respond({
           status: 200,
-          json: {
+          contentType: 'application/json',
+          body: JSON.stringify({
             organization_id: ORGANIZATION_ID,
             user: { email: EMAIL, orgs: { data: [{ id: ORGANIZATION_ID, title: 'Offline Billing organization' }] } },
-          },
+          }),
         })
     }
     if (url.href === BILLING_CREDIT_GRANTS_URL) {
@@ -62,16 +63,16 @@ try {
         'access-control-allow-origin': PLATFORM_ORIGIN,
         'access-control-allow-headers': 'authorization,openai-organization',
       }
-      if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors })
+      if (request.method() === 'OPTIONS') return request.respond({ status: 204, headers: cors })
       if (request.method() === 'GET') {
         assert.equal(request.headers()['openai-organization'], ORGANIZATION_ID)
         assert.equal(request.headers().authorization, 'Bearer offline-billing-fixture')
         billingRequests++
-        return route.fulfill({ status: 200, contentType: 'application/json', headers: cors, body: CREDIT_JSON })
+        return request.respond({ status: 200, contentType: 'application/json', headers: cors, body: CREDIT_JSON })
       }
     }
     unhandled.push({ origin: url.origin, pathname: url.pathname, method: request.method() })
-    return route.abort()
+    return request.abort()
   })
 
   async function readyAdapter() {
@@ -136,7 +137,7 @@ try {
   console.log(
     JSON.stringify({
       offline: true,
-      testBrowser: `stock-chromium/${browser.version}`,
+      testBrowser: browser.version,
       delayedResponseMs: DELAY_MS,
       delayedElapsedMs,
       sharedDeadlineMs: 30_000,

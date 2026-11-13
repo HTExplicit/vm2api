@@ -351,8 +351,8 @@ function fixtureDatabase(records) {
   const applied = applyMigrations(db, { migrationsDir })
   assert.equal(
     applied.length,
-    56,
-    'test schema must include account API state, key model allowlists, and the CloakBrowser migration',
+    57,
+    'test schema must include account API state, key model allowlists, and the ShardBrowser migration',
   )
   db.prepare('UPDATE schema_migrations SET applied_at = ?').run('2026-09-01T00:00:00.000Z')
   db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(

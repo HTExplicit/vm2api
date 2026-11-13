@@ -263,12 +263,37 @@ describe('Platform key setup handoff', () => {
       data: JSON.stringify({
         type: 'status',
         status: 'error',
-        error: 'browser_key_required',
-        message: '请先配置 CloakBrowser key',
+        error: 'browser_not_installed',
+        message: '请先安装账号浏览器',
       }),
     })
     expect(render()).toContain('href="#/settings/openai"')
     socket.status('error', '账号授权未完成')
+    expect(render()).not.toContain('href="#/settings/openai"')
+  })
+
+  it('links an unverified installation to its manual retry while keeping migration errors separate', async () => {
+    const socket = await mount()
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'status',
+        status: 'error',
+        error: 'browser_install_unverified',
+        message: '浏览器安装未完成，请在设置中重试安装',
+      }),
+    })
+    const html = render()
+    expect(html).toContain('href="#/settings/openai"')
+    expect(html).toContain('安装或重试安装')
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'status',
+        status: 'error',
+        error: 'browser_data_migration_failed',
+        message: '浏览器旧数据清理失败',
+      }),
+    })
+    expect(render()).toContain('浏览器旧数据清理失败')
     expect(render()).not.toContain('href="#/settings/openai"')
   })
 

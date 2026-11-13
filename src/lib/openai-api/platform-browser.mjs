@@ -2,7 +2,6 @@ import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
 import { createProxyAgent } from '../vm/proxy-agent.mjs'
-import { createBrowserTempCleanup } from '../browser/temp-cleanup.mjs'
 import { createHeadedDisplay } from '../browser/headed-display.mjs'
 
 function problem(code, message) {
@@ -100,71 +99,60 @@ export async function createBoundProxyRelay(proxyUrl) {
   }
 }
 
-async function runtime(cacheDir) {
-  process.env.CLOAKBROWSER_CACHE_DIR = cacheDir
-  process.env.CLOAKBROWSER_AUTO_UPDATE = 'false'
-  const cloak = await import('cloakbrowser')
-  const installed = cloak.binaryInfo()
-  if (!installed.installed || !installed.binaryPath) {
-    throw problem('browser_not_installed', '账号浏览器尚未安装，请在设置 → OpenAI 中安装。')
-  }
-  return {
-    executable: installed.binaryPath,
-    version: installed.version,
-    async launchPersistentContext(options) {
-      // The free launcher may ignore version pins. An explicit cached binary
-      // bypasses ensureBinary, so opening an account never installs an update.
-      const previous = process.env.CLOAKBROWSER_BINARY_PATH
-      process.env.CLOAKBROWSER_BINARY_PATH = installed.binaryPath
-      try {
-        return await cloak.launchPersistentContext(options)
-      } finally {
-        if (previous === undefined) delete process.env.CLOAKBROWSER_BINARY_PATH
-        else process.env.CLOAKBROWSER_BINARY_PATH = previous
-      }
-    },
-  }
+async function prepareProfile(options) {
+  const { prepareShardProfile } = await import('../browser/shard-runtime-helper.mjs')
+  return prepareShardProfile(options)
 }
 
+async function launch(options) {
+  const { default: puppeteer } = await import('puppeteer-core')
+  return puppeteer.launch(options)
+}
+
+function processExited(child) {
+  return child && (child.exitCode !== null || child.signalCode !== null)
+}
+
+/** The slot's native profile owns web storage; the DB only carries HTTP Cookie updates. */
 export async function createPlatformBrowserSession(
-  { profileDir, storageState, proxyUrl, licenseKey, cacheDir, signal },
+  { profileDir, storageState, proxyUrl, timezone, cacheDir, signal },
   overrides = {},
 ) {
   const proxy = boundProxy(proxyUrl)
-  if (!licenseKey?.trim()) throw problem('browser_key_required', '请先在设置 → OpenAI 中保存 CloakBrowser 授权 Key。')
   if (!profileDir || !path.isAbsolute(profileDir) || !cacheDir || !path.isAbsolute(cacheDir)) {
     throw problem('browser_path_required', '账号浏览器目录未配置。')
   }
-  signal?.throwIfAborted()
-  const resources = await (overrides.runtime || runtime)(cacheDir)
+  if (!timezone) throw problem('browser_timezone_required', '账号代理尚未提供有效时区，请先检测代理位置。')
   signal?.throwIfAborted()
   fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 })
-  const temporary = overrides.tempCleanup || createBrowserTempCleanup({ executablePath: resources.executable })
-  const recovered = await temporary.cleanup()
-  let warning = recovered.warning || null
   let relay
   let display
+  let browser
   let context
+  let exited
   let closing
-  let contextClosed = false
+  let browserClosed = false
   let relayClosed = false
   let displayClosed = false
-  let temporaryCleared = false
-  let beforeLaunch
-  let temporaryPaths
-  const captureTemporaryPaths = () => {
-    if (beforeLaunch && !temporaryPaths) temporaryPaths = temporary.createdSince(beforeLaunch)
-  }
+  let warning = null
   const close = () => {
     if (closing) return closing
     closing = (async () => {
-      if (!contextClosed) {
-        try {
-          await context?.close()
-          contextClosed = true
-        } catch {
-          throw problem('browser_close_failed', '浏览器退出未完成，请重试关闭。')
+      if (!browserClosed) {
+        if (browser) {
+          const child = browser.process()
+          if (!processExited(child)) {
+            try {
+              await browser.close()
+            } catch {
+              // A disconnected protocol may race the owned process's exit.
+              if (!processExited(child)) throw problem('browser_close_failed', '浏览器退出未完成，请重试关闭。')
+            }
+          }
+          if (!processExited(child)) throw problem('browser_close_failed', '浏览器进程仍在运行，请重试关闭。')
+          if (child.signalCode || child.exitCode !== 0) warning = '浏览器异常退出，最后的网页状态可能未保存。'
         }
+        browserClosed = true
       }
       if (!relayClosed) {
         try {
@@ -178,15 +166,6 @@ export async function createPlatformBrowserSession(
         await display?.close()
         displayClosed = true
       }
-      if (!temporaryCleared) {
-        captureTemporaryPaths()
-        const report = await temporary.cleanup({ paths: temporaryPaths || [] })
-        const cleanupWarning =
-          report.warning ||
-          (report.failed.length || report.skipped.length ? '浏览器已关闭，部分临时文件未清理。' : null)
-        if (cleanupWarning) warning = [warning, cleanupWarning].filter(Boolean).join(' ')
-        temporaryCleared = true
-      }
     })().finally(() => {
       closing = null
     })
@@ -197,43 +176,80 @@ export async function createPlatformBrowserSession(
     signal?.throwIfAborted()
     display = await (overrides.createDisplay || createHeadedDisplay)({ signal })
     signal?.throwIfAborted()
-    beforeLaunch = temporary.snapshot()
+    const resources = await (overrides.prepareProfile || prepareProfile)({
+      cacheDir,
+      profileDir,
+      timezone,
+      env: display.env,
+      signal,
+    })
+    signal?.throwIfAborted()
     try {
-      context = await resources.launchPersistentContext({
+      browser = await (overrides.launch || launch)({
+        executablePath: resources.executablePath,
         userDataDir: profileDir,
-        licenseKey,
         headless: false,
-        geoip: true,
-        proxy: relay.url,
-        launchOptions: { env: display.env },
+        defaultViewport: null,
+        env: display.env,
+        waitForInitialPage: false,
+        timeout: 30_000,
+        protocolTimeout: 60_000,
+        args: [
+          '--no-sandbox',
+          '--no-startup-window',
+          '--start-maximized',
+          '--use-gl=angle',
+          '--use-angle=swiftshader',
+          `--fingerprint-profile=${resources.fingerprintPath}`,
+          `--proxy-server=${relay.url}`,
+        ],
       })
     } catch {
-      throw problem('browser_start_failed', '账号浏览器启动失败，请检查浏览器安装和授权。')
+      signal?.throwIfAborted()
+      throw problem('browser_start_failed', '账号浏览器启动失败，请检查浏览器安装。')
     }
-    captureTemporaryPaths()
+    const child = browser.process()
+    exited = processExited(child)
+      ? Promise.resolve({ code: child.exitCode, signal: child.signalCode })
+      : new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })))
     signal?.throwIfAborted()
-    // Only HTTP updates waiting to reach this profile replace its cookies.
-    // Ordinary DB snapshots can be older after a crash or a failed save.
+    context = browser.defaultBrowserContext()
+    // A normal DB snapshot can be older than the native profile after a crash.
     if (storageState?.cookies_pending === true && Array.isArray(storageState.cookies)) {
+      const existing = await context.cookies()
+      if (existing.length) await context.deleteCookie(...existing)
       const now = (overrides.now || Date.now)() / 1000
       const cookies = storageState.cookies.filter(
         (cookie) => cookie.expires == null || cookie.expires < 0 || cookie.expires > now,
       )
-      await context.clearCookies()
-      if (cookies.length) await context.addCookies(cookies)
+      if (cookies.length) await context.setCookie(...cookies)
     }
     signal?.throwIfAborted()
-    const page = context.pages()[0] || (await context.newPage())
+    const page = await browser.newPage()
+    await page.bringToFront()
+    signal?.throwIfAborted()
     return {
+      browser,
+      exited,
       context,
       page,
       version: resources.version,
       get warning() {
         return warning
       },
-      // The persistent profile owns localStorage and IndexedDB. Billing only
-      // needs cookies; a blocked IndexedDB upgrade must not delay browser close.
-      storageState: async () => ({ cookies: await context.cookies(), origins: [] }),
+      async exportCookies() {
+        let timer
+        try {
+          return await Promise.race([
+            context.cookies(),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(problem('browser_cookie_timeout', '浏览器 Cookie 保存超时。')), 3000)
+            }),
+          ])
+        } finally {
+          clearTimeout(timer)
+        }
+      },
       close,
     }
   } catch (error) {
@@ -243,6 +259,7 @@ export async function createPlatformBrowserSession(
     } catch (closeError) {
       closeError.pendingSession = {
         close,
+        exited,
         get warning() {
           return warning
         },

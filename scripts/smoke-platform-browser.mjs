@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -51,7 +52,8 @@ async function verifyBrowserInput(page) {
     onmousedown="this.dataset.down=Date.now();this.dataset.events+='mousedown,'"
     onmouseup="this.dataset.up=Date.now();this.dataset.events+='mouseup,'"
     onclick="this.dataset.clicks=Number(this.dataset.clicks)+1">Offline input target</button>`)
-  const bounds = await frame.locator('button').boundingBox()
+  const button = await frame.$('button')
+  const bounds = await button.boundingBox()
   const point = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }
   class Socket extends EventEmitter {
     readyState = 1
@@ -81,14 +83,14 @@ async function verifyBrowserInput(page) {
     socket.input({ type: 'move', ...point, seq: 2 })
     socket.input({ type: 'mouse_up', ...point, seq: 3 })
     await stream.inputTail
-    const result = await frame.locator('button').evaluate((button) => ({ ...button.dataset }))
+    const result = await button.evaluate((element) => ({ ...element.dataset }))
     assert.equal(result.clicks, '1', 'a forwarded press and release must click the actual iframe button')
     assert.equal(result.events, 'mousedown,mouseup,')
     assert.ok(Number(result.up) - Number(result.down) >= 50, 'the press duration must be preserved')
     socket.input({ type: 'click', ...point, seq: 4 })
     await stream.inputTail
     assert.equal(
-      await frame.locator('button').getAttribute('data-clicks'),
+      await button.evaluate((element) => element.dataset.clicks),
       '2',
       'legacy click input must still reach the button',
     )
@@ -98,16 +100,47 @@ async function verifyBrowserInput(page) {
   }
 }
 
-// Run in a disposable CI container after building the public image. These
-// stock Chromium checks do not claim to validate CloakBrowser fingerprints.
-const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vm2api-profile-smoke-'))
+// Actual Shard kernel, installed only into a disposable CI volume. A second
+// container runs --reopen against these same synthetic profiles.
+const reusableRoot = process.env.BROWSER_FIXTURE_PROFILE_ROOT
+const root = reusableRoot || (await fs.mkdtemp(path.join(os.tmpdir(), 'vm2api-profile-smoke-')))
+await fs.mkdir(root, { recursive: true })
+const reopen = process.argv.includes('--reopen')
+const hash = async (file) =>
+  createHash('sha256')
+    .update(await fs.readFile(file))
+    .digest('hex')
+const baselinePath = path.join(root, 'baseline.json')
+const baseline = reopen ? JSON.parse(await fs.readFile(baselinePath, 'utf8')) : {}
 try {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const session = await createBrowserFixture({ profileDir: path.join(root, attempt === 2 ? 'slot-b' : 'slot-a') })
+  for (const [attempt, slot] of ['slot-a', 'slot-b', 'slot-a'].entries()) {
+    const profileDir = path.join(root, slot)
+    const session = await createBrowserFixture({ profileDir })
+    const child = session.browser.process()
     try {
-      if (attempt === 0) assert.ok((await verifyLocalBrowserPage(session.page)).screenshotBytes > 0)
-      await session.context.route('http://fixture.test/**', (route) =>
-        route.fulfill({ contentType: 'text/html', body: '<title>Browser fixture</title><p>ready</p>' }),
+      if (attempt === 0) {
+        assert.ok((await verifyLocalBrowserPage(session.page)).screenshotBytes > 0)
+        assert.equal(
+          await session.page.evaluate(() => {
+            const gl = document.createElement('canvas').getContext('webgl2')
+            if (!gl) return false
+            gl.clearColor(0.25, 0.5, 0.75, 1)
+            gl.clear(gl.COLOR_BUFFER_BIT)
+            const pixel = new Uint8Array(4)
+            gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel)
+            return (
+              Math.abs(pixel[0] - 64) < 10 && Math.abs(pixel[1] - 128) < 10 && pixel[3] === 255 && gl.getError() === 0
+            )
+          }),
+          true,
+          'software WebGL renders real pixels',
+        )
+      }
+      await session.page.setRequestInterception(true)
+      session.page.on('request', (request) =>
+        request.url().startsWith('http://fixture.test/')
+          ? request.respond({ contentType: 'text/html', body: '<title>Browser fixture</title><p>ready</p>' })
+          : request.abort(),
       )
       await session.page.goto('http://fixture.test/')
       const identity = await session.page.evaluate(() => ({
@@ -117,22 +150,30 @@ try {
       }))
       assert.match(identity.userAgent, /Chrom(?:e|ium)/)
       assert.equal(identity.timezone, 'America/New_York')
-      assert.equal(identity.saved, attempt === 1 ? 'slot-a' : null)
+      const existing = reopen || attempt === 2
+      assert.equal(identity.saved, existing ? slot : null)
       const cookie = (await session.context.cookies()).find((value) => value.name === 'slot')
-      assert.equal(cookie?.value, attempt === 1 ? 'slot-a' : undefined)
-      if (attempt === 0) {
-        await session.context.addCookies([
-          { name: 'slot', value: 'slot-a', url: 'http://fixture.test/', expires: Math.floor(Date.now() / 1000) + 3600 },
-        ])
-        await session.page.evaluate(async () => {
-          localStorage.setItem('slot', 'slot-a')
+      assert.equal(cookie?.value, existing ? slot : undefined)
+      const fingerprintHash = await hash(path.join(profileDir, 'fingerprint.json'))
+      if (existing)
+        assert.equal(fingerprintHash, baseline[slot], 'same profile keeps its fingerprint across process restarts')
+      else baseline[slot] = fingerprintHash
+      if (!existing) {
+        await session.context.setCookie({
+          name: 'slot',
+          value: slot,
+          url: 'http://fixture.test/',
+          expires: Math.floor(Date.now() / 1000) + 3600,
+        })
+        await session.page.evaluate(async (slot) => {
+          localStorage.setItem('slot', slot)
           await new Promise((resolve, reject) => {
             const open = indexedDB.open('fixture', 1)
             open.onupgradeneeded = () => open.result.createObjectStore('state')
             open.onerror = () => reject(open.error)
             open.onsuccess = () => {
               const tx = open.result.transaction('state', 'readwrite')
-              tx.objectStore('state').put('slot-a', 'slot')
+              tx.objectStore('state').put(slot, 'slot')
               tx.oncomplete = () => {
                 open.result.close()
                 resolve()
@@ -140,13 +181,12 @@ try {
               tx.onerror = () => reject(tx.error)
             }
           })
-        })
-        await verifyBrowserInput(session.page)
+        }, slot)
+        if (attempt === 0) await verifyBrowserInput(session.page)
         await session.page.goto('http://fixture.test/')
         assert.equal(await completes(blockIndexedDbUpgrade(session.page), 'IndexedDB upgrade did not block'), 1)
-        const snapshot = await completes(session.storageState(), 'Cookie snapshot stalled behind blocked IndexedDB')
-        assert.equal(snapshot.cookies.find((value) => value.name === 'slot')?.value, 'slot-a')
-        assert.deepEqual(snapshot.origins, [], 'the HTTP snapshot must not export localStorage or IndexedDB')
+        const cookies = await completes(session.exportCookies(), 'Cookie snapshot stalled behind blocked IndexedDB')
+        assert.equal(cookies.find((value) => value.name === 'slot')?.value, slot)
         assert.deepEqual(
           await session.page.evaluate(() => ({
             blocked: globalThis.fixtureUpgradeBlocked,
@@ -155,7 +195,7 @@ try {
           { blocked: true, state: 'pending' },
           'Cookie export must complete without releasing the blocked upgrade',
         )
-      } else if (attempt === 1) {
+      } else {
         const indexed = await session.page.evaluate(
           () =>
             new Promise((resolve, reject) => {
@@ -171,21 +211,20 @@ try {
               }
             }),
         )
-        assert.equal(indexed, 'slot-a')
-      } else {
-        assert.deepEqual(
-          await session.page.evaluate(async () => (await indexedDB.databases()).map((db) => db.name)),
-          [],
-        )
+        assert.equal(indexed, slot)
       }
       assert.ok(await session.page.screenshot({ type: 'jpeg' }))
     } finally {
       await completes(session.close(), 'Browser close stalled behind blocked IndexedDB')
+      assert.equal(child.exitCode, 0, 'close waits for the real browser process to exit normally')
+      assert.equal(child.signalCode, null)
     }
   }
+  assert.notEqual(baseline['slot-a'], baseline['slot-b'], 'separate slots have independent fingerprint seeds')
+  if (!reopen) await fs.writeFile(baselinePath, JSON.stringify(baseline))
 } finally {
-  await fs.rm(root, { recursive: true, force: true })
+  if (!reusableRoot) await fs.rm(root, { recursive: true, force: true })
 }
 console.log(
-  'Stock Chromium: blocked IndexedDB permits Cookie snapshot and close; persistent storage, isolated profiles, screenshot and iframe input passed',
+  `ShardBrowser ${reopen ? 'fresh-container reopen' : 'A/B/A'}: persistent storage, fingerprint isolation, WebGL, screenshot, iframe input and real process exit passed`,
 )

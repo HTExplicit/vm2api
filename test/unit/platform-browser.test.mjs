@@ -5,42 +5,55 @@ import os from 'node:os'
 import path from 'node:path'
 import http from 'node:http'
 import net from 'node:net'
-import { once } from 'node:events'
+import { EventEmitter, once } from 'node:events'
+import { spawn } from 'node:child_process'
 import { createBoundProxyRelay, createPlatformBrowserSession } from '../../src/lib/openai-api/platform-browser.mjs'
 
 function fixture(t, changes = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-browser-test-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const calls = []
-  const page = { url: () => 'about:blank' }
+  const page = { url: () => 'about:blank', bringToFront: async () => calls.push(['bringToFront']) }
+  const child = changes.child || Object.assign(new EventEmitter(), { exitCode: null, signalCode: null })
   const context = {
-    pages: () => [page],
-    clearCookies: async () => calls.push(['clearCookies']),
-    addCookies: async (cookies) => calls.push(['addCookies', cookies]),
     cookies: async () => [],
-    storageState: async () => assert.fail('native profile storage must not be exported'),
-    close: async () => calls.push(['context.close']),
+    deleteCookie: async (...cookies) => calls.push(['deleteCookie', cookies]),
+    setCookie: async (...cookies) => calls.push(['setCookie', cookies]),
     ...changes.context,
   }
-  const report = () => ({ removed: 0, failed: [], skipped: [], warning: null })
+  const browser = {
+    process: () => child,
+    defaultBrowserContext: () => context,
+    newPage: async () => {
+      calls.push(['newPage'])
+      return page
+    },
+    close: async () => {
+      calls.push(['browser.close'])
+      child.exitCode = 0
+      child.emit('exit', 0, null)
+    },
+    ...changes.browser,
+  }
   const options = {
     profileDir: path.join(root, 'profile'),
     cacheDir: path.join(root, 'runtime'),
-    licenseKey: 'fixture-license',
+    timezone: 'America/New_York',
     proxyUrl: 'socks5h://127.0.0.1:1080',
   }
   const dependencies = {
-    runtime: async (cacheDir) => {
-      calls.push(['runtime', cacheDir])
+    prepareProfile: async (value) => {
+      calls.push(['prepareProfile', value])
       return {
-        executable: '/fixture/chrome',
-        version: 'fixture-version',
-        launchPersistentContext: async (value) => {
-          calls.push(['launch', value])
-          await changes.launch?.()
-          return context
-        },
+        executablePath: '/fixture/chrome',
+        fingerprintPath: '/fixture/fingerprint.json',
+        version: '157.0.8103.50',
       }
+    },
+    launch: async (value) => {
+      calls.push(['launch', value])
+      await changes.launch?.()
+      return browser
     },
     createRelay: async (proxy) => {
       calls.push(['relay', proxy])
@@ -50,95 +63,140 @@ function fixture(t, changes = {}) {
       calls.push(['display'])
       return { env: { DISPLAY: ':42' }, close: async () => calls.push(['display.close']) }
     },
-    tempCleanup: { enabled: true, cleanup: async () => report(), snapshot: () => new Set(), createdSince: () => [] },
   }
-  return { options, dependencies, calls, context, page }
+  return { options, dependencies, calls, context, browser, child, page }
 }
 
-test('headed persistent launch leaves seed and viewport to CloakBrowser and replaces the HTTP cookie snapshot', async (t) => {
+test('native Puppeteer launch uses the installed profile, headful display, software GPU and bound relay', async (t) => {
   const f = fixture(t)
+  const session = await createPlatformBrowserSession(f.options, f.dependencies)
+  assert.deepEqual(
+    f.calls.slice(0, 3).map(([name]) => name),
+    ['relay', 'display', 'prepareProfile'],
+  )
+  const prepared = f.calls.find(([name]) => name === 'prepareProfile')[1]
+  assert.equal(prepared.timezone, 'America/New_York')
+  assert.deepEqual(prepared.env, { DISPLAY: ':42' })
+  const launch = f.calls.find(([name]) => name === 'launch')[1]
+  assert.equal(launch.executablePath, '/fixture/chrome')
+  assert.equal(launch.userDataDir, f.options.profileDir)
+  assert.equal(launch.headless, false)
+  assert.equal(launch.defaultViewport, null)
+  assert.equal(launch.waitForInitialPage, false)
+  assert.equal(launch.protocolTimeout, 60_000, 'protocol commands must permit the 30–45 second business waits')
+  assert.deepEqual(launch.env, { DISPLAY: ':42' })
+  assert.ok(launch.args.includes('--fingerprint-profile=/fixture/fingerprint.json'))
+  assert.ok(launch.args.includes('--proxy-server=http://127.0.0.1:54321'))
+  assert.ok(launch.args.includes('--use-angle=swiftshader'))
+  assert.equal(session.browser, f.browser)
+  assert.equal(session.context, f.context)
+  assert.equal(session.page, f.page)
+  assert.equal(session.version, '157.0.8103.50')
+  assert.equal(f.calls.filter(([name]) => name === 'newPage').length, 1)
+  await session.close()
+  assert.deepEqual(
+    f.calls.slice(-3).map(([name]) => name),
+    ['browser.close', 'relay.close', 'display.close'],
+  )
+})
+
+test('pending HTTP snapshot replaces native cookies using full deletion objects and filters expiration', async (t) => {
+  const old = [{ name: 'removed', value: 'old', domain: 'example.test', path: '/', expires: -1, httpOnly: true }]
+  const f = fixture(t, { context: { cookies: async () => old } })
   const cookies = [
     { name: 'session', value: 'fresh', domain: 'example.test', path: '/', expires: -1 },
     { name: 'live', value: 'value', domain: 'example.test', path: '/', expires: 2001 },
     { name: 'expired', value: 'old', domain: 'example.test', path: '/', expires: 2000 },
   ]
   const session = await createPlatformBrowserSession(
-    {
-      ...f.options,
-      storageState: {
-        cookies,
-        cookies_pending: true,
-        origins: [{ origin: 'https://example.test' }],
-        sessionStorage: { old: true },
-      },
-    },
+    { ...f.options, storageState: { cookies, cookies_pending: true } },
     { ...f.dependencies, now: () => 2_000_000 },
   )
-  assert.deepEqual(f.calls.find(([name]) => name === 'launch')[1], {
-    userDataDir: f.options.profileDir,
-    licenseKey: 'fixture-license',
-    headless: false,
-    geoip: true,
-    proxy: 'http://127.0.0.1:54321',
-    launchOptions: { env: { DISPLAY: ':42' } },
-  })
-  assert.deepEqual(f.calls.slice(-2), [['clearCookies'], ['addCookies', cookies.slice(0, 2)]])
-  assert.equal(session.page, f.page)
-  assert.equal(session.context, f.context)
-  assert.equal(session.version, 'fixture-version')
-  assert.deepEqual(await session.storageState(), { cookies: [], origins: [] })
-  await session.close()
   assert.deepEqual(
-    f.calls.slice(-3).map(([name]) => name),
-    ['context.close', 'relay.close', 'display.close'],
+    f.calls.find(([name]) => name === 'deleteCookie'),
+    ['deleteCookie', old],
   )
+  assert.deepEqual(
+    f.calls.find(([name]) => name === 'setCookie'),
+    ['setCookie', cookies.slice(0, 2)],
+  )
+  await session.close()
 })
 
-test('Billing export reads only cookies and never traverses native profile storage', async (t) => {
+test('Cookie export does not traverse IndexedDB or localStorage', async (t) => {
   const cookies = [{ name: 'session', value: 'current', domain: 'example.test', path: '/', expires: -1 }]
   const f = fixture(t, { context: { cookies: async () => cookies } })
   const session = await createPlatformBrowserSession(f.options, f.dependencies)
-  assert.deepEqual(await session.storageState(), { cookies, origins: [] })
+  assert.deepEqual(await session.exportCookies(), cookies)
+  assert.equal(session.storageState, undefined)
   await session.close()
 })
 
-test('ordinary DB snapshots cannot overwrite newer native profile cookies', async (t) => {
-  const cookies = [{ name: 'session', value: 'old-db-value', domain: 'example.test', path: '/', expires: -1 }]
-  for (const storageState of [undefined, { cookies: [] }, { cookies }, { cookies, cookies_pending: false }]) {
+test('a stalled Cookie export times out independently of the longer browser protocol deadline', async (t) => {
+  const f = fixture(t, { context: { cookies: () => new Promise(() => {}) } })
+  const session = await createPlatformBrowserSession(f.options, f.dependencies)
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const exported = session.exportCookies()
+  const rejected = assert.rejects(exported, { code: 'browser_cookie_timeout' })
+  t.mock.timers.tick(3000)
+  await rejected
+  await session.close()
+  assert.equal(f.child.exitCode, 0)
+  assert.deepEqual(
+    f.calls.slice(-3).map(([name]) => name),
+    ['browser.close', 'relay.close', 'display.close'],
+  )
+})
+
+test('ordinary DB snapshots never overwrite newer profile cookies', async (t) => {
+  for (const storageState of [
+    undefined,
+    { cookies: [] },
+    { cookies: [{ name: 'old' }] },
+    { cookies: [], cookies_pending: false },
+  ]) {
     const f = fixture(t)
     const session = await createPlatformBrowserSession({ ...f.options, storageState }, f.dependencies)
-    assert.equal(f.calls.filter(([name]) => name === 'clearCookies').length, 0)
-    assert.equal(f.calls.filter(([name]) => name === 'addCookies').length, 0)
+    assert.equal(
+      f.calls.some(([name]) => ['deleteCookie', 'setCookie'].includes(name)),
+      false,
+    )
     await session.close()
   }
 })
 
-test('a pending empty HTTP snapshot clears cookies removed by the server', async (t) => {
-  const f = fixture(t)
+test('a pending empty Cookie snapshot removes cookies deleted by the HTTP server', async (t) => {
+  const old = [{ name: 'gone', value: 'old', domain: 'example.test', path: '/', expires: -1 }]
+  const f = fixture(t, { context: { cookies: async () => old } })
   const session = await createPlatformBrowserSession(
     { ...f.options, storageState: { cookies: [], cookies_pending: true } },
     f.dependencies,
   )
-  assert.equal(f.calls.filter(([name]) => name === 'clearCookies').length, 1)
-  assert.equal(f.calls.filter(([name]) => name === 'addCookies').length, 0)
+  assert.deepEqual(
+    f.calls.find(([name]) => name === 'deleteCookie'),
+    ['deleteCookie', old],
+  )
+  assert.equal(
+    f.calls.some(([name]) => name === 'setCookie'),
+    false,
+  )
   await session.close()
 })
 
-test('required proxy, key and directories are checked before loading runtime resources', async (t) => {
+test('proxy, absolute directories and resolved timezone are required before starting resources', async (t) => {
   const f = fixture(t)
   for (const [patch, code] of [
     [{ proxyUrl: '' }, 'proxy_required'],
     [{ proxyUrl: 'ftp://127.0.0.1' }, 'proxy_unsupported'],
-    [{ licenseKey: '' }, 'browser_key_required'],
     [{ profileDir: 'relative' }, 'browser_path_required'],
     [{ cacheDir: '' }, 'browser_path_required'],
-  ]) {
+    [{ timezone: '' }, 'browser_timezone_required'],
+  ])
     await assert.rejects(createPlatformBrowserSession({ ...f.options, ...patch }, f.dependencies), { code })
-  }
   assert.deepEqual(f.calls, [])
 })
 
-test('cancellation during launch closes the context before its relay and display', async (t) => {
+test('cancellation during launch closes the owned process before its relay and display', async (t) => {
   const controller = new AbortController()
   const f = fixture(t, { launch: () => controller.abort() })
   await assert.rejects(createPlatformBrowserSession({ ...f.options, signal: controller.signal }, f.dependencies), {
@@ -146,95 +204,95 @@ test('cancellation during launch closes the context before its relay and display
   })
   assert.deepEqual(
     f.calls.slice(-3).map(([name]) => name),
-    ['context.close', 'relay.close', 'display.close'],
+    ['browser.close', 'relay.close', 'display.close'],
   )
 })
 
-test('a failed context close retains relay and display until a successful retry', async (t) => {
+test('closing is shared and supporting resources wait for actual browser process exit', async (t) => {
+  const f = fixture(t)
+  let release
+  f.browser.close = async () => {
+    f.calls.push(['browser.close'])
+    await new Promise((resolve) => {
+      release = resolve
+    })
+    f.child.exitCode = 0
+  }
+  const session = await createPlatformBrowserSession(f.options, f.dependencies)
+  const first = session.close(),
+    second = session.close()
+  assert.equal(first, second)
+  assert.equal(
+    f.calls.some(([name]) => name === 'relay.close'),
+    false,
+  )
+  release()
+  await first
+  assert.equal(f.calls.filter(([name]) => name === 'browser.close').length, 1)
+  await session.close()
+  assert.equal(f.calls.filter(([name]) => name === 'relay.close').length, 1)
+})
+
+test('protocol close completion cannot release a browser whose process is still running', async (t) => {
   const f = fixture(t)
   let attempts = 0
-  f.context.close = async () => {
-    f.calls.push(['context.close'])
-    if (++attempts === 1) throw new Error('fixture')
+  f.browser.close = async () => {
+    attempts++
+    if (attempts === 2) f.child.exitCode = 0
   }
   const session = await createPlatformBrowserSession(f.options, f.dependencies)
   await assert.rejects(session.close(), { code: 'browser_close_failed' })
   assert.equal(
-    f.calls.some(([name]) => name === 'relay.close' || name === 'display.close'),
+    f.calls.some(([name]) => name === 'relay.close'),
     false,
   )
   await session.close()
-  await session.close()
   assert.equal(attempts, 2)
-  assert.equal(f.calls.filter(([name]) => name === 'relay.close').length, 1)
-  assert.equal(f.calls.filter(([name]) => name === 'display.close').length, 1)
 })
 
-test('artifact cleanup failures and skips only warn after browser resources exit', async (t) => {
-  for (const outcome of ['failed', 'skipped']) {
-    const f = fixture(t)
-    const artifact = path.join(path.dirname(f.options.profileDir), 'playwright-artifacts-test')
-    fs.mkdirSync(artifact)
-    fs.writeFileSync(path.join(artifact, 'retain.txt'), outcome)
-    let cleanupCalls = 0
-    f.dependencies.tempCleanup.createdSince = () => [artifact]
-    f.dependencies.tempCleanup.cleanup = async ({ paths } = {}) => {
-      const report = { failed: [], skipped: [], warning: null }
-      if (paths) {
-        cleanupCalls++
-        f.calls.push(['temp.cleanup'])
-        assert.deepEqual(paths, [artifact])
-        report[outcome].push({ name: path.basename(artifact) })
-      }
-      return report
-    }
-    const session = await createPlatformBrowserSession(f.options, f.dependencies)
-    await session.close()
-    assert.match(session.warning, /部分临时文件未清理/)
-    assert.deepEqual(
-      f.calls.slice(-4).map(([name]) => name),
-      ['context.close', 'relay.close', 'display.close', 'temp.cleanup'],
-    )
-    assert.equal(fs.readFileSync(path.join(artifact, 'retain.txt'), 'utf8'), outcome)
-    await session.close()
-    assert.equal(cleanupCalls, 1)
-  }
+test('an already terminated browser releases resources and reports a state warning', async (t) => {
+  const f = fixture(t)
+  const session = await createPlatformBrowserSession(f.options, f.dependencies)
+  f.child.signalCode = 'SIGKILL'
+  await session.close()
+  assert.equal(
+    f.calls.some(([name]) => name === 'browser.close'),
+    false,
+  )
+  assert.match(session.warning, /异常退出/)
+  assert.deepEqual(
+    f.calls.slice(-2).map(([name]) => name),
+    ['relay.close', 'display.close'],
+  )
 })
 
-test('relay and display exit failures remain retryable before artifact cleanup', async (t) => {
+test('relay or display failures retry only unfinished resource cleanup', async (t) => {
   for (const resource of ['relay', 'display']) {
     const f = fixture(t)
     let attempts = 0
-    let cleanups = 0
     const close = async () => {
-      f.calls.push([`${resource}.close`])
       if (++attempts === 1) throw new Error('resource still running')
     }
     if (resource === 'relay') f.dependencies.createRelay = async () => ({ url: 'http://127.0.0.1:54321', close })
     else f.dependencies.createDisplay = async () => ({ env: { DISPLAY: ':42' }, close })
-    f.dependencies.tempCleanup.cleanup = async ({ paths } = {}) => {
-      if (paths) cleanups++
-      return { failed: [], skipped: [], warning: null }
-    }
     const session = await createPlatformBrowserSession(f.options, f.dependencies)
     await assert.rejects(session.close())
-    assert.equal(cleanups, 0)
     await session.close()
     assert.equal(attempts, 2)
-    assert.equal(f.calls.filter(([name]) => name === 'context.close').length, 1)
-    assert.equal(cleanups, 1)
+    assert.equal(f.calls.filter(([name]) => name === 'browser.close').length, 1)
   }
 })
 
-test('startup failure exposes unfinished cleanup so the shared manager can retry it', async (t) => {
-  const f = fixture(t)
-  let closeFailed = true
-  f.context.clearCookies = async () => {
-    throw new Error('fixture cookie failure')
-  }
-  f.context.close = async () => {
-    if (closeFailed) throw new Error('fixture close failure')
-    f.calls.push(['context.close'])
+test('failed startup retains unfinished cleanup for the manager to retry', async (t) => {
+  const f = fixture(t, {
+    context: {
+      cookies: async () => {
+        throw new Error('Cookie read failed')
+      },
+    },
+  })
+  f.browser.close = async () => {
+    throw new Error('close failed')
   }
   let pending
   await assert.rejects(
@@ -243,34 +301,32 @@ test('startup failure exposes unfinished cleanup so the shared manager can retry
       f.dependencies,
     ),
     (error) => {
-      assert.equal(error.code, 'browser_close_failed')
       pending = error.pendingSession
-      return !!pending?.close
+      return error.code === 'browser_close_failed' && Boolean(pending?.close)
     },
   )
   assert.equal(
     f.calls.some(([name]) => name === 'relay.close'),
     false,
   )
-  closeFailed = false
+  f.child.exitCode = 0
   await pending.close()
   assert.deepEqual(
-    f.calls.slice(-3).map(([name]) => name),
-    ['context.close', 'relay.close', 'display.close'],
+    f.calls.slice(-2).map(([name]) => name),
+    ['relay.close', 'display.close'],
   )
 })
 
-test('launcher failures do not expose private diagnostics and release supporting processes', async (t) => {
+test('launcher failure hides private diagnostics and closes supporting resources', async (t) => {
   const f = fixture(t, {
     launch: () => {
-      throw new Error('fixture-license private upstream diagnostics')
+      throw new Error('private upstream diagnostics')
     },
   })
-  await assert.rejects(createPlatformBrowserSession(f.options, f.dependencies), (error) => {
-    assert.equal(error.code, 'browser_start_failed')
-    assert.equal(error.message.includes('fixture-license'), false)
-    return true
-  })
+  await assert.rejects(
+    createPlatformBrowserSession(f.options, f.dependencies),
+    (error) => error.code === 'browser_start_failed' && !error.message.includes('private upstream'),
+  )
   assert.deepEqual(
     f.calls.slice(-2).map(([name]) => name),
     ['relay.close', 'display.close'],
@@ -341,4 +397,39 @@ test('closing relay also closes an HTTP proxy socket waiting for CONNECT respons
   await relay.close()
   await closed
   assert.equal(upstream.destroyed, true)
+})
+
+test('session exit notification follows the owned process exit rather than connection events', async (t) => {
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(7), 80)'], {
+    stdio: 'ignore',
+    windowsHide: true,
+  })
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill()
+  })
+  const f = fixture(t, { child })
+  const session = await createPlatformBrowserSession(f.options, f.dependencies)
+  let resolved = false
+  session.exited.then(() => {
+    resolved = true
+  })
+  child.emit('disconnect')
+  await Promise.resolve()
+  assert.equal(resolved, false)
+  assert.deepEqual(await session.exited, { code: 7, signal: null })
+  await session.close()
+  assert.match(session.warning, /异常退出/)
+  assert.equal(
+    f.calls.some(([name]) => name === 'browser.close'),
+    false,
+  )
+})
+
+test('session exit notification also handles a process that already exited', async (t) => {
+  const child = Object.assign(new EventEmitter(), { exitCode: 9, signalCode: null })
+  const f = fixture(t, { child })
+  const session = await createPlatformBrowserSession(f.options, f.dependencies)
+  assert.deepEqual(await session.exited, { code: 9, signal: null })
+  assert.equal(child.listenerCount('exit'), 0)
+  await session.close()
 })

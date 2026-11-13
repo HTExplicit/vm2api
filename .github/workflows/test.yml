@@ -47,6 +47,10 @@ jobs:
           go-version: '1.25.x'
           cache-dependency-path: redact/go.sum
       - run: npm ci
+      - name: build independent browser installer
+        run: |
+          npm ci --prefix scripts/shard-helper --ignore-scripts --no-audit --no-fund
+          npm run build:browser-helper
       - name: installer and upgrade shell syntax
         run: |
           bash -n deploy/install.sh
@@ -123,6 +127,8 @@ jobs:
             test/unit/panel-upgrade-script.test.mjs \
             test/unit/fleet-services.test.mjs \
             test/unit/proxy-http-scheme.test.mjs \
+            test/unit/proxy-pool-update.test.mjs \
+            test/unit/panel-proxy-browser-boundary.test.mjs \
             test/unit/remote-slot-push-retry.test.mjs \
             test/unit/routing-concurrency-overrides.test.mjs \
             test/unit/probe-status.test.mjs \
@@ -155,7 +161,8 @@ jobs:
             test/unit/slot-browser-repo.test.mjs \
             test/unit/slot-browser-manager.test.mjs \
             test/unit/browser-stream.test.mjs \
-            test/unit/browser-temp-cleanup.test.mjs \
+            test/unit/browser-data-migration.test.mjs \
+            test/unit/shard-helper.test.mjs \
             test/unit/codex-browser-login.test.mjs \
             test/unit/slot-cleanup.test.mjs \
             test/unit/docker-inspect-outcome.test.mjs \
@@ -395,21 +402,36 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=vm2api-amd64
           cache-to: type=gha,scope=vm2api-amd64,mode=max
-      - name: Download stock Chromium into a disposable fixture cache
+      - name: Verify public image excludes runtime browser assets
         run: |
-          mkdir -p "$RUNNER_TEMP/browser-fixture-cache"
+          docker run --rm --network none --entrypoint node \
+            ghcr.io/htexplicit/vm2api:validation-${{ github.event.pull_request.head.sha || github.sha }} \
+            scripts/check-browser-image.mjs
+      - name: Install Shard into a disposable runtime cache
+        run: |
+          mkdir -p "$RUNNER_TEMP/browser-fixture-cache" "$RUNNER_TEMP/browser-fixture-profiles"
           docker run --rm --entrypoint node \
-            -e PLAYWRIGHT_BROWSERS_PATH=/browser-test-cache \
-            --mount "type=bind,src=$RUNNER_TEMP/browser-fixture-cache,dst=/browser-test-cache" \
+            --mount "type=bind,src=$RUNNER_TEMP/browser-fixture-cache,dst=/browser-test-data" \
             ghcr.io/htexplicit/vm2api:validation-${{ github.event.pull_request.head.sha || github.sha }} \
-            node_modules/playwright-core/cli.js install chromium --no-shell
-      - name: Verify public image and offline Chromium page fixtures
+            scripts/install-browser-runtime.mjs /browser-test-data
+      - name: Verify offline Shard pages and application browser behavior
         run: |
-          docker run --rm --network none --entrypoint sh \
-            -e PLAYWRIGHT_BROWSERS_PATH=/browser-test-cache \
-            --mount "type=bind,src=$RUNNER_TEMP/browser-fixture-cache,dst=/browser-test-cache,readonly" \
+          docker run --rm --init --network none --cpus 3 --memory 4g --memory-swap 4g --entrypoint sh \
+            -e SHARD_BROWSER_CACHE_DIR=/browser-test-data/browser-runtime/shardbrowser \
+            -e BROWSER_FIXTURE_PROFILE_ROOT=/browser-test-profiles \
+            --mount "type=bind,src=$RUNNER_TEMP/browser-fixture-cache,dst=/browser-test-data,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/browser-fixture-profiles,dst=/browser-test-profiles" \
             ghcr.io/htexplicit/vm2api:validation-${{ github.event.pull_request.head.sha || github.sha }} \
-            -c 'set -eu; node scripts/check-browser-image.mjs; node scripts/smoke-platform-browser.mjs; node scripts/smoke-platform-setup.mjs; node scripts/smoke-platform-balance.mjs; node scripts/smoke-browser-cleanup.mjs'
+            -c 'set -eu; node scripts/smoke-platform-browser.mjs; node scripts/smoke-platform-setup.mjs; node scripts/smoke-platform-balance.mjs; node scripts/smoke-browser-oauth.mjs; node scripts/smoke-browser-cleanup.mjs'
+      - name: Reopen native profiles in a fresh container
+        run: |
+          docker run --rm --init --network none --cpus 3 --memory 4g --memory-swap 4g --entrypoint node \
+            -e SHARD_BROWSER_CACHE_DIR=/browser-test-data/browser-runtime/shardbrowser \
+            -e BROWSER_FIXTURE_PROFILE_ROOT=/browser-test-profiles \
+            --mount "type=bind,src=$RUNNER_TEMP/browser-fixture-cache,dst=/browser-test-data,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/browser-fixture-profiles,dst=/browser-test-profiles" \
+            ghcr.io/htexplicit/vm2api:validation-${{ github.event.pull_request.head.sha || github.sha }} \
+            scripts/smoke-platform-browser.mjs --reopen
       - name: Manual Claude OAuth helper against offline TLS and SOCKS fixtures
         run: |
           docker run --rm --network none --entrypoint sh \

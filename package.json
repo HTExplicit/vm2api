@@ -19,21 +19,22 @@
     "fetch:payload": "node scripts/fetch-payload.mjs",
     "test:web": "pnpm -C web test",
     "format": "biome format --write && gofmt -w worker && pnpm -C web format",
-    "format:check": "biome format && node scripts/check-gofmt.mjs && pnpm -C web format:check"
+    "format:check": "biome format && node scripts/check-gofmt.mjs && pnpm -C web format:check",
+    "build:browser-helper": "node scripts/build-shard-helper.mjs"
   },
   "dependencies": {
-    "cloakbrowser": "0.7.2",
     "croner": "^10.0.1",
     "https-proxy-agent": "^9.1.0",
-    "mmdb-lib": "3.0.5",
     "node-fetch": "^2.7.0",
-    "playwright-core": "1.62.0",
+    "puppeteer-core": "25.17.0",
     "sharp": "0.35.5",
     "socks-proxy-agent": "^10.1.0",
     "ssh2": "^1.17.0",
+    "tough-cookie": "6.1.0",
     "ws": "^8.22.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.11"
+    "@biomejs/biome": "2.5.11",
+    "playwright-core": "1.62.0"
   }
 }

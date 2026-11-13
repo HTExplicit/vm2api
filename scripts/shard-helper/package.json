@@ -1,0 +1,9 @@
+{
+  "name": "vm2api-shard-helper-build",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@proxyshard/shardx": "2.1.6",
+    "esbuild": "0.28.2"
+  }
+}

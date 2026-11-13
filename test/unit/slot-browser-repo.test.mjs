@@ -163,14 +163,17 @@ test('CloakBrowser migration clears Firefox web state once and preserves credent
     setup_status: 'ready',
     offer: { receipt: 'keep' },
     benefit: { amount: '12.3456789' },
-    fingerprint: { firefox: 'legacy-account' },
-    storage_state: { cookies: [{ value: 'legacy-account-secret' }] },
   })
   api.upsertAccount('account-orphan', {
     vm_id: 'slot-deleted',
-    fingerprint: { firefox: 'legacy-orphan' },
-    storage_state: { cookies: [{ value: 'legacy-orphan-secret' }] },
   })
+  for (const id of ['account-a', 'account-orphan']) {
+    db.prepare('UPDATE openai_api_accounts SET fingerprint_json = ?, storage_state_enc = ? WHERE account_id = ?').run(
+      JSON.stringify({ firefox: 'legacy-account' }),
+      maybeEncrypt(JSON.stringify({ cookies: [{ value: 'legacy-account-secret' }] })),
+      id,
+    )
+  }
   const storage = maybeEncrypt(JSON.stringify({ cookies: [{ value: 'legacy-slot-secret' }] }))
   const billing = maybeEncrypt(JSON.stringify({ headers: { authorization: 'Bearer legacy-billing' } }))
   db.prepare(`INSERT INTO slot_browser_profiles
@@ -216,8 +219,8 @@ test('CloakBrowser migration clears Firefox web state once and preserves credent
   assert.deepEqual(fs.readFileSync(credentialFile), credentialBytes)
   assert.equal(new OpenaiApiRepo(db).getKey(key.id).api_key, 'sk-platform-keep')
   const orphan = new OpenaiApiRepo(db).getAccount('account-orphan')
-  assert.equal(orphan.fingerprint, null)
-  assert.equal(orphan.storage_state, null)
+  assert.equal(Object.hasOwn(orphan, 'fingerprint'), false)
+  assert.equal(Object.hasOwn(orphan, 'storage_state'), false)
   assert.equal(repo.get('slot-deleted'), null, 'legacy account storage must not recreate a slot profile')
   const migration = db.prepare('SELECT * FROM schema_migrations WHERE version = ?').get('056')
   assert.ok(migration)
@@ -285,8 +288,6 @@ test('slot API cleanup removes owned secrets while preserving other keys, shared
     enabled: true,
     claim_status: 'claimed',
     operation_id: 'never-repeat-operation',
-    fingerprint: { old: true },
-    storage_state: { cookies: [{ value: 'old-session' }] },
   })
   repo.upsertAccount('account-b', { vm_id: 'slot-b', organization_id: 'org-shared', key_id: other.id, enabled: true })
   assert.deepEqual(repo.cleanupForVm('slot-a'), { accounts: 1, keys: 2, endpoints: 1 })
@@ -300,8 +301,8 @@ test('slot API cleanup removes owned secrets while preserving other keys, shared
   assert.equal(account.vm_id, '')
   assert.equal(account.key_id, '')
   assert.equal(account.enabled, false)
-  assert.equal(account.fingerprint, null)
-  assert.equal(account.storage_state, null)
+  assert.equal(Object.hasOwn(account, 'fingerprint'), false)
+  assert.equal(Object.hasOwn(account, 'storage_state'), false)
   assert.equal(account.claim_status, 'claimed')
   assert.equal(account.operation_id, 'never-repeat-operation')
   assert.equal(repo.getAccount('account-b').key_id, other.id)

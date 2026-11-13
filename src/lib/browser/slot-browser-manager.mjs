@@ -64,6 +64,8 @@ export class SlotBrowserManager {
     getVm = (id) => readVm(cfg.paths.project, id),
     getAccountIdentity = (_id, vm) => vm.codex?.chatgpt_account_id || '',
     resolveProxy = hostProxyUrlForVm,
+    resolveTimezone = () => '',
+    prepareData = () => {},
     createSession = createPlatformBrowserSession,
     Stream = BrowserStream,
     now = Date.now,
@@ -75,6 +77,8 @@ export class SlotBrowserManager {
       getVm,
       getAccountIdentity,
       resolveProxy,
+      resolveTimezone,
+      prepareData,
       createSession,
       Stream,
       now,
@@ -83,6 +87,7 @@ export class SlotBrowserManager {
     this.states = new Map()
     this.queue = []
     this.tickets = new Map()
+    this.proxyChanges = new Set()
     this.stopped = false
     this.active = null
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 })
@@ -139,6 +144,7 @@ export class SlotBrowserManager {
   async acquire(vmId, { purpose = 'platform', interactive = false, retain = interactive, signal } = {}) {
     signal?.throwIfAborted()
     if (this.stopped) throw problem('browser_stopped', '浏览器服务正在关闭')
+    if (this.proxyChanges.has(vmId)) throw problem('browser_proxy_changing', '槽位代理正在变更，请稍后打开浏览器')
     const current = this.currentVm(vmId)
     let live = this.jobs.get(vmId)
     if (live && (live.closing || live.closeSignal.aborted)) {
@@ -244,7 +250,10 @@ export class SlotBrowserManager {
     this.setStatus(live, 'starting', '正在启动槽位浏览器')
     let browser
     try {
+      this.prepareData()
       const launchConfig = this.runtime ? await this.runtime.launchConfig() : {}
+      const { vm } = this.assertCurrent(live)
+      const timezone = await this.resolveTimezone(vm, live.proxyUrl)
       this.assertCurrent(live)
       if (!profile) this.profileRepo.upsert(live.vmId, { account_id: live.accountId || '' })
       browser = await this.createSession({
@@ -252,30 +261,24 @@ export class SlotBrowserManager {
         profileDir: this.profileDirectory(live.vmId),
         storageState: profile?.storage_state,
         proxyUrl: live.proxyUrl,
+        timezone,
         signal: live.closeSignal,
       })
     } catch (error) {
       if (error.pendingSession) {
         live.browser = error.pendingSession
+        this.watchProcessExit(live)
         live.pendingCloseError = error
       }
       throw error
     }
     live.browser = browser
+    this.watchProcessExit(live)
     live.warning = browser.warning || null
     if (live.closeSignal.aborted) return
     live.page = browser.page
     live.context = browser.context
     if (profile?.storage_state?.cookies_pending) await this.persist(live)
-    await browser.context.route?.('**/*', async (route) => {
-      try {
-        this.assertCurrent(live)
-        await route.continue()
-      } catch {
-        await route.abort().catch(() => {})
-        void this.close(live.vmId, { reason: 'identity_changed' }).catch(() => {})
-      }
-    })
     const navigationLocked = () =>
       live.inputLocked === true ||
       live.closeSignal.aborted ||
@@ -319,11 +322,18 @@ export class SlotBrowserManager {
   }
 
   async persist(live) {
-    if (!live.browser?.storageState || live.closeSignal.aborted || live.persistable === false) return
+    if (!live.browser?.exportCookies || live.closeSignal.aborted || live.persistable === false) return
     this.assertCurrent(live)
     this.profileRepo.upsert(live.vmId, {
-      storage_state: await live.browser.storageState(),
+      storage_state: { cookies: await live.browser.exportCookies() },
       ...(live.accountId ? { account_id: live.accountId } : {}),
+    })
+  }
+
+  watchProcessExit(live) {
+    live.browser.exited?.then(() => {
+      if (this.jobs.get(live.vmId) === live && !live.closing)
+        void this.close(live.vmId, { reason: 'process_exited' }).catch(() => {})
     })
   }
 
@@ -465,6 +475,18 @@ export class SlotBrowserManager {
 
   cancel(vmId, options) {
     return this.close(vmId, options)
+  }
+
+  async withProxyChange(vmIds, change) {
+    const ids = [...new Set(vmIds)]
+    if (ids.some((id) => this.proxyChanges.has(id)))
+      throw problem('browser_proxy_changing', '槽位代理正在变更，请稍后重试')
+    for (const id of ids) this.proxyChanges.add(id)
+    try {
+      return await change()
+    } finally {
+      for (const id of ids) this.proxyChanges.delete(id)
+    }
   }
 
   browserTicket(vmId, { purpose = 'oauth' } = {}) {

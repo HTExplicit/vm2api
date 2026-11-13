@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, InputHTMLAttributes } from 'react'
+import type { ButtonHTMLAttributes } from 'react'
 import {
   QueryClient,
   QueryClientProvider,
@@ -14,18 +14,16 @@ import {
 import { AccountBrowserSection } from './account-browser-section'
 
 const controls = vi.hoisted(() => ({
-  cursor: 0,
   mutationCursor: 0,
   mutations: [] as MutationObserver<unknown, Error, void, unknown>[],
-  hooks: [] as unknown[],
-  effects: [] as (() => void)[],
-  buttons: [] as ButtonHTMLAttributes<HTMLButtonElement>[],
-  inputs: [] as InputHTMLAttributes<HTMLInputElement>[],
+  buttons: [] as (ButtonHTMLAttributes<HTMLButtonElement> & {
+    loading?: boolean
+  })[],
   api: vi.fn(),
 }))
 
-// Manual server renders have no mounted hook subscriptions. Retain the real
-// mutation observers so explicit rerenders can exercise their pending/error state.
+// Server renders have no mounted subscriptions. Real mutation observers retain
+// pending/error states between explicit renders without replacing query behavior.
 vi.mock('@tanstack/react-query', async (original) => {
   const query = await original<typeof import('@tanstack/react-query')>()
   return {
@@ -44,34 +42,6 @@ vi.mock('@tanstack/react-query', async (original) => {
     },
   }
 })
-
-vi.mock('react', async (original) => {
-  const react = await original<typeof import('react')>()
-  return {
-    ...react,
-    useEffect: (effect: () => void, deps: readonly unknown[]) => {
-      const index = controls.cursor++
-      const previous = controls.hooks[index] as readonly unknown[] | undefined
-      if (!previous || deps.some((value, item) => value !== previous[item])) {
-        controls.hooks[index] = deps
-        controls.effects.push(effect)
-      }
-    },
-    useState: (initial: unknown) => {
-      const index = controls.cursor++
-      if (!(index in controls.hooks))
-        controls.hooks[index] =
-          typeof initial === 'function' ? initial() : initial
-      return [
-        controls.hooks[index],
-        (next: unknown) => {
-          controls.hooks[index] =
-            typeof next === 'function' ? next(controls.hooks[index]) : next
-        },
-      ]
-    },
-  }
-})
 vi.mock('@/lib/api', () => ({ api: controls.api }))
 vi.mock('@/components/ui/button', () => ({
   Button: (
@@ -85,20 +55,16 @@ vi.mock('@/components/ui/button', () => ({
     )
   },
 }))
-vi.mock('@/components/ui/input', () => ({
-  Input: (props: InputHTMLAttributes<HTMLInputElement>) => {
-    controls.inputs.push(props)
-    return <input {...props} />
-  },
-}))
 
 const initial: AccountBrowserStatus = {
-  launcher_version: '0.7.2',
+  launcher_version: '2.1.6',
   installed_version: null,
+  installed_build: null,
   running_version: null,
   latest_version: null,
+  latest_build: null,
   checked_at: null,
-  key_set: false,
+  update_status: 'not_installed',
   installing: false,
   phase: 'idle',
   progress: null,
@@ -114,17 +80,13 @@ function setStatus(patch: Partial<AccountBrowserStatus> = {}) {
 }
 
 function render() {
-  controls.cursor = 0
   controls.mutationCursor = 0
   controls.buttons = []
-  controls.inputs = []
-  const html = renderToStaticMarkup(
+  return renderToStaticMarkup(
     <QueryClientProvider client={client}>
       <AccountBrowserSection />
     </QueryClientProvider>
   )
-  for (const effect of controls.effects.splice(0)) effect()
-  return html
 }
 
 function button(label: string) {
@@ -135,45 +97,8 @@ function button(label: string) {
   return found!
 }
 
-async function installAfterFailedCheck() {
-  setStatus({ key_set: true })
-  render()
-  controls.api.mockRejectedValueOnce(new Error('此前版本检查失败'))
-  button('检查更新').onClick!({} as never)
-  await vi.waitFor(() => expect(render()).toContain('此前版本检查失败'))
-  controls.api.mockResolvedValueOnce({
-    ...initial,
-    key_set: true,
-    installing: true,
-    phase: 'downloading',
-  })
-  button('安装浏览器').onClick!({} as never)
-  await vi.waitFor(() =>
-    expect(
-      client.getQueryData<AccountBrowserStatus>(['account-browser'])?.installing
-    ).toBe(true)
-  )
-  expect(render()).toContain('此前版本检查失败')
-}
-
-function completeInstallation() {
-  setStatus({
-    key_set: true,
-    installed_version: '156.0.8078.47.1',
-    latest_version: '156.0.8078.47.1',
-    installing: false,
-    phase: 'ready',
-    last_error: null,
-  })
-  render()
-  return render()
-}
-
 beforeEach(() => {
-  controls.cursor = 0
   controls.mutations = []
-  controls.hooks = []
-  controls.effects = []
   controls.api.mockReset()
   client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -183,152 +108,93 @@ beforeEach(() => {
 afterEach(() => client.clear())
 
 describe('account browser management', () => {
-  it('clears an earlier failed check only after the accepted installation finishes successfully', async () => {
-    await installAfterFailedCheck()
-    const html = completeInstallation()
-    expect(html).not.toContain('此前版本检查失败')
-    expect(html).not.toContain('检查失败')
-    expect(html).toContain('浏览器已就绪')
-    expect(button('已是最新').disabled).toBe(true)
-  })
-
-  it('keeps a new failed check after an installation has already completed', async () => {
-    await installAfterFailedCheck()
-    completeInstallation()
-    controls.api.mockRejectedValueOnce(new Error('新一次版本检查失败'))
-    button('检查更新').onClick!({} as never)
-    await vi.waitFor(() => expect(render()).toContain('新一次版本检查失败'))
+  it('shows local installation status without a license form or upstream request', () => {
     const html = render()
-    expect(html).toContain('新一次版本检查失败')
-    expect(html).not.toContain('已是最新')
-    expect(button('请先检查更新').disabled).toBe(true)
-  })
-
-  it.each([
-    [null, null, '安装浏览器', false],
-    ['156.0.8078.47.1', null, '请先检查更新', true],
-    ['156.0.8078.47.1', '156.0.8078.47.1', '已是最新', true],
-    ['156.0.1', '156.0.1.0', '已是最新', true],
-    ['156.0.10', '156.0.9', '无需更新', true],
-    ['156.0.9', '156.0.10', '更新浏览器', false],
-    ['156.0.1', '156.0.1.0.1', '更新浏览器', false],
-  ] as const)(
-    'compares installed %s with latest %s before offering an update',
-    (installed, latest, label, disabled) => {
-      setStatus({
-        key_set: true,
-        installed_version: installed,
-        latest_version: latest,
-      })
-      render()
-      const action = button(label)
-      expect(action.disabled).toBe(disabled)
-      expect(action['aria-label']).toBe(label)
-    }
-  )
-
-  it('shows setup and versions without installing or checking upstream on render', () => {
-    const html = render()
-    expect(html).toContain('待配置')
-    expect(html).toContain('尚未安装')
+    expect(html).toContain('ShardBrowser')
+    expect(html).toContain('待安装')
     expect(html).toContain('尚未检查')
-    expect(html).toContain('0.7.2')
-    expect(button('安装浏览器').disabled).toBe(true)
+    expect(html).toContain('2.1.6')
+    expect(html).not.toContain('<input')
+    expect(html).not.toContain('CloakBrowser')
+    expect(button('安装浏览器').disabled).toBe(false)
     expect(controls.api).not.toHaveBeenCalled()
   })
 
-  it('keeps local installation, current running version, and latest version distinct', () => {
+  it.each([
+    ['unchecked', '请先检查更新', true],
+    ['current', '已是最新', true],
+    ['update_available', '更新浏览器', false],
+    ['components_available', '更新组件', false],
+    ['newer_installed', '无需更新', true],
+    ['application_update_required', '请先升级应用', true],
+    ['check_failed', '请重新检查', true],
+    ['retry_required', '重试安装', false],
+  ] as const)(
+    'uses server decision %s for the action instead of comparing versions',
+    (update_status, label, disabled) => {
+      setStatus({
+        installed_version: '157.0.8103.50',
+        installed_build: '1',
+        latest_version: '157.0.8103.50',
+        latest_build: '2',
+        update_status,
+      })
+      render()
+      expect(button(label).disabled).toBe(disabled)
+    }
+  )
+
+  it('shows installed and latest builds while keeping the running version distinct', () => {
     setStatus({
-      key_set: true,
-      installed_version: '156.0.1',
-      running_version: '155.0.2',
-      latest_version: '156.0.3',
+      installed_version: '157.0.8103.50',
+      installed_build: '1',
+      running_version: '156.0.8078.47',
+      latest_version: '157.0.8103.50',
+      latest_build: '2',
+      update_status: 'update_available',
       browser_busy: true,
     })
     const html = render()
-    expect(html).toContain('156.0.1')
-    expect(html).toContain('155.0.2')
-    expect(html).toContain('156.0.3')
+    expect(html).toContain('157.0.8103.50 · 构建 1')
+    expect(html).toContain('157.0.8103.50 · 构建 2')
+    expect(html).toContain('156.0.8078.47')
     expect(html).toContain('请先关闭正在使用的账号浏览器')
     expect(button('更新浏览器').disabled).toBe(true)
-    expect(button('清除 key').disabled).toBe(true)
+    expect(button('检查更新').disabled).toBe(false)
   })
 
-  it('submits a key without storing it in mutation variables, then clears the field', async () => {
+  it('explains application and component updates without enabling an incompatible install', () => {
+    setStatus({ update_status: 'application_update_required' })
+    expect(render()).toContain('官方新版需要更新的启动组件，请先升级应用')
+    expect(button('请先升级应用').disabled).toBe(true)
+    setStatus({ update_status: 'components_available' })
+    expect(render()).toContain('内核版本未变，官方浏览器组件有更新')
+    expect(button('更新组件').disabled).toBe(false)
+  })
+
+  it('posts installation without a version and polls only while the task runs', async () => {
     render()
-    controls.inputs[0].onChange!({
-      target: { value: 'private-license-key' },
-    } as never)
-    render()
-    controls.api.mockResolvedValue({ ...initial, key_set: true })
-    button('保存 key').onClick!({} as never)
-    await vi.waitFor(() => {
-      expect(
-        client.getQueryData<AccountBrowserStatus>(['account-browser'])?.key_set
-      ).toBe(true)
-    })
-    expect(controls.api).toHaveBeenCalledWith(
-      '/api/panel/account-browser/key',
-      {
-        method: 'PUT',
-        body: JSON.stringify({ key: 'private-license-key' }),
-      }
+    let accept!: (value: AccountBrowserStatus) => void
+    controls.api.mockImplementationOnce(
+      () => new Promise<AccountBrowserStatus>((resolve) => (accept = resolve))
     )
-    expect(
-      client
-        .getMutationCache()
-        .getAll()
-        .every((item) => item.state.variables === undefined)
-    ).toBe(true)
-    expect(
-      JSON.stringify(client.getQueryData(['account-browser']))
-    ).not.toContain('private-license-key')
-    expect(render()).toContain('已配置，保存后不回显')
-    expect(controls.inputs[0].value).toBe('')
-  })
-
-  it('clears the configured key only through its explicit action', async () => {
-    setStatus({ key_set: true, installed_version: '156.0.1' })
-    render()
-    expect(button('保存 key').disabled).toBe(true)
-    controls.api.mockResolvedValue({ ...initial, installed_version: '156.0.1' })
-    button('清除 key').onClick!({} as never)
-    await vi.waitFor(() =>
-      expect(controls.api).toHaveBeenCalledWith(
-        '/api/panel/account-browser/key',
-        {
-          method: 'PUT',
-          body: JSON.stringify({ key: null }),
-        }
-      )
-    )
-  })
-
-  it('requests an update without a version selector and shows progress with task polling', async () => {
-    setStatus({ key_set: true })
-    render()
-    controls.api.mockResolvedValue({
-      ...initial,
-      key_set: true,
-      installing: true,
-      phase: 'downloading',
-      progress: 40,
-    })
     button('安装浏览器').onClick!({} as never)
-    await vi.waitFor(() =>
-      expect(
-        client.getQueryData<AccountBrowserStatus>(['account-browser'])
-          ?.installing
-      ).toBe(true)
-    )
-    expect(controls.api).toHaveBeenCalledWith(
+    await vi.waitFor(() => {
+      render()
+      expect(button('安装浏览器').disabled).toBe(true)
+      expect(button('检查更新').disabled).toBe(true)
+    })
+    accept({ ...initial, installing: true, phase: 'downloading', progress: 40 })
+    await vi.waitFor(() => expect(render()).toContain('40%'))
+    expect(controls.api).toHaveBeenCalledExactlyOnceWith(
       '/api/panel/account-browser/install',
       { method: 'POST' }
     )
     const html = render()
-    expect(html).toContain('正在下载内核')
-    expect(html).toContain('40%')
+    expect(html).toContain('正在下载组件')
     expect(html).toContain('关闭此页面不会取消安装')
+    expect(html).toContain('<progress')
+    expect(html).toContain('value="40"')
     const interval = accountBrowserQueryOptions().refetchInterval
     expect(typeof interval).toBe('function')
     if (typeof interval === 'function') {
@@ -339,95 +205,90 @@ describe('account browser management', () => {
         interval({ state: { data: { installing: false } } } as never)
       ).toBe(false)
     }
+    setStatus({
+      installed_version: '157.0.8103.50',
+      installed_build: '1',
+      update_status: 'current',
+      phase: 'ready',
+    })
+    expect(render()).toContain('安装完成。')
+    expect(render()).not.toContain('验证完成')
+    expect(button('已是最新').disabled).toBe(true)
   })
 
-  it('shows failed checks and never labels a cached version as up to date', async () => {
+  it('reports file and version verification without claiming browser runtime testing', () => {
+    setStatus({ installing: true, phase: 'verifying' })
+    const html = render()
+    expect(html).toContain('正在核对文件与版本')
+    expect(html).not.toContain('正在验证浏览器')
+    expect(html.match(/<progress[^>]+>/)?.[0]).not.toContain('value=')
+  })
+
+  it('does not expose a cached current state after a failed check, and recovers on success', async () => {
     setStatus({
-      key_set: true,
-      installed_version: '156.0.1',
-      latest_version: '156.0.1',
+      installed_version: '157.0.8103.50',
+      latest_version: '157.0.8103.50',
+      update_status: 'current',
     })
     render()
-    controls.api.mockRejectedValue(new Error('无法查询官方版本，请重试'))
+    controls.api.mockRejectedValueOnce(new Error('无法查询官方版本，请重试'))
     button('检查更新').onClick!({} as never)
     await vi.waitFor(() =>
-      expect(
-        client
-          .getMutationCache()
-          .getAll()
-          .some((item) => item.state.status === 'error')
-      ).toBe(true)
+      expect(render()).toContain('无法查询官方版本，请重试')
     )
-    const html = render()
-    expect(html).toContain('无法查询官方版本，请重试')
-    expect(html).not.toContain('已是最新')
-    expect(button('请先检查更新').disabled).toBe(true)
-    controls.inputs[0].onChange!({
-      target: { value: 'replacement-key' },
-    } as never)
-    expect(render()).toContain('无法查询官方版本，请重试')
-    controls.api.mockResolvedValue({
+    expect(render()).not.toContain('已是最新')
+    expect(button('请重新检查').disabled).toBe(true)
+    controls.api.mockResolvedValueOnce({
       ...initial,
-      key_set: true,
-      installed_version: '156.0.1',
-      latest_version: '156.0.2',
+      installed_version: '157.0.8103.50',
+      latest_version: '157.0.8103.50',
+      update_status: 'components_available',
     })
     button('检查更新').onClick!({} as never)
-    await vi.waitFor(() =>
-      expect(
-        client.getQueryData<AccountBrowserStatus>(['account-browser'])
-          ?.latest_version
-      ).toBe('156.0.2')
-    )
-    expect(render()).not.toContain('无法查询官方版本，请重试')
-    expect(button('更新浏览器').disabled).toBe(false)
+    await vi.waitFor(() => {
+      expect(render()).not.toContain('无法查询官方版本')
+      expect(button('更新组件').disabled).toBe(false)
+    })
+    expect(button('更新组件').disabled).toBe(false)
   })
 
-  it('requires a successful check after a persisted check failure, including remounts', async () => {
-    const checked = {
-      ...initial,
-      key_set: true,
-      installed_version: '156.0.9',
-      latest_version: '156.0.10',
-      checked_at: '2026-11-13T02:00:00Z',
-    }
+  it('keeps persisted install failures retryable through the same install action', async () => {
     setStatus({
-      ...checked,
+      installed_version: '157.0.8103.50',
+      latest_version: '157.0.8103.50',
+      update_status: 'retry_required',
       phase: 'failed',
       last_error: {
-        code: 'browser_update_check_failed',
-        message: '官方版本检查超时',
+        code: 'browser_version_mismatch',
+        message: '安装版本不一致',
       },
     })
-    expect(render()).toContain('官方版本检查超时')
-    expect(button('请先检查更新').disabled).toBe(true)
-    controls.api.mockResolvedValue({
-      ...checked,
-      phase: 'idle',
-      last_error: null,
+    expect(render()).toContain('安装版本不一致')
+    expect(button('重试安装').disabled).toBe(false)
+    controls.api.mockResolvedValueOnce({
+      ...initial,
+      installing: true,
+      phase: 'checking',
     })
-    button('检查更新').onClick!({} as never)
-    await vi.waitFor(() =>
-      expect(
-        client.getQueryData<AccountBrowserStatus>(['account-browser'])
-          ?.last_error
-      ).toBe(null)
+    button('重试安装').onClick!({} as never)
+    await vi.waitFor(() => expect(render()).toContain('正在检查版本'))
+    expect(controls.api).toHaveBeenCalledExactlyOnceWith(
+      '/api/panel/account-browser/install',
+      { method: 'POST' }
     )
-    const html = render()
-    expect(html).not.toContain('官方版本检查超时')
-    expect(button('更新浏览器').disabled).toBe(false)
   })
 
-  it('allows retrying a newer installation after a non-check failure', () => {
-    setStatus({
-      key_set: true,
-      installed_version: '156.0.9',
-      latest_version: '156.0.10',
-      phase: 'failed',
-      last_error: { code: 'browser_install_failed', message: '内核下载失败' },
+  it('clears an earlier install request error when a subsequent check succeeds', async () => {
+    render()
+    controls.api.mockRejectedValueOnce(new Error('浏览器正在使用'))
+    button('安装浏览器').onClick!({} as never)
+    await vi.waitFor(() => expect(render()).toContain('浏览器正在使用'))
+    controls.api.mockResolvedValueOnce({
+      ...initial,
+      update_status: 'application_update_required',
     })
-    const html = render()
-    expect(html).toContain('内核下载失败')
-    expect(button('更新浏览器').disabled).toBe(false)
+    button('检查更新').onClick!({} as never)
+    await vi.waitFor(() => expect(render()).not.toContain('浏览器正在使用'))
+    expect(button('请先升级应用').disabled).toBe(true)
   })
 })

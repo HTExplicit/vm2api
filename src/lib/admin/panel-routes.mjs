@@ -699,6 +699,57 @@ export function createPanelHandler(ctx) {
   const slotBrowserManager = ctx.slotBrowserManager
   const accountBrowserRuntime = ctx.accountBrowserRuntime
   const codexBrowserLogin = ctx.codexBrowserLogin
+  const changingProxies = new Set()
+  const applyProxyChange = async (res, vmIds, change, proxyIds = []) => {
+    const previous = vmIds.length
+      ? proxyPool
+          .snapshot()
+          .proxies.filter((proxy) => (proxy.bound_vm_ids || []).some((id) => vmIds.includes(id)))
+          .map((proxy) => proxy.id)
+      : []
+    const targets = new Set([...proxyIds, ...previous])
+    if ([...targets].some((id) => changingProxies.has(id))) {
+      json(res, 409, { ok: false, error: { code: 'proxy_changing', message: '代理正在变更，请稍后重试' } })
+      return null
+    }
+    for (const id of targets) changingProxies.add(id)
+    const run = async () => {
+      for (const vmId of new Set(vmIds)) {
+        const results = await Promise.allSettled([
+          codexBrowserLogin?.cancel(vmId),
+          openaiApiManager?.cancel(vmId),
+          slotBrowserManager?.close(vmId),
+        ])
+        const failed = results.find((result) => result.status === 'rejected')
+        if (failed) {
+          json(res, 409, {
+            ok: false,
+            error: {
+              code: failed.reason?.code || 'browser_close_failed',
+              message: '账号浏览器尚未关闭，代理未变更；请关闭浏览器后重试',
+            },
+          })
+          return null
+        }
+      }
+      return change()
+    }
+    try {
+      return await (slotBrowserManager?.withProxyChange ? slotBrowserManager.withProxyChange(vmIds, run) : run())
+    } catch (error) {
+      if (!res.headersSent)
+        json(res, 409, {
+          ok: false,
+          error: {
+            code: error.code || 'browser_close_failed',
+            message: error.publicMessage || '代理操作未完成，请查看当前绑定状态后重试',
+          },
+        })
+      return null
+    } finally {
+      for (const id of targets) changingProxies.delete(id)
+    }
+  }
   const slotBrowserRepo = ctx.slotBrowserRepo
   const openaiApiRepo = ctx.openaiApiRepo
   const panelUsers = ctx.panelUsers
@@ -1632,22 +1683,14 @@ export function createPanelHandler(ctx) {
       ) {
         return true
       }
-      const accountBrowserRoute = /^\/api\/panel\/account-browser(?:\/(key|check|install))?$/.exec(p)
+      const accountBrowserRoute = /^\/api\/panel\/account-browser(?:\/(check|install))?$/.exec(p)
       if (accountBrowserRoute) {
         const action = accountBrowserRoute[1]
         try {
           let result
           let status = 200
           if (req.method === 'GET' && !action) result = accountBrowserRuntime.status()
-          else if (req.method === 'PUT' && action === 'key') {
-            const body = await readBody(req, 8192)
-            if (!body || !Object.hasOwn(body, 'key') || (body.key !== null && typeof body.key !== 'string'))
-              return json(res, 400, {
-                ok: false,
-                error: { code: 'invalid_browser_key', message: '请输入授权 key，或明确清除已保存的 key' },
-              })
-            result = await accountBrowserRuntime.setKey(body.key)
-          } else if (req.method === 'POST' && action === 'check') result = await accountBrowserRuntime.check()
+          else if (req.method === 'POST' && action === 'check') result = await accountBrowserRuntime.check()
           else if (req.method === 'POST' && action === 'install') {
             result = accountBrowserRuntime.install()
             status = 202
@@ -6602,9 +6645,21 @@ export function createPanelHandler(ctx) {
         let worker = null
         let timezone = null
         if (bindVmId && result.items?.[0]?.id) {
-          const bind = proxyPool.bind(result.items[0].id, bindVmId)
+          const candidate = proxyPool.bind(result.items[0].id, bindVmId, { dryRun: true })
+          const bind = candidate.ok
+            ? await applyProxyChange(
+                res,
+                candidate.connection_changed ? [bindVmId] : [],
+                () => {
+                  const applied = proxyPool.bind(result.items[0].id, bindVmId)
+                  if (applied.ok) bindVmProxy(cfg.paths.project, bindVmId, proxyPool.getProxyForVm(bindVmId))
+                  return applied
+                },
+                [candidate.proxy.id],
+              )
+            : candidate
+          if (!bind) return true
           if (bind.ok) {
-            bindVmProxy(cfg.paths.project, bindVmId, proxyPool.getProxyForVm(bindVmId))
             bound = bind.proxy
             // Before the reload: the worker reads vm.timezone when it starts.
             timezone = await syncVmTimezoneFromProxy(cfg.paths.project, proxyPool, bindVmId, {
@@ -6684,7 +6739,23 @@ export function createPanelHandler(ctx) {
         for (const key of ['host', 'port', 'username', 'password', 'label', 'domain_forward']) {
           if (Object.prototype.hasOwnProperty.call(body, key)) patch[key] = body[key]
         }
-        const result = proxyPool.update(id, patch)
+        const candidate = proxyPool.update(id, patch, { dryRun: true })
+        const result = candidate.ok
+          ? await applyProxyChange(
+              res,
+              candidate.connection_changed ? candidate.proxy.bound_vm_ids || [] : [],
+              () => {
+                const applied = proxyPool.update(id, patch)
+                if (applied.ok && applied.connection_changed) {
+                  for (const vmId of applied.proxy.bound_vm_ids || [])
+                    bindVmProxy(cfg.paths.project, vmId, proxyPool.getProxyByIdWithAuth(id))
+                }
+                return applied
+              },
+              candidate.connection_changed ? [id] : [],
+            )
+          : candidate
+        if (!result) return true
         if (!result.ok) {
           const status = result.error === 'proxy_not_found' ? 404 : 400
           const type = status === 404 ? 'not_found_error' : 'invalid_request_error'
@@ -6713,7 +6784,6 @@ export function createPanelHandler(ctx) {
         // like it worked while every bound slot keeps dialing the old proxy.
         const workers = []
         for (const vmId of result.proxy.bound_vm_ids || []) {
-          bindVmProxy(cfg.paths.project, vmId, proxyPool.getProxyByIdWithAuth(id))
           const vm = getVm(cfg.paths.project, vmId)
           if (vm?.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
             const reloaded = await reloadSlotReady(getVm(cfg.paths.project, vmId), cfg.paths.project, {
@@ -6824,7 +6894,14 @@ export function createPanelHandler(ctx) {
       }
       if (req.method === 'POST' && /^\/api\/panel\/proxies\/[^/]+\/disable$/.test(p)) {
         const id = p.split('/')[4]
-        const result = proxyPool.setEnabled(id, false)
+        const current = proxyPool.snapshot().proxies.find((proxy) => proxy.id === id)
+        const result = await applyProxyChange(
+          res,
+          current?.enabled ? current.bound_vm_ids || [] : [],
+          () => proxyPool.setEnabled(id, false),
+          [id],
+        )
+        if (!result) return true
         if (!result.ok)
           return json(res, 404, {
             ok: false,
@@ -6841,7 +6918,20 @@ export function createPanelHandler(ctx) {
             ok: false,
             error: { type: 'invalid_request_error', code: 'missing_field', message: 'vm_id required', param: 'vm_id' },
           })
-        const result = proxyPool.bind(id, vmId)
+        const candidate = proxyPool.bind(id, vmId, { dryRun: true })
+        const result = candidate.ok
+          ? await applyProxyChange(
+              res,
+              candidate.connection_changed ? [vmId] : [],
+              () => {
+                const applied = proxyPool.bind(id, vmId)
+                if (applied.ok) bindVmProxy(cfg.paths.project, vmId, proxyPool.getProxyForVm(vmId))
+                return applied
+              },
+              [candidate.proxy.id],
+            )
+          : candidate
+        if (!result) return true
         if (!result.ok) {
           const message =
             result.error === 'proxy_bind_limit'
@@ -6854,7 +6944,6 @@ export function createPanelHandler(ctx) {
             error: { type: 'invalid_request_error', code: result.error, message, details: result },
           })
         }
-        bindVmProxy(cfg.paths.project, vmId, proxyPool.getProxyForVm(vmId))
         if (egressEnabled()) {
           await ensureProxyEgress(
             cfg.paths.project,
@@ -6885,16 +6974,29 @@ export function createPanelHandler(ctx) {
             : snap?.bound_vm_id
               ? [snap.bound_vm_id]
               : []
-        const result = proxyPool.unbind(id, vmId || null)
+        const affected = targets.filter((target) =>
+          (snap?.bound_vm_ids || (snap?.bound_vm_id ? [snap.bound_vm_id] : [])).includes(target),
+        )
+        const result = await applyProxyChange(
+          res,
+          affected,
+          () => {
+            const applied = proxyPool.unbind(id, vmId || null)
+            if (applied.ok)
+              for (const unboundId of applied.unbound_vm_ids || affected) {
+                bindVmProxy(cfg.paths.project, unboundId, null)
+                markUnschedulable(cfg.paths.project, unboundId, 'proxy_required')
+              }
+            return applied
+          },
+          [id],
+        )
+        if (!result) return true
         if (!result.ok)
           return json(res, 404, {
             ok: false,
             error: { type: 'not_found_error', code: result.error, message: result.error },
           })
-        for (const unboundId of result.unbound_vm_ids || targets) {
-          bindVmProxy(cfg.paths.project, unboundId, null)
-          markUnschedulable(cfg.paths.project, unboundId, 'proxy_required')
-        }
         if (egressEnabled() && !(result.proxy?.bound_vm_ids || []).length) {
           stopProxyEgress(cfg.paths.project, id)
         }
@@ -6904,29 +7006,52 @@ export function createPanelHandler(ctx) {
         const id = p.split('/').pop()
         const snap = proxyPool.snapshot().proxies.find((proxy) => proxy.id === id)
         const targets = snap?.bound_vm_ids?.length ? snap.bound_vm_ids : snap?.bound_vm_id ? [snap.bound_vm_id] : []
-        const result = proxyPool.remove(id)
+        const result = await applyProxyChange(
+          res,
+          targets,
+          () => {
+            const applied = proxyPool.remove(id)
+            if (applied.ok)
+              for (const unboundId of targets) {
+                bindVmProxy(cfg.paths.project, unboundId, null)
+                markUnschedulable(cfg.paths.project, unboundId, 'proxy_required')
+              }
+            return applied
+          },
+          [id],
+        )
+        if (!result) return true
         if (!result.ok)
           return json(res, 404, {
             ok: false,
             error: { type: 'not_found_error', code: result.error, message: result.error },
           })
-        for (const unboundId of targets) {
-          bindVmProxy(cfg.paths.project, unboundId, null)
-          markUnschedulable(cfg.paths.project, unboundId, 'proxy_required')
-        }
         if (egressEnabled()) stopProxyEgress(cfg.paths.project, id)
         return json(res, 200, panel.ok(result.removed))
       }
       // Auto-allocate proxy for a VM
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/allocate-proxy$/.test(p)) {
         const vmId = p.split('/')[4]
-        const allocated = proxyPool.allocateForVm(vmId)
+        const candidate = proxyPool.allocateForVm(vmId, { dryRun: true })
+        const result = candidate
+          ? await applyProxyChange(
+              res,
+              (candidate.bound_vm_ids || []).includes(vmId) ? [] : [vmId],
+              () => {
+                const applied = proxyPool.bind(candidate.id, vmId)
+                if (applied.ok) bindVmProxy(cfg.paths.project, vmId, proxyPool.getProxyForVm(vmId))
+                return { proxy: applied.ok ? applied.proxy : null }
+              },
+              [candidate.id],
+            )
+          : { proxy: null }
+        if (!result) return true
+        const allocated = result.proxy
         if (!allocated)
           return json(res, 409, {
             ok: false,
             error: { type: 'api_error', code: 'no_free_proxy', message: 'No free SOCKS5 in pool' },
           })
-        bindVmProxy(cfg.paths.project, vmId, proxyPool.getProxyForVm(vmId))
         if (egressEnabled()) await ensureProxyEgress(cfg.paths.project, proxyPool.getProxyForVm(vmId))
         let worker = null
         const timezone = await syncVmTimezoneFromProxy(cfg.paths.project, proxyPool, vmId, {

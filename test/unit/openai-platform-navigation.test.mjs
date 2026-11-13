@@ -19,7 +19,7 @@ function pageFixture() {
   page.url = () => currentUrl
   page.mainFrame = () => frame
   page.isClosed = () => closed
-  page.getByRole = () => ({ count: async () => 0 })
+  page.$$ = async () => []
   page.navigate = (url) => {
     currentUrl = url
     page.emit('framenavigated', frame)

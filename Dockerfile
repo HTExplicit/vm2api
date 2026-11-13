@@ -30,22 +30,33 @@ COPY deploy/payload.json deploy/payload.json
 COPY scripts/fetch-payload.mjs scripts/fetch-payload.mjs
 RUN node scripts/fetch-payload.mjs --dest /payload
 
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS browser-helper
+WORKDIR /src
+COPY scripts/shard-helper/package.json scripts/shard-helper/package-lock.json ./scripts/shard-helper/
+RUN npm ci --prefix scripts/shard-helper --ignore-scripts --no-audit --no-fund
+COPY scripts/build-shard-helper.mjs scripts/shard-helper-entry.mjs scripts/shard-helper-NOTICE ./scripts/
+RUN node scripts/build-shard-helper.mjs
+
 FROM node:22-bookworm-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates iptables iproute2 python3 \
+    libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcups2 \
+    libdbus-1-3 libdrm2 libexpat1 libgbm1 libglib2.0-0 libnspr4 libnss3 \
+    libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 \
+    libxfixes3 libxkbcommon0 libxrandr2 libxshmfence1 libxss1 \
+    fonts-liberation fonts-noto-color-emoji fonts-noto-cjk \
+    xvfb openbox x11-utils x11-xserver-utils unzip \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 WORKDIR /opt/vm2api
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
-# The public image contains only the launcher and system libraries. The admin
-# installs CloakBrowser into the data volume after configuring a license key.
-ENV CLOAKBROWSER_AUTO_UPDATE=false
-RUN node node_modules/playwright-core/cli.js install-deps chromium \
-  && apt-get install -y --no-install-recommends xvfb openbox x11-utils \
-  && rm -rf /var/lib/apt/lists/*
+# Installers and browser data stay separate: only the independent helper enters
+# the public image. Shard is downloaded to the data volume at deployment time.
+COPY --from=browser-helper /src/generated/shardbrowser ./generated/shardbrowser
 COPY src ./src
 COPY scripts ./scripts
+RUN rm -rf scripts/shard-helper
 RUN node scripts/check-browser-image.mjs
 COPY VERSION CHANGELOG.md ./
 COPY deploy/payload.json ./deploy/payload.json

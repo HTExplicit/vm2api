@@ -477,6 +477,7 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
     assert.deepEqual(applyMigrations(db, { migrationsDir: src }), [
       '054_api_keys_allowed_models.sql',
       '056_cloakbrowser_web_sessions.sql',
+      '057_shardbrowser_web_sessions.sql',
     ])
     const { risk_review_enabled, ...after } = db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy')
     assert.equal(risk_review_enabled, 0)

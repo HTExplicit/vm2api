@@ -1,15 +1,18 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { chromium } from 'playwright-core'
+import puppeteer from 'puppeteer-core'
 import { createPlatformBrowserSession } from '../src/lib/openai-api/platform-browser.mjs'
 
-/** Stock Chromium with the production session's storage/close path; never starts CloakBrowser. */
+/** The production session, using an installed Shard cache in release CI.
+ * UI-only development tests may explicitly supply an ordinary Chromium binary. */
 export async function createBrowserFixture({
   profileDir,
   viewport = null,
   executablePath = process.env.UI_BROWSER_EXE,
+  cacheDir = process.env.SHARD_BROWSER_CACHE_DIR,
 } = {}) {
+  if (!cacheDir && !executablePath) throw new Error('Set SHARD_BROWSER_CACHE_DIR to an installed test runtime')
   const temporary = !profileDir
   const directory = profileDir || (await fs.mkdtemp(path.join(os.tmpdir(), 'vm2api-browser-fixture-')))
   let session
@@ -18,48 +21,42 @@ export async function createBrowserFixture({
     if (temporary) await fs.rm(directory, { recursive: true, force: true })
   }
   try {
-    let launched
     session = await createPlatformBrowserSession(
       {
         profileDir: directory,
-        cacheDir: directory,
-        licenseKey: 'offline-stock-fixture',
+        cacheDir: cacheDir || directory,
+        timezone: 'America/New_York',
         proxyUrl: 'http://127.0.0.1:1',
       },
       {
         ...(process.platform === 'linux'
           ? {}
           : { createDisplay: async () => ({ env: process.env, close: async () => {} }) }),
-        runtime: async () => ({
-          executable: executablePath || chromium.executablePath(),
-          get version() {
-            return launched.browser().version()
-          },
-          async launchPersistentContext(options) {
-            launched = await chromium.launchPersistentContext(options.userDataDir, {
-              ...(executablePath ? { executablePath } : {}),
-              headless: process.platform !== 'linux',
-              env: options.launchOptions.env,
-              viewport,
-              timezoneId: 'America/New_York',
-              proxy: { server: options.proxy },
-              args: ['--no-sandbox', '--start-maximized'],
-            })
-            return launched
-          },
-        }),
+        ...(executablePath
+          ? {
+              prepareProfile: async () => ({
+                executablePath,
+                fingerprintPath: path.join(directory, 'unused-test-fingerprint.json'),
+                version: 'explicit-test-browser',
+              }),
+              launch: (options) => puppeteer.launch({ ...options, headless: process.platform !== 'linux' }),
+            }
+          : {}),
       },
     )
-    const { context, page } = session
-    // Scenario-specific handlers override this catch-all. The dead proxy also
-    // prevents unmatched requests from reaching a real account or website.
-    await context.route('**/*', (route) => route.abort())
-    // Persistent-context launch can resolve before the headed window has
-    // presented a frame, especially when restoring a maximized profile.
-    await page.bringToFront()
-    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    if (viewport) await session.page.setViewport(viewport)
+    if (executablePath) await session.page.emulateTimezone('America/New_York')
+    // Scenario handlers own interception. The dead proxy prevents unmatched
+    // fixture requests from reaching an external site or account.
+    await session.page.bringToFront()
+    await session.page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+    )
     return {
       ...session,
+      get warning() {
+        return session.warning
+      },
       close,
     }
   } catch (error) {

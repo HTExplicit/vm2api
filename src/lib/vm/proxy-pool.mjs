@@ -653,13 +653,13 @@ export class ProxyPool extends EventEmitter {
    * `nodeId` (null = control plane). The generic px-local resolves to the
    * slot's own VPS; another machine's local row is refused.
    */
-  resolveLocalTarget(proxyId, nodeId) {
+  resolveLocalTarget(proxyId, nodeId, { ensure = true } = {}) {
     const target = localEgressIdForNode(nodeId || null)
     if (proxyId !== target && proxyId !== LOCAL_EGRESS_ID) {
       return { ok: false, error: 'local_proxy_node_mismatch', expected: target }
     }
     const targetNode = localEgressNodeId(target)
-    if (targetNode) this.ensureLocalForNode(targetNode)
+    if (targetNode && ensure) this.ensureLocalForNode(targetNode)
     return { ok: true, id: target }
   }
 
@@ -818,7 +818,7 @@ export class ProxyPool extends EventEmitter {
   }
 
   /** Allocate one healthy proxy with remaining capacity and bind to vmId */
-  allocateForVm(vmId, { ownerUserId = null, role = 'admin' } = {}) {
+  allocateForVm(vmId, { ownerUserId = null, role = 'admin', dryRun = false } = {}) {
     if (!vmId) return null
     if (this.state.proxies.some((p) => proxyHasVm(p, vmId) && proxyBlockedReason(p, this.state.config.ipv6_enabled)))
       return null
@@ -830,10 +830,19 @@ export class ProxyPool extends EventEmitter {
     const limit = this.bindLimit()
     const owner = normalizeOwnerId(ownerUserId)
     const localTarget = this.localTargetForVm(vmId)
-    if (localTarget !== LOCAL_EGRESS_ID && this.state.proxies.some((p) => p.id === LOCAL_EGRESS_ID)) {
-      this.ensureLocalForNode(localEgressNodeId(localTarget))
+    const proxies = this.state.proxies.slice()
+    if (
+      localTarget !== LOCAL_EGRESS_ID &&
+      proxies.some((p) => p.id === LOCAL_EGRESS_ID) &&
+      !proxies.some((p) => p.id === localTarget)
+    ) {
+      if (dryRun) proxies.push(localEgressRecord(localEgressNodeId(localTarget)))
+      else {
+        this.ensureLocalForNode(localEgressNodeId(localTarget))
+        proxies.push(this.state.proxies.find((p) => p.id === localTarget))
+      }
     }
-    const candidates = this.state.proxies.filter((p) => {
+    const candidates = proxies.filter((p) => {
       if (isLocalEgressProxy(p) && p.id !== localTarget) return false
       if (!p.enabled || p.status === 'dead' || p.status === 'fail') return false
       if (proxyBlockedReason(p, this.state.config.ipv6_enabled)) return false
@@ -847,26 +856,34 @@ export class ProxyPool extends EventEmitter {
     })
     const pick = candidates[0]
     if (!pick) return null
-    const bound = this.bind(pick.id, vmId, { role })
+    const bound = this.bind(pick.id, vmId, { role, dryRun })
     return bound.ok ? bound.proxy : null
   }
 
-  bind(proxyId, vmId, { force = false } = {}) {
+  bind(proxyId, vmId, { force = false, dryRun = false } = {}) {
     const vm = String(vmId || '').trim()
     if (isLocalEgressId(proxyId) && vm) {
       // Local egress is the slot's own VPS route: a generic px-local request lands
       // on the slot's node row; another machine's local row is refused.
-      const resolved = this.resolveLocalTarget(proxyId, this._vmNodeOrUndefined(vm) || null)
+      const resolved = this.resolveLocalTarget(proxyId, this._vmNodeOrUndefined(vm) || null, { ensure: !dryRun })
       if (!resolved.ok) return resolved
       proxyId = resolved.id
     }
-    const p = this.state.proxies.find((x) => x.id === proxyId)
+    const p =
+      this.state.proxies.find((x) => x.id === proxyId) ||
+      (dryRun && localEgressNodeId(proxyId) ? localEgressRecord(localEgressNodeId(proxyId)) : null)
     if (!p) return { ok: false, error: 'proxy_not_found' }
     // Migration moves a slot onto its node row even while that row is marked down.
     if (!force && (!p.enabled || p.status === 'dead')) return { ok: false, error: 'proxy_disabled' }
     const blocked = proxyBlockedReason(p, this.state.config.ipv6_enabled)
     if (blocked) return { ok: false, error: blocked }
     if (!vm) return { ok: false, error: 'vm_id_required' }
+    const ids = boundVmIdsOf(p)
+    const limit = this.bindLimit()
+    if (!force && !ids.includes(vm) && ids.length >= limit) {
+      return { ok: false, error: 'proxy_bind_limit', max: limit, bound_vm_ids: ids }
+    }
+    if (dryRun) return { ok: true, proxy: this.publicProxy(p), connection_changed: !ids.includes(vm) }
     for (const x of this.state.proxies) {
       if (x.id === proxyId) continue
       const ids = boundVmIdsOf(x)
@@ -876,14 +893,9 @@ export class ProxyPool extends EventEmitter {
           ids.filter((id) => id !== vm),
         )
     }
-    const ids = boundVmIdsOf(p)
     if (ids.includes(vm)) {
       this.save()
       return { ok: true, proxy: this.publicProxy(p) }
-    }
-    const limit = this.bindLimit()
-    if (!force && ids.length >= limit) {
-      return { ok: false, error: 'proxy_bind_limit', max: limit, bound_vm_ids: ids }
     }
     setBoundVmIds(p, [...ids, vm])
     this.save()
@@ -949,7 +961,7 @@ export class ProxyPool extends EventEmitter {
    * The merged record goes through socks5Record() so this shares the exact
    * validation and normalization the import path uses.
    */
-  update(proxyId, patch = {}) {
+  update(proxyId, patch = {}, { dryRun = false } = {}) {
     const p = this.state.proxies.find((x) => x.id === proxyId)
     if (!p) return { ok: false, error: 'proxy_not_found' }
     const has = (k) => Object.prototype.hasOwnProperty.call(patch, k)
@@ -971,6 +983,13 @@ export class ProxyPool extends EventEmitter {
     }
     const domainChanged = domainForward !== !!p.domain_forward
     if (!connection) {
+      if (dryRun)
+        return {
+          ok: true,
+          proxy: this.publicProxy(p),
+          connection_changed: false,
+          domain_forward_changed: domainChanged,
+        }
       p.label = label
       p.domain_forward = domainForward
       this.save()
@@ -994,6 +1013,14 @@ export class ProxyPool extends EventEmitter {
       password: has('password') ? patch.password : username ? p.password : null,
     })
     if (!next) return { ok: false, error: 'invalid_proxy' }
+    const changed = ['scheme', 'host', 'port', 'username', 'password'].some((key) => next[key] !== p[key])
+    if (dryRun)
+      return {
+        ok: true,
+        proxy: this.publicProxy(p),
+        connection_changed: changed,
+        domain_forward_changed: domainChanged,
+      }
     p.host = next.host
     p.port = next.port
     p.username = next.username
@@ -1004,8 +1031,12 @@ export class ProxyPool extends EventEmitter {
     p.raw = socksEndpoint(next.host, next.port)
     p.label = label
     p.domain_forward = domainForward
+    if (changed) {
+      // A row ID survives edits; its old exit location does not describe the new connection.
+      for (const key of Object.keys(p)) if (key.startsWith('geo_')) p[key] = null
+    }
     this.save()
-    return { ok: true, proxy: this.publicProxy(p), connection_changed: true, domain_forward_changed: domainChanged }
+    return { ok: true, proxy: this.publicProxy(p), connection_changed: changed, domain_forward_changed: domainChanged }
   }
 
   updateConfig(patch = {}) {
@@ -1635,6 +1666,40 @@ export class ProxyPool extends EventEmitter {
   timezoneForVm(vmId) {
     const p = this.state.proxies.find((x) => proxyHasVm(x, vmId))
     return p ? validTimezone(p.geo_timezone) : ''
+  }
+
+  /** Browser locale follows this connection's saved exit; no control-plane lookup fallback. */
+  async browserTimezone(proxyId, proxyUrl) {
+    if (!proxyUrl) throw Object.assign(new Error('账号未绑定可用代理'), { code: 'proxy_required', status: 400 })
+    const p = this.state.proxies.find((x) => x.id === proxyId)
+    const cached = p && validTimezone(p.geo_timezone)
+    if (cached) return cached
+    const connection = p && ['scheme', 'host', 'port', 'username', 'password'].map((key) => p[key])
+    const result = await this.geoLookup(proxyUrl, {
+      timeoutMs: this.state.config.geo_timeout_ms,
+      ipv6Mode: 'proxy',
+    })
+    if (
+      p &&
+      (!this.state.proxies.includes(p) ||
+        connection.some((value, index) => value !== p[['scheme', 'host', 'port', 'username', 'password'][index]]))
+    ) {
+      throw Object.assign(new Error('代理已变化，请重新打开浏览器'), { code: 'browser_proxy_changed', status: 409 })
+    }
+    if (p) {
+      this._applyGeoResult(
+        p,
+        result?.ok && !validTimezone(result.geo?.timezone) ? { ok: false, error: 'geo_timezone_missing' } : result,
+      )
+      this.save()
+    }
+    const timezone = validTimezone(p?.geo_timezone || (result?.ok && result.geo?.timezone))
+    if (!timezone)
+      throw Object.assign(new Error('无法确定账号代理时区，请在代理池刷新地理信息后重试'), {
+        code: 'browser_timezone_unavailable',
+        status: 502,
+      })
+    return timezone
   }
 
   _applyProbeResultInner(p, result, { cascade = true } = {}) {
