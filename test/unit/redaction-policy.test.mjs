@@ -8,14 +8,22 @@ describe('redaction policy', () => {
   })
 
   it('rejects coerced booleans and unknown fields', () => {
-    assert.throws(() => normalizeRedaction({ enabled: 'false', secrets: true, personal: true }), /enabled/)
-    assert.throws(() => normalizeRedaction({ enabled: false, secrets: true, personal: true, shape: true }), /unknown/)
+    assert.throws(() => normalizeRedaction({ enabled: 'false', secrets: true, personal: true }), {
+      message: /enabled/,
+      code: 'invalid_redaction_config',
+      status: 400,
+    })
+    assert.throws(() => normalizeRedaction({ enabled: false, secrets: true, personal: true, shape: true }), {
+      message: /unknown/,
+      code: 'invalid_redaction_config',
+      status: 400,
+    })
   })
 
   it('rejects an enabled policy with nothing to protect', () => {
     assert.throws(
       () => normalizeRedaction({ enabled: true, secrets: false, personal: false, words: ['  '], rules: [] }),
-      /requires/,
+      { message: /requires/, code: 'invalid_redaction_config', status: 400 },
     )
   })
 
@@ -48,9 +56,9 @@ describe('redaction policy', () => {
       personal: true,
       words: ['Nightjar'],
       wordsAnyCase: true,
-      rules: [{ kind: 'GATEWAY_KEY', prefix: 'oc_sk_' }],
+      rules: [{ kind: 'GATEWAY_KEY', prefix: ' oc_sk_ ' }, { prefix: ' ' }],
       kinds: { ip: true, home: false },
-      allow: [' build-01 '],
+      allow: [' build-01 ', 'build-01', ''],
     })
     const { wordsAnyCase, kinds, allow, rules } = policy
     assert.deepEqual(
