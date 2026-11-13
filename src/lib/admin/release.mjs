@@ -17,7 +17,7 @@ const execFileAsync = promisify(execFile)
 const UPGRADE_SCRIPT = fs.readFileSync(path.join(MODULE_PROJECT, 'scripts', 'panel-upgrade.sh'), 'utf8')
 
 export const GITHUB_REPO = process.env.VM2API_GITHUB_REPO?.trim() || 'HTExplicit/vm2api'
-export const INSTALL_SCRIPT_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/maint/deploy/install.sh`
+export const INSTALL_SCRIPT_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/install.sh`
 export const DOCKER_SOCK = '/var/run/docker.sock'
 
 const DEFAULT_CACHE_MS = 5 * 60 * 1000

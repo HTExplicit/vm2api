@@ -5,9 +5,9 @@
 #   查 GitHub Release → 停服务 → 换版本 → 保留配置 → 拉起。
 #
 # 安装:
-#   curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/install.sh | sudo bash
+#   curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/main/deploy/install.sh | sudo bash
 # 更新:
-#   curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/install.sh | sudo bash -s -- upgrade
+#   curl -sSL https://raw.githubusercontent.com/HTExplicit/vm2api/main/deploy/install.sh | sudo bash -s -- upgrade
 # 检查:
 #   sudo bash /opt/vm2api/deploy/install.sh check
 #
@@ -313,7 +313,7 @@ guide_changelog_error() {
   echo "    grep -q '!CHANGELOG.md' .dockerignore || echo '!CHANGELOG.md' >> .dockerignore"
   echo "    docker compose up -d --build"
   echo "  或一键升到已修复版本:"
-  echo "    curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/maint/deploy/install.sh | sudo bash -s -- upgrade"
+  echo "    curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/install.sh | sudo bash -s -- upgrade"
   echo ""
 }
 
@@ -748,7 +748,7 @@ cmd_install() {
   ok "安装完成  ${INSTALL_DIR}  @ $(local_version)"
 
   print_login_banner
-  info "以后更新: curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/maint/deploy/install.sh | sudo bash -s -- upgrade"
+  info "以后更新: curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/install.sh | sudo bash -s -- upgrade"
 }
 
 cmd_upgrade() {
@@ -757,7 +757,7 @@ cmd_upgrade() {
   resolve_host_arch
   print_banner
   if [ ! -f "${INSTALL_DIR}/docker-compose.yml" ]; then
-    err "未安装。先: curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/maint/deploy/install.sh | sudo bash"
+    err "未安装。先: curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/install.sh | sudo bash"
     exit 1
   fi
   local current tag mode
@@ -811,7 +811,7 @@ cmd_check() {
     warn "有新版本 ${tag}"
     echo ""
     echo "一键更新:"
-    echo "  curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/maint/deploy/install.sh | sudo bash -s -- upgrade"
+    echo "  curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy/install.sh | sudo bash -s -- upgrade"
     echo ""
     if [ -f "${INSTALL_DIR}/CHANGELOG.md" ]; then
       print_changelog_slice "${INSTALL_DIR}/CHANGELOG.md" "$current" "$(version_of_tag "$tag")" || true

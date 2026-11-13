@@ -3,9 +3,9 @@ name: ci
 
 on:
   push:
-    branches: [maint]
+    branches: [main]
   pull_request:
-    branches: [maint]
+    branches: [main]
   workflow_dispatch:
     inputs:
       performance:

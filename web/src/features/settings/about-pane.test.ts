@@ -50,7 +50,7 @@ describe('release check display', () => {
   it('shows the fork installer when the API has no upgrade command', () => {
     const html = renderStatus({ upgrade_command: '', source_error: 'offline' })
     expect(html).toContain(
-      'https://raw.githubusercontent.com/HTExplicit/vm2api/maint/deploy/install.sh'
+      'https://raw.githubusercontent.com/HTExplicit/vm2api/main/deploy/install.sh'
     )
     expect(html).not.toContain('dofastted/vm2api')
   })
