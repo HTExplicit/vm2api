@@ -16,6 +16,8 @@ import {
 } from '../../scripts/release-assets.mjs'
 
 const pinned = JSON.parse(fs.readFileSync(new URL('../../deploy/payload.json', import.meta.url), 'utf8'))
+const manifestAsset = pinned.files.find((file) => file.path === 'share/crag/kernels/v2/amd64/manifest.json').asset
+const encryptedAsset = pinned.files.find((file) => file.path === 'share/crag/kernels/v2/amd64/crag-v2.payload.enc').asset
 const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex')
 
 test('the complete release derives twenty-one pinned assets and image-built egress from the image', (t) => {
@@ -23,7 +25,7 @@ test('the complete release derives twenty-one pinned assets and image-built egre
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const files = pinned.files.map((file) => {
     const bytes = Buffer.from(
-      file.asset === 'crag-v2-amd64-manifest.json'
+      file.asset === manifestAsset
         ? JSON.stringify({ payload: { plaintext_sha256: 'core-commitment' } })
         : `image bytes for ${file.asset}`,
     )
@@ -35,7 +37,7 @@ test('the complete release derives twenty-one pinned assets and image-built egre
   const mapping = imageAssets(manifest)
   assert.equal(mapping.size, 22)
   assert.deepEqual(mapping.get('kin-kernel').sources, ['image-bin/kin-kernel', 'image-wrap-cli/kin-kernel.bin'])
-  assert.equal(mapping.get('crag-v2-amd64-manifest.json').sources[0], 'image-crag/kernels/v2/amd64/manifest.json')
+  assert.equal(mapping.get(manifestAsset).sources[0], 'image-crag/kernels/v2/amd64/manifest.json')
   assert.equal(mapping.get('libc.so.6').sources[0], 'image-wrap-cli/glibc239/libc.so.6')
   assert.deepEqual(mapping.get('crag-v2-licensed-amd64.tar.gz').sources, ['image-crag/crag-v2-licensed-amd64.tar.gz'])
   assert.equal(mapping.has('cc-node'), false)
@@ -47,7 +49,7 @@ test('the complete release derives twenty-one pinned assets and image-built egre
     assets: expected.map((asset) => ({ name: asset.name, size: asset.size, sha256: digestOf(asset.name) })),
   }
   const cragBuild = {
-    application_release: 'v1.4.073',
+    application_release: 'v1.4.081',
     core_plaintext_sha256: 'core-commitment',
     assets: Object.fromEntries(
       expected.filter((asset) => asset.name.startsWith('crag-v2-')).map((asset) => [asset.name, digestOf(asset.name)]),
@@ -107,7 +109,7 @@ test('release CRAG archive verifies its signature and exactly matches the image 
     )
   }
   assert.equal(verifyCragArchive(pinned, dir).payload.plaintext_sha256, signed.payload.plaintext_sha256)
-  fs.writeFileSync(path.join(dir, 'crag-v2-amd64-crag-v2.payload.enc'), 'different factory bytes')
+  fs.writeFileSync(path.join(dir, encryptedAsset), 'different factory bytes')
   assert.throws(() => verifyCragArchive(pinned, dir), /CRAG archive and image factory differ/)
 })
 

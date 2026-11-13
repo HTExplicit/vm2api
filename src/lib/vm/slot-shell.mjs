@@ -15,22 +15,19 @@ import { slotContainerName } from '../transport/rust-kernel-supervisor.mjs'
 import { slotHost } from './slot-host.mjs'
 import { isCodexVm } from './vm-kind.mjs'
 import { isKvmRuntime } from './runtime-kind.mjs'
-import {
-  LOCAL_CRAG_CLAUDE,
-  REMOTE_CRAG_CLAUDE,
-  resolveCragKernelVersion,
-  resolveKernelDataplane,
-} from './slot-engine.mjs'
 import { slotExecCmd } from './slot-exec.mjs'
 import { getVm } from './vm-registry.mjs'
 import { OFFICIAL_CLI_VERSION } from '../identity/vm-identity.mjs'
 import { ensureOfficialCredentialLink, writeWorkerCredentialFile } from '../oauth/oauth-credentials.mjs'
-import { assertAuthLoginReady, officialLoginCredentialToOauth } from '../oauth/claude-auth-login.mjs'
+import {
+  assertAuthLoginReady,
+  officialLoginCredentialToOauth,
+  resolveAuthLoginClaude,
+} from '../oauth/claude-auth-login.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
 import { ensureRemoteOfficialCredentialLink, reconcileSlotCredentials } from '../cluster/remote-slot-files.mjs'
 import { officialCcUidGid } from './vm-runtime.mjs'
-import { resolveSlotClaude } from './slot-engine.mjs'
 
 const SHELL_RE = /^\/api\/panel\/vms\/([^/]+)\/shell$/
 const TICKET_TTL_MS = 30_000
@@ -141,8 +138,8 @@ export async function adoptLiveShellLogin(projectRoot, vm, { importOauth = null,
 }
 
 /** One interactive import at a time. A tick and terminal close share it. */
-export function createLiveLoginAdoption({ adopt, onImported, onError }) {
-  let seen = ''
+export function createLiveLoginAdoption({ adopt, onImported, onError, initialSeen = '' }) {
+  let seen = initialSeen
   let pending = null
   return (report = false) => {
     if (pending) return pending
@@ -347,8 +344,8 @@ const SYSTEM_FACTS_RC = [
 ].join('\n')
 
 /**
- * Interactive shell for one panel session. `claude` is this slot's kernel
- * binary: cli-node, or the CRAG package's native claude after a v2 switch.
+ * Interactive shell for one panel session. `claude` uses the package's native
+ * client independently of the slot's selected inference kernel.
  * Not whatever `claude` is on PATH. The rcfile is session-only; the slot's
  * own ~/.bashrc is sourced, not rewritten. Startup prints a live 系统特征
  * block: slot computer files and cgroup limits first, then guest /proc and
@@ -356,11 +353,7 @@ const SYSTEM_FACTS_RC = [
  * unknown/未采集 and must not prevent the prompt.
  */
 export function terminalClaudeBin(vm) {
-  const host = slotHost(vm)
-  const dataplane = resolveKernelDataplane(vm) || 'wrap'
-  if (dataplane === 'crag' && resolveCragKernelVersion(vm) === 'v2' && !isKvmRuntime(vm) && !host.native)
-    return host.bakedKernel ? REMOTE_CRAG_CLAUDE : LOCAL_CRAG_CLAUDE
-  return host.bins.cli
+  return resolveAuthLoginClaude(vm).bin
 }
 
 /** @returns {{ cmd: string[], rc: string }} */
@@ -370,7 +363,7 @@ export function panelShellLaunch(cliBin, { native = false } = {}) {
   const q = `'${bin.replace(/'/g, `'\\''`)}'`
   const rc = [
     'if [ -n "${BASH_VERSION:-}" ]; then [ -f /etc/bash.bashrc ] && . /etc/bash.bashrc; [ -f ~/.bashrc ] && . ~/.bashrc; fi',
-    'unalias claude usage /usage 2>/dev/null || true',
+    'unalias claude cc usage /usage 2>/dev/null || true',
     // Official CLI reads ~/.claude/.credentials.json and, unless CLAUDE_CONFIG_DIR
     // is set, ~/.claude.json. Slot tokens already live in .claude; point the
     // session there and expose the nested account file at the home path.
@@ -383,13 +376,13 @@ export function panelShellLaunch(cliBin, { native = false } = {}) {
     'mkdir -p "$CLAUDE_CONFIG_DIR"',
     'if [ -f "$CLAUDE_CONFIG_DIR/credentials.json" ] && [ ! -e "$CLAUDE_CONFIG_DIR/.credentials.json" ]; then ln -s credentials.json "$CLAUDE_CONFIG_DIR/.credentials.json" 2>/dev/null || true; fi',
     'if [ ! -e "$HOME/.claude.json" ] && [ -f "$CLAUDE_CONFIG_DIR/.claude.json" ]; then ln -s .claude/.claude.json "$HOME/.claude.json" 2>/dev/null || true; fi',
-    `claude() { export HOME="\${HOME:-/home/kincli}"; export CLAUDE_CONFIG_DIR="\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}"; if [ -x ${q} ]; then ${q} "$@"; else echo "Claude CLI 未安装" >&2; return 127; fi; }`,
+    `claude() { case "$1:$2" in auth:login|setup-token:*) echo "请在面板账号页完成换票，再使用 /sync 同步凭证" >&2; return 2 ;; esac; export HOME="\${HOME:-/home/kincli}"; export CLAUDE_CONFIG_DIR="\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}"; if [ -x ${q} ]; then ${q} "$@"; else echo "原生 Claude Code 未安装，请同步客户端" >&2; return 127; fi; }`,
+    'cc() { claude "$@"; }',
     'usage() { claude /usage "$@"; }',
     'if [ -n "${BASH_VERSION:-}" ]; then eval \'/usage() { usage "$@"; }\'; fi',
     // OSC 133 distinguishes a real shell prompt from a normal-buffer CLI TUI.
     'if [ -n "${BASH_VERSION:-}" ]; then PS1=\'\\[\\e]133;A\\a\\]\'"${PS1:-$ }"; PS0=$(printf \'\\033]133;C\\007\'); else PS1="$(printf \'\\033]133;A\\007\')${PS1:-$ }"; fi',
     SYSTEM_FACTS_RC,
-    'if [ -n "${KIN_PANEL_LOGIN:-}" ]; then printf "\\n"; claude auth login; fi',
     'rm -f "$KIN_PANEL_RCFILE"',
   ].join('\n')
   return {
@@ -403,7 +396,7 @@ export function panelShellLaunch(cliBin, { native = false } = {}) {
 }
 // Closing the hijacked stream does not end a TTY exec: bash would linger in the
 // slot. Every process of the session inherits the marker, so HUP them by it.
-const REAP_SCRIPT = `for d in /proc/[0-9]*; do tr '\\0' '\\n' < "$d/environ" 2>/dev/null | grep -qx "${SESSION_ENV}=$1" || continue; cmd=$(tr '\\0' ' ' < "$d/cmdline" 2>/dev/null || true); case "$cmd" in *cli-node*|*${LOCAL_CRAG_CLAUDE.slice(LOCAL_CRAG_CLAUDE.lastIndexOf('claude-code-'))}*) kill -KILL "\${d#/proc/}" 2>/dev/null || true ;; *) kill -HUP "\${d#/proc/}" 2>/dev/null || true ;; esac; done; exit 0`
+const REAP_SCRIPT = `for d in /proc/[0-9]*; do tr '\\0' '\\n' < "$d/environ" 2>/dev/null | grep -qx "${SESSION_ENV}=$1" || continue; cmd=$(tr '\\0' ' ' < "$d/cmdline" 2>/dev/null || true); case "$cmd" in *cli-node*|*"$2"*) kill -KILL "\${d#/proc/}" 2>/dev/null || true ;; *) kill -HUP "\${d#/proc/}" 2>/dev/null || true ;; esac; done; exit 0`
 
 function clampInt(v, lo, hi, dflt) {
   const n = Number.parseInt(v, 10)
@@ -420,7 +413,6 @@ export function createSlotShell({
   routing = () => ({}),
   logger = console,
   importOauth = null,
-  authLoginReady = null,
   upgradeLoginReady = null,
 } = {}) {
   const tickets = new Map()
@@ -432,19 +424,13 @@ export function createSlotShell({
     const vm = getVm(projectRoot, vmId)
     if (!vm) return refuse(404, 'vm_not_found', 'vm not found')
     if (isCodexVm(vm)) return refuse(409, 'no_container', 'GPT 槽没有容器，无法打开终端')
-    if (login) {
-      try {
-        await (authLoginReady || assertAuthLoginReady)(projectRoot, vm, { routing: routing() })
-      } catch (err) {
-        return refuse(409, err.code || 'auth_login_not_ready', err.message)
-      }
-    }
+    if (login) return refuse(409, 'panel_login_required', '请在面板账号页生成授权链接并完成换票')
     if (sessions >= MAX_SESSIONS) return refuse(429, 'shell_limit', `终端会话已达上限 ${MAX_SESSIONS}`)
     const now = Date.now()
     for (const [t, v] of tickets) if (v.exp <= now) tickets.delete(t)
     if (tickets.size >= MAX_TICKETS) return refuse(429, 'shell_limit', '终端 ticket 过多，请稍后再试')
     const ticket = crypto.randomBytes(24).toString('base64url')
-    tickets.set(ticket, { vmId: vm.id, exp: now + TICKET_TTL_MS, login })
+    tickets.set(ticket, { vmId: vm.id, exp: now + TICKET_TTL_MS, login: false })
     return { ok: true, ticket, expires_in: TICKET_TTL_MS / 1000 }
   }
 
@@ -494,6 +480,7 @@ export function createSlotShell({
         cols: clampInt(url.searchParams.get('cols'), 10, 500, 80),
         rows: clampInt(url.searchParams.get('rows'), 5, 200, 24),
         login,
+        cliBin: entry.cliBin,
       }
       wss.handleUpgrade(req, socket, head, (ws) => attach(ws, vm, size))
     }
@@ -501,7 +488,7 @@ export function createSlotShell({
       accept()
       return true
     }
-    ;(upgradeLoginReady || authLoginReady || assertAuthLoginReady)(projectRoot, vm, { routing: routing() }).then(
+    ;(upgradeLoginReady || authLoginReady || assertAuthLoginReady)(projectRoot, vm, { cliBin: entry.cliBin }).then(
       accept,
       (err) =>
         rejectUpgrade(
@@ -522,6 +509,8 @@ export function createSlotShell({
     let connect = null
     let session = null
     let closed = false
+    let initialRefresh = ''
+    let sessionCli = size.cliBin || terminalClaudeBin(vm)
     let released = false
     const release = () => {
       if (released) return
@@ -552,7 +541,7 @@ export function createSlotShell({
       else if (pending.length < 256) pending.push(msg)
     })
     const reap = () => {
-      const { Cmd, User } = slotExecCmd(vm, ['/bin/sh', '-c', REAP_SCRIPT, 'reap', token], {
+      const { Cmd, User } = slotExecCmd(vm, ['/bin/sh', '-c', REAP_SCRIPT, 'reap', token, sessionCli], {
         detach: true,
         user: isKvmRuntime(vm) ? '0' : undefined,
       })
@@ -569,8 +558,14 @@ export function createSlotShell({
     })
     try {
       connect = slotHost(vm).dockerApi()
-      if (size.login) await preparePanelShellLogin(projectRoot, vm)
-      const selected = resolveSlotClaude(vm, routing(), slotHost(vm))
+      if (size.login) {
+        await preparePanelShellLogin(projectRoot, vm)
+        const doc = readJsonFile(path.join(projectRoot, 'vms', vm.id, 'cli-home', '.claude', '.credentials.json'))
+        initialRefresh = String(doc?.claudeAiOauth?.refreshToken || doc?.claudeAiOauth?.refresh_token || '')
+      }
+      const selected = resolveAuthLoginClaude(vm)
+      await assertAuthLoginReady(projectRoot, vm, { cliBin: selected.bin })
+      sessionCli = selected.bin
       const launch = panelShellLaunch(selected.bin, selected)
       const env = ['TERM=xterm-256color', `${SESSION_ENV}=${token}`, `${RC_ENV}=${launch.rc}`]
       // guest-exec 经 root SSH 降权后仍继承 /root，终端须显式切换到槽用户目录。
@@ -603,6 +598,7 @@ export function createSlotShell({
     // ConsoleSize on exec start is API >= 1.42; resize covers older daemons.
     resize(size.cols, size.rows)
     const adoptLive = createLiveLoginAdoption({
+      initialSeen: initialRefresh,
       adopt: (seen) => {
         if (!size.login) return { imported: false, refresh: seen }
         return adoptLiveShellLogin(projectRoot, vm, {

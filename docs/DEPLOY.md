@@ -42,7 +42,7 @@ CRAG V2 的资产、工作区和设备授权目录分别使用 Linux 私有 run 
 
 ### CRAG V2 二进制更新
 
-CRAG 签名加密包的附件名为 `crag-v2-licensed-amd64.tar.gz`，包含原版 Claude Code 2.1.321。若 `deploy/payload.json` 固定了 `crag_release`，不指定 tag 时从对应 vm2api Release 拉取配套包；旧版本及显式指定的其他 tag 仍走供应仓 `dofastted/claude-code`。`manifest.version` 的 `v2` 是协议族，实际发行版本见缓存指针的 `release.tag`。原生进程使用非 bare 的 CC TUI。
+CRAG 签名加密包的附件名为 `crag-v2-licensed-amd64.tar.gz`，包含原版 Claude Code 2.1.321。`deploy/payload.json` 的 `crag_release` 是独立的供应仓 tag（例如 `v2.8.16`），不跟随 vm2api 应用版本；未指定 tag 时从 `dofastted/claude-code` 拉取该独立版本。`manifest.version` 的 `v2` 是协议族，实际发行版本见缓存指针的 `release.tag`。原生进程使用非 bare 的 CC TUI。
 
 已有可信出厂包后，可在服务器独立更新，不升级或重启控制面：
 
@@ -56,7 +56,7 @@ sudo bash /opt/vm2api/deploy/install.sh crag-update
 
 更新顺序：供应仓完整包下载和原信任锚签名/成员 SHA/ELF 校验 → 原子切换下载指针 → 全槽清点 → 检查已有 CRAG V2 槽 → 有变化时以唯一标记暂停调度并排空在途请求 → 确认原生 `active_requests`、`queued`、`continuations` 全为 0 → 受管同步/必要时重载对应槽 → 核验实际运行 memfd SHA 与签名 payload 承诺一致。安装目录哈希相同不能视为已更新运行进程。
 
-不改变内核选择：CRAG V2 槽更新运行内核；已停止槽只更新磁盘，不开机；非 CRAG 本地槽若留有 `crag-v2` 缓存，仅原子更新该目录，不碰 wrapper、配置和进程；无副本的槽、Codex 槽不安装 CRAG。非 CRAG 集群槽标为 skip，不宣称替换其远端文件；当前物化器不支持的集群/KVM CRAG V2 目标在下载/停调度前失败。报告逐槽列出 `sync` / `cache` / `skip`。
+不改变内核选择：本机 Docker/KVM 的 CRAG V2 槽更新运行内核；已停止槽只更新磁盘，不开机；非 CRAG 本地槽若留有 `crag-v2` 缓存，仅原子更新该目录，不碰 wrapper、配置和进程；无副本的槽、Codex 槽不安装 CRAG。非 CRAG 集群槽标为 skip；选用 CRAG 的集群槽须通过内核页指定目标安装或重装，独立更新器在下载和停调度前拒绝处理。报告逐槽列出 `sync` / `cache` / `skip`，KVM 操作见 [CRAG KVM 部署](crag-kvm.md)。
 
 下载或信任校验失败不覆盖旧包、不停槽；未完成工具续接时拒绝强制重启。更新锁为 `share/crag/kernels/v2/.update-lock`，并发更新失败；强杀后须先确认无更新进程再清理锁。调度 hold 使用本次唯一 `crag_update_*` 标记，仅完整成功后恢复自己的 hold；取得 hold 后失败则保留该标记，按错误报告核对包与槽状态后定向恢复，不清除其他操作的 hold。断电/强杀不承诺自动恢复。失败返回非零，不伪装成功。回滚用保留的前一完整包，仍须验证原发行公钥、空闲/续接状态并显式重载；禁止轮换授权身份、用 legacy ELF 降级或仅改指针后宣称已回滚。
 

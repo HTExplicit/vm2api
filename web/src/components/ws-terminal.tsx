@@ -57,7 +57,7 @@ function withBuiltins(own: SlashCommand[]): SlashCommand[] {
  * 30s 一次性 ticket。传入 `commands` 时启用 `/` 快捷指令与按钮栏。
  */
 export type LoginTerminalHandle = {
-  paste: (text: string) => void
+  paste: (text: string) => boolean
   focus: () => void
 }
 
@@ -69,6 +69,9 @@ export const WsTerminal = forwardRef<
     commands?: SlashCommand[]
     startupCommand?: string
     officialLogin?: boolean
+    loginCliBin?: string
+    onCliBin?: (path: string) => void
+    onConnectionChange?: (connected: boolean) => void
     fontSize?: number
     onLogin?: () => void
     onAuthUrl?: (url: string) => void
@@ -80,6 +83,9 @@ export const WsTerminal = forwardRef<
     commands,
     startupCommand,
     officialLogin,
+    loginCliBin,
+    onCliBin,
+    onConnectionChange,
     fontSize,
     onLogin,
     onAuthUrl,
@@ -88,6 +94,7 @@ export const WsTerminal = forwardRef<
 ) {
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
+  const connectedRef = useRef(false)
   const sendRef = useRef<(data: string) => void>(() => {})
   const pendingMessagesRef = useRef<string[]>([])
   const lineRef = useRef<SlashLine>(SLASH_IDLE)
@@ -111,8 +118,8 @@ export const WsTerminal = forwardRef<
     const term = termRef.current
     const cmd = withBuiltins(commandsRef.current).find((c) => c.name === name)
     if (!term || !cmd || busyRef.current) return
-    if (term.buffer.active.type !== 'normal') {
-      setNote('全屏程序运行中，退出后再执行快捷指令')
+    if (term.buffer.active.type !== 'normal' || !shellPromptRef.current) {
+      setNote('请先退出前台程序，返回 shell 后再执行快捷指令')
       return
     }
     const line = lineRef.current
@@ -159,6 +166,10 @@ export const WsTerminal = forwardRef<
   onLoginRef.current = onLogin
   const onAuthUrlRef = useRef(onAuthUrl)
   onAuthUrlRef.current = onAuthUrl
+  const onCliBinRef = useRef(onCliBin)
+  onCliBinRef.current = onCliBin
+  const onConnectionRef = useRef(onConnectionChange)
+  onConnectionRef.current = onConnectionChange
   const seenUrl = useRef('')
   const urlTail = useRef('')
   const captureUrl = (raw: string) => {
@@ -184,6 +195,7 @@ export const WsTerminal = forwardRef<
     shellPromptRef.current = false
     term.parser.registerOscHandler(133, (data) => {
       shellPromptRef.current = data === 'A'
+      if (data === 'A') lineRef.current = SLASH_IDLE
       return true
     })
     term.parser.registerOscHandler(52, (data) => {
@@ -228,7 +240,11 @@ export const WsTerminal = forwardRef<
     termRef.current = term
     lineRef.current = SLASH_IDLE
     setPhase('connecting')
+    connectedRef.current = false
+    onConnectionRef.current?.(false)
     setNote('')
+    seenUrl.current = ''
+    urlTail.current = ''
 
     let ws: WebSocket | null = null
     let disposed = false
@@ -260,7 +276,7 @@ export const WsTerminal = forwardRef<
         withBuiltins(commandsRef.current)
           .filter((c) => !c.input || shellPromptRef.current)
           .map((c) => c.name),
-        term.buffer.active.type === 'normal'
+        term.buffer.active.type === 'normal' && shellPromptRef.current
       )
       lineRef.current = step.line
       for (const a of step.actions) {
@@ -274,12 +290,15 @@ export const WsTerminal = forwardRef<
     )
     const observer = new ResizeObserver(fitTerminal)
     observer.observe(host)
-    api<{ ticket: string }>(ticketPath, {
+    api<{ ticket: string; cli_bin?: string }>(ticketPath, {
       method: 'POST',
-      body: officialLogin ? JSON.stringify({ login: true }) : undefined,
+      body: officialLogin
+        ? JSON.stringify({ login: true, cli_bin: loginCliBin || '' })
+        : undefined,
     })
-      .then(({ ticket }) => {
+      .then(({ ticket, cli_bin }) => {
         if (disposed) return
+        if (cli_bin) onCliBinRef.current?.(cli_bin)
         const base = new URL(apiBase() || window.location.origin)
         base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:'
         base.pathname = socketPath
@@ -292,6 +311,8 @@ export const WsTerminal = forwardRef<
         ws = new WebSocket(base.toString())
         ws.binaryType = 'arraybuffer'
         ws.onopen = () => {
+          connectedRef.current = true
+          onConnectionRef.current?.(true)
           setPhase('open')
           for (const payload of pendingMessagesRef.current) ws?.send(payload)
           pendingMessagesRef.current = []
@@ -316,6 +337,9 @@ export const WsTerminal = forwardRef<
           if (msg.t === 'error') setNote(msg.message || '终端错误')
         }
         ws.onclose = () => {
+          if (disposed) return
+          connectedRef.current = false
+          onConnectionRef.current?.(false)
           pendingMessagesRef.current = []
           if (!disposed) setPhase('closed')
         }
@@ -328,6 +352,8 @@ export const WsTerminal = forwardRef<
       })
 
     return () => {
+      connectedRef.current = false
+      onConnectionRef.current?.(false)
       disposed = true
       cancelAnimationFrame(initialFit)
       observer.disconnect()
@@ -346,6 +372,7 @@ export const WsTerminal = forwardRef<
     execute,
     startupCommand,
     officialLogin,
+    loginCliBin,
     fontSize,
   ])
 
@@ -354,9 +381,11 @@ export const WsTerminal = forwardRef<
     () => ({
       paste(text) {
         const value = String(text || '')
-        if (!value || !termRef.current) return
-        termRef.current.paste(value.endsWith('\n') ? value : `${value}\n`)
+        if (!value || !termRef.current || !connectedRef.current) return false
+        termRef.current.paste(value.replace(/[\r\n]+$/, ''))
+        sendRef.current('\r')
         termRef.current.focus()
+        return true
       },
       focus() {
         termRef.current?.focus()
@@ -366,7 +395,9 @@ export const WsTerminal = forwardRef<
   )
   return (
     <div className='flex h-full min-h-0 flex-col gap-2'>
-      <div className='flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground'>
+      <div
+        className={`flex flex-wrap items-center justify-between gap-2 text-xs ${officialLogin ? 'text-zinc-400' : 'text-muted-foreground'}`}
+      >
         <span>
           {phase === 'connecting'
             ? '连接中…'
@@ -405,7 +436,7 @@ export const WsTerminal = forwardRef<
       </div>
       <div
         ref={hostRef}
-        className='h-full min-h-0 min-w-0 flex-1 overflow-hidden rounded-md border bg-[#0b0d10] p-1'
+        className={`h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-[#0b0d10] p-1 ${officialLogin ? '' : 'rounded-md border'}`}
       />
     </div>
   )

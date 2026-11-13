@@ -55,7 +55,7 @@ SSH 扩展槽同样由控制面经绑定出口换票。拿到授权后，提交�
 8. `invalid_grant` 先重读 generation，识别其他路径已完成的竞争刷新。
 9. 上游 401 **不** force-refresh（端点拒票 ≠ 过期；硬刷会把还能用的 grant 烧成 `invalid_grant`）。
 10. 目录 / 模型列表 **不** hop worker `/v1/models`。
-11. 槽内 cli-node（kernel 拉起的 native 槽、面板运维终端里的 `claude`、初装 hello / `/usage` / 常驻、`setup-token`）带 `CLAUDE_CODE_HOST_REFRESH=1` 和 `CLAUDE_CODE_VERSION`：临期或 401 时只重读 `credentials.json`，不请求 token 端点，不写回凭证。否则它与 host 同用一个轮换 RT，后到的一方拿 `invalid_grant`，且其写回会丢掉 `kinGeneration`。官方 Claude 2.1.321 不读这个变量。CRAG v2 拉起的那个进程会在连上 `platform.claude.com:443` / `console.anthropic.com:443` 后先写 `KIN-BLOCK\n`；kin-egress 看到标记就关掉连接，不向 SOCKS 拨号。登录、`kin-oauth-auth` 和 `kin-worker oauth refresh` 不写这个标记，换票仍走原来的出口。
+11. 槽内 cli-node（kernel 推理、初装 hello / `/usage` / 常驻、`setup-token`）带 `CLAUDE_CODE_HOST_REFRESH=1` 和 `CLAUDE_CODE_VERSION`：临期或 401 时只重读 `credentials.json`，不请求 token 端点，不写回凭证。否则它与 host 同用一个轮换 RT，后到的一方拿 `invalid_grant`，且其写回会丢掉 `kinGeneration`。运维终端使用官方原生 Claude 2.1.321，它不读这个变量，终端不覆盖其版本号。CRAG v2 拉起的那个进程会在连上 `platform.claude.com:443` / `console.anthropic.com:443` 后先写 `KIN-BLOCK\n`；kin-egress 看到标记就关掉连接，不向 SOCKS 拨号。`kin-oauth-auth` 和 `kin-worker oauth refresh` 不写这个标记，面板换票仍走原来的出口。
 
 过期且无 refresh 的槽不入调度池。面板「网页可用」与调度选槽同一套资格。
 
@@ -69,6 +69,17 @@ SSH 扩展槽同样由控制面经绑定出口换票。拿到授权后，提交�
 - 遥测 sidecar 的 event_logging / eval（若开启）
 
 代理缺失或连接失败时槽位 fail closed，不允许 VPS 直连 Anthropic。
+
+## 面板换票与原生 Claude Code 终端
+
+所有授权换票在账号面板完成。「OAuth → Claude Code 授权」使用面板管理的 PKCE 会话：生成链接、浏览器授权、粘贴授权码。凭证导入后自动同步给 VM 客户端；同步失败会返回错误，不显示完成。
+
+- 原生客户端的 `.credentials.json` 链接到面板管理的 `credentials.json`。显式导入以面板新凭证为准，不让旧原生客户端留下的文件覆盖新账号。远程槽导入时先推送凭证；后续手动同步保留节点已轮换的凭证，再修复原生客户端链接。
+- 运维终端的 `/sync` 可重新同步凭证。它不触发 OAuth 换票、不输出 token；同步完成后重新启动 `claude` 或 `cc` 使用当前凭证。
+- 终端中的 `claude` / `cc` 始终使用包内原生 CC。本地 Docker / KVM 槽使用 `/home/kincli/.kin/crag-v2/claude-code-2.1.321/claude`，集群 Docker 槽使用 `/opt/kin-live/crag-v2/claude-code-2.1.321/claude`。本地缺少程序时从已校验发布包暂存原生客户端；缺包或不可执行会报错。
+- 推理内核仍使用各自客户端：wrap 使用 cli-node，cc 使用 cc-node，CRAG v2 使用对应包内原生 CC。切换内核会重建调用配置，终端面板随切换重新连接。
+- `/usage`、`/probe`、`/wrap`、`/reload`、`/sync`、`/help`、`/clear` 在 shell 提示符处可用，也支持粘贴后按回车。原生 CC 或其它前台程序运行时，斜杠输入直接交给该程序。
+- 旧 `login: true` 终端票据返回 `panel_login_required`；终端包装命令 `claude auth login` / `claude setup-token` 提示前往面板换票。
 
 ## 官方 Claude Code 初装
 

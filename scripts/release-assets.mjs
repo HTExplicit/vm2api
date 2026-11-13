@@ -80,7 +80,8 @@ export function writeProvenance({ manifest, dir, image, sourceCommit, upstreamBu
   for (const asset of assets.filter((item) => item.name.startsWith('crag-v2-'))) {
     assert.equal(asset.digest, `sha256:${cragBuild.assets[asset.name]}`, `${asset.name}: CRAG provenance mismatch`)
   }
-  const signedManifest = JSON.parse(fs.readFileSync(path.join(dir, 'crag-v2-amd64-manifest.json'), 'utf8'))
+  const manifestAsset = manifest.files.find((file) => file.path === 'share/crag/kernels/v2/amd64/manifest.json').asset
+  const signedManifest = JSON.parse(fs.readFileSync(path.join(dir, manifestAsset), 'utf8'))
   assert.equal(
     signedManifest.payload.plaintext_sha256,
     cragBuild.core_plaintext_sha256,
@@ -170,7 +171,7 @@ function main() {
       image: opts.image,
       sourceCommit: capture('git', ['rev-parse', 'HEAD']),
       upstreamBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.072-binaries.json'), 'utf8')),
-      cragBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.073-crag.json'), 'utf8')),
+      cragBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.081-crag.json'), 'utf8')),
       assets: [...expected],
     }),
   )

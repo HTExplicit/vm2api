@@ -208,7 +208,7 @@ afterEach(() => {
 
 describe('Claude manual credential entry after browser login removal', () => {
   it.each(['import', 'detail', 'reauth'] as const)(
-    'keeps Cookie, manual links and the official terminal without a browser entry on %s',
+    'keeps Cookie and panel-owned OAuth links without a browser or login terminal on %s',
     async (surface) => {
       render(surface)
       if (surface === 'import') {
@@ -235,16 +235,23 @@ describe('Claude manual credential entry after browser login removal', () => {
       )
       expect(html).toContain('完整授权码，含 # 后半段')
       expect(html).not.toContain('浏览器登录')
-      click('Claude Code')
+      click('Claude Code 授权')
       html = render(surface)
-      expect(html).toContain('打开官方登录终端')
+      expect(html).toContain('生成授权链接')
       expect(html).not.toContain('浏览器登录')
-      click('打开官方登录终端')
+      expect(html).not.toContain('打开官方登录终端')
+      click('生成授权链接')
       await new Promise((resolve) => setTimeout(resolve, 0))
       html = render(surface)
-      expect(controls.terminal).toHaveBeenCalledWith(vm)
-      expect(html).toContain('Claude Code 登录')
-      expect(html).toContain('回填 callback code')
+      expect(controls.api).toHaveBeenLastCalledWith(
+        `/api/panel/vms/${vm.id}/oauth/generate-auth-url`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ flavor: 'claude_code', force: false }),
+        }
+      )
+      expect(controls.terminal).not.toHaveBeenCalled()
+      expect(html).toContain('完整授权码，含 # 后半段')
       expect(html).not.toContain('浏览器登录')
       expect(
         controls.api.mock.calls.some(([path]) => /\/browser(?:\/|$)/.test(path))

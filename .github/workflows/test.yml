@@ -75,6 +75,7 @@ jobs:
             test/unit/auto-mode-reminder.test.mjs \
             test/unit/auto-mode-api.test.mjs \
             test/unit/claude-auth-login.test.mjs \
+            test/unit/client-credentials-sync.test.mjs \
             test/unit/oauth-auth-url.test.mjs \
             test/unit/oauth-credentials.test.mjs \
             test/unit/slot-oauth.test.mjs \
@@ -231,6 +232,7 @@ jobs:
             test/unit/vm-test-chat-billing.test.mjs \
             test/unit/kernel-catalog.test.mjs \
             test/unit/kernel-install.test.mjs \
+            test/unit/kernel-switch-recovery.test.mjs \
             test/unit/crag-update.test.mjs \
             test/unit/crag-factory.test.mjs \
             test/unit/docker-memory-api.test.mjs \

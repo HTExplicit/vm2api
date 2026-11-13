@@ -1,7 +1,7 @@
 {
   "repo": "dofastted/vm2api",
-  "release": "v1.4.073",
-  "crag_release": "v1.4.7301",
+  "release": "v1.4.077",
+  "crag_release": "v2.8.16",
   "files": [
     {
       "path": "bin/kin-kernel",
@@ -84,8 +84,9 @@
     {
       "path": "share/crag/crag-v2-licensed-amd64.tar.gz",
       "asset": "crag-v2-licensed-amd64.tar.gz",
-      "size": 167322277,
-      "sha256": "227038e2b3971c9b1e99f11c87edda662cd9b42f99103b33fc065383b7d152a4"
+      "release": "v1.4.081",
+      "size": 167390946,
+      "sha256": "52f602bb0e1074dfd2685f69d045cc22590690a9c0cfc1b83ae133d943e4faad"
     },
     {
       "path": "share/crag/kernels/v2/amd64/LICENSES.txt",
@@ -113,15 +114,15 @@
     },
     {
       "path": "share/crag/kernels/v2/amd64/crag-v2",
-      "asset": "crag-v2-amd64-crag-v2",
+      "asset": "crag-v2-amd64-v2.8.16-crag-v2",
       "size": 854200,
-      "sha256": "1dc535dff9894591e8aeeea287972661e43251715a23f2e9612e0871812c12fb"
+      "sha256": "205157e3cbbc6600b1a019fdf389d547ddacf6e764606a8e2b8746f931601335"
     },
     {
       "path": "share/crag/kernels/v2/amd64/crag-v2.payload.enc",
-      "asset": "crag-v2-amd64-crag-v2.payload.enc",
-      "size": 9512908,
-      "sha256": "dba8dbb3c1b6ddf1bf13b831ed8bb839f8aac6db7d2429b4640337d2f750030a"
+      "asset": "crag-v2-amd64-v2.8.16-crag-v2.payload.enc",
+      "size": 9582172,
+      "sha256": "962e3c4a33ab1652fd3212f240e5299cc738b09f7c71d0baa80d4fed3a731726"
     },
     {
       "path": "share/crag/kernels/v2/amd64/kernel.json.example",
@@ -131,9 +132,9 @@
     },
     {
       "path": "share/crag/kernels/v2/amd64/manifest.json",
-      "asset": "crag-v2-amd64-manifest.json",
+      "asset": "crag-v2-amd64-v2.8.16-manifest.json",
       "size": 2467,
-      "sha256": "e1565454001be4c93b7472d0b147c6f86cd737d6fcfc18af6a66f006649c764f"
+      "sha256": "d9dc5e0b43ea46d273fbb4450e1da56482fe6d19e04db97b02e758f403b78fc2"
     }
   ]
 }

@@ -498,7 +498,7 @@ test('billing attribution leaves caller-supplied billing unchanged', () => {
   assert.equal(out.system[0].text, caller)
 })
 
-test('missing billing receives cli and turn indexes; caller billing keeps entrypoint', () => {
+test('missing billing uses the supplied version and session; caller billing stays unchanged', () => {
   const messages = [
     { role: 'user', content: 'ping' },
     { role: 'assistant', content: 'pong' },
@@ -545,7 +545,7 @@ test('routing.json cc_entrypoint reaches the rendered template billing without a
   }
 })
 
-test('one routing read keeps billing, system identity and env on the same entrypoint', () => {
+test('routing entrypoint switches rendered billing between cli and sdk-cli', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-entrypoint-sync-'))
   const file = path.join(dir, 'routing.json')
   const body = { model: 'claude-opus-5-5', messages: [{ role: 'user', content: 'hello' }] }
@@ -560,24 +560,18 @@ test('one routing read keeps billing, system identity and env on the same entryp
       forceConfigured: true,
       routingFile: file,
       mode: 'official_full',
-      entrypoint,
     })
   }
   try {
-    const cli = render('cli')
-    assert.match(cli.system[0].text, /cc_entrypoint=cli;/)
-    assert.equal(cli.system[1].text, "You are Claude Code, Anthropic's official CLI for Claude.")
-    assert.equal(
-      cli.system
-        .map((block) => block.text)
-        .join('\n')
-        .includes('! <command>'),
-      false,
-    )
-    const sdk = render('sdk-cli')
-    assert.match(sdk.system[0].text, /cc_entrypoint=sdk-cli;/)
-    assert.equal(sdk.system[1].text, OFFICIAL_303_AGENT_IDENTITY)
-    assert.doesNotMatch(sdk.system.map((block) => block.text).join('\n'), /! <command>/)
+    for (const entrypoint of ['cli', 'sdk-cli', 'cli']) {
+      const out = render(entrypoint)
+      assert.match(out.system[0].text, new RegExp(`cc_entrypoint=${entrypoint};`))
+      assert.equal(
+        out.system[1].text,
+        entrypoint === 'cli' ? "You are Claude Code, Anthropic's official CLI for Claude." : OFFICIAL_303_AGENT_IDENTITY,
+      )
+      assert.doesNotMatch(out.system.map((block) => block.text).join('\n'), /! <command>/)
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
