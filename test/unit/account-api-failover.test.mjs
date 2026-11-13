@@ -237,12 +237,15 @@ test('local HTTP rejection switches selected account without losing native tools
   }
 })
 
-test('local redaction refusal does not dispatch, switch or fault an account', async () => {
+for (const [status, code] of [
+  [409, 'redaction_signed_history_requires_reset'],
+  [413, 'redaction_body_too_large'],
+]) test(`local redaction ${status} does not dispatch, switch or fault an account`, async () => {
   const f = fixture()
   const policy = normalizeRedaction({ enabled: true, secrets: true, personal: false, words: [], rules: [] })
   publishRedactionForTests({ enabled: true, ready: true, policy, client: {
     async mask() {
-      throw Object.assign(new Error('signed history'), { code: 'redaction_signed_history_requires_reset', status: 409 })
+      throw Object.assign(new Error('local redaction refusal'), { code, status })
     },
   } })
   try {
@@ -253,8 +256,10 @@ test('local redaction refusal does not dispatch, switch or fault an account', as
       redactionSession: 'client-session',
       forwardImpl() { assert.fail('redaction refusal must precede dispatch') },
     })
-    assert.equal(result.status, 409)
-    assert.equal(result.body.error.code, 'redaction_signed_history_requires_reset')
+    assert.equal(result.status, status)
+    assert.equal(result.body.error.code, code)
+    assert.equal(result.body.error.type, status === 413 ? 'invalid_request_error' : 'api_error')
+    assert.deepEqual(result.body.error.details, status === 413 ? { retryable: false } : undefined)
     assert.equal(result.transportError, false)
     assert.equal(result.attemptCount, 0)
     assert.equal(result.upstreamExecutions, 0)

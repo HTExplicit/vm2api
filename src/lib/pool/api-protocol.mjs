@@ -498,7 +498,14 @@ async function runApiAttempt(options) {
       ok: false,
       status: error.status || 503,
       via: 'redaction',
-      body: { error: { type: 'api_error', code: error.code, message: String(error.message).slice(0, 300) } },
+      body: {
+        error: {
+          type: error.status === 413 ? 'invalid_request_error' : 'api_error',
+          code: error.code,
+          message: String(error.message).slice(0, 300),
+          ...(error.status === 413 ? { details: { retryable: false } } : {}),
+        },
+      },
       terminalState: options.res?.headersSent ? 'incomplete' : 'rejected',
       committed: !!options.res?.headersSent,
       transportError: false,
@@ -592,7 +599,9 @@ async function runApiAttemptBody({
   }
   if (requestContext) Object.assign(body, prepareClassifierBody(body))
   const redactionState = await ensureRedaction(routing || {}, { projectRoot: cfg?.paths?.project })
-  const redaction = redactionState.enabled ? { principal: redactionPrincipal, session: redactionSession } : null
+  const redaction = redactionState.enabled
+    ? { principal: redactionPrincipal, session: redactionSession, maxBodyBytes: redactionState.maxBodyBytes }
+    : null
   if (redaction) body = await maskJson(body, redaction)
   const callerProtocolHeaders = forwardAnthropicProtocolHeaders(req?.headers, protocol, protocolKind, {
     passthrough,

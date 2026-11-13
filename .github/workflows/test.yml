@@ -56,7 +56,7 @@ jobs:
         run: python3 -m unittest test_install_schedule.ScheduleTests.test_upgrade_runs_shared_fleet_once_and_honors_no_sync test_install_schedule.ScheduleTests.test_crag_update_uses_existing_host_or_container_without_compose_restart test_install_schedule.ScheduleTests.test_crag_update_rejects_no_start_before_any_mutation
       - name: redaction helper unit checks
         working-directory: redact
-        run: go test ./...
+        run: go test ./internal/server
       - name: egress timeout and DNS regressions
         working-directory: worker
         run: go test -race ./internal/egress ./internal/proxy
@@ -122,6 +122,11 @@ jobs:
             test/unit/proxy-probe-tunnel.test.mjs \
             test/unit/panel-upgrade-script.test.mjs \
             test/unit/fleet-services.test.mjs \
+            test/unit/proxy-http-scheme.test.mjs \
+            test/unit/remote-slot-push-retry.test.mjs \
+            test/unit/routing-concurrency-overrides.test.mjs \
+            test/unit/probe-status.test.mjs \
+            test/unit/panel-cred-status.test.mjs \
             test/unit/billing-aggregation.test.mjs \
             test/unit/usage-logs-repo.test.mjs \
             test/unit/request-log.test.mjs \

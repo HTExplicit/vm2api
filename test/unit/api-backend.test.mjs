@@ -2218,6 +2218,39 @@ for (const stream of [false, true]) {
   })
 }
 
+test('account API keeps a local redaction 413 non-retryable through the client error mapping', async () => {
+  const policy = normalizeRedaction({ enabled: true, secrets: true, personal: false })
+  publishRedactionForTests({
+    enabled: true,
+    ready: true,
+    policy,
+    client: {
+      async mask() {
+        throw Object.assign(new Error('body exceeds the configured request body limit'), {
+          code: 'redaction_body_too_large',
+          status: 413,
+          details: { retryable: false },
+        })
+      },
+    },
+  })
+  try {
+    const run = await runAccountApiProtocol(
+      { model: 'o3', input: 'local fixture', stream: false },
+      'openai.responses',
+      { redaction: policy },
+    )
+    assert.equal(run.response.statusCode, 413)
+    assert.equal(run.response.body.error.type, 'invalid_request_error')
+    assert.equal(run.response.body.error.code, 'redaction_body_too_large')
+    assert.deepEqual(run.response.body.error.details, { retryable: false })
+    assert.equal(run.sent.length, 0)
+    assert.equal(run.billed.length, 0)
+  } finally {
+    publishRedactionForTests(null)
+  }
+})
+
 test('account API native Responses preserves Codex tools, history, parameters, and before-upstream changes', async () => {
   const inbound = nativeToolsRequest()
   inbound.store = true

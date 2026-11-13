@@ -477,7 +477,9 @@ export function buildVmTestInbound({
   personaMode = 'rewrite',
 } = {}) {
   const caps = getCapabilities(model) || {}
-  const thinking = caps.requires_adaptive || caps.thinking_mode === 'adaptive_only' ? { type: 'adaptive' } : null
+  // Omission lets the CLI enable thinking and spend the probe's small output budget.
+  const thinking =
+    caps.requires_adaptive || caps.thinking_mode === 'adaptive_only' ? { type: 'adaptive' } : { type: 'disabled' }
   let inbound = claudeCodeInboundBody({
     model,
     messages: [{ role: 'user', content: prompt }],
@@ -1142,6 +1144,10 @@ export async function runVmTestChat(opts = {}) {
         max_tokens: maxTokens,
         stream: true,
         temperature: 1,
+        thinking:
+          caps.requires_adaptive || caps.thinking_mode === 'adaptive_only'
+            ? { type: 'adaptive' }
+            : { type: 'disabled' },
         messages: [{ role: 'user', content: prompt }],
       }
       headers = {
