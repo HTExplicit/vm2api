@@ -16,7 +16,6 @@ import {
   ensureSlotSubscriptionType,
 } from '../oauth/oauth-credentials.mjs'
 import {
-  HOLD_MAINTENANCE,
   HOLD_PROXY,
   applyClearHold,
   applyClearUnschedulable,
@@ -635,12 +634,10 @@ export function clearScheduleHold(projectRoot, id, reason, { tag = null } = {}) 
   })
 }
 
-const LEGACY_WORKER_RELOAD = /^[a-z_]*_worker_reload$/
-
 /**
  * Legacy entry point, kept as a router onto the four-state fields.
  * - manual: the operator switch (on also clears 不可调度).
- * - false + a deterministic reason → 不可调度; maintenance / proxy reasons → hold;
+ * - false + a deterministic reason → 不可调度; proxy reasons → hold;
  *   'disabled' / 'stopped' → 调度关.
  * - true from automatic callers only fixes the soft paused mark: it never
  *   reopens 调度关 or 不可调度 (decision 6). Holds are cleared by their owners.
@@ -663,43 +660,13 @@ export function setVmSchedulable(
     }
     const code = String(reason || 'disabled')
     if (code === 'disabled' || code === 'stopped') applyScheduleOff(vm, true, { reason: code, preserveStatus })
-    else if (code === KERNEL_UPDATE_HOLD || LEGACY_WORKER_RELOAD.test(code)) {
-      applyHold(vm, HOLD_MAINTENANCE, { tag: code })
-    } else if (/\|proxy=/.test(code)) {
+    else if (/\|proxy=/.test(code)) {
       applyHold(vm, HOLD_PROXY, { tag: /\|proxy=([^|\s]+)/.exec(code)?.[1] || null, message: code })
     } else if (code === 'slot SOCKS5 proxy is required') applyUnschedulable(vm, 'proxy_required', detail)
     else if (isUnschedulableReason(code)) applyUnschedulable(vm, code, detail)
     else applyUnschedulable(vm, 'runtime_start_failed', { message: code.slice(0, 240), ...(detail || {}) })
     if (!preserveStatus) deriveScheduleFields(vm, { preserveStatus: false })
   })
-}
-export const KERNEL_UPDATE_HOLD = 'kernel_update'
-
-export function holdSchedulableSlots(project, reason = KERNEL_UPDATE_HOLD) {
-  const held = []
-  for (const vm of listVms(project)) {
-    if (vm?.schedulable === false) continue
-    const summary = setScheduleHold(project, vm.id, HOLD_MAINTENANCE, { tag: reason })
-    if (summary) held.push(vm.id)
-  }
-  return held
-}
-
-export function resumeSchedulableSlots(project, ids, reason = KERNEL_UPDATE_HOLD) {
-  const restored = []
-  for (const id of ids || []) {
-    const vm = getVm(project, id)
-    if (!vm || !isMaintenanceHold(vm, reason)) continue
-    const summary = clearScheduleHold(project, id, HOLD_MAINTENANCE, { tag: reason })
-    if (summary?.schedulable !== false) restored.push(id)
-  }
-  return restored
-}
-
-/** True when the slot sits in a system maintenance hold with this tag (or a legacy record of it). */
-export function isMaintenanceHold(vm, tag) {
-  if (vm?.schedule_hold?.reason === HOLD_MAINTENANCE) return vm.schedule_hold.detail?.tag === tag
-  return vm?.schedulable === false && vm?.schedule_disabled_reason === tag
 }
 
 /** One-shot boot migration onto the four-state fields. Legacy fields are kept for rollback. */
@@ -733,24 +700,6 @@ export function migrateScheduleFields(projectRoot) {
     })
   }
   return migrated
-}
-
-export async function waitForSlotDrain(poolScheduler, ids, { timeoutMs = 120000 } = {}) {
-  const wanted = new Set((ids || []).map(String))
-  const count = () => {
-    let inflight = 0
-    for (const [vmId, value] of poolScheduler?.vmInflight || []) {
-      if (wanted.has(String(vmId))) inflight += Number(value) || 0
-    }
-    return inflight
-  }
-  const deadline = Date.now() + timeoutMs
-  let inflight = count()
-  while (inflight > 0 && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    inflight = count()
-  }
-  return { ok: inflight === 0, inflight }
 }
 
 export function markKernelRestartPending(project, id, reason = 'kernel_restart_failed') {

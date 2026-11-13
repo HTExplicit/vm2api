@@ -38,10 +38,8 @@ const UNSCHEDULABLE_REASONS = Object.freeze({
 })
 
 /** System holds: written and cleared by the system itself (受限 · slot). */
-export const HOLD_MAINTENANCE = 'maintenance'
 export const HOLD_PROXY = 'proxy_cooldown'
 const HOLD_REASONS = Object.freeze({
-  [HOLD_MAINTENANCE]: '维护中',
   [HOLD_PROXY]: '代理异常',
 })
 
@@ -69,7 +67,6 @@ const RESTRICTED_SLOT = [
   { match: /^node_offline$/, text: '节点离线' },
   { match: /^kernel_faulted$/, text: '内核故障' },
   { match: /^worker_unhealthy$/, text: '槽服务异常' },
-  { match: /^maintenance$/, text: '维护中' },
   { match: /^rest_period$/, text: '休息时段' },
   { match: /^(cooldown|account_cooldown|restricted)$/, text: '冷却中' },
 ]
@@ -232,7 +229,8 @@ export function applyClearHold(vm, reason, { tag = null, now = Date.now() } = {}
 // ---------------------------------------------------------------------------
 // Migration of records written before the four-state model
 
-const LEGACY_HOLD = /^(kernel_update|[a-z_]*_worker_reload)$/
+// Former maintenance holds (removed): such records go back to the pool.
+const LEGACY_MAINTENANCE = /^(maintenance|kernel_update|[a-z_]*_worker_reload)$/
 const LEGACY_PROXY_HOLD = /(egress_down|proxy_probe_failed|\|proxy=)/
 const LEGACY_DROP = /^(quota_5h|quota_7d|account_quota_exhausted|rate_limited|quota_refresh_failed)/
 const LEGACY_START_FAILED = /runtime start failed|start|boot|container|docker|kernel/i
@@ -243,6 +241,11 @@ const LEGACY_START_FAILED = /runtime start failed|start|boot|container|docker|ke
  */
 export function migrateScheduleRecord(vm) {
   if (!vm || typeof vm !== 'object') return false
+  if (vm.schedule_hold?.reason === 'maintenance') {
+    delete vm.schedule_hold
+    deriveScheduleFields(vm)
+    return true
+  }
   if (vm.schedule_off === true || vm.unschedulable || vm.schedule_hold) return false
   if (vm.schedulable !== false) return false
   const reason = String(vm.schedule_disabled_reason || '').trim()
@@ -253,8 +256,8 @@ export function migrateScheduleRecord(vm) {
     vm.unschedulable = { reason, detail: vm.schedule_disabled_detail || null, at: vm.schedule_updated_at || null }
   } else if (reason === 'slot SOCKS5 proxy is required') {
     vm.unschedulable = { reason: 'proxy_required', detail: { message: reason }, at: vm.schedule_updated_at || null }
-  } else if (LEGACY_HOLD.test(reason)) {
-    vm.schedule_hold = { reason: HOLD_MAINTENANCE, detail: { tag: reason }, at: vm.schedule_updated_at || null }
+  } else if (LEGACY_MAINTENANCE.test(reason)) {
+    // Dropped: the pool takes the slot back.
   } else if (LEGACY_PROXY_HOLD.test(reason)) {
     const proxyId = /\|proxy=([^|\s]+)/.exec(reason)?.[1] || null
     vm.schedule_hold = {

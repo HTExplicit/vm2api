@@ -73,8 +73,6 @@ GPT 订阅主动刷新仅管理员，普通 user 不可调用；其他普通租�
 | POST | `/vms/pool-policy` | 批量槽策略。`{ ids: [...] }` 或 `{ all: true }`，可带 `weight`(1–100) / `schedule_level`(1–10 或 `"auto"`) / `max_concurrency`(1–256) / `max_rpm`(0–1000000) / `max_sessions`(0–256)；`null`（或 `""`）取消钉住：weight 回默认 1、schedule_level 回 auto、上限回 tier / 全局默认，语义与逐槽 PATCH 一致。只写 `vms/*.json`、不重建槽详情，100+ 槽一次调用即可（逐个 `PATCH /vms/:id` 每槽约 4s，并发下发会压住控制面）。返回 `{ updated, missing, failed, items: [{ id, weight, schedule_level, max_concurrency, concurrency_override, max_rpm, max_sessions }] }` |
 | POST | `/vms/:id/probe` | 槽 SOCKS5 探官方 `/usage` + Fable（Pro 跳过 Fable） |
 | POST | `/vms/:id/exit-probe` | 测这个槽真实出口的 IP 与地理（仅 admin）：SOCKS5 槽经代理查；本地代理槽查它所在 VPS 那条本地代理并刷新该行地理。未绑定 502 `proxy_required` |
-| POST | `/vms/schedule/hold` | kernel 升级排空：`{ reason? }` 默认 `kernel_update`。给当前 **可调度** 槽加维护暂停（`schedule_hold={reason:'maintenance', detail:{tag:reason}}`，受限，不改容器状态）；等待这些槽在途请求归零（最长约 120s）。成功 `{ paused, inflight: 0, drained: true }`。超时 409 `slots_busy`，**自动恢复** 本次 hold 的槽。调度关与不可调度的槽不受影响 |
-| POST | `/vms/schedule/resume` | 与 hold 配对：`{ reason? }` 默认 `kernel_update`。恢复 `schedule_disabled_reason` 等于该 reason 的槽为可调度；返回 `{ restored }`。`deploy/install.sh upgrade` 在 kernel 同步后调用 |
 | POST | `/vms/:id/schedulable` | 操作员开关 `{ schedulable }`，不改容器。`false` = 调度关；`true` = 调度开，同时清除不可调度。凭证已失效或吊销时开启返回 409 `credential_unavailable`（先重新导入凭证） |
 | POST | `/vms/:id/cooldown/clear` | 清账号/模型冷却、粘性钉和 `/usage` 429 旗标；GPT 槽同时清除可恢复的 `codex.extra.codex_limited_until`，再重算调度，重新入池 |
 | POST | `/vms/:id/test-chat` | loopback `POST /v1/messages`，master 可钉槽；官方 CC 入站 + 4 块 system。省略或空白 prompt 使用手动测试的全局默认（未设置时 `hello`） |
@@ -93,7 +91,7 @@ GPT 订阅主动刷新仅管理员，普通 user 不可调用；其他普通租�
 | POST | `/vms/:id/reload` | 重载该槽 worker |
 | GET | `/kernels` | 仅 admin/master。返回两种产品 `kernels`（`cli-node` 默认免费、`crag` 签名加密 V2）、真实本地版本/就绪状态、按 VM 的公开 `licenses` 与 `installations`。读取不会初始化设备身份，不返回机器码、注册码或私钥 |
 | POST | `/kernels/pull` | `{ kernel: "cli-node" \| "crag", tag?: "vX.Y.Z" }`。只更新安装包缓存，不安装、不停 VM。默认内核从 vm2api Release 下载 `kin-kernel` 与 `cli-node`；CRAG 使用独立的 `crag_release` 供应仓 tag（例如 `v2.8.16`），从 `dofastted/claude-code` 下载 `crag-v2-licensed-amd64.tar.gz`。两种来源都按本机可信发行公钥校验签名、密文与成员；缺少附件返回 `crag_v2_asset_missing`，不退回 legacy ELF |
-| POST | `/kernels/install` | `{ targets: [{ id, kernel: "cli-node" \| "crag" }] }`，仅处理非空显式范围；先校验目标，每槽检查包与授权，再暂停调度、排空、停止、安装并保存选择。原运行槽重启且健康后恢复原调度意图，原停止槽保持停止。返回 `{ ok,total,ok_count,failed_count,items:[{id,kernel,ok,stopped,restarted?,schedulable?,status?,version?,code?,error?}] }`，逐项失败不伪装成全局成功 |
+| POST | `/kernels/install` | `{ targets: [{ id, kernel: "cli-node" \| "crag" }] }`，仅处理非空显式范围；先校验目标，每槽检查包与授权，再直接停止、安装并保存选择，不暂停调度、不等待在途请求。原运行槽重启且健康后恢复原调度意图，原停止槽保持停止。返回 `{ ok,total,ok_count,failed_count,items:[{id,kernel,ok,stopped,restarted?,schedulable?,status?,version?,code?,error?}] }`，逐项失败不伪装成全局成功 |
 | GET | `/wrap-cli` | kernel / wrap 样本 inspect：`ok, dir, kernel_bin, glibc_shim, wrapper, meta, kernel`。`kernel.source` 为 `configured`（仓内 `KIN_KERNEL_BIN` / `bin/kin-kernel`）或 `sample` |
 | POST | `/wrap-cli/make` | `{ glibc_vm? }` 重整 share/wrap-cli；叠上仓内最新 kernel；可从指定槽拷 glibc shim |
 | POST | `/wrap-cli/kernel` | 原始 `application/octet-stream` linux amd64 ELF。替换仓内 `bin/kin-kernel` 与 `share/wrap-cli/kin-kernel.bin`。不自动同步槽位 |
@@ -104,7 +102,7 @@ GPT 订阅主动刷新仅管理员，普通 user 不可调用；其他普通租�
 | POST | `/vms/:id/start` · `/stop` | 容器生命周期。`start` 可传 `{ ensure_kernel: true }`，仅本次 GPT 开机确保内核就绪，默认 `false`；不改全局按需启动设置。运行中容器除非显式 recreate，禁止 `docker rm -f` |
 | GET | `/vms/:id/health` | 仅检查内核，返回 `{ id, kernel: { go_health, rust_health, codex_health } }`，不发模型请求；核验实际槽位还须结合实时记录、`kin.vm.id` 容器标签及真实内核 |
 | GET | `/vms/:id/diagnose` | 只读检查凭证、出口、容器、所选内核和自动恢复状态；CRAG 满载进程池不要求常驻 `cli_pid`，返回忙碌而非故障 |
-| POST | `/vms/:id/recover` | 按当前选择的 cli-node / CRAG 执行排空 → 关机 → 开机 → 就绪诊断；仅完整成功后清除请求熔断。授权错误在停机前拒绝；启动失败保留故障与不可调度原因 |
+| POST | `/vms/:id/recover` | 按当前选择的 cli-node / CRAG 执行关机 → 开机 → 就绪诊断，不暂停调度、不等待在途请求；仅完整成功后清除请求熔断。授权错误在停机前拒绝；启动失败保留故障与不可调度原因 |
 | POST | `/vms/:id/activate` | 写入 `vms/active.json` 与 DB `active_vm`；列表/详情 `vm.active === true` 表示当前指针。管理台表格、机架、详情与行菜单可切换 |
 | POST | `/vms/:id/reset` | 销毁容器与家目录，再按原槽位重建（保留 ID/代理/种子；凭证清空） |
 | POST | `/vms/:id/reset-fingerprint` | |
@@ -128,13 +126,13 @@ GPT 订阅主动刷新仅管理员，普通 user 不可调用；其他普通租�
 
 离线 `CRAGU1` 一次写入安装级授权，并把同一正式状态复制到每个本地槽和每台集群机器的 `registration.code`。不按 VM 槽或机器核销。在线 `CRAGL1` 仍只绑定本槽设备，已有在线授权不会被通用码覆盖。响应里的 `license.scope` 为 `kernel`（离线）或 `device`（在线）。
 
-拉取与安装分离：拉取失败保留旧包，安装包就绪不代表服务已启动。默认内核不依赖 cc-node 或 legacy CRAG。注册码无效、过期或包未就绪时不停止该槽；停止后的复制、配置或就绪检查失败返回 `stopped:true`，不恢复调度。凭据、授权设备密钥、指纹和工作数据保留。若停止状态写入失败，保留本次安装器的安全暂停，修复存储后成功重装、启动或恢复服务才清除；不会清除无关维护暂停。
+拉取与安装分离：拉取失败保留旧包，安装包就绪不代表服务已启动。默认内核不依赖 cc-node 或 legacy CRAG。注册码无效、过期或包未就绪时不停止该槽；停止后的复制、配置或就绪检查失败返回 `stopped:true`，不恢复调度。凭据、授权设备密钥、指纹和工作数据保留。若停止状态写入失败，看门狗保持暂停，修复存储后成功重装、启动或恢复服务才释放。
 
 该安装与重装入口支持 Linux amd64 本机和集群的 Docker、KVM Claude 槽，支持 cli-node ↔ CRAG 双向更换；KVM 同步 guest 内核入口。Codex 和 macOS 原生目标在停止前拒绝。KVM 的 CRAG 切核使用此入口；既有 PATCH、槽策略和 `/dataplane` 入口仍限制将 KVM 切至 CRAG。独立 `crag-update` 支持本机 Docker、KVM，但存在选用 CRAG 的集群槽时拒绝更新；集群须在内核页明确选择目标安装或重装。
 
 新安装与既有 PATCH/槽策略、同步、数据面切换、Release 同步及单槽修复共用同一记录锁；多槽操作在接收时固定目标并按稳定顺序加锁。其他页面的并发重装不能在安装器停止服务后穿插复制或自动重启；`restart:false` 仍只读检查。
 
-运行中槽位通过 PATCH、槽策略或 `/dataplane` 切核时，会先加入独立维护暂停并等待在途请求归零，同时暂停并排空该槽的看门狗操作。cli-node ↔ CRAG 双向切换重建需要变更创建参数的容器；容器已启动不等于内核就绪，`rust_ok:false` 仍视为失败。成功切核 / 重装重置该账号的请求熔断及内核恢复预算；失败不抹除故障。维护结束仅清除本次暂停，保留操作员调度关及其他出口 / 维护暂停。`restart:false` 的检查行为不变。
+运行中槽位通过 PATCH、槽策略或 `/dataplane` 切核时，只暂停并排空该槽的看门狗操作，不暂停调度、不等待在途请求，该槽进行中的请求会中断。cli-node ↔ CRAG 双向切换重建需要变更创建参数的容器；容器已启动不等于内核就绪，`rust_ok:false` 仍视为失败。成功切核 / 重装重置该账号的请求熔断及内核恢复预算；失败不抹除故障。操作员调度关及出口暂停保持不变。`restart:false` 的检查行为不变。
 
 `/vms`、`/vms/:id`、`/usage` 的账号行带窗口估算 `estimate_5h` / `estimate_7d` / `estimate_fable`（Fable 只在有 `7d_oi` 窗口的 Claude 号上非空）和 `window_fable_cost`。结构：`{ status, spent_usd, total_usd, remaining_usd, total_tokens, used_ratio }`。总量 = 窗口内官方费用 ÷ 已用比例，按官方价算，不乘分组倍率。`status` 不是 `ok` 时 `total_usd` / `remaining_usd` 为 `null`：`no_data`（无用量读数）、`no_reset`（无重置时间或已过期）、`log_gap`（日志没覆盖窗口起点，或已用比例动了但网关内无花费）、`low_usage`（已用 < 5%）、`unpriced`（窗口内有未定价请求）。token 字段 `total_tokens` / `today_tokens` / `window_*_tokens` 都是输入 + 输出 + 缓存读 + 缓存写，每类只算一次。
 
@@ -168,7 +166,7 @@ GPT 订阅主动刷新仅管理员，普通 user 不可调用；其他普通租�
 
 风险审计拦截（`distill_blocked`、`policy_blocked` / `refusal_guard`、硬正则与决策模型 403）发生在选槽之前，上游请求级错误（内容拒答、`invalid_request`、`*_repairable` 等）只影响本次请求：都不改变槽位状态。
 
-记录字段：`schedule_off`、`unschedulable{reason,detail,at}`、`schedule_hold{reason,detail,at}`（系统暂停：`maintenance` / `proxy_cooldown`，由写入方自己解除）。`schedulable` / `schedule_disabled_reason` / `schedule_manual` 每次写入时派生，保留给旧读者与回滚。升级后首次启动把旧记录迁到新字段，原文件备份到 `backups/schedule-migration-<ts>/`；上线前可用 `node scripts/replay-schedule-state.mjs --project <dir>` 预览迁移结果。设置 `routing.pool.manual_schedule_wins` 已移除（调度关不会被任何自动路径打开）。
+记录字段：`schedule_off`、`unschedulable{reason,detail,at}`、`schedule_hold{reason,detail,at}`（系统暂停：仅 `proxy_cooldown`，由写入方自己解除；旧版遗留的 `maintenance` 暂停在启动迁移时直接清除）。`schedulable` / `schedule_disabled_reason` / `schedule_manual` 每次写入时派生，保留给旧读者与回滚。升级后首次启动把旧记录迁到新字段，原文件备份到 `backups/schedule-migration-<ts>/`；上线前可用 `node scripts/replay-schedule-state.mjs --project <dir>` 预览迁移结果。设置 `routing.pool.manual_schedule_wins` 已移除（调度关不会被任何自动路径打开）。
 
 ### 平台独立的槽位限额
 

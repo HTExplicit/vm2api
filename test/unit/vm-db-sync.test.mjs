@@ -166,14 +166,14 @@ test('setVmSchedulable preserveStatus keeps running when operator disables', () 
   assert.equal(off.schedule_disabled_reason, 'disabled')
 })
 
-test('lifting a worker-reload hold restores soft-paused status to running', () => {
+test('lifting a proxy hold restores soft-paused status to running', () => {
   seedVmFile('vm-t3b')
   initVmDbSync(project, { watch: false })
-  setVmSchedulable(project, 'vm-t3b', false, 'proxy_rebind_worker_reload')
+  setVmSchedulable(project, 'vm-t3b', false, 'egress_down|proxy=px-1')
   const paused = JSON.parse(fs.readFileSync(path.join(project, 'vms', 'vm-t3b.json'), 'utf8'))
   assert.equal(paused.status, 'paused')
   assert.equal(paused.schedulable, false)
-  clearScheduleHold(project, 'vm-t3b', 'maintenance')
+  clearScheduleHold(project, 'vm-t3b', 'proxy_cooldown')
   const ready = JSON.parse(fs.readFileSync(path.join(project, 'vms', 'vm-t3b.json'), 'utf8'))
   assert.equal(ready.status, 'running')
   assert.equal(ready.schedulable, true)

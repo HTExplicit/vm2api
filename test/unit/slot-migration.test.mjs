@@ -169,12 +169,12 @@ test('preflight failure has no hold, stop, boot or release side effects', async 
   assert.equal(slotMigrationJob(root, args.id).status, 'failed')
 })
 
-test('busy drain is bounded and resumes original scheduling without stopping', async (t) => {
-  let now = 0
-  const { root, args, events } = fixture(t, { now: () => (now += 60_000) })
+test('a busy slot is migrated without pausing scheduling or waiting for in-flight requests', async (t) => {
+  const { root, args, events } = fixture(t)
   args.poolScheduler.vmInflight.set(args.id, 1)
   await startSlotMigration(args).done
-  assert.equal(events.includes('stop'), false)
+  assert.equal(events.includes('stop'), true)
+  assert.equal(slotMigrationJob(root, args.id).status, 'done')
   assert.equal(getVm(root, args.id).schedule_hold, undefined)
 })
 
@@ -197,7 +197,7 @@ test('copy or verification failure restores original placement and memory only a
   }
 })
 
-test('uncertain rollback stays held and never starts a second copy', async (t) => {
+test('uncertain rollback stays stopped and never starts a second copy', async (t) => {
   const { root, args, events } = fixture(t, {
     copy: async () => {
       throw new Error('interrupted')
@@ -208,7 +208,7 @@ test('uncertain rollback stays held and never starts a second copy', async (t) =
   })
   await startSlotMigration(args).done
   assert.equal(slotMigrationJob(root, args.id).status, 'needs_attention')
-  assert.equal(getVm(root, args.id).schedule_hold.reason, 'maintenance')
+  assert.equal(getVm(root, args.id).status, 'stopped')
   assert.equal(
     events.some((e) => e.startsWith('boot:')),
     false,

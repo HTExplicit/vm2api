@@ -4,19 +4,16 @@ import { randomUUID } from 'node:crypto'
 import { describeKernelCatalog } from '../admin/kernel-catalog.mjs'
 import { writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
 import {
-  applyHold,
-  applyClearHold,
   applyClearUnschedulable,
   applyUnschedulable,
   deriveScheduleFields,
-  HOLD_MAINTENANCE,
   migrateScheduleRecord,
 } from '../pool/schedule-state.mjs'
 import { clusterManager } from '../cluster/placement.mjs'
 import { checkCragLicense } from './crag-license.mjs'
 import { isValidVmId, withVmLock } from './vm-file.mjs'
 import { ensureHostPrivateDir } from './private-dir.mjs'
-import { getVm, listVms, patchVmRecord, vmHasSchedulableCredential, waitForSlotDrain } from './vm-registry.mjs'
+import { getVm, listVms, patchVmRecord, vmHasSchedulableCredential } from './vm-registry.mjs'
 import { isCodexVm } from './vm-kind.mjs'
 import { isKvmRuntime } from './runtime-kind.mjs'
 import { startSlotReady, stopSlot } from './slot-runtime.mjs'
@@ -34,12 +31,7 @@ const INTERRUPTED_COMMAND =
 // Key by record path so independent projects cannot release each other's slot.
 const safetyHolds = new Map()
 
-function clearInstallHold(record) {
-  const operation = record.kernel_operation
-  if (record.schedule_hold?.detail?.tag === operation?.id) {
-    applyClearHold(record, HOLD_MAINTENANCE, { tag: operation.id })
-    if (operation.previous_hold) record.schedule_hold = operation.previous_hold
-  }
+function clearKernelOperation(record) {
   delete record.kernel_operation
   deriveScheduleFields(record)
 }
@@ -48,7 +40,7 @@ function clearInstallHold(record) {
 export function releaseKernelInstallSafetyHold(projectRoot, id, watchdog) {
   const file = path.join(projectRoot, 'vms', `${id}.json`)
   if (safetyHolds.has(file) && safetyHolds.get(file) !== watchdog) return false
-  if (getVm(projectRoot, id)?.kernel_operation) patchVmRecord(projectRoot, id, clearInstallHold)
+  if (getVm(projectRoot, id)?.kernel_operation) patchVmRecord(projectRoot, id, clearKernelOperation)
   if (!watchdog || safetyHolds.get(file) !== watchdog) return false
   safetyHolds.delete(file)
   watchdog.release?.(id)
@@ -209,19 +201,14 @@ export async function installKernelTargets({
               kernel: target.kernel,
               phase: 'pending',
               recovery_attempts: resumeId ? (previous.recovery_attempts || 0) + 1 : 0,
-              previous_hold: previous ? previous.previous_hold : record.schedule_hold || null,
               was_running: resumeId
                 ? previous.was_running === true
                 : record.status === 'running' && record.runtime?.stopped !== true,
               schedule_off: record.schedule_off === true,
               started_at: previous?.started_at || new Date().toISOString(),
             }
-            applyHold(record, HOLD_MAINTENANCE, { tag: operationId })
           })
           operationPersisted = true
-          phase = 'kernel_drain_failed'
-          const drained = await waitForSlotDrain(poolScheduler, [target.id])
-          if (!drained.ok) return failure(target, phase, '在途请求未结束，未重启内核')
           phase = 'kernel_stop_failed'
           const halt = await (ops.stopSlot || stopSlot)(vm)
           if (!halt?.ok) {
@@ -289,7 +276,7 @@ export async function installKernelTargets({
           if (!saved) return failure(target, 'vm_not_found', '虚拟机记录已移除', true)
           // Only restore the power intent captured before this operation stopped the slot.
           if (!saved.kernel_operation.was_running) {
-            const idle = patchVmRecord(projectRoot, target.id, clearInstallHold)
+            const idle = patchVmRecord(projectRoot, target.id, clearKernelOperation)
             if (!idle) return failure(target, 'vm_not_found', '虚拟机记录已移除', true)
             installed = true
             return {
@@ -334,7 +321,7 @@ export async function installKernelTargets({
               delete record.schedule_off
               delete record.schedule_off_reason
             }
-            clearInstallHold(record)
+            clearKernelOperation(record)
             delete record.kernel_restart_pending
           })
           if (!running) return failure(target, 'vm_not_found', '虚拟机记录已移除', false)
@@ -373,7 +360,7 @@ export async function installKernelTargets({
                 if (record.kernel_operation?.id !== operationId) return
                 record.kernel_operation.phase = interrupted ? 'pending' : 'failed'
                 record.kernel_operation.code = phase
-                if (!stopped && !interrupted) clearInstallHold(record)
+                if (!stopped && !interrupted) clearKernelOperation(record)
               })
             } catch {
               console.warn(`[kernel-install] ${target.id} failure state could not be persisted (${phase})`)

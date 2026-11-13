@@ -52,7 +52,7 @@ async function request(root, method, suffix, body, extra = {}, endpoint = '/vms/
   return response
 }
 
-test('switch holds admission and watchdog until the old request drains', async (t) => {
+test('switch holds only the watchdog and cuts over a busy slot without pausing scheduling', async (t) => {
   const { root, vm } = fixture(t)
   const inflight = new Map([[vm.id, 1]])
   let releaseHold
@@ -81,8 +81,8 @@ test('switch holds admission and watchdog until the old request drains', async (
       },
       kernelPolicyOps: {
         restartRustKernel: async () => {
-          assert.equal(inflight.get(vm.id), 0, 'no accepted request may be killed by cutover')
-          assert.equal(getVm(root, vm.id).schedule_hold.reason, 'maintenance')
+          assert.equal(inflight.get(vm.id), 1, 'a busy slot is cut over without waiting')
+          assert.equal(getVm(root, vm.id).schedule_hold, undefined)
           events.push('restart')
           return { ok: true }
         },
@@ -92,9 +92,6 @@ test('switch holds admission and watchdog until the old request drains', async (
   await new Promise(setImmediate)
   assert.equal(getVm(root, vm.id).dataplane, 'wrap', 'watchdog drain precedes metadata and file changes')
   releaseHold()
-  await new Promise(setImmediate)
-  assert.equal(getVm(root, vm.id).dataplane, 'wrap', 'accepted inference must drain before cutover')
-  inflight.set(vm.id, 0)
   const response = await result
   assert.equal(response.status, 200, JSON.stringify(response.body))
   assert.deepEqual(events, ['hold', 'restart', 'reset', 'release'])
@@ -123,7 +120,7 @@ for (const target of ['crag', 'wrap']) {
             assert.equal(selected.dataplane, target)
             assert.equal(project, root)
             assert.equal(options.recreate, true)
-            assert.equal(getVm(root, vm.id).schedule_hold.reason, 'maintenance')
+            assert.deepEqual(getVm(root, vm.id).schedule_hold, priorHold)
             booted = true
             return { ok: true, rust_ok: true, rust: { ok: true } }
           },
@@ -315,7 +312,7 @@ for (const all of [false, true]) {
         kernelPolicyOps: {
           startSlotReady: async (selected, _root, options) => {
             assert.equal(options.recreate, true)
-            assert.equal(getVm(root, vm.id).schedule_hold.reason, 'maintenance')
+            assert.equal(getVm(root, vm.id).schedule_hold, undefined)
             assert.equal(all ? routing.inference.dataplane : selected.dataplane, 'crag')
             booted = true
             return { ok: true, rust_ok: true }
