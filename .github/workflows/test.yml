@@ -88,6 +88,15 @@ jobs:
             test/unit/crs-persona.test.mjs \
             test/unit/anthropic-policy.test.mjs \
             test/unit/cache-ttl.test.mjs \
+            test/unit/cache-breakpoints.test.mjs \
+            test/unit/claude-reset-credits.test.mjs \
+            test/unit/claude-reset-routes.test.mjs \
+            test/unit/cli-hop-body.test.mjs \
+            test/unit/convert-cache-shape.test.mjs \
+            test/unit/max-tokens-default.test.mjs \
+            test/unit/outbound-parity.test.mjs \
+            test/unit/routing-redaction-budget.test.mjs \
+            test/unit/zero-usage-contract.test.mjs \
             test/unit/cache-prefix.test.mjs \
             test/unit/request-body-context.test.mjs \
             test/unit/routing-json-parse-cache.test.mjs \
@@ -316,6 +325,8 @@ jobs:
           pnpm exec vitest run src/config/repo.test.ts src/features/settings/about-pane.test.ts
           pnpm exec vitest run src/lib/vm-status.test.ts src/features/vm/vm-list-table.test.tsx
           pnpm exec vitest run src/features/vm/usage-windows.test.tsx src/features/vm/vm-rack-model.test.ts
+          pnpm exec vitest run src/features/vm/claude-reset-actions.test.tsx src/features/vm/claude-reset-cards.test.ts
+          pnpm exec vitest run src/lib/fable-status.test.ts src/lib/pool-quota.test.ts
           pnpm exec vitest run src/features/models/model-mapping.test.ts src/features/models/policy.test.ts
           pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx src/features/vm/openai-api-actions.test.tsx src/features/settings/openai-api-balance-section.test.tsx
           pnpm exec vitest run src/features/vm/openai-platform-browser-dialog.test.tsx
@@ -335,6 +346,10 @@ jobs:
           pnpm build
       - name: Platform configuration retry UI
         run: node scripts/smoke-platform-retry-ui.mjs
+      - name: Claude reset card interactions
+        env:
+          UI_BROWSER_EXE: /usr/bin/google-chrome
+        run: node --test test/browser/claude-reset-actions.test.mjs
       - name: Account API key management UI
         run: node scripts/smoke-openai-apikey-ui.mjs
       - name: Browser close retry UI

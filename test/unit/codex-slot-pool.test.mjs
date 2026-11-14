@@ -7,6 +7,7 @@ import {
   isCodexFailoverError,
   evaluateCodexQuotaSchedule,
   codexAdmissionBlock,
+  codexAccountCandidate,
 } from '../../src/lib/pool/codex-slot-pool.mjs'
 import { SessionLimitRegistry } from '../../src/lib/pool/session-limit.mjs'
 import { evaluateOpenAIQuotaGate } from '../../src/lib/pool/openai-quota-policy.mjs'
@@ -32,6 +33,80 @@ test('ready slots sort by remaining 5h/7d stress', () => {
   ])
   assert.deepEqual(picked.ids, ['vm-a', 'vm-b'])
   assert.equal(picked.error, undefined)
+})
+
+test('smart candidates separate 5h flow, weekly stock and absent snapshots', () => {
+  const now = Date.parse('2026-11-14T00:00:00.000Z')
+  const reset7d = new Date(now + 48 * 3_600_000).toISOString()
+  const flow = codexAccountCandidate(
+    gpt('flow', { utilization_5h: 0.2, utilization_7d: 0.9, reset_7d: reset7d }),
+    now,
+    {},
+  )
+  assert.equal(flow.quotaRemainingRank, 8_000)
+  assert.equal(flow.quotaStockRank, 1_000)
+  assert.ok(Math.abs(flow.quotaRemaining7d - 0.1) < 1e-12)
+  assert.equal(flow.quotaReset7dAt, Date.parse(reset7d))
+  const weekly = codexAccountCandidate(gpt('weekly', { utilization_7d: 0.4 }), now, {})
+  assert.equal(weekly.quotaRemainingRank, 6_000)
+  assert.equal(weekly.quotaStockRank, 6_000)
+  assert.equal(weekly.quotaRemaining7d, 0.6)
+  const missing = codexAccountCandidate(gpt('missing', { utilization_5h: null, utilization_7d: '' }), now, {})
+  assert.deepEqual(
+    [missing.quotaRemainingRank, missing.quotaStockRank, missing.quotaRemaining7d, missing.quotaReset7dAt],
+    [null, null, null, null],
+  )
+  const snapshot = codexAccountCandidate(
+    gpt('snapshot', { codex: { extra: { codex_5h_used_percent: 80, codex_7d_used_percent: 20 } } }),
+    now,
+    {},
+  )
+  assert.equal(snapshot.quotaRemainingRank, 2_000)
+  assert.equal(snapshot.quotaStockRank, 8_000)
+  assert.equal(snapshot.quotaRemaining7d, 0.8)
+})
+
+test('smart order favors sustainable 5h flow instead of the worst combined window', () => {
+  const now = Date.parse('2026-11-14T00:00:00.000Z')
+  const ordered = orderCodexSessionSlots(
+    [
+      gpt('vm-a-stock', { utilization_5h: 0.8, utilization_7d: 0.2 }),
+      gpt('vm-z-flow', { utilization_5h: 0.2, utilization_7d: 0.8 }),
+    ],
+    { now, roundRobinCursor: 0 },
+  )
+  assert.deepEqual(ordered.ids, ['vm-z-flow', 'vm-a-stock'])
+})
+
+test('reset urgency cannot bypass auth, operator, hard quota or Retry-After gates', async () => {
+  const rt = await import('../../src/lib/pool/openai-account-runtime.mjs')
+  rt.resetOpenAIAccountRuntime()
+  try {
+    const now = Date.parse('2026-11-14T00:00:00.000Z')
+    const urgency = {
+      utilization_5h: 0,
+      utilization_7d: 0.1,
+      reset_7d: new Date(now + 3_600_000).toISOString(),
+      policy: { weight: 10 },
+    }
+    const auth = gpt('vm-auth', { ...urgency, auth_block: { reason: 'oauth_401', status: 401 } })
+    const manual = gpt('vm-manual', { ...urgency, schedulable: false, schedule_disabled_reason: 'disabled' })
+    const capped = gpt('vm-capped', { ...urgency, utilization_5h: 0.85 })
+    const held = gpt('vm-held', urgency)
+    const ready = gpt('vm-ready', { utilization_5h: 0.7, utilization_7d: 0.7 })
+    rt.holdOpenAIAccount(held.id, { until: now + 60_000, now, reason: 'rate_limited' })
+    const ordered = orderCodexSessionSlots([auth, manual, capped, held, ready], {
+      now,
+      roundRobinCursor: 0,
+      quotaPolicy: { limit_5h: 0.8 },
+    })
+    assert.deepEqual(ordered.ids, ['vm-ready'])
+    assert.equal(codexAdmissionBlock(auth, now).error, 'credential_blocked')
+    assert.equal(codexAdmissionBlock(capped, now, { limit_5h: 0.8 }).error, 'quota_exhausted')
+    assert.equal(codexAdmissionBlock(held, now).retryAt, now + 60_000)
+  } finally {
+    rt.resetOpenAIAccountRuntime()
+  }
 })
 
 test('parked slots come after ready ones', () => {

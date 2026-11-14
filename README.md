@@ -43,7 +43,7 @@
 
 ## 本 fork 的发布来源
 
-本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，主分支为 `main`，当前维护版 `v1.4.8601` 基于官方 `v1.4.086`（`8c4ab5fb`），版本与升级说明见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随上游 `main` 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始，合入 031 后从 3101 开始，合入 032 后从 3201 开始，合入 036 后从 3601 开始，合入 038 后从 3801 开始，合入 041 后从 4101 开始。
+本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，主分支为 `main`，当前维护版 `v1.4.8701` 基于官方 `v1.4.087`（`6ca9c058`），版本与升级说明见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随上游 `main` 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始，合入 031 后从 3101 开始，合入 032 后从 3201 开始，合入 036 后从 3601 开始，合入 038 后从 3801 开始，合入 041 后从 4101 开始。
 
 旧 `maint` 分支仅保留已发布版本的安装链接兼容；新开发、PR 和 CI 统一使用 `main`。
 
@@ -51,11 +51,11 @@
 
 控制面镜像默认使用 `ghcr.io/htexplicit/vm2api`，通过 `VM2API_IMAGE` 配置；`VM2API_GITHUB_REPO` 指定发布仓库，Compose 会传入控制面，面板更新默认检查本 fork 的公开 Release。槽位闭源二进制由 `deploy/payload.json` 固定上游来源、版本、大小和 SHA256；`kin-egress` 与控制面 helper 从本 fork 源码编译，客体系统镜像来源保持原配置。
 
-当前发布 **linux/amd64** 控制面镜像、22 个载荷附件及 `build-provenance.json`，共 23 个附件。载荷全部从同一最终镜像按 digest 提取；21 个上游资产按官方 1.4.086 的不可变载荷发行 `payload-2026.11.13-crag-2.8.17` 固定大小与 SHA256，包含 CLI、Codex kernel 0.1.2、四个 glibc 文件、CRAG v2.8.17 签名出厂包及完整归档；`kin-egress` 使用镜像内由 fork 源码编译的同一份字节。来源清单记录提交、镜像 digest 和实际附件校验值。发布流程先准备草稿，再构建推送版本镜像并提取、校验、上传附件，核验 GHCR 匿名访问后才移动镜像 `latest` 并公开 Release。若新建包为私有，维护者需设为 Public；匿名访问检查失败时保留草稿，修正包权限后可重跑失败的 `publish` job。当前不提供 ARM64 控制面镜像。
+当前发布 **linux/amd64** 控制面镜像、22 个载荷附件及 `build-provenance.json`，共 23 个附件。载荷全部从同一最终镜像按 digest 提取；21 个上游资产按官方 1.4.087 的不可变载荷发行 `payload-2026.11.14-cache-ttl` 固定大小与 SHA256，包含缓存 TTL 修复版 CLI 2.1.321、Codex kernel 0.1.2、四个 glibc 文件及未重建的 CRAG v2.8.17 签名出厂包和完整归档；`kin-egress` 使用镜像内由 fork 源码编译的同一份字节。来源清单记录提交、镜像 digest 和实际附件校验值。发布流程先准备草稿，再构建推送版本镜像并提取、校验、上传附件，核验 GHCR 匿名访问后才移动镜像 `latest` 并公开 Release。若新建包为私有，维护者需设为 Public；匿名访问检查失败时保留草稿，修正包权限后可重跑失败的 `publish` job。当前不提供 ARM64 控制面镜像。
 
 普通 CLI/Codex 集群槽不依赖可选 CRAG 包，cc-node 继续可选。镜像入口校验并发布完整可信 CRAG 出厂包，常规安装与面板升级统一收尾从官方供应仓 `dofastted/claude-code` 拉取、校验独立版本的 CRAG 归档，非空且全部为本地 Codex 时直接完成收尾，不拉取 CRAG、不改缓存指针或同步槽位；其余清单默认版本由载荷清单固定为 `v2.8.17`，显式 CRAG 标签同样从供应仓拉取。应用与普通 CLI 仍使用本 fork 的发布标签。包分发不会激活授权或改变现有内核选择。wrap Claude 按当前 fork 标签拉取 CLI，仅有差异的目标直接重启并核验健康，不暂停调度；原停机保持停机、人工调度关闭保持。入口不再后台执行另一轮同步。本地 Codex 随控制面替换由启动恢复器补起新内核，无需重建 GPT 槽。手工仅替换 Compose 镜像后，仍需在内核页更新 Claude。
 
-1.4.8601 补齐 HTTP 代理的槽位透明出口：`kin-egress` 与 `kin-worker` 使用 HTTP CONNECT，支持 Basic 认证；现有代理协议与绑定保持。原生 CRAG 交接仅在运行中内核声明 `native_handoff_v1` 时协商，按真实消息、终止原因、用量和错误整流；工具通过完整终态验证后交付。发布新包不会启用 CRAG 或切换内核；旧 CLI 与 Codex 路径保持。
+槽位透明出口支持 HTTP 代理：`kin-egress` 与 `kin-worker` 使用 HTTP CONNECT，支持 Basic 认证；现有代理协议与绑定保持。原生 CRAG 交接仅在运行中内核声明 `native_handoff_v1` 时协商，按真实消息、终止原因、用量和错误整流；工具通过完整终态验证后交付。发布新包不会启用 CRAG 或切换内核；旧 CLI 与 Codex 路径保持。
 
 GPT 登录与 OpenAI Platform 共用 [ShardBrowser](https://github.com/ProxyShard/ShardBrowser) 和 Puppeteer Core。管理员在「设置 → OpenAI → 账号浏览器」安装内核，无需浏览器授权 key；公开镜像只含控制组件、独立安装助手和系统依赖，内核在部署端从官方获取。采用有头浏览器、虚拟显示和软件图形渲染，全局一次一个窗口。每槽首次选择 Linux 指纹模板并保留原生 profile，固定英文，时区跟随绑定代理的已检测位置；关闭时仅导出 Billing 所需的 Cookie。面板独立检查和更新内核及组件，更新前关闭当前窗口；安装仅核对文件和实际版本，不运行页面自检，失败由管理员重试。升级到 1.4.8402 会清除旧 CloakBrowser 网页状态及其授权 key，保留 OAuth 凭据、Platform API key、账号和业务记录，相关网页按需重新登录；后续应用升级保留新内核缓存与 profile。
 
@@ -75,6 +75,7 @@ GPT 登录与 OpenAI Platform 共用 [ShardBrowser](https://github.com/ProxyShar
 - [📊 干净度基准评测（Benchmarks）](#-干净度基准评测benchmarks)
 - [🚀 快速开始（生产部署）](#-快速开始生产部署)
 - [🔌 接口与协议兼容](#-接口与协议兼容)
+- [开发验证与 CI](#开发验证与-ci)
 - [💬 交流与赞助支持](#-交流与赞助支持--community--sponsorship)
 - [📜 许可证与免责声明](#-许可证与免责声明--license)
 
@@ -296,6 +297,7 @@ For the current asset manifest, provenance checks, and draft-to-publication work
   - [8️⃣ Enterprise API Key & Quota Management](#8️⃣-enterprise-api-key--quota-management)
 - [📊 Cleanliness Benchmarks](#-cleanliness-benchmarks)
 - [🚀 Quick Start (Production Setup)](#-quick-start-production-setup)
+- [Development checks](#开发验证与-ci)
 - [💬 Community & Sponsorship](#-交流与赞助支持--community--sponsorship)
 - [📜 License & Compliance](#-许可证与免责声明--license)
 
@@ -414,6 +416,34 @@ After deployment, access:
 - **Management Console**: `http://<YOUR_IP>:8787/console`
 - **Health Check**: `http://<YOUR_IP>:8787/health`
 - **API Endpoint**: `POST http://<YOUR_IP>:8787/v1/messages`
+
+---
+
+## 开发验证与 CI
+
+CI 配置以 [`.github/workflows/test.yml`](.github/workflows/test.yml) 为准，使用 Node.js 22、pnpm 10 和 Go 1.25。日常本地验证只运行本次改动涉及的测试文件；fork 的 Actions 门禁保留明确列出的后端回归和 Shard 镜像验证。
+
+先按需安装依赖：后端 `npm ci`，前端 `pnpm -C web install --frozen-lockfile`。以下命令均在仓库根目录执行：
+
+| 目的 | 命令 |
+| --- | --- |
+| 手动后端核心集 | `npm run test:ci` |
+| 手动前端核心集 | `pnpm -C web test:ci` |
+| 指定后端测试文件 | `npm run test:unit -- api-keys`（也接受 `api-keys.test.mjs`） |
+| 指定前端测试文件 | `pnpm -C web exec vitest run src/lib/api.test.ts` |
+| 后端全量单测 | `npm run test:unit` |
+| 前端全量单测 | `pnpm -C web test` |
+| 前端类型检查与生产构建 | `pnpm -C web build` |
+
+后端 runner 每个测试文件使用独立进程；不传文件名时保留全量行为。`test:ci` 是手动选择的固定核心集，不能代替 fork 的 CI 门禁。
+
+- `ci` job 执行安装与升级脚本检查、定向后端测试、脱敏 helper 与出口回归、选定 E2E、前端回归及构建。
+- `browser-image` job 构建 amd64 验证镜像，核验公开镜像不含浏览器内核或授权 key，在临时缓存安装 Shard，再离线验证浏览器业务、原生 profile 重开和 Claude OAuth helper。
+- 本 fork 未启用官方的 paths-filter、`full` 或 `arm64` 手动输入，也不构建 ARM64 镜像。现有可选 `performance` job 用于同机离线性能比较。纯文档修改只需核验事实、链接和范围；现有工作流没有按文档类型跳过业务门禁。
+
+格式工具和只处理改动文件的方法见 [docs/FORMAT.md](docs/FORMAT.md)。`npm test` / `npm run test:all` 执行后端全量单测和 `worker` race 测试，不包含前端、`api-kernel`、`redact` 或 E2E。CI 绿灯只表示该次实际执行的检查通过，不代表生产或真实模型验收。
+
+The fork keeps its focused backend checks and offline amd64 Shard image gate. The `test:ci` scripts and selected-file runner are manual tools; upstream path filtering, full-suite inputs and ARM packaging are not enabled here.
 
 ---
 

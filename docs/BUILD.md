@@ -4,7 +4,7 @@ git 里只有源码。`bin/`、`web/dist`、`share/crag` 与 `share/wrap-cli` �
 
 - `web/dist`、`kin-api-kernel`、`kin-redact` 与 `kin-egress` 在最终控制面镜像内从 fork 源码构建。`kin-egress` 保留 fork 的出口逻辑并包含 HTTP CONNECT 支持。
 - 其余 linux amd64 kernel / helper、Claude CLI、完整签名加密 CRAG native v2 包与 glibc shim 由 [`deploy/payload.json`](../deploy/payload.json) 按大小和 SHA-256 固定。清单的 `release` 指向已公开、不可变的 payload Release，可独立于应用版本；`npm run fetch:payload` 与镜像构建使用同一清单，校验失败即停止。
-- 当前载荷来源为官方 `payload-2026.11.13-crag-2.8.17`，配套 CRAG `v2.8.17`。应用基线和资产来源见 [官方 086 构建记录](releases/v1.4.086-binaries.json)；来源与完整性校验不等于生产运行验收。
+- 当前载荷来源为官方 `payload-2026.11.14-cache-ttl`，包含 CLI `2.1.321` 缓存 TTL 修复字节；CRAG `v2.8.17` 的原签名包与出厂成员保持，不重新构建。应用基线和资产来源见 [官方 087 构建记录](releases/v1.4.087-binaries.json)；来源与完整性校验不等于生产运行验收。
 
 ## 完整应用交付
 
@@ -119,7 +119,7 @@ npm run test:web          # 要先 pnpm -C web install
 node --check src/server.mjs
 ```
 
-CI（`.github/workflows/test.yml`）在 main push / PR 上运行，也可手动触发；包含受影响后端与 Go 回归、前端检查，以及 amd64 镜像中的离线 Shard 浏览器验证。CI 不发起真实模型请求，不代表生产验收，也不扩展 ARM64 发布范围。PR 使用该次检出的合并状态；需要验证更新后的主线时刷新 PR 再运行。当前 fork 的 `.github/workflows/pr-rerun.yml` 自动重跑任务关闭。
+CI（`.github/workflows/test.yml`）在 main push / PR 上运行，也可手动触发；保留 fork 明确列出的后端与 Go 回归、前端检查，以及 amd64 镜像中的离线 Shard 浏览器验证。`test:ci` 脚本与 runner 的指定文件参数是手动验证工具；不启用官方 paths-filter、`full` 或 `arm64` 输入。命令与门禁范围见 [开发验证与 CI](../README.md#开发验证与-ci)。PR 使用该次检出的合并状态；需要验证更新后的主线时刷新 PR 再运行。当前 fork 的 `.github/workflows/pr-rerun.yml` 自动重跑任务关闭。
 
 ## 升级一台已部署的机
 
