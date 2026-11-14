@@ -83,6 +83,48 @@ function fixture(t, { body = {}, headers = {}, protocol = 'openai.responses', ho
   return { args, res, chunks }
 }
 
+test('a committed reset emits one error, keeps partial usage and is not replayed', async (t) => {
+  let calls = 0
+  const diagnostic = {
+    component: 'codex-kernel',
+    phase: 'stream',
+    lastEventType: 'response.output_text.delta',
+    lastEventAgoMs: 1,
+    responseCommitted: true,
+    usageState: 'partial',
+  }
+  const fx = fixture(t, {
+    body: { stream: true },
+    hop: async ({ onEvent }) => {
+      calls++
+      await onEvent('data: {"type":"response.output_text.delta","delta":"partial"}\n\n')
+      return {
+        ok: false,
+        status: 0,
+        committed: true,
+        terminalState: 'incomplete',
+        transportError: true,
+        usage: { input_tokens: 5 },
+        body: { error: { code: 'ECONNRESET', message: 'aborted' } },
+        failureDiagnostics: diagnostic,
+      }
+    },
+  })
+  await handleCodexProtocol(fx.args)
+  assert.equal(calls, 1)
+  assert.equal(
+    fx.chunks
+      .join('')
+      .split('\n')
+      .filter((line) => line.startsWith('data:') && JSON.parse(line.slice(5)).type === 'error').length,
+    1,
+  )
+  assert.equal(fx.args.logBag.final_state, 'incomplete')
+  assert.equal(fx.args.logBag.error_code, 'ECONNRESET')
+  assert.equal(fx.args.logBag.input_tokens, 5)
+  assert.deepEqual(fx.args.logBag.failure_diagnostics, { ...diagnostic, kernelRunId: null })
+})
+
 for (const [name, body, headers, streamed] of [
   ['omitted stream', {}, {}, false],
   ['explicit false', { stream: false }, {}, false],
@@ -261,7 +303,9 @@ for (const terminal of ['failed', 'incomplete', 'done']) {
         await onEvent('data: {"type":"response.output_text.delta","delta":"partial"}')
         const error = { code: 'server_error', message: 'Upstream interrupted' }
         const usage = { input_tokens: 10, output_tokens: 2 }
-        await onEvent(`data: ${JSON.stringify({ type: `response.${terminal}`, response: { status: 'failed', error, usage } })}`)
+        await onEvent(
+          `data: ${JSON.stringify({ type: `response.${terminal}`, response: { status: 'failed', error, usage } })}`,
+        )
         return {
           ok: false,
           status: 200,

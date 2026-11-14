@@ -563,6 +563,7 @@ export class RequestLogStore {
       output_tokens: extra.output_tokens ?? usage.output_tokens ?? null,
       error_code: extra.error_code || null,
       error_message: extra.error_message ? String(extra.error_message).slice(0, 300) : null,
+      failure_diagnostics: extra.failure_diagnostics || null,
       user_agent: ctx.user_agent,
       ip: ctx.ip,
       api_key_presented: extra.api_key_presented ? presentedApiKeyForLog(extra.api_key_presented) : null,
@@ -885,6 +886,7 @@ const EXPORT_COLUMNS = [
   'error_class',
   'error_code',
   'error_message',
+  'failure_diagnostics',
   'error_label',
   'model',
   'vm_id',
@@ -906,7 +908,7 @@ const EXPORT_COLUMNS = [
 
 function csvCell(v) {
   if (v == null || v === '') return ''
-  const s = String(v)
+  const s = typeof v === 'object' ? JSON.stringify(v) : String(v)
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 

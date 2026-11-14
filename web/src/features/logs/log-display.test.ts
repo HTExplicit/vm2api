@@ -11,6 +11,8 @@ import {
   resolveModelAuditDisplay,
   segmentWidth,
   statusBadgeClass,
+  statusBadgeLabel,
+  isSuccessfulRequest,
   statusBadgeTooltip,
   thinkingEffortBadgeClass,
   unitPricePerMillion,
@@ -176,13 +178,31 @@ describe('latency segments', () => {
 describe('provider chain', () => {
   it('classifies attempts by commit / upstream status / terminal state', () => {
     expect(chainItemStatus(attempt({ downstreamCommitted: true }))).toBe(
-      'success'
+      'pending'
     )
     expect(chainItemStatus(attempt({ upstreamStatus: 529 }))).toBe('failure')
     expect(chainItemStatus(attempt({ terminalState: 'exhausted' }))).toBe(
       'failure'
     )
     expect(chainItemStatus(attempt({}))).toBe('pending')
+    expect(
+      chainItemStatus(
+        attempt({
+          downstreamCommitted: true,
+          upstreamStatus: 200,
+          terminalState: 'incomplete',
+          errorCode: 'ECONNRESET',
+        })
+      )
+    ).toBe('failure')
+    expect(
+      chainItemStatus(
+        attempt({ downstreamCommitted: true, terminalState: 'verified' })
+      )
+    ).toBe('success')
+    expect(chainItemStatus(attempt({ terminalState: 'cancelled' }))).toBe(
+      'cancelled'
+    )
   })
 
   it('picks the committed attempt as the final provider', () => {
@@ -209,10 +229,40 @@ describe('display helpers', () => {
     expect(statusBadgeClass(200, 'verified')).toContain('bg-green-100')
     expect(statusBadgeClass(500, 'incomplete')).toContain('bg-red-100')
     expect(statusBadgeTooltip(200, 'incomplete', 'worker_timeout')).toBe(
-      '响应未完整结束（worker_timeout）'
+      'HTTP 200 · 响应未完整结束（worker_timeout）'
     )
-    expect(statusBadgeTooltip(200, 'incomplete', null)).toBe('响应未完整结束')
+    expect(statusBadgeTooltip(200, 'incomplete', null)).toBe(
+      'HTTP 200 · 响应未完整结束'
+    )
     expect(statusBadgeTooltip(200, 'verified', 'worker_timeout')).toBeNull()
+  })
+
+  it('uses classified results instead of HTTP 200 for labels and success', () => {
+    expect(statusBadgeLabel(200, 'incomplete', '传输中断')).toBe('传输中断')
+    expect(statusBadgeLabel(200, 'incomplete', '超时')).toBe('超时')
+    expect(statusBadgeLabel(200, 'cancelled', null)).toBe('已取消')
+    expect(statusBadgeClass(200, 'cancelled')).toContain('bg-gray-100')
+    expect(
+      isSuccessfulRequest({
+        statusCode: 200,
+        finalState: 'incomplete',
+        errorClass: 'transport',
+      })
+    ).toBe(false)
+    expect(
+      isSuccessfulRequest({
+        statusCode: 200,
+        finalState: 'verified',
+        errorClass: null,
+      })
+    ).toBe(true)
+    expect(
+      isSuccessfulRequest({
+        statusCode: 200,
+        finalState: 'cancelled',
+        errorClass: null,
+      })
+    ).toBe(false)
   })
 
   it('styles known and unknown effort levels', () => {

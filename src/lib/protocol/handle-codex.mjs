@@ -33,6 +33,7 @@ import { isPelicanTestRequest, pelicanTestAdmission } from '../admin/pelican-tes
 import { ensureRedaction, maskJson, restoreJsonValue } from '../redaction/runtime.mjs'
 import {
   codexKernelRequestOptions,
+  codexKernelRunId,
   ensureCodexKernel,
   writeCodexKernelConfig,
 } from '../transport/codex-kernel-supervisor.mjs'
@@ -858,6 +859,7 @@ export async function handleCodexProtocol({
         let conversionError = null
         let errorEmitted = false
         const attemptStartedAt = Date.now()
+        const kernelRunId = codexKernelRunId(vm.id)
         const sessionOptions = {
           boundSessionId: stickyBound?.sessionId || '',
           boundVmId: stickyBound?.vmId || '',
@@ -1014,6 +1016,7 @@ export async function handleCodexProtocol({
           ? Math.max(0, result.firstByteAt - requestStartedAt)
           : (result?.firstByteMs ?? null)
         logBag.generation_ms = result?.generationMs ?? null
+        logBag.failure_diagnostics = result?.failureDiagnostics ? { ...result.failureDiagnostics, kernelRunId } : null
         if (conversionError) {
           result.ok = false
           result.status = 502

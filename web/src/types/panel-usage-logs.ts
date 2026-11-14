@@ -11,6 +11,18 @@
  * 仍服务于错误归集与导出，由 `types/panel-logs.ts` 描述。
  */
 
+export type FailureDiagnostics = {
+  component: 'codex-kernel'
+  phase: 'connect' | 'headers' | 'first_event' | 'stream' | 'finalize'
+  kernelRunId: string | null
+  kernelRequestId?: string | null
+  lastEventType: string | null
+  lastEventAgoMs: number | null
+  responseCommitted: boolean
+  usageState: 'missing' | 'partial' | 'final'
+  cleanupErrorCode?: string
+}
+
 /** 单次上游尝试，`request_attempts` 直出，按 `attemptNumber` 升序构成供应商链。 */
 export type ProviderChainItem = {
   attemptNumber: number
@@ -192,6 +204,7 @@ export type UsageLogRow = {
   errorOwner: 'client' | 'provider' | 'platform' | null
   errorCode: string | null
   errorMessage: string | null
+  failureDiagnostics?: FailureDiagnostics | null
   /** classifyJev 实际 POST 的 state。送审上下文，不是模型指出的命中句。 */
   jevState: string | null
 

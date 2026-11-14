@@ -123,6 +123,7 @@ jobs:
             test/unit/panel-vm-start.test.mjs \
             test/unit/panel-vm-deactivate.test.mjs \
             test/unit/codex-start-ready.test.mjs \
+            test/unit/codex-kernel-client.test.mjs \
             test/unit/runtime-state.test.mjs \
             test/unit/slot-engine-runtime.test.mjs \
             test/unit/slot-recovery.test.mjs \
@@ -339,7 +340,7 @@ jobs:
           pnpm exec vitest run src/features/vm/codex-browser-finish.test.ts src/features/vm/codex-credential-browser-completion.test.tsx
           pnpm exec vitest run src/features/vm/claude-credential-panel.test.tsx
           pnpm exec vitest run src/features/openai-apikey src/features/logs/account-api-logs.test.tsx src/components/layout/data/sidebar-data.test.ts
-          pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx
+          pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx src/features/logs/failure-display.test.tsx
           pnpm exec vitest run src/features/anthropic/endpoint-save.test.ts
           pnpm exec vitest run src/features/settings/health-pane.test.ts src/features/cluster/slot-migration.test.ts
           pnpm exec vitest run src/features/vm/engine-editor.test.tsx src/features/wrap/index.test.tsx src/lib/slash-line.test.ts src/features/vm/engine-contract.test.ts src/features/vm/persona-contract.test.ts src/lib/wrap-health.test.ts src/features/system/compat-patch.test.ts
@@ -351,6 +352,8 @@ jobs:
           pnpm build
       - name: Platform configuration retry UI
         run: node scripts/smoke-platform-retry-ui.mjs
+      - name: Log failures with offline data
+        run: node scripts/smoke-log-failures-ui.mjs
       - name: Claude reset card interactions
         env:
           UI_BROWSER_EXE: /usr/bin/google-chrome

@@ -76,6 +76,47 @@ test('normal mode writes jsonl without body', () => {
   assert.equal(store.listDebug({ limit: 5 }).length, 0)
 })
 
+test('normal failure diagnostics survive storage, panel hydration and both exports without bodies', (t) => {
+  const store = tmpStore('normal')
+  t.after(() => {
+    store.db.close()
+    fs.rmSync(store.dataDir, { recursive: true, force: true })
+  })
+  const failure_diagnostics = {
+    component: 'codex-kernel',
+    phase: 'stream',
+    kernelRunId: 'run-one',
+    lastEventType: 'response.output_text.delta',
+    lastEventAgoMs: 500,
+    responseCommitted: true,
+    usageState: 'missing',
+  }
+  const ctx = store.start(
+    { method: 'POST', headers: {}, socket: {} },
+    { protocol: 'openai.responses', pathName: '/v1/responses' },
+  )
+  const summary = store.finish(ctx, {
+    status: 200,
+    stream: true,
+    error_code: 'ECONNRESET',
+    final_state: 'incomplete',
+    failure_diagnostics,
+    inbound_body: { input: 'private body' },
+  })
+  const saved = store.getDebug(ctx.request_id)
+  assert.deepEqual(saved.failure_diagnostics, failure_diagnostics)
+  assert.equal(saved.inbound_body, undefined)
+  assert.deepEqual(new UsageLogsView(store.db).listBatch().logs[0].failureDiagnostics, failure_diagnostics)
+  const exported = new UsageLogsView(store.db).exportRows().items
+  assert.deepEqual(JSON.parse(logsToJsonl(exported)).failure_diagnostics, failure_diagnostics)
+  assert.ok(logsToCsv(exported).includes('response.output_text.delta'))
+  assert.equal(logsToCsv(exported).includes('[object Object]'), false)
+  assert.equal(JSON.stringify(exported).includes('private body'), false)
+  assert.equal(summary.input_tokens, null)
+  assert.equal(new UsageLogsView(store.db).listBatch().logs[0].inputTokens, 0)
+  assert.equal(store.listDebug().length, 0)
+})
+
 test('account API summaries preserve sending identity without adding an OAuth VM identity', (t) => {
   const store = tmpStore('normal')
   t.after(() => {

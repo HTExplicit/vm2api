@@ -49,6 +49,7 @@ import {
 } from '../core/errors.mjs'
 import { extraHeadersFromLimitError } from '../pool/quota-window.mjs'
 import { createStreamTiming, isGeneratedContentEvent } from '../protocol/stream-timing.mjs'
+import { createFailureDiagnostics } from './failure-diagnostics.mjs'
 import { mergeUsage } from '../protocol/openai-usage.mjs'
 import { ensureRedaction, maskJson, restoreJsonValue, createSseRestorer } from '../redaction/runtime.mjs'
 import { inferenceCodec } from './inference-codec.mjs'
@@ -120,6 +121,7 @@ async function workerRequest(
     maxRequestBytes = 0,
     inference = false,
     onRequestStarted,
+    onConnected,
     requireInternalToken = false,
   } = {},
 ) {
@@ -191,6 +193,11 @@ async function workerRequest(
     )
     if (timeoutMs != null) arm(timeoutMs, `slot worker timeout after ${timeoutMs}ms`)
     req.once('close', clearTimer)
+    if (onConnected)
+      req.once('socket', (socket) => {
+        if (socket.connecting) socket.once('connect', onConnected)
+        else onConnected()
+      })
     req.once('error', reject)
     if (payload) req.write(payload)
     req.end()
@@ -1077,6 +1084,9 @@ export async function streamGoWorker({
   let sseUsage = null
   const timing = createStreamTiming()
   const requestId = randomUUID()
+  const diagnostics = createFailureDiagnostics(requestId)
+  let lastError = null
+  let successfulTerminal = null
   let stopCancel = () => {}
   let nativeHandoff = false
   let handoff = null
@@ -1141,6 +1151,7 @@ export async function streamGoWorker({
         nativeHandoff = useNativeHandoff
         stopCancel = cancelOnAbort(exec, signal, requestId)
       },
+      onConnected: () => diagnostics.connected(),
       signal,
       timeoutMs,
     })
@@ -1166,10 +1177,12 @@ export async function streamGoWorker({
         transportError: false,
         threadBetas: prepared.thread,
         upstreamResponseModel,
+        failureDiagnostics: diagnostics.snapshot(committed),
         ...nativeMetadata(),
       })
       return classifyManagedQueueRejection(result, managedCrag)
     }
+    diagnostics.headers()
     if (nativeHandoff) {
       const received = await consumeNativeHandoffStream(response, {
         state: handoff,
@@ -1181,6 +1194,7 @@ export async function streamGoWorker({
           onCommit?.()
         },
         onObserve: (event) => {
+          diagnostics.observe(event)
           timing.observe(event)
           if (event.type === 'message_start') rememberThreadTurn(event.message?.id, prepared.thread)
           const responseModel = event.message?.model
@@ -1229,6 +1243,7 @@ export async function streamGoWorker({
         sawMessageStop: received.sawMessageStop,
         committed,
         terminalState: failed ? 'incomplete' : 'verified',
+        failureDiagnostics: failed ? diagnostics.snapshot(committed) : null,
         transportError: false,
         threadBetas: prepared.thread,
         upstreamResponseModel,
@@ -1236,7 +1251,6 @@ export async function streamGoWorker({
     }
     let buffer = ''
     let receivedAt = null
-    let lastError = null
     let dataBuf = ''
     let sseModel = null
     let sseStop = null
@@ -1271,12 +1285,19 @@ export async function streamGoWorker({
     }
     const observeSseEvent = (event) => {
       if (!event) return event
+      diagnostics.observe(event, receivedAt || Date.now())
       timing.observe(event, receivedAt)
       if (event.type === 'response_headers' && event.headers && typeof event.headers === 'object') {
         sseRateHeaders = { ...sseRateHeaders, ...event.headers }
       }
       if (event.type === 'error') lastError = event
       if (event.type === 'response.completed' || event.type === 'response.done') responseTerminal = event
+      if (
+        event.type === 'response.completed' ||
+        (event.type === 'response.done' && event.response?.status === 'completed')
+      ) {
+        successfulTerminal = event
+      }
       if (
         event.type === 'response.failed' ||
         event.type === 'response.incomplete' ||
@@ -1322,78 +1343,93 @@ export async function streamGoWorker({
       }, 1000)
       idleTimer.unref?.()
     }
+    let cleanupError = null
     try {
       // message_stop is the protocol terminal event, but the kernel still sends
       // job_done and its trailers afterward. Keep reading until the worker
       // closes the response so a normal completion is not mistaken for cancel.
       const sseRestorer = prepared.redaction ? createSseRestorer(prepared.redaction) : null
-      for await (const chunk of response) {
-        receivedAt = Date.now()
-        buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
-        let newline
-        while ((newline = buffer.indexOf('\n')) >= 0) {
-          const sourceLine = buffer.slice(0, newline).replace(/\r$/, '')
-          buffer = buffer.slice(newline + 1)
-          // CLI diagnostics share the internal stream, never the caller's SSE.
-          if (sourceLine.startsWith('event:'))
-            outboundHeadersFrame = ['kin_outbound_headers', 'kin_provider_result'].includes(sourceLine.slice(6).trim())
-          if (outboundHeadersFrame) {
-            if (sourceLine.startsWith('data:')) {
-              const event = parseJson(sourceLine.slice(5).trim())
-              if (
-                event?.type === 'kin_outbound_headers' &&
-                event.headers &&
-                typeof event.headers === 'object' &&
-                !Array.isArray(event.headers) &&
-                typeof onOutboundHeaders === 'function'
-              ) {
-                try {
-                  const body = event.body == null ? undefined : capOutboundBody(event.body)
-                  onOutboundHeaders(event.headers, {
-                    body,
-                    body_truncated:
-                      event.body_truncated === true || (typeof event.body === 'string' && body !== event.body),
-                  })
-                } catch {
-                  console.warn('[worker] outbound header observer failed')
+      try {
+        for await (const chunk of response) {
+          receivedAt = Date.now()
+          buffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+          let newline
+          while ((newline = buffer.indexOf('\n')) >= 0) {
+            const sourceLine = buffer.slice(0, newline).replace(/\r$/, '')
+            buffer = buffer.slice(newline + 1)
+            // CLI diagnostics share the internal stream, never the caller's SSE.
+            if (sourceLine.startsWith('event:'))
+              outboundHeadersFrame = ['kin_outbound_headers', 'kin_provider_result'].includes(
+                sourceLine.slice(6).trim(),
+              )
+            if (outboundHeadersFrame) {
+              if (sourceLine.startsWith('data:')) {
+                const event = parseJson(sourceLine.slice(5).trim())
+                if (
+                  event?.type === 'kin_outbound_headers' &&
+                  event.headers &&
+                  typeof event.headers === 'object' &&
+                  !Array.isArray(event.headers) &&
+                  typeof onOutboundHeaders === 'function'
+                ) {
+                  try {
+                    const body = event.body == null ? undefined : capOutboundBody(event.body)
+                    onOutboundHeaders(event.headers, {
+                      body,
+                      body_truncated:
+                        event.body_truncated === true || (typeof event.body === 'string' && body !== event.body),
+                    })
+                  } catch {
+                    console.warn('[worker] outbound header observer failed')
+                  }
                 }
               }
+              if (sourceLine === '') outboundHeadersFrame = false
+              continue
             }
-            if (sourceLine === '') outboundHeadersFrame = false
-            continue
-          }
-          const lines = sseRestorer
-            ? [...sseRestorer.before(sourceLine), await sseRestorer.line(sourceLine)]
-            : [sourceLine]
-          for (const line of lines) {
-            if (line) {
-              sawChunk = true
-              lastChunkAt = Date.now()
-            }
-            applyClaudeSSELineToMessage(line, assembler)
-            if (line.startsWith('data:')) {
-              const piece = line.slice(5).trim()
-              if (piece && piece !== '[DONE]') {
-                dataBuf = dataBuf ? `${dataBuf}\n${piece}` : piece
+            const lines = sseRestorer
+              ? [...sseRestorer.before(sourceLine), await sseRestorer.line(sourceLine)]
+              : [sourceLine]
+            for (const line of lines) {
+              if (line) {
+                sawChunk = true
+                lastChunkAt = Date.now()
+              }
+              applyClaudeSSELineToMessage(line, assembler)
+              if (line.startsWith('data:')) {
+                const piece = line.slice(5).trim()
+                if (piece && piece !== '[DONE]') {
+                  dataBuf = dataBuf ? `${dataBuf}\n${piece}` : piece
+                  const event = observeSseEvent(takeSseEvent())
+                  if (isDownstreamCommitEvent(event)) await flushCommit()
+                }
+              } else if (line === '') {
+                if (dataBuf) {
+                  const event = takeSseEvent()
+                  dataBuf = ''
+                  observeSseEvent(event)
+                  if (isDownstreamCommitEvent(event)) await flushCommit()
+                }
+              } else if (dataBuf && !line.startsWith('event:') && !line.startsWith(':')) {
+                dataBuf = `${dataBuf}\n${line}`
                 const event = observeSseEvent(takeSseEvent())
                 if (isDownstreamCommitEvent(event)) await flushCommit()
               }
-            } else if (line === '') {
-              if (dataBuf) {
-                const event = takeSseEvent()
-                dataBuf = ''
-                observeSseEvent(event)
-                if (isDownstreamCommitEvent(event)) await flushCommit()
-              }
-            } else if (dataBuf && !line.startsWith('event:') && !line.startsWith(':')) {
-              dataBuf = `${dataBuf}\n${line}`
-              const event = observeSseEvent(takeSseEvent())
-              if (isDownstreamCommitEvent(event)) await flushCommit()
+              await emitLine(line)
             }
-            await emitLine(line)
           }
+          if (sawChunk && !outboundHeadersFrame && buffer) lastChunkAt = Date.now()
         }
-        if (sawChunk && !outboundHeadersFrame && buffer) lastChunkAt = Date.now()
+      } catch (error) {
+        // Protocol completion is authoritative. Finish through the same path
+        // so queued terminal frames and observed usage are still delivered.
+        if (
+          !successfulTerminal ||
+          lastError ||
+          !['ECONNRESET', 'ERR_STREAM_PREMATURE_CLOSE', 'ABORT_ERR', 'worker_timeout'].includes(error.code)
+        )
+          throw error
+        cleanupError = error
       }
       if (buffer && !outboundHeadersFrame) {
         if (sseRestorer) {
@@ -1458,6 +1494,11 @@ export async function streamGoWorker({
         ...timing.snapshot(),
         committed,
         terminalState: nativeTimeout && !committed ? 'rejected' : terminalState,
+        failureDiagnostics: cleanupError
+          ? { ...diagnostics.snapshot(committed), cleanupErrorCode: cleanupError.code }
+          : complete
+            ? null
+            : diagnostics.snapshot(committed),
         transportError: false,
         threadBetas: prepared.thread,
       })
@@ -1481,6 +1522,7 @@ export async function streamGoWorker({
         ...timing.snapshot(),
         committed,
         usage: sseUsage,
+        failureDiagnostics: diagnostics.snapshot(committed),
         upstreamResponseModel,
         ...nativeMetadata(),
       })
@@ -1496,28 +1538,31 @@ export async function streamGoWorker({
               ? 413
               : 0,
       via: 'go-worker-stream',
-      body: handoff?.errorBody || {
-        type: 'error',
-        error: {
-          type: error.status === 413 ? 'invalid_request_error' : 'worker_error',
-          ...(error.status === 413 ? { details: { retryable: false } } : {}),
-          code: error.code || 'worker_transport_error',
-          message: String(error.message || error).slice(0, 300),
+      body: lastError ||
+        handoff?.errorBody || {
+          type: 'error',
+          error: {
+            type: error.status === 413 ? 'invalid_request_error' : 'worker_error',
+            ...(error.status === 413 ? { details: { retryable: false } } : {}),
+            code: error.code || 'worker_transport_error',
+            message: String(error.message || error).slice(0, 300),
+          },
         },
-      },
       headers: observedHeaders,
       usage: sseUsage,
       ...nativeMetadata(),
       ...timing.snapshot(),
       committed,
       upstreamResponseModel,
+      failureDiagnostics: diagnostics.snapshot(committed),
       terminalState:
-        committed || (nativeHandoff && String(error.code).startsWith('native_handoff_'))
+        committed || lastError || (nativeHandoff && String(error.code).startsWith('native_handoff_'))
           ? 'incomplete'
           : error.status === 413
             ? 'rejected'
             : 'transport_error',
-      transportError: error.status !== 413 && !(nativeHandoff && String(error.code).startsWith('native_handoff_')),
+      transportError:
+        !lastError && error.status !== 413 && !(nativeHandoff && String(error.code).startsWith('native_handoff_')),
     }
   } finally {
     stopCancel()

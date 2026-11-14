@@ -33,6 +33,7 @@ const STATUS_TO_STEP: Record<ChainItemStatus, StepStatus> = {
   success: 'success',
   failure: 'failure',
   pending: 'pending',
+  cancelled: 'warning',
 }
 
 function Field({ label, value }: { label: string; value: string | null }) {

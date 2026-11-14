@@ -9,9 +9,59 @@ import {
   stopCodexKernel,
   writeCodexKernelConfig,
   shouldRecycleCodexKernel,
+  captureCodexKernelLogs,
 } from '../../src/lib/transport/codex-kernel-supervisor.mjs'
 import fs from 'node:fs'
 import os from 'node:os'
+
+test('native output, split UTF-8 and process exit share one opaque run id', async () => {
+  const records = []
+  const script = `const b=Buffer.from('中文输出'); process.stdout.write(b.subarray(0,2)); setTimeout(()=>{process.stdout.write(b.subarray(2)); process.stderr.write('native failure');},20)`
+  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const runId = captureCodexKernelLogs(child, (r) => records.push(r))
+  await new Promise((resolve) => child.once('close', resolve))
+  assert.match(runId, /^[0-9a-f-]{36}$/)
+  assert.ok(records.every((r) => r.kernelRunId === runId))
+  assert.equal(
+    records
+      .filter((r) => r.stream === 'stdout')
+      .map((r) => r.message)
+      .join(''),
+    '中文输出',
+  )
+  assert.equal(
+    records
+      .filter((r) => r.stream === 'stderr')
+      .map((r) => r.message)
+      .join(''),
+    'native failure',
+  )
+  assert.equal(records[0].event, 'codex_kernel_started')
+  assert.equal(records.at(-1).event, 'codex_kernel_exited')
+  assert.equal(records.at(-1).code, 0)
+})
+
+test('spawn failures and signals are retained without exposing VM identity', async () => {
+  const records = []
+  const missing = spawn(path.join(os.tmpdir(), 'vm2api-no-such-kernel', 'kernel'), [], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const failedRun = captureCodexKernelLogs(missing, (r) => records.push(r))
+  await new Promise((resolve) => missing.once('close', resolve))
+  assert.equal(records.find((r) => r.event === 'codex_kernel_start_failed').code, 'ENOENT')
+  assert.equal(
+    records.some((r) => r.event === 'codex_kernel_started'),
+    false,
+  )
+  const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const runId = captureCodexKernelLogs(child, (r) => records.push(r))
+  assert.notEqual(runId, failedRun)
+  await new Promise((resolve) => child.once('spawn', resolve))
+  child.kill('SIGTERM')
+  await new Promise((resolve) => child.once('close', resolve))
+  assert.equal(records.at(-1).signal, 'SIGTERM')
+  assert.ok(records.every((r) => !('vmId' in r)))
+})
 
 const PROXY_ENV_KEYS = [
   'HTTPS_PROXY',

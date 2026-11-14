@@ -1,3 +1,5 @@
+import type { FailureDiagnostics } from './panel-usage-logs'
+
 export type RequestLogItem = {
   request_id?: string
   id?: string
@@ -28,6 +30,7 @@ export type RequestLogItem = {
   error_owner?: ErrorOwner
   error_code?: string
   error_message?: string
+  failure_diagnostics?: FailureDiagnostics | null
   vm_id?: string
   duration_ms?: number
   attempt_count?: number
@@ -113,7 +116,7 @@ export type RequestLogsResponse = {
   config?: { muted_error_classes?: string[]; mode?: string }
 }
 
-export type ErrorOwner = 'client' | 'provider' | 'platform'
+export type ErrorOwner = 'client' | 'provider' | 'platform' | null
 
 export type ErrorClassBucket = {
   id: string

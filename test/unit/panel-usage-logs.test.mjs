@@ -61,10 +61,13 @@ test('usage-log routes and export accept error-only independently of HTTP status
     return response
   }
 
-  for (const suffix of ['errors_only=1', 'errors_only=1&status_code=200', 'error_class=timeout']) {
+  for (const suffix of ['errors_only=1', 'errors_only=1&status_code=200', 'error_class=transport']) {
     const listed = await request(`/api/panel/usage-logs?${suffix}`)
-    assert.deepEqual(listed.body.data.logs.map((row) => row.id), ['stream-reset'])
-    assert.equal(listed.body.data.logs[0].errorClass, 'timeout')
+    assert.deepEqual(
+      listed.body.data.logs.map((row) => row.id),
+      ['stream-reset'],
+    )
+    assert.equal(listed.body.data.logs[0].errorClass, 'transport')
     const summary = await request(`/api/panel/usage-logs/summary?${suffix}`)
     assert.equal(summary.body.data.totalRequests, 1)
     assert.equal(summary.body.data.errorRequests, 1)
@@ -74,7 +77,13 @@ test('usage-log routes and export accept error-only independently of HTTP status
   const unfiltered = await request('/api/panel/usage-logs?errors_only=0')
   assert.equal(unfiltered.body.data.logs.length, 3)
   const exported = await request('/api/panel/request-logs/export?format=jsonl&errors_only=1')
-  const records = exported.body.trim().split('\n').map((line) => JSON.parse(line))
-  assert.deepEqual(records.map((row) => row.request_id), ['stream-reset'])
+  const records = exported.body
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line))
+  assert.deepEqual(
+    records.map((row) => row.request_id),
+    ['stream-reset'],
+  )
   assert.equal(exported.headers['x-kin-export-total'], '1')
 })
