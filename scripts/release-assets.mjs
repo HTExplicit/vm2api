@@ -95,7 +95,7 @@ export function writeProvenance({ manifest, dir, image, sourceCommit, upstreamBu
       release: manifest.release,
       build: {
         ...upstreamBuild,
-        source_record: 'docs/releases/v1.4.087-binaries.json',
+        source_record: 'docs/releases/v1.4.091-binaries.json',
         assets: upstreamBuild.assets.filter((asset) => pinnedAssets.some((item) => item.name === asset.name)),
       },
       crag: cragBuild,
@@ -170,8 +170,8 @@ function main() {
       dir: opts.dest,
       image: opts.image,
       sourceCommit: capture('git', ['rev-parse', 'HEAD']),
-      upstreamBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.087-binaries.json'), 'utf8')),
-      cragBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.086-crag.json'), 'utf8')),
+      upstreamBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.091-binaries.json'), 'utf8')),
+      cragBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.091-crag.json'), 'utf8')),
       assets: [...expected],
     }),
   )

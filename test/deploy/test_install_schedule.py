@@ -31,7 +31,7 @@ def run_installer(command, response=None, extra_env=None, mock=None):
 
 
 class ScheduleTests(unittest.TestCase):
-    def test_upgrade_runs_shared_fleet_once_and_honors_no_sync(self):
+    def test_install_and_upgrade_run_shared_fleet_once_and_honor_skip_options(self):
         mock = r'''
 need_root() { :; }
 require_cmds() { :; }
@@ -54,26 +54,34 @@ sync_wrap_cli() { echo unexpected-second-sync >> "$TRACE"; }
 docker() {
   case "$*" in
     *'test -f'*) return 0 ;;
-    *) printf '%s\n' "$*" >> "$TRACE" ;;
+    *) printf '%s\n' "$*" >> "$TRACE"; return "$FLEET_EXIT" ;;
   esac
 }
 '''
-        for enabled in (False, True):
-            with self.subTest(sync=enabled), tempfile.TemporaryDirectory() as tmp:
-                trace = Path(tmp) / "trace"
-                (Path(tmp) / "docker-compose.yml").write_text("")
-                result = run_installer(
-                    'INSTALL_DIR="$TEST_ROOT"; SYNC_WRAP="$TEST_SYNC"; CRAG_TARGET_VERSION=v2.0.2; cmd_upgrade',
-                    mock=mock, extra_env={
-                        "TRACE": str(trace), "TEST_ROOT": tmp,
-                        "TEST_SYNC": str(int(enabled)),
-                    },
-                )
-                self.assertEqual(result.returncode, 0, result.stderr)
-                lines = trace.read_text().splitlines() if trace.exists() else []
-                self.assertEqual(lines, [
-                    "exec vm2api node /opt/vm2api/scripts/fleet-services.mjs /opt/vm2api 4 v2.0.2"
-                ] if enabled else [])
+        for command in ("cmd_install", "cmd_upgrade"):
+            for enabled in (False, True):
+                for no_start in (False, True):
+                    for failed in (False, True):
+                        with self.subTest(command=command, sync=enabled, no_start=no_start, failed=failed), tempfile.TemporaryDirectory() as tmp:
+                            trace = Path(tmp) / "trace"
+                            (Path(tmp) / "docker-compose.yml").write_text("")
+                            result = run_installer(
+                                'INSTALL_DIR="$TEST_ROOT"; SYNC_WRAP="$TEST_SYNC"; NO_START="$TEST_NO_START"; CRAG_TARGET_VERSION=v2.0.2; ' + command,
+                                mock=mock, extra_env={
+                                    "TRACE": str(trace), "TEST_ROOT": tmp,
+                                    "TEST_SYNC": str(int(enabled)), "TEST_NO_START": str(int(no_start)),
+                                    "FLEET_EXIT": "22" if failed else "0",
+                                },
+                            )
+                            should_refresh = enabled and not no_start
+                            self.assertEqual(result.returncode, int(should_refresh and failed), result.stderr)
+                            lines = trace.read_text().splitlines() if trace.exists() else []
+                            self.assertEqual(lines, [
+                                "exec vm2api node /opt/vm2api/scripts/fleet-services.mjs /opt/vm2api 4 v2.0.2"
+                            ] if should_refresh else [])
+                            if should_refresh and failed:
+                                self.assertNotIn("安装完成", result.stdout)
+                                self.assertNotIn("已更新到", result.stdout)
 
     def test_crag_update_uses_existing_host_or_container_without_compose_restart(self):
         for container in (False, True):

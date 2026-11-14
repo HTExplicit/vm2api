@@ -44,7 +44,10 @@ function fixture(t, { failClose = false } = {}) {
   }
   const originalUpdate = pool.update.bind(pool)
   pool.update = (id, patch, options) => {
-    if (!options?.dryRun && ['host', 'port', 'username', 'password'].some((key) => Object.hasOwn(patch, key))) {
+    if (
+      !options?.dryRun &&
+      ['scheme', 'host', 'port', 'username', 'password'].some((key) => Object.hasOwn(patch, key))
+    ) {
       const candidate = originalUpdate(id, patch, { dryRun: true })
       if (candidate.ok && candidate.connection_changed) {
         assert.equal(active, false, 'connection cannot change before actual close')
@@ -108,20 +111,33 @@ test('connection edit cancels both businesses and closes before applying pool an
   assert.equal(f.busy.size, 0)
 })
 
+test('scheme edit uses the same browser transaction and updates the bound VM', async (t) => {
+  const f = fixture(t)
+  const result = await f.call('PUT', `/api/panel/proxies/${f.first.id}`, { scheme: 'http' })
+  assert.equal(result.status, 200)
+  assert.deepEqual(f.events, ['oauth:vm-a', 'platform:vm-a', 'close:vm-a', 'apply'])
+  assert.equal(f.first.scheme, 'http')
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'vms/vm-a.json'))).proxy.scheme, 'http')
+  assert.equal(f.busy.size, 0)
+})
+
 test('label, identical connection, and invalid edits leave the browser alone', async (t) => {
   const f = fixture(t)
   assert.equal((await f.call('PUT', `/api/panel/proxies/${f.first.id}`, { label: 'renamed' })).status, 200)
   assert.equal((await f.call('PUT', `/api/panel/proxies/${f.first.id}`, { port: 1080 })).status, 200)
+  assert.equal((await f.call('PUT', `/api/panel/proxies/${f.first.id}`, { scheme: 'socks5' })).status, 200)
+  assert.equal((await f.call('PUT', `/api/panel/proxies/${f.first.id}`, { scheme: 'https' })).status, 400)
   assert.equal((await f.call('PUT', `/api/panel/proxies/${f.first.id}`, { port: -1 })).status, 400)
   assert.equal((await f.call('PUT', '/api/panel/proxies/missing', { port: 1081 })).status, 404)
   assert.deepEqual(f.events, [])
 })
 
-for (const action of ['edit', 'bind', 'unbind', 'remove', 'disable', 'import']) {
+for (const action of ['edit', 'scheme', 'bind', 'unbind', 'remove', 'disable', 'import']) {
   test(`${action} refuses mutation while the browser cannot exit`, async (t) => {
     const f = fixture(t, { failClose: true })
     const routes = {
       edit: ['PUT', `/api/panel/proxies/${f.first.id}`, { host: 'new.proxy.test' }],
+      scheme: ['PUT', `/api/panel/proxies/${f.first.id}`, { scheme: 'http' }],
       bind: ['POST', `/api/panel/proxies/${f.second.id}/bind`, { vm_id: 'vm-a' }],
       unbind: ['POST', `/api/panel/proxies/${f.first.id}/unbind`, { vm_id: 'vm-a' }],
       remove: ['DELETE', `/api/panel/proxies/${f.first.id}`, {}],
@@ -133,11 +149,37 @@ for (const action of ['edit', 'bind', 'unbind', 'remove', 'disable', 'import']) 
     assert.equal(result.body.error.code, 'browser_close_failed')
     assert.equal(f.pool.getProxyForVm('vm-a').id, f.first.id)
     assert.equal(f.first.host, '1.2.3.4')
+    assert.equal(f.first.scheme, 'socks5')
     assert.equal(f.first.enabled, true)
     assert.equal(f.busy.size, 0)
     assert.deepEqual(f.events, ['oauth:vm-a', 'platform:vm-a', 'close:vm-a'])
   })
 }
+
+test('import default_scheme preserves explicit protocols and rejects invalid defaults before mutation', async (t) => {
+  const f = fixture(t)
+  const before = f.pool.snapshot()
+  const rejected = await f.call('POST', '/api/panel/proxies/import', {
+    text: '9.8.7.6:8080',
+    default_scheme: 'https',
+  })
+  assert.equal(rejected.status, 400)
+  assert.equal(rejected.body.error.code, 'invalid_scheme')
+  assert.deepEqual(f.pool.snapshot(), before)
+  const imported = await f.call('POST', '/api/panel/proxies/import', {
+    text: '9.8.7.6:8080\nsocks5://9.8.7.5:1080',
+    default_scheme: 'http',
+  })
+  assert.equal(imported.status, 200)
+  assert.deepEqual(
+    imported.body.data.items.map(({ scheme }) => scheme),
+    ['http', 'socks5'],
+  )
+  const legacy = await f.call('POST', '/api/panel/proxies/import', { text: '9.8.7.4:1080' })
+  assert.equal(legacy.status, 200)
+  assert.equal(legacy.body.data.items[0].scheme, 'socks5')
+  assert.deepEqual(f.events, [])
+})
 
 test('invalid bind and unbinding an unrelated slot do not cancel its browser', async (t) => {
   const f = fixture(t)

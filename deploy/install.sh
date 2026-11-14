@@ -76,7 +76,7 @@ usage() {
   --dir PATH           安装目录（默认 ${INSTALL_DIR}）
   --yes                非交互
   --no-start           只拉代码，不 compose up
-  --no-sync-wrap       升级后不检查、不停调度、不更新槽内 kernel
+  --no-sync-wrap       跳过 CRAG 获取及槽内 CLI / kernel 同步
   --from-source        clone 仓库并在本机构建镜像（默认拉预构建镜像）
   -h, --help           帮助
 EOF
