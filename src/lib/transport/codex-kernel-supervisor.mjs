@@ -25,7 +25,6 @@ export function captureCodexKernelLogs(child, log = (record) => console.error(JS
   for (const stream of ['stdout', 'stderr']) {
     child[stream].setEncoding('utf8')
     child[stream].on('data', (message) => emit('codex_kernel_output', { stream, message }))
-    child[stream].unref?.()
   }
   child.once('error', (error) => emit('codex_kernel_start_failed', { code: error.code, message: error.message }))
   child.once('close', (code, signal) => emit('codex_kernel_exited', { code, signal }))
@@ -276,6 +275,8 @@ export async function ensureCodexKernel(exec, { timeoutMs = 8000, startupRecover
   })
   captureCodexKernelLogs(child)
   child.unref()
+  child.stdout.unref()
+  child.stderr.unref()
   starts.set(exec.vmId, child)
   writeLimitStamp(paths.configPath, wanted)
   return waitForHealth(exec, timeoutMs)
