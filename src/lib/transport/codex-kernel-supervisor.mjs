@@ -17,6 +17,25 @@ import { computedUpstreamTransport, normalizeCodexRouting } from '../protocol/co
 const starts = new Map()
 const stops = new Map()
 
+/** Keep native output in the operator's rotated process log, never in panel data. */
+export function captureCodexKernelLogs(child, log = (record) => console.error(JSON.stringify(record))) {
+  child.kernelRunId = crypto.randomUUID()
+  const emit = (event, details) => log({ event, kernelRunId: child.kernelRunId, pid: child.pid || null, ...details })
+  child.once('spawn', () => emit('codex_kernel_started'))
+  for (const stream of ['stdout', 'stderr']) {
+    child[stream].setEncoding('utf8')
+    child[stream].on('data', (message) => emit('codex_kernel_output', { stream, message }))
+    child[stream].unref?.()
+  }
+  child.once('error', (error) => emit('codex_kernel_start_failed', { code: error.code, message: error.message }))
+  child.once('close', (code, signal) => emit('codex_kernel_exited', { code, signal }))
+  return child.kernelRunId
+}
+
+export function codexKernelRunId(vmId) {
+  return starts.get(vmId)?.kernelRunId || null
+}
+
 // The kernel exits only through config.proxy_url; inherited proxy variables would give it a second, unseen exit.
 function kernelEnv(env = process.env) {
   return Object.fromEntries(Object.entries(env).filter(([key]) => !/^(https?|all|no)_proxy$/i.test(key)))
@@ -252,9 +271,10 @@ export async function ensureCodexKernel(exec, { timeoutMs = 8000, startupRecover
   } catch {}
   const child = spawn(bin, [paths.configPath], {
     env: kernelEnv(),
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
   })
+  captureCodexKernelLogs(child)
   child.unref()
   starts.set(exec.vmId, child)
   writeLimitStamp(paths.configPath, wanted)

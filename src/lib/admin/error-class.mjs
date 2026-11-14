@@ -14,6 +14,8 @@ export const ERROR_CLASSES = {
   overloaded: { id: 'overloaded', owner: 'provider', label: '过载排队' },
   unavailable: { id: 'unavailable', owner: 'platform', label: '无可用账号' },
   timeout: { id: 'timeout', owner: 'provider', label: '超时' },
+  transport: { id: 'transport', owner: null, label: '传输中断' },
+  incomplete: { id: 'incomplete', owner: null, label: '响应未完成' },
   credential: { id: 'credential', owner: 'platform', label: '凭证' },
   proxy: { id: 'proxy', owner: 'platform', label: '代理' },
   upstream: { id: 'upstream', owner: 'provider', label: '上游' },
@@ -75,13 +77,23 @@ const CODE_MAP = {
   restore_in_progress: 'other',
   wrap_connection_error: 'other',
   upstream_timeout: 'timeout',
-  stream_incomplete: 'timeout',
-  client_cancelled: 'timeout',
-  request_cancelled: 'timeout',
-  client_aborted: 'timeout',
-  selection_cancelled: 'timeout',
-  ECONNRESET: 'timeout',
-  aborted: 'timeout',
+  worker_timeout: 'timeout',
+  ETIMEDOUT: 'timeout',
+  stream_incomplete: 'incomplete',
+  upstream_stream_incomplete: 'incomplete',
+  ECONNRESET: 'transport',
+  ECONNREFUSED: 'transport',
+  ECONNABORTED: 'transport',
+  ENETUNREACH: 'transport',
+  EHOSTUNREACH: 'transport',
+  ENOTFOUND: 'transport',
+  EAI_AGAIN: 'transport',
+  ABORT_ERR: 'transport',
+  EPIPE: 'transport',
+  ERR_STREAM_PREMATURE_CLOSE: 'transport',
+  worker_transport_error: 'transport',
+  upstream_transport: 'transport',
+  aborted: 'transport',
   upstream_auth_error: 'credential',
   oauth_need_reimport: 'credential',
   oauth_refresh_failed: 'credential',
@@ -98,6 +110,8 @@ export const IGNORED_ERROR_CODES = new Set([
   'client_aborted',
   'selection_cancelled',
 ])
+
+export const FAILED_REQUEST_STATES = ['incomplete', 'transport_error', 'error', 'rejected', 'exhausted']
 
 /**
  * Client ingress auth (missing / unknown / disabled / expired sk-kin).
@@ -218,8 +232,9 @@ export function isIgnoredClientCancel(row = {}) {
   const status = Number(row?.status) || 0
   const code = String(row?.error_code || '').trim()
   if (status >= 400 && status !== 499) return false
+  if (row.final_state === 'cancelled') return true
   if (IGNORED_ERROR_CODES.has(code)) return true
-  return /client_aborted|request_cancelled|selection_cancelled|context canceled/i.test(hay(row))
+  return false
 }
 
 export function isErrorRow(row) {
@@ -227,7 +242,7 @@ export function isErrorRow(row) {
   const status = Number(row?.status) || 0
   // Streaming headers can commit HTTP 200 before a later transport or terminal
   // error. Keep those failures visible just as the usage-log SQL predicates do.
-  return status >= 400 || !!row?.error_code
+  return status >= 400 || !!row?.error_code || FAILED_REQUEST_STATES.includes(row?.final_state)
 }
 
 export function classifyRequestError(row = {}) {
@@ -236,6 +251,8 @@ export function classifyRequestError(row = {}) {
   const code = String(row.error_code || '').trim()
   const text = hay(row)
   let id = CODE_MAP[code] || null
+  // A provider may use a generic incomplete code for a concrete deadline.
+  if ((!id || id === 'incomplete') && /timeout|timed out|deadline/.test(text)) id = 'timeout'
 
   if (/signature|thinking block|skip_thought_signature|must contain thinking/.test(text)) id = 'signature'
   else if ((id === 'upstream' || (!id && status === 503)) && /overload|负载过高/.test(text)) id = 'overloaded'
@@ -256,7 +273,9 @@ export function classifyRequestError(row = {}) {
   if (!id) {
     if (/extra usage|entitlement|quota|5h|7d/.test(text) && (status === 429 || /quota|usage/.test(text))) id = 'quota'
     else if (/socks|proxy|cloudflare|just a moment/.test(text)) id = 'proxy'
-    else if (/timeout|aborted|incomplete|deadline/.test(text) || status === 408 || status === 504) id = 'timeout'
+    else if (/timeout|timed out|deadline/.test(text) || status === 408 || status === 504) id = 'timeout'
+    else if (/aborted|connection reset|socket hang up|premature.*close/.test(text)) id = 'transport'
+    else if (/incomplete/.test(text)) id = 'incomplete'
     else if (
       INGRESS_AUTH_ERROR_CODES.has(code) ||
       /missing_api|invalid_api|api[_-]?key|missing credentials|invalid credentials/.test(text)
@@ -268,6 +287,8 @@ export function classifyRequestError(row = {}) {
     else if (status === 529 || /overload|负载过高/.test(text)) id = 'overloaded'
     else if (status === 503 || /no eligible/.test(text)) id = 'unavailable'
     else if (status === 400 || status === 422) id = 'request'
+    else if (row.final_state === 'transport_error') id = 'transport'
+    else if (row.final_state === 'incomplete') id = 'incomplete'
     else if (status >= 500) id = 'upstream'
     else id = 'other'
   }
@@ -285,7 +306,13 @@ export function enrichLogRow(row) {
   if (!row) return row
   const cls = classifyRequestError(row)
   if (!cls) {
-    return { ...row, error_class: null, error_owner: null, error_label: null }
+    return {
+      ...row,
+      error_class: null,
+      error_owner: null,
+      error_label: null,
+      ...(isIgnoredClientCancel(row) && !row.final_state ? { final_state: 'cancelled' } : {}),
+    }
   }
   const committedFailure = !row.final_state && Number(row.status) >= 200 && Number(row.status) < 300
   return { ...row, ...cls, ...(committedFailure ? { final_state: 'incomplete' } : {}) }

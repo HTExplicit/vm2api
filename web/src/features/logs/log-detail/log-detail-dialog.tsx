@@ -62,6 +62,8 @@ export function LogDetailDialog({
                   statusCode={row.statusCode}
                   finalState={row.finalState}
                   errorCode={row.errorCode}
+                  errorClass={row.errorClass}
+                  errorLabel={row.errorLabel}
                 />
               ) : null}
             </DialogTitle>

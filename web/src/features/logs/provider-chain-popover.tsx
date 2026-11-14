@@ -45,6 +45,11 @@ const STATUS_STYLE: Record<
     color: 'text-slate-500',
     bg: 'bg-slate-50 dark:bg-slate-800/50',
   },
+  cancelled: {
+    icon: InfoIcon,
+    color: 'text-slate-500',
+    bg: 'bg-slate-50 dark:bg-slate-800/50',
+  },
 }
 
 function UpstreamStatusBadge({ code }: { code: number }) {
