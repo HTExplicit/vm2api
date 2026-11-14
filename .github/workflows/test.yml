@@ -347,6 +347,8 @@ jobs:
       - name: Platform configuration retry UI
         run: node scripts/smoke-platform-retry-ui.mjs
       - name: Claude reset card interactions
+        env:
+          UI_BROWSER_EXE: /usr/bin/google-chrome
         run: node --test test/browser/claude-reset-actions.test.mjs
       - name: Account API key management UI
         run: node scripts/smoke-openai-apikey-ui.mjs
