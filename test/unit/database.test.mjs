@@ -176,9 +176,10 @@ test('migration 053 adds unknown observed models without rewriting historical mo
     `)
     const before = { ...db.prepare('SELECT * FROM usage_logs WHERE id = ?').get('log-legacy') }
     applyMigrations(db, { migrationsDir: migrations })
-    const { sent_model, upstream_response_model, ...after } = db
+    const { sent_model, upstream_response_model, failure_diagnostics_json, ...after } = db
       .prepare('SELECT * FROM usage_logs WHERE id = ?')
       .get('log-legacy')
+    assert.equal(failure_diagnostics_json, null)
     assert.equal(sent_model, null)
     assert.equal(upstream_response_model, null)
     assert.deepEqual(after, before)
@@ -478,6 +479,7 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       '054_api_keys_allowed_models.sql',
       '056_cloakbrowser_web_sessions.sql',
       '057_shardbrowser_web_sessions.sql',
+      '058_usage_logs_failure_diagnostics.sql',
     ])
     const { risk_review_enabled, ...after } = db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy')
     assert.equal(risk_review_enabled, 0)

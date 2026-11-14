@@ -10,6 +10,7 @@
  */
 
 import { getDb } from '../database.mjs'
+import { parseFailureDiagnostics } from '../../transport/failure-diagnostics.mjs'
 import { DEFAULT_MUTED_ERROR_CLASSES, enrichLogRow, excludeErrorClassSql } from '../../admin/error-class.mjs'
 import { reportTimezone, zonedDayStartMs } from '../../core/timezone.mjs'
 import {
@@ -241,6 +242,7 @@ export function toUsageLogRow(row, names, chain = []) {
     errorOwner: row.error_owner ?? null,
     errorCode: row.error_code || null,
     errorMessage: row.error_message || null,
+    failureDiagnostics: parseFailureDiagnostics(row.failure_diagnostics_json),
     blockedBy: blocked,
     blockedReason: blocked ? row.error_message || row.error_label || null : null,
     userAgent: row.user_agent || null,
@@ -413,6 +415,7 @@ function buildFilter(filters, defaultMuted) {
 function exportRow(raw) {
   return enrichLogRow({
     ...raw,
+    failure_diagnostics: parseFailureDiagnostics(raw.failure_diagnostics_json),
     ts: raw.created_at,
     ip: raw.ip_address,
     stream: !!raw.stream,

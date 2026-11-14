@@ -323,7 +323,7 @@ function LogRow({
           </Tooltip>
         </div>
       )}
-      <div className='min-w-[70px] flex-[0.7] truncate pr-3 pl-1.5'>
+      <div className='min-w-[112px] flex-[0.9] pr-3 pl-1.5'>
         <Button
           type='button'
           variant='ghost'
@@ -334,6 +334,8 @@ function LogRow({
             statusCode={row.statusCode}
             finalState={row.finalState}
             errorCode={row.errorCode}
+            errorClass={row.errorClass}
+            errorLabel={row.errorLabel}
           />
         </Button>
       </div>
@@ -514,7 +516,7 @@ export function VirtualizedLogsTable({
                   性能
                 </HeadCell>
               )}
-              <HeadCell className='min-w-[70px] flex-[0.7] pr-3 pl-1.5'>
+              <HeadCell className='min-w-[112px] flex-[0.9] pr-3 pl-1.5'>
                 状态
               </HeadCell>
             </div>

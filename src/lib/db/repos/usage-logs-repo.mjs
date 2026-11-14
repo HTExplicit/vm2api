@@ -9,6 +9,7 @@
  */
 
 import { getDb } from '../database.mjs'
+import { parseFailureDiagnostics } from '../../transport/failure-diagnostics.mjs'
 import { collectErrors, enrichLogRow, excludeErrorClassSql, ingressAuthSql } from '../../admin/error-class.mjs'
 import {
   costColumnsFromUsage,
@@ -112,6 +113,7 @@ const SUMMARY_COLUMNS = [
   'output_tokens',
   'error_code',
   'error_message',
+  'failure_diagnostics_json',
   'user_agent',
   'ip_address',
   'api_key_presented',
@@ -167,6 +169,8 @@ const SUMMARY_COLUMNS = [
 
 function toRow(rec) {
   return SUMMARY_COLUMNS.map((c) => {
+    if (c === 'failure_diagnostics_json')
+      return rec.failure_diagnostics == null ? null : JSON.stringify(rec.failure_diagnostics)
     if (c === 'created_at') return rec.created_at ?? rec.ts ?? null
     if (c === 'ip_address') return rec.ip_address ?? rec.ip ?? null
     if (c === 'stream') return rec.stream ? 1 : 0
@@ -190,8 +194,10 @@ function toRow(rec) {
 
 function fromRow(row) {
   if (!row) return null
+  const { failure_diagnostics_json, ...summary } = row
   return {
-    ...row,
+    ...summary,
+    failure_diagnostics: parseFailureDiagnostics(failure_diagnostics_json),
     ts: row.created_at,
     ip: row.ip_address,
     stream: !!row.stream,

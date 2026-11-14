@@ -173,7 +173,8 @@ test('SQL migration clears only old web state and license, preserving credential
     },
   )
   for (const table of tables) {
-    const actual = db.prepare(`SELECT * FROM ${table}`).all()
+    const preservedColumns = Object.keys(before[table][0])
+    const actual = db.prepare(`SELECT ${preservedColumns.join(', ')} FROM ${table}`).all()
     const expected =
       table === 'openai_api_accounts'
         ? before[table].map((row) =>

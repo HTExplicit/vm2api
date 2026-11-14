@@ -121,17 +121,20 @@ test('classifyRequestError maps known codes and statuses', () => {
   )
   assert.equal(classifyRequestError({ status: 200, error_code: 'client_cancelled' }), null)
   assert.equal(classifyRequestError({ status: 499, error_code: 'client_cancelled' }), null)
-  assert.equal(classifyRequestError({ status: 502, error_code: 'ECONNRESET' }).error_class, 'timeout')
-  assert.equal(classifyRequestError({ status: 200, error_code: 'stream_incomplete' }).error_class, 'timeout')
+  assert.equal(classifyRequestError({ status: 502, error_code: 'ECONNRESET' }).error_class, 'transport')
+  assert.equal(classifyRequestError({ status: 200, error_code: 'stream_incomplete' }).error_class, 'incomplete')
   assert.equal(classifyRequestError({ status: 200, error_message: 'stream first-byte timeout' }), null)
 })
 
 test('committed stream errors remain classified and collected while client cancellations stay ignored', () => {
   const failed = { status: 200, error_code: 'ECONNRESET', final_state: 'incomplete', error_message: '' }
   assert.equal(enrichLogRow({ status: 200, error_code: 'ECONNRESET', final_state: null }).final_state, 'incomplete')
-  assert.equal(enrichLogRow({ status: 200, error_code: 'client_cancelled', final_state: null }).final_state, null)
+  assert.equal(
+    enrichLogRow({ status: 200, error_code: 'client_cancelled', final_state: null }).final_state,
+    'cancelled',
+  )
   assert.equal(enrichLogRow({ status: 200, final_state: 'verified' }).final_state, 'verified')
-  assert.equal(classifyRequestError(failed).error_class, 'timeout')
+  assert.equal(classifyRequestError(failed).error_class, 'transport')
   assert.equal(classifyRequestError({ status: 200, error_code: 'upstream_error' }).error_class, 'upstream')
   const bag = collectErrors([
     { ...failed, request_id: 'reset-one' },
@@ -141,7 +144,7 @@ test('committed stream errors remain classified and collected while client cance
     { status: 499, error_code: 'client_cancelled' },
   ])
   assert.equal(bag.total, 2)
-  assert.equal(bag.by_class[0].id, 'timeout')
+  assert.equal(bag.by_class[0].id, 'transport')
   assert.equal(bag.by_class[0].count, 2)
   assert.equal(bag.by_code[0].error_code, 'ECONNRESET')
 })
@@ -171,6 +174,52 @@ test('collectErrors groups by class and code', () => {
   assert.equal(bag.by_code[0].error_code, 'server_overloaded')
   assert.equal(bag.recent.length, 3)
   assert.equal(enrichLogRow({ status: 503, error_code: 'server_overloaded' }).error_label, '过载排队')
+})
+
+test('transport, explicit deadlines, incomplete protocol and cancellation describe different facts', () => {
+  assert.equal(
+    classifyRequestError({
+      status: 200,
+      error_code: 'codex_upstream',
+      error_message: 'OAuth token revoked',
+      vm_id: 'test-slot',
+      final_state: 'incomplete',
+    }).error_class,
+    'credential',
+  )
+  assert.equal(
+    classifyRequestError({
+      status: 200,
+      error_code: 'codex_upstream',
+      error_message: 'SOCKS proxy refused connection',
+      final_state: 'incomplete',
+    }).error_class,
+    'proxy',
+  )
+  for (const error_code of ['ECONNRESET', 'aborted', 'ERR_STREAM_PREMATURE_CLOSE']) {
+    const result = classifyRequestError({
+      status: 200,
+      error_code,
+      error_message: 'aborted',
+      final_state: 'incomplete',
+    })
+    assert.equal(result.error_class, 'transport')
+    assert.equal(result.error_owner, null)
+  }
+  assert.equal(classifyRequestError({ status: 200, error_code: 'worker_timeout' }).error_class, 'timeout')
+  assert.equal(
+    classifyRequestError({ status: 200, error_code: 'stream_incomplete', error_message: 'max_output_tokens' })
+      .error_class,
+    'incomplete',
+  )
+  assert.equal(
+    classifyRequestError({ status: 200, error_code: 'upstream_stream_incomplete', error_message: 'job idle timeout' })
+      .error_class,
+    'timeout',
+  )
+  assert.equal(classifyRequestError({ status: 200, final_state: 'incomplete' }).error_class, 'incomplete')
+  assert.equal(classifyRequestError({ status: 499, final_state: 'cancelled' }), null)
+  assert.equal(classifyRequestError({ status: 500, final_state: 'cancelled' }).error_class, 'upstream')
 })
 
 test('resolveMutedErrorClasses defaults to auth and accepts an empty list', () => {

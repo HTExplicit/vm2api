@@ -512,7 +512,47 @@ test('tenant error collection hides other users and anonymous ingress failures',
   assert.deepEqual(all.ingress_hits.map((h) => h.ip).sort(), ['198.51.100.7', '203.0.113.9'])
 })
 
-test('error-only and timeout filters find committed stream failures counted in account outcomes', () => {
+test('terminal failures and cancellation agree across classification, SQL, summary and export', () => {
+  const db = freshDb()
+  try {
+    seed(db, [
+      { status: 200, final_state: 'verified' },
+      ...[23315, 21554, 4696].map((duration_ms) => ({
+        status: 200,
+        duration_ms,
+        input_tokens: 0,
+        output_tokens: 0,
+        error_code: 'ECONNRESET',
+        error_message: 'aborted',
+        final_state: 'incomplete',
+      })),
+      { status: 200, final_state: 'incomplete' },
+      { status: 200, error_code: 'worker_timeout', final_state: 'incomplete' },
+      { status: 499, final_state: 'cancelled' },
+    ])
+    const view = new UsageLogsView(db)
+    const summary = view.summary({})
+    assert.equal(summary.errorRequests, 5)
+    assert.equal(view.listBatch({ errors_only: true }).logs.length, 5)
+    assert.equal(view.exportRows({ errors_only: true }).items.length, 5)
+    assert.equal(view.summary({ error_class: 'transport' }).errorRequests, 3)
+    const reset = view.listBatch({ error_class: 'transport' }).logs
+    assert.deepEqual(
+      reset.map((r) => r.durationMs).sort((a, b) => a - b),
+      [4696, 21554, 23315],
+    )
+    assert.ok(
+      reset.every((r) => r.statusCode === 200 && r.errorOwner === null && r.inputTokens === 0 && r.outputTokens === 0),
+    )
+    assert.equal(view.listBatch({ error_class: 'timeout' }).logs.length, 1)
+    assert.equal(view.listBatch({ error_class: 'incomplete' }).logs.length, 1)
+    assert.equal(view.listBatch().logs.find((r) => r.statusCode === 499).finalState, 'cancelled')
+  } finally {
+    db.close()
+  }
+})
+
+test('error-only and transport filters find committed stream failures counted in account outcomes', () => {
   const db = freshDb()
   try {
     const rows = seed(db, [
@@ -527,18 +567,24 @@ test('error-only and timeout filters find committed stream failures counted in a
     for (const filters of [
       { errors_only: true },
       { errors_only: true, status_code: 200 },
-      { error_class: 'timeout' },
+      { error_class: 'transport' },
     ]) {
       const page = view.listBatch(filters)
-      assert.deepEqual(page.logs.map((r) => r.id), failedIds)
-      assert.ok(page.logs.every((r) => r.statusCode === 200 && r.errorClass === 'timeout'))
+      assert.deepEqual(
+        page.logs.map((r) => r.id),
+        failedIds,
+      )
+      assert.ok(page.logs.every((r) => r.statusCode === 200 && r.errorClass === 'transport'))
       const summary = view.summary(filters)
       assert.deepEqual([summary.totalRequests, summary.successRequests, summary.errorRequests], [2, 0, 2])
     }
     // An explicit HTTP status filter keeps its original meaning.
     assert.deepEqual(view.listBatch({ exclude_status_200: true }).logs, [])
     seed(db, [{ account_id: 'acc-a', error_code: 'client_cancelled' }])
-    assert.deepEqual(view.listBatch({ errors_only: true }).logs.map((r) => r.id), failedIds)
+    assert.deepEqual(
+      view.listBatch({ errors_only: true }).logs.map((r) => r.id),
+      failedIds,
+    )
   } finally {
     db.close()
   }

@@ -39,6 +39,11 @@ function remapVia(result) {
   return {
     ...result,
     via: String(result.via || 'go-worker').replace(/go-worker/g, 'codex-kernel'),
+    ...(result.failureDiagnostics
+      ? {
+          failureDiagnostics: { ...result.failureDiagnostics, component: 'codex-kernel' },
+        }
+      : {}),
   }
 }
 

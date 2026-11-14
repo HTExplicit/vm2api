@@ -27,16 +27,17 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { ThinkingEffortBadge } from '../log-cells'
+import { StatusBadge, ThinkingEffortBadge } from '../log-cells'
 import {
   actualCacheRate,
   cacheCostSplit,
   cacheWriteSplit,
   effectiveMultiplier,
   hasFastMode,
-  isSuccessStatus,
+  isSuccessfulRequest,
   resolveModelAuditDisplay,
 } from '../log-display'
+import { FailureDiagnosticsPanel } from './failure-diagnostics'
 
 function SectionTitle({
   icon: Icon,
@@ -121,7 +122,8 @@ export function SummaryTab({
   scrollToRedirect: boolean
 }) {
   const audit = resolveModelAuditDisplay(row)
-  const success = isSuccessStatus(row.statusCode)
+  const success = isSuccessfulRequest(row)
+  const cancelled = row.finalState === 'cancelled'
   const rate = calculateOutputRate(row.outputTokens, row.generationMs)
   const totalTokens = row.totalTokens
   const breakdown = row.costBreakdown
@@ -157,20 +159,26 @@ export function SummaryTab({
       <div
         className={cn(
           'flex items-center gap-4 rounded-lg border p-4',
-          success
-            ? 'border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/20'
-            : 'border-rose-200 bg-rose-50 dark:border-rose-800 dark:bg-rose-950/20'
+          cancelled
+            ? 'border-border bg-muted/40'
+            : success
+              ? 'border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/20'
+              : 'border-rose-200 bg-rose-50 dark:border-rose-800 dark:bg-rose-950/20'
         )}
       >
         <div
           className={cn(
             'flex h-12 w-12 items-center justify-center rounded-full',
-            success
-              ? 'bg-emerald-100 dark:bg-emerald-900/30'
-              : 'bg-rose-100 dark:bg-rose-900/30'
+            cancelled
+              ? 'bg-muted'
+              : success
+                ? 'bg-emerald-100 dark:bg-emerald-900/30'
+                : 'bg-rose-100 dark:bg-rose-900/30'
           )}
         >
-          {success ? (
+          {cancelled ? (
+            <Clock className='h-6 w-6 text-muted-foreground' />
+          ) : success ? (
             <CheckCircle className='h-6 w-6 text-emerald-600' />
           ) : (
             <AlertCircle className='h-6 w-6 text-rose-600' />
@@ -178,27 +186,20 @@ export function SummaryTab({
         </div>
         <div>
           <div className='flex items-center gap-2'>
-            <span className='text-lg font-semibold'>
-              {row.statusCode ?? '未知'}
-            </span>
-            {row.statusCode != null ? (
-              <Badge
-                variant={success ? 'default' : 'destructive'}
-                className='text-xs'
-              >
-                {success ? 'OK' : 'Error'}
-              </Badge>
-            ) : null}
-            {row.errorLabel ? (
-              <Badge variant='outline' className='text-xs'>
-                {row.errorLabel}
-              </Badge>
-            ) : null}
+            <StatusBadge
+              statusCode={row.statusCode}
+              finalState={row.finalState}
+              errorCode={row.errorCode}
+              errorClass={row.errorClass}
+              errorLabel={row.errorLabel}
+            />
           </div>
           <p className='text-sm text-muted-foreground'>
-            {success
-              ? '请求成功完成'
-              : '请求失败，以下是详细的错误信息和供应商决策链'}
+            {cancelled
+              ? '请求已由客户端取消'
+              : success
+                ? '请求成功完成'
+                : '请求失败，以下是详细的错误信息和供应商决策链'}
           </p>
         </div>
       </div>
@@ -584,10 +585,18 @@ export function SummaryTab({
 
       {row.errorMessage || row.errorCode ? (
         <div className='space-y-2'>
-          <SectionTitle icon={AlertCircle} color='text-rose-600'>
-            错误信息
+          <SectionTitle
+            icon={AlertCircle}
+            color={cancelled ? 'text-muted-foreground' : 'text-rose-600'}
+          >
+            {cancelled ? '取消信息' : '错误信息'}
           </SectionTitle>
-          <div className='space-y-1 rounded-lg border bg-rose-50 p-3 dark:bg-rose-950/20'>
+          <div
+            className={cn(
+              'space-y-1 rounded-lg border p-3',
+              cancelled ? 'bg-muted/40' : 'bg-rose-50 dark:bg-rose-950/20'
+            )}
+          >
             {row.errorCode || row.errorOwner ? (
               <div className='flex flex-wrap gap-1'>
                 {row.errorCode ? (
@@ -603,13 +612,29 @@ export function SummaryTab({
               </div>
             ) : null}
             {row.errorMessage ? (
-              <p className='font-mono text-xs break-words whitespace-pre-wrap text-rose-800 dark:text-rose-200'>
+              <p
+                className={cn(
+                  'font-mono text-xs break-words whitespace-pre-wrap',
+                  cancelled
+                    ? 'text-muted-foreground'
+                    : 'text-rose-800 dark:text-rose-200'
+                )}
+              >
                 {row.errorMessage}
               </p>
             ) : null}
           </div>
         </div>
       ) : null}
+      {row.stream &&
+      ['incomplete', 'transport_error'].includes(row.finalState || '') &&
+      row.failureDiagnostics?.usageState !== 'final' ? (
+        <p className='text-sm text-muted-foreground'>
+          响应未完整结束，当前 Token 和费用可能缺失或仅包含部分用量；0
+          不代表实际无消耗。
+        </p>
+      ) : null}
+      <FailureDiagnosticsPanel row={row} />
       {row.jevState ? (
         <div className='space-y-2'>
           <SectionTitle icon={AlertCircle} color='text-amber-600'>

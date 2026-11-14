@@ -1097,6 +1097,139 @@ unixTest('streamGoWorker retains model and usage after a reset', async () => {
   }
 })
 
+for (const scenario of [
+  'headers-timeout',
+  'headers-reset',
+  'stream-reset',
+  'first-byte-timeout',
+  'idle-timeout',
+  'cancelled',
+  'missing-terminal',
+  'incomplete-terminal',
+  'completed-then-reset',
+  'empty-completed-then-reset',
+  'terminal-forward-error',
+  'completed',
+]) {
+  unixTest(`Codex diagnostic observes ${scenario} without replacing its actual result`, async () => {
+    let upstream
+    let kernelRequestId
+    const controller = new AbortController()
+    const fx = await fixture((req, res) => {
+      req.resume()
+      if (req.url.endsWith('/cancel')) return res.end('{}')
+      const chunks = []
+      req.on('data', (chunk) => chunks.push(chunk))
+      req.on('end', () => {
+        kernelRequestId = JSON.parse(Buffer.concat(chunks).toString()).request_id
+      })
+      upstream = res
+      if (scenario === 'headers-timeout') return
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.flushHeaders()
+      if (scenario === 'headers-reset') return setTimeout(() => res.destroy(), 15)
+      if (scenario === 'first-byte-timeout') return
+      if (scenario === 'empty-completed-then-reset') {
+        writeData(res, {
+          type: 'response.completed',
+          response: { status: 'completed', usage: { input_tokens: 0, output_tokens: 0 } },
+        })
+        return setTimeout(() => res.destroy(), 15)
+      }
+      writeData(res, { type: 'response.created', response: { model: 'test-model', usage: { input_tokens: 5 } } })
+      writeData(res, { type: 'response.output_text.delta', delta: 'partial' })
+      if (scenario === 'missing-terminal') return res.end()
+      if (scenario === 'incomplete-terminal') {
+        writeData(res, {
+          type: 'response.incomplete',
+          response: {
+            status: 'incomplete',
+            incomplete_details: { reason: 'max_output_tokens' },
+            usage: { input_tokens: 5, output_tokens: 2 },
+          },
+        })
+        return res.end()
+      }
+      if (scenario.startsWith('completed') || scenario === 'terminal-forward-error') {
+        writeData(res, {
+          type: 'response.completed',
+          response: { status: 'completed', usage: { input_tokens: 5, output_tokens: 2 } },
+        })
+        if (scenario === 'completed') res.end()
+      }
+    })
+    try {
+      const result = await streamGoWorker({
+        exec: fx.exec,
+        envelope: { body: { input: 'test' } },
+        requestPath: '/internal/v1/codex/responses',
+        timeoutMs: ['headers-timeout', 'first-byte-timeout'].includes(scenario) ? 20 : 4000,
+        idleTimeoutMs: scenario === 'idle-timeout' ? 20 : 4000,
+        signal: controller.signal,
+        onEvent(line) {
+          if (scenario === 'stream-reset' && line.includes('partial')) upstream.destroy()
+          if (scenario === 'cancelled' && line.includes('partial')) controller.abort()
+          if (scenario === 'completed-then-reset' && line.includes('response.completed')) upstream.destroy()
+          if (scenario === 'terminal-forward-error' && line.includes('response.completed'))
+            throw Object.assign(new Error('fixture delivery failed'), { code: 'fixture_delivery_error' })
+        },
+      })
+      if (scenario.startsWith('completed') || scenario === 'empty-completed-then-reset') {
+        assert.equal(result.ok, true)
+        assert.equal(result.terminalState, 'verified')
+        if (scenario.endsWith('then-reset')) {
+          assert.equal(result.failureDiagnostics.phase, 'finalize')
+          assert.equal(result.failureDiagnostics.cleanupErrorCode, 'ECONNRESET')
+          assert.equal(result.failureDiagnostics.usageState, 'final')
+        } else assert.equal(result.failureDiagnostics, null)
+      } else {
+        const d = result.failureDiagnostics
+        assert.equal(d.kernelRequestId, kernelRequestId)
+        assert.equal(result.ok, false)
+        assert.equal(
+          d.responseCommitted,
+          !['headers-timeout', 'headers-reset', 'first-byte-timeout'].includes(scenario),
+        )
+        assert.equal(
+          d.phase,
+          scenario === 'headers-timeout'
+            ? 'headers'
+            : ['headers-reset', 'first-byte-timeout'].includes(scenario)
+              ? 'first_event'
+              : ['incomplete-terminal', 'terminal-forward-error'].includes(scenario)
+                ? 'finalize'
+                : 'stream',
+        )
+        if (scenario.includes('timeout')) assert.equal(result.body.error.code, 'worker_timeout')
+        if (scenario.endsWith('reset')) assert.equal(result.body.error.code, 'ECONNRESET')
+        if (scenario === 'cancelled') assert.equal(result.terminalState, 'cancelled')
+        if (scenario === 'incomplete-terminal') assert.equal(result.body.error.code, 'stream_incomplete')
+        if (scenario === 'terminal-forward-error') assert.equal(result.body.error.code, 'fixture_delivery_error')
+        if (!['headers-timeout', 'headers-reset', 'first-byte-timeout'].includes(scenario))
+          assert.equal(result.usage.input_tokens, 5)
+      }
+    } finally {
+      controller.abort()
+      upstream?.destroy()
+      await fx.close()
+    }
+  })
+}
+
+unixTest('connection failure is observed before kernel headers', async () => {
+  const fx = await fixture((_req, res) => res.end())
+  await fx.close()
+  const result = await streamGoWorker({
+    exec: fx.exec,
+    envelope: { body: { input: 'test' } },
+    requestPath: '/internal/v1/codex/responses',
+  })
+  assert.equal(result.body.error.code, 'ENOENT')
+  assert.equal(result.failureDiagnostics.phase, 'connect')
+  assert.equal(result.failureDiagnostics.responseCommitted, false)
+  assert.equal(result.failureDiagnostics.lastEventType, null)
+})
+
 unixTest('a reset after empty Responses items uses the existing same-account retry', async () => {
   const largeInput = '你好🧪'.repeat(40_000)
   for (const [item, input] of [

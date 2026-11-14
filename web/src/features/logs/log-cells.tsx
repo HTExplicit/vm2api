@@ -10,6 +10,7 @@ import { ModelVendorIcon } from '@/components/model-vendor-icon'
 import {
   copyText,
   statusBadgeClass,
+  statusBadgeLabel,
   statusBadgeTooltip,
   thinkingEffortBadgeClass,
 } from './log-display'
@@ -18,22 +19,44 @@ export function StatusBadge({
   statusCode,
   finalState = null,
   errorCode = null,
+  errorClass = null,
+  errorLabel = null,
   className,
 }: {
   statusCode: number | null
   finalState?: string | null
   errorCode?: string | null
+  errorClass?: string | null
+  errorLabel?: string | null
   className?: string
 }) {
+  const label = statusBadgeLabel(statusCode, finalState, errorLabel)
+  const showHttp = statusCode != null && label !== String(statusCode)
   const badge = (
-    <Badge
-      variant='outline'
-      className={cn(statusBadgeClass(statusCode, finalState), className)}
-    >
-      {statusCode ?? '未知'}
-    </Badge>
+    <span className='inline-flex flex-col items-start gap-0.5'>
+      <Badge
+        variant='outline'
+        className={cn(
+          'whitespace-nowrap',
+          statusBadgeClass(statusCode, finalState, errorClass),
+          className
+        )}
+      >
+        {label}
+      </Badge>
+      {showHttp ? (
+        <span className='text-[10px] text-muted-foreground'>
+          HTTP {statusCode}
+        </span>
+      ) : null}
+    </span>
   )
-  const title = statusBadgeTooltip(statusCode, finalState, errorCode)
+  const title = statusBadgeTooltip(
+    statusCode,
+    finalState,
+    errorCode,
+    errorLabel
+  )
   if (!title) return badge
   return (
     <Tooltip delayDuration={250}>

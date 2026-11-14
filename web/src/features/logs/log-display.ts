@@ -40,9 +40,16 @@ export function isIncompleteCommitted(
 
 export function statusBadgeClass(
   statusCode: number | null,
-  finalState: string | null | undefined = null
+  finalState: string | null | undefined = null,
+  errorClass: string | null = null
 ): string {
-  if (isIncompleteCommitted(statusCode, finalState))
+  if (finalState === 'cancelled')
+    return 'bg-gray-100 text-gray-700 border-gray-300 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-600'
+  if (
+    statusCode != null &&
+    statusCode < 400 &&
+    (errorClass || isFailedTerminal(finalState))
+  )
     return INCOMPLETE_SUCCESS_BADGE
   if (statusCode != null) {
     if (statusCode >= 200 && statusCode < 300)
@@ -60,11 +67,55 @@ export function statusBadgeClass(
 export function statusBadgeTooltip(
   statusCode: number | null,
   finalState: string | null | undefined,
-  errorCode: string | null | undefined
+  errorCode: string | null | undefined,
+  errorLabel: string | null = null
 ): string | null {
-  if (!isIncompleteCommitted(statusCode, finalState)) return null
-  const state = terminalStateLabel(finalState ?? null) || '响应未完整结束'
-  return errorCode ? `${state}（${errorCode}）` : state
+  if (
+    !errorLabel &&
+    !isFailedTerminal(finalState) &&
+    finalState !== 'cancelled'
+  )
+    return null
+  const state =
+    errorLabel || terminalStateLabel(finalState ?? null) || '响应未完整结束'
+  const reason = errorCode ? `${state}（${errorCode}）` : state
+  return statusCode == null ? reason : `HTTP ${statusCode} · ${reason}`
+}
+
+function isFailedTerminal(state: string | null | undefined): boolean {
+  return (
+    !!state &&
+    [
+      'incomplete',
+      'transport_error',
+      'error',
+      'rejected',
+      'exhausted',
+    ].includes(state)
+  )
+}
+
+export function isSuccessfulRequest(
+  row: Pick<UsageLogRow, 'statusCode' | 'finalState' | 'errorClass'>
+): boolean {
+  return (
+    isSuccessStatus(row.statusCode) &&
+    row.finalState !== 'cancelled' &&
+    !isFailedTerminal(row.finalState) &&
+    !row.errorClass
+  )
+}
+
+export function statusBadgeLabel(
+  statusCode: number | null,
+  finalState: string | null,
+  errorLabel: string | null
+): string {
+  if (finalState === 'cancelled') return '已取消'
+  if (errorLabel) return errorLabel
+  if (isFailedTerminal(finalState))
+    return terminalStateLabel(finalState) || '请求失败'
+  return statusCode == null ? '未知' : String(statusCode)
 }
 
 export function isSuccessStatus(statusCode: number | null): boolean {
@@ -269,16 +320,18 @@ export function terminalStateLabel(state: string | null): string | null {
   return TERMINAL_STATE_LABELS[state] ?? state
 }
 
-export type ChainItemStatus = 'success' | 'failure' | 'pending'
+export type ChainItemStatus = 'success' | 'failure' | 'pending' | 'cancelled'
 
-/** 已提交给下游或上游 2xx = 成功；上游 ≥400 或终态非成功 = 失败；其余待定。 */
+/** 协议终态优先；提交输出和 HTTP 2xx 只表明尝试已经开始。 */
 export function chainItemStatus(item: ProviderChainItem): ChainItemStatus {
-  if (item.downstreamCommitted) return 'success'
-  if (item.upstreamStatus != null) {
-    return isSuccessStatus(item.upstreamStatus) ? 'success' : 'failure'
-  }
+  if (item.terminalState === 'cancelled') return 'cancelled'
+  if (
+    item.errorCode ||
+    (item.upstreamStatus != null && item.upstreamStatus >= 400)
+  )
+    return 'failure'
   if (item.terminalState === 'verified') return 'success'
-  if (item.terminalState) return 'failure'
+  if (item.terminalState && item.terminalState !== 'started') return 'failure'
   return 'pending'
 }
 

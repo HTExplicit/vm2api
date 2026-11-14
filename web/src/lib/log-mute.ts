@@ -15,6 +15,8 @@ export const ERROR_CLASS_META: Record<
   overloaded: { label: '过载排队', owner: 'provider' },
   unavailable: { label: '无可用账号', owner: 'platform' },
   timeout: { label: '超时', owner: 'provider' },
+  transport: { label: '传输中断', owner: null },
+  incomplete: { label: '响应未完成', owner: null },
   credential: { label: '凭证', owner: 'platform' },
   proxy: { label: '代理', owner: 'platform' },
   upstream: { label: '上游', owner: 'provider' },
