@@ -162,6 +162,10 @@ test('proxy protocols are keyboard selectable and edits preserve stored credenti
   const saving = page.waitForRequest((request) => request.url().endsWith('/proxies/offline-proxy'))
   await dialog.getByRole('button', { name: '保存', exact: true }).click()
   await saving
+  await page.waitForFunction(
+    (id) => document.getElementById(id)?.disabled === true,
+    await dialog.getByRole('radio', { name: 'HTTP', exact: true }).getAttribute('id'),
+  )
   assert.deepEqual(edits, [{ scheme: 'http' }], 'a scheme-only edit sends no credential clearing fields')
   assert.equal(await dialog.getByRole('radio', { name: 'HTTP', exact: true }).isDisabled(), true)
   releaseEdit()
