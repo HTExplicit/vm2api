@@ -1,6 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { orderOpenAIAccounts, selectOpenAIAccount, smartScore } from '../../src/lib/pool/openai-account-selector.mjs'
+import {
+  orderOpenAIAccounts,
+  resetBurnFactor,
+  selectOpenAIAccount,
+  smartScore,
+} from '../../src/lib/pool/openai-account-selector.mjs'
 import {
   reportOpenAIAttempt,
   resetOpenAIAccountRuntime,
@@ -61,14 +66,55 @@ test('quota exhausted affinity escapes and the next normal account is used', () 
   assert.equal(ordered.blocker, 'local_availability')
 })
 
-test('scores inside 0.05 rotate by account id', () => {
+test('scores inside 0.15 rotate by account id', () => {
   const left = account('a', { quotaRemainingRank: 8_000 })
-  const right = account('b', { quotaRemainingRank: 8_100 })
-  assert.ok(Math.abs(smartScore(left, 2) - smartScore(right, 2)) <= 0.05)
+  const right = account('b', { quotaRemainingRank: 9_750 })
+  const difference = smartScore(right, 2) - smartScore(left, 2)
+  assert.ok(difference > 0.05 && difference <= 0.15)
   const first = selectOpenAIAccount([right, left], { strategy: 'smart', roundRobinCursor: 0 })
   const second = selectOpenAIAccount([right, left], { strategy: 'smart', roundRobinCursor: 1 })
   assert.equal(first.candidate.id, 'a')
   assert.equal(second.candidate.id, 'b')
+})
+
+test('cold accounts use neutral quota, stock and latency signals', () => {
+  const now = Date.parse('2026-11-14T00:00:00.000Z')
+  const cold = account('cold', { quotaRemainingRank: null, quotaStockRank: null })
+  const measured = account('measured', {
+    quotaRemainingRank: 5_000,
+    quotaStockRank: 5_000,
+    firstOutputLatencyMs: 10_000,
+  })
+  assert.equal(smartScore(cold, 2, now), smartScore(measured, 2, now))
+  assert.ok(Math.abs(smartScore(cold, 2, now) - 2.8) < 1e-12)
+})
+
+test('weekly reset urgency uses remaining stock and is enabled by default', async () => {
+  const previous = process.env.VM2API_CODEX_RESET_WEIGHT
+  delete process.env.VM2API_CODEX_RESET_WEIGHT
+  let selector
+  try {
+    selector = await import('../../src/lib/pool/openai-account-selector.mjs?reset-default')
+  } finally {
+    if (previous === undefined) delete process.env.VM2API_CODEX_RESET_WEIGHT
+    else process.env.VM2API_CODEX_RESET_WEIGHT = previous
+  }
+  const now = Date.parse('2026-11-14T00:00:00.000Z')
+  const distant = account('a-distant', { quotaRemaining7d: 0.5, quotaReset7dAt: now + 48 * 3_600_000 })
+  const urgent = account('z-urgent', { quotaRemaining7d: 0.5, quotaReset7dAt: now + 12 * 3_600_000 })
+  assert.equal(selector.SMART_RESET_WEIGHT, 1)
+  assert.equal(resetBurnFactor(distant, now), 0.25)
+  assert.equal(resetBurnFactor(urgent, now), 1)
+  assert.equal(resetBurnFactor({ ...urgent, quotaReset7dAt: null }, now), 0)
+  assert.equal(resetBurnFactor({ ...urgent, quotaReset7dAt: now }, now), 0)
+  assert.equal(resetBurnFactor({ ...urgent, quotaRemaining7d: 0 }, now), 0)
+  assert.ok(Math.abs(selector.smartScore(urgent, 2, now) - selector.smartScore(distant, 2, now) - 0.75) < 1e-12)
+  assert.equal(selector.selectOpenAIAccount([distant, urgent], { now, roundRobinCursor: 0 }).candidate.id, urgent.id)
+  assert.equal(
+    selector.selectOpenAIAccount([account('high-weight', { weight: 2 }), urgent], { now, roundRobinCursor: 0 })
+      .candidate.id,
+    'high-weight',
+  )
 })
 
 test('quota reset priority ranks known reset times before missing reset times', () => {

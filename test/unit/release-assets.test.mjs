@@ -22,9 +22,9 @@ const encryptedAsset = pinned.files.find(
 ).asset
 const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex')
 
-test('current payload pins match the official 086 build and signed CRAG source records', () => {
+test('current payload pins match the official 087 build and original signed CRAG source records', () => {
   const upstream = JSON.parse(
-    fs.readFileSync(new URL('../../docs/releases/v1.4.086-binaries.json', import.meta.url), 'utf8'),
+    fs.readFileSync(new URL('../../docs/releases/v1.4.087-binaries.json', import.meta.url), 'utf8'),
   )
   const crag = JSON.parse(fs.readFileSync(new URL('../../docs/releases/v1.4.086-crag.json', import.meta.url), 'utf8'))
   assert.equal(pinned.release, upstream.payload_release)
@@ -44,9 +44,17 @@ test('current payload pins match the official 086 build and signed CRAG source r
   }
   const archive = pinned.files.find((file) => file.asset === 'crag-v2-licensed-amd64.tar.gz')
   assert.equal(archive.path, 'share/crag/crag-v2-licensed-amd64.tar.gz')
-  assert.equal(archive.sha256, upstream.native.sha256)
+  assert.equal(archive.sha256, upstream.native.archive.sha256)
   assert.equal(crag.signed_manifest, manifestAsset)
   assert.equal(crag.signed_manifest_sha256, crag.assets[manifestAsset])
+  const cliBuild = JSON.parse(
+    fs.readFileSync(new URL('../../docs/releases/cli-node-cache-ttl-20261114.json', import.meta.url), 'utf8'),
+  )
+  assert.equal(cliBuild.release_tag, pinned.release)
+  assert.deepEqual(cliBuild.artifact, upstream.cli.artifact)
+  assert.deepEqual(cliBuild.source, upstream.cli.private_source_identity_from_published_record)
+  assert.equal(upstream.native.rebuilt, false)
+  assert.equal(crag.application_release, 'v1.4.086')
 })
 
 test('the complete release derives twenty-one pinned assets and image-built egress from the image', (t) => {
@@ -74,7 +82,7 @@ test('the complete release derives twenty-one pinned assets and image-built egre
   assert.equal(expected.length, 22)
   const digestOf = (name) => expected.find((asset) => asset.name === name).digest.slice('sha256:'.length)
   const upstreamBuild = {
-    application_release: 'v1.4.086',
+    application_release: 'v1.4.087',
     assets: expected.map((asset) => ({ name: asset.name, size: asset.size, sha256: digestOf(asset.name) })),
   }
   const cragBuild = {
@@ -101,30 +109,32 @@ test('the complete release derives twenty-one pinned assets and image-built egre
   assert.equal(provenance.image, image)
   assert.equal(provenance.source_commit, 'fork-source')
   assert.equal(provenance.assets.length, 22)
-  assert.equal(provenance.upstream.build.application_release, 'v1.4.086')
+  assert.equal(provenance.upstream.build.application_release, 'v1.4.087')
   assert.equal(
     provenance.upstream.build.assets.some((asset) => asset.name === 'kin-egress'),
     false,
   )
   assert.equal(provenance.upstream.build.assets.length, 21)
-  assert.equal(provenance.upstream.build.source_record, 'docs/releases/v1.4.086-binaries.json')
+  assert.equal(provenance.upstream.build.source_record, 'docs/releases/v1.4.087-binaries.json')
   assert.deepEqual(provenance.upstream.crag, cragBuild)
-  const worker = upstreamBuild.assets.find((asset) => asset.name === 'kin-worker')
-  worker.sha256 = '0'.repeat(64)
-  assert.throws(
-    () =>
-      writeProvenance({
-        manifest,
-        dir,
-        image,
-        sourceCommit: 'fork-source',
-        upstreamBuild,
-        cragBuild,
-        assets: expected.slice(0, -1),
-      }),
-    /kin-worker: upstream provenance mismatch/,
-  )
-  worker.sha256 = digestOf('kin-worker')
+  for (const name of ['kin-worker', 'cli-node']) {
+    const recorded = upstreamBuild.assets.find((asset) => asset.name === name)
+    recorded.sha256 = '0'.repeat(64)
+    assert.throws(
+      () =>
+        writeProvenance({
+          manifest,
+          dir,
+          image,
+          sourceCommit: 'fork-source',
+          upstreamBuild,
+          cragBuild,
+          assets: expected.slice(0, -1),
+        }),
+      new RegExp(`${name}: upstream provenance mismatch`),
+    )
+    recorded.sha256 = digestOf(name)
+  }
   assert.equal(provenance.source_built['kin-egress'].source_commit, 'fork-source')
   const release = { draft: true, tag_name: 'v1.4.6901', assets: expected.map((entry) => ({ ...entry })) }
   verifyReleaseAssets(release, 'v1.4.6901', expected)

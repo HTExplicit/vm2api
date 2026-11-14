@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { sanitizeAnthropicBody } from '../../src/lib/protocol/sanitize.mjs'
-import { defaultMaxTokensForModel } from '../../src/lib/protocol/model-policy.mjs'
+import { defaultMaxTokensForModel, getModelParams } from '../../src/lib/protocol/model-policy.mjs'
+import { toStandardAnthropicBody } from '../../src/lib/protocol/anthropic-policy.mjs'
 import { toClaudeMessages } from '../../src/lib/protocol/convert.mjs'
 
 test('missing max_tokens follows official per-model defaults', () => {
@@ -43,4 +44,22 @@ test('OpenAI chat convert uses the same per-model default', () => {
     messages: [{ role: 'user', content: 'hi' }],
   })
   assert.equal(claude.max_tokens, 32000)
+})
+test('front protocol cleaning caps oversized budgets without raising explicit caller budgets', () => {
+  const model = 'claude-opus-5'
+  const cap = Number(getModelParams(model).max_tokens_cap)
+  const explicit = Math.floor(cap / 2)
+  for (const [requested, expected] of [
+    [cap + 1, cap],
+    [explicit, explicit],
+  ]) {
+    const input = {
+      model,
+      max_tokens: requested,
+      messages: [{ role: 'user', content: 'hi' }],
+    }
+    const out = toStandardAnthropicBody(input).body
+    assert.equal(out.max_tokens, expected)
+    assert.equal(input.max_tokens, requested)
+  }
 })

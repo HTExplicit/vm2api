@@ -11,6 +11,7 @@ import {
   workerHealth,
   usageFromSseEvent,
   isDownstreamCommitEvent,
+  restoreKernelErrorStatus,
   restoreUncommittedHop,
   semanticStatusForStreamError,
 } from '../../src/lib/transport/go-worker-client.mjs'
@@ -109,6 +110,47 @@ test('semanticStatusForStreamError reads outer Codex status 500 instead of defau
     }),
     502,
   )
+})
+test('server overload errors map to 503 and preserve retry identity', () => {
+  const body = {
+    type: 'error',
+    error: {
+      type: 'service_unavailable_error',
+      code: 'server_is_overloaded',
+      message: 'Our servers are currently overloaded. Please try again later.',
+    },
+  }
+  assert.equal(semanticStatusForStreamError(body), 503)
+  const restored = restoreUncommittedHop({
+    ok: false,
+    status: 200,
+    committed: false,
+    terminalState: 'incomplete',
+    headers: {},
+    body,
+  })
+  assert.equal(restored.status, 503)
+  assert.equal(restored.body.error.code, 'server_is_overloaded')
+  assert.equal(restored.streamError, true)
+})
+test('kernel-wrapped server overload restores 503 but explicit status wins', () => {
+  const body = {
+    type: 'error',
+    error: {
+      type: 'service_unavailable_error',
+      code: 'server_is_overloaded',
+      message: 'overloaded',
+    },
+  }
+  const restored = restoreKernelErrorStatus({ ok: false, status: 502, body })
+  assert.equal(restored.status, 503)
+  assert.equal(restored.body.error.code, 'server_is_overloaded')
+  const explicit = restoreKernelErrorStatus({
+    ok: false,
+    status: 502,
+    body: { ...body, error: { ...body.error, status: 502 } },
+  })
+  assert.equal(explicit.status, 502)
 })
 
 test('restoreUncommittedHop reports Codex outer status 500 rather than 502', () => {
@@ -870,9 +912,13 @@ unixTest('response restoration leaves the final outbound diagnostic body unchang
   const fx = await fixture((req, res) => {
     req.resume()
     res.setHeader('content-type', 'text/event-stream')
-    res.write(`event: kin_outbound_headers\ndata: ${JSON.stringify({
-      type: 'kin_outbound_headers', headers: { 'content-type': 'application/json' }, body: outboundBody,
-    })}\n\n`)
+    res.write(
+      `event: kin_outbound_headers\ndata: ${JSON.stringify({
+        type: 'kin_outbound_headers',
+        headers: { 'content-type': 'application/json' },
+        body: outboundBody,
+      })}\n\n`,
+    )
     writeData(res, { type: 'message_start', message: { content: [] } })
     writeData(res, { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: masked } })
     writeData(res, { type: 'message_stop' })
@@ -881,7 +927,9 @@ unixTest('response restoration leaves the final outbound diagnostic body unchang
   const policy = normalizeRedaction({ enabled: true, secrets: true, personal: false })
   const restoredBodies = []
   publishRedactionForTests({
-    enabled: true, ready: true, policy,
+    enabled: true,
+    ready: true,
+    policy,
     client: {
       mask: async ({ body }) => ({ body }),
       restore: async ({ body }) => {
@@ -1189,7 +1237,11 @@ unixTest('streamGoWorker retains models declared in HTTP error JSON without chan
     res.end(JSON.stringify(payload))
   })
   try {
-    for (const declaration of [{ model: 'reported-error-model' }, { response: { model: 'reported-error-model' } }, {}]) {
+    for (const declaration of [
+      { model: 'reported-error-model' },
+      { response: { model: 'reported-error-model' } },
+      {},
+    ]) {
       payload = {
         ...declaration,
         error: { type: 'invalid_request_error', code: 'bad_request', message: 'original upstream message' },
@@ -1767,7 +1819,7 @@ unixTest('streamGoWorker merges SSE cache details into a totals-only usage trail
   }
 })
 
-test('terminal metadata is not a downstream commit', () => {
+test('terminal metadata and empty blocks are not downstream commits', () => {
   assert.equal(isDownstreamCommitEvent({ type: 'message_start', message: {} }), false)
   assert.equal(isDownstreamCommitEvent({ type: 'error', error: { message: 'Connection error' } }), false)
   assert.equal(isDownstreamCommitEvent({ type: 'message_stop' }), false)
@@ -1791,6 +1843,26 @@ test('terminal metadata is not a downstream commit', () => {
     { type: 'response.output_item.done', item: { type: 'image_generation_call', result: 'aW1hZ2U=' } },
   ])
     assert.equal(isDownstreamCommitEvent(event), true)
+  assert.equal(
+    isDownstreamCommitEvent({ type: 'content_block_start', content_block: { type: 'text', text: '' } }),
+    false,
+  )
+  assert.equal(
+    isDownstreamCommitEvent({ type: 'content_block_start', content_block: { type: 'thinking', thinking: '' } }),
+    false,
+  )
+  assert.equal(
+    isDownstreamCommitEvent({ type: 'content_block_delta', delta: { type: 'thinking_delta', estimated_tokens: 1 } }),
+    true,
+  )
+  assert.equal(
+    isDownstreamCommitEvent({ type: 'content_block_start', content_block: { type: 'redacted_thinking', data: '' } }),
+    false,
+  )
+  assert.equal(
+    isDownstreamCommitEvent({ type: 'content_block_start', content_block: { type: 'redacted_thinking', data: 'x' } }),
+    true,
+  )
   assert.equal(
     isDownstreamCommitEvent({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'hi' } }),
     true,
