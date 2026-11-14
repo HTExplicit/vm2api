@@ -4,9 +4,17 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { cragV2PackageRoot, stageCragV2Tree, verifyCragV2Tree } from '../src/lib/vm/wrap-cli-runtime.mjs'
+import { cragV2Arch, cragV2PackageRoot, stageCragV2Tree, verifyCragV2Tree } from '../src/lib/vm/wrap-cli-runtime.mjs'
 
-export function publishCragFactory(root, source = '/opt/vm2api/image-crag/kernels/v2/amd64') {
+export function publishCragFactory(
+  root,
+  source = '/opt/vm2api/image-crag/kernels/v2/amd64',
+  { arch = cragV2Arch() } = {},
+) {
+  if (arch !== 'amd64') return { ok: true, skipped: true, reason: 'unsupported_arch' }
+  if (String(process.env.KIN_CRAG_V2_ROOT || '').trim()) {
+    return { ok: true, skipped: true, reason: 'custom_package' }
+  }
   if (!fs.existsSync(path.join(source, 'manifest.json'))) return { ok: true, skipped: true }
   const checked = verifyCragV2Tree(source)
   if (!checked.ok) throw new Error(`CRAG image factory invalid: ${checked.code}`)

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { VmProxySnap } from '@/types/panel-vm'
 import { toast } from 'sonner'
@@ -16,6 +16,8 @@ import { Label } from '@/components/ui/label'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { proxiesQueryOptions } from '@/features/proxies/queries'
 import { type ProxyEditResult, editOutcome } from './proxy-results'
+import { type ProxyScheme, proxySchemeOf } from './proxy-scheme'
+import { ProxySchemeToggle } from './proxy-scheme-toggle'
 import { proxyBoundIds } from './proxy-sort'
 
 /** 与网关 PROXY_LABEL_MAX 一致。 */
@@ -36,6 +38,8 @@ export function ProxyEditDialog({
   onOpenChange: (open: boolean) => void
 }) {
   const qc = useQueryClient()
+  const returnFocus = useRef<HTMLElement | null>(null)
+  const [scheme, setScheme] = useState<ProxyScheme>('socks5')
   const [host, setHost] = useState('')
   const [port, setPort] = useState('')
   const [username, setUsername] = useState('')
@@ -48,12 +52,14 @@ export function ProxyEditDialog({
   // 代理名称只影响显示：只改名称时网关不会重载已绑槽位的 worker。
   const labelChanged = label.trim() !== String(proxy?.label || '')
   const localProxy = proxy?.kind === 'local' || proxy?.scheme === 'local'
+  const schemeChanged = !localProxy && scheme !== proxySchemeOf(proxy?.scheme)
 
   // 按 id 重置，而不是按对象身份。代理页每次 refetch 都会产出新的 proxy 对象，
   // 若依赖对象引用，编辑期间的一次后台刷新就会把用户正在输入的账密清空。
   const proxyId = proxy?.id || ''
   useEffect(() => {
     if (!proxyId) return
+    setScheme(proxySchemeOf(proxy?.scheme))
     setHost(String(proxy?.host || ''))
     setPort(String(proxy?.port || ''))
     setUsername('')
@@ -70,6 +76,7 @@ export function ProxyEditDialog({
       // 只发真正改动的键：网关按「键是否存在」区分「不动」与「清空」，
       // 无脑全量提交会把留空的账密框当成清除指令。
       const patch: Record<string, unknown> = {}
+      if (schemeChanged) patch.scheme = scheme
       if (host.trim() && host.trim() !== proxy?.host) patch.host = host.trim()
       if (port.trim() && port.trim() !== String(proxy?.port ?? '')) {
         patch.port = Number(port.trim())
@@ -114,6 +121,7 @@ export function ProxyEditDialog({
   const passwordWithoutUser =
     !clearAuth && !!password && !username.trim() && !proxy?.has_auth
   const connectionChanged = !(
+    !schemeChanged &&
     host.trim() === String(proxy?.host || '') &&
     port.trim() === String(proxy?.port ?? '') &&
     !username.trim() &&
@@ -126,7 +134,15 @@ export function ProxyEditDialog({
 
   return (
     <Dialog open={!!proxy} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent
+        onOpenAutoFocus={() => {
+          returnFocus.current = document.activeElement as HTMLElement | null
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          returnFocus.current?.focus()
+        }}
+      >
         <DialogHeader>
           <DialogTitle>编辑代理</DialogTitle>
         </DialogHeader>
@@ -140,6 +156,21 @@ export function ProxyEditDialog({
               placeholder='如：东京-2 号机、xx 机房'
             />
           </div>
+          {localProxy ? null : (
+            <div className='space-y-1'>
+              <ProxySchemeToggle
+                value={scheme}
+                onChange={setScheme}
+                disabled={save.isPending}
+              />
+              {schemeChanged ? (
+                <p className='text-xs text-muted-foreground'>
+                  只换协议，主机、端口与账密保持不变；请确认该端口确实提供{' '}
+                  {scheme === 'http' ? 'HTTP CONNECT' : 'SOCKS5'} 服务。
+                </p>
+              ) : null}
+            </div>
+          )}
           <div className='grid gap-3 sm:grid-cols-[2fr_1fr]'>
             <div className='space-y-1'>
               <Label>主机</Label>
@@ -223,7 +254,7 @@ export function ProxyEditDialog({
           )}
           {passwordWithoutUser ? (
             <p className='text-xs text-[color:var(--status-bad)]'>
-              只填密码不生效，SOCKS5 需要同时有用户名。
+              只填密码不生效，代理认证需要同时有用户名。
             </p>
           ) : null}
           {boundCount && connectionChanged ? (

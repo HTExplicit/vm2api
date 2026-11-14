@@ -4,7 +4,7 @@ git 里只有源码。`bin/`、`web/dist`、`share/crag` 与 `share/wrap-cli` �
 
 - `web/dist`、`kin-api-kernel`、`kin-redact` 与 `kin-egress` 在最终控制面镜像内从 fork 源码构建。`kin-egress` 保留 fork 的出口逻辑并包含 HTTP CONNECT 支持。
 - 其余 linux amd64 kernel / helper、Claude CLI、完整签名加密 CRAG native v2 包与 glibc shim 由 [`deploy/payload.json`](../deploy/payload.json) 按大小和 SHA-256 固定。清单的 `release` 指向已公开、不可变的 payload Release，可独立于应用版本；`npm run fetch:payload` 与镜像构建使用同一清单，校验失败即停止。
-- 当前载荷来源为官方 `payload-2026.11.14-cache-ttl`，包含 CLI `2.1.321` 缓存 TTL 修复字节；CRAG `v2.8.17` 的原签名包与出厂成员保持，不重新构建。应用基线和资产来源见 [官方 087 构建记录](releases/v1.4.087-binaries.json)；来源与完整性校验不等于生产运行验收。
+- 当前载荷来源为官方 `payload-2026.11.14-crag-2.8.18`，只更新 CRAG `v2.8.18` 的原签名包及相应出厂成员；CLI `2.1.321` 缓存 TTL 修复字节与其余固定资产保持。应用、发行工作流及资产来源见 [091 供应来源记录](releases/v1.4.091-binaries.json)，原签名包见 [CRAG 2.8.18 来源](releases/v1.4.091-crag.json)。这些记录由 fork 根据供应方公开发行整理，不声明独立重建或重签；来源与完整性校验不等于生产运行验收。
 
 ## 完整应用交付
 
@@ -79,7 +79,7 @@ install -m 755 kin-kernel kin-egress kin-worker kin-codex-kernel kin-oauth-auth 
 
 ## 本机构建
 
-依赖：Node 22、Go 1.25、pnpm 10、python3（官方 CLI PTY 脚本）。OAuth 换票由控制面 spawn `bin/kin-oauth-auth` 完成；`auth.js` 只保留在本地构建目录，不上传到控制面。kernel / wrap CLI 用 payload ELF，不要在本机 cargo / 重编 Claude Code。
+依赖：Node 22、Go 1.25、pnpm 10、python3（官方 CLI PTY 脚本）。OAuth 换票使用固定的 `bin/kin-oauth-auth`：内核具备能力且遥测就绪时在槽内执行，否则由控制面经槽当前绑定出口执行。`auth.js` 只保留在本地构建目录，不上传到控制面。kernel / wrap CLI 用 payload ELF，不要在本机 cargo / 重编 Claude Code。
 
 ```bash
 npm ci

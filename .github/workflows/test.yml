@@ -57,7 +57,7 @@ jobs:
           sh -n scripts/panel-upgrade.sh
       - name: installer shared finalization
         working-directory: test/deploy
-        run: python3 -m unittest test_install_schedule.ScheduleTests.test_upgrade_runs_shared_fleet_once_and_honors_no_sync test_install_schedule.ScheduleTests.test_crag_update_uses_existing_host_or_container_without_compose_restart test_install_schedule.ScheduleTests.test_crag_update_rejects_no_start_before_any_mutation
+        run: python3 -m unittest test_install_schedule
       - name: redaction helper unit checks
         working-directory: redact
         run: go test ./internal/server
@@ -132,10 +132,12 @@ jobs:
             test/unit/kernel-router.test.mjs \
             test/unit/cluster-local-status.test.mjs \
             test/unit/cluster-node-host.test.mjs \
+            test/unit/docker-control-image.test.mjs \
             test/unit/proxy-probe-tunnel.test.mjs \
             test/unit/panel-upgrade-script.test.mjs \
             test/unit/fleet-services.test.mjs \
             test/unit/proxy-http-scheme.test.mjs \
+            test/unit/proxy-pool-bind.test.mjs \
             test/unit/proxy-pool-update.test.mjs \
             test/unit/panel-proxy-browser-boundary.test.mjs \
             test/unit/remote-slot-push-retry.test.mjs \
@@ -231,6 +233,8 @@ jobs:
             test/unit/crag-v2-credential-health.test.mjs \
             test/unit/guest-oauth-transparent-egress.test.mjs \
             test/unit/kvm-runtime.test.mjs \
+            test/unit/kvm-crag-apparmor.test.mjs \
+            test/unit/slot-runtime-apparmor.test.mjs \
             test/unit/kernel-cpu.test.mjs \
             test/unit/guest-identity-reader.test.mjs \
             test/unit/telemetry-status.test.mjs \
@@ -261,6 +265,7 @@ jobs:
             test/unit/kernel-switch-recovery.test.mjs \
             test/unit/crag-update.test.mjs \
             test/unit/crag-factory.test.mjs \
+            test/unit/crag-seed.test.mjs \
             test/unit/docker-memory-api.test.mjs \
             test/unit/docker-slot-memory.test.mjs \
             test/unit/install-payload.test.mjs \
@@ -337,7 +342,7 @@ jobs:
           pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx
           pnpm exec vitest run src/features/anthropic/endpoint-save.test.ts
           pnpm exec vitest run src/features/settings/health-pane.test.ts src/features/cluster/slot-migration.test.ts
-          pnpm exec vitest run src/features/vm/engine-editor.test.tsx src/lib/slash-line.test.ts src/features/vm/engine-contract.test.ts src/features/vm/persona-contract.test.ts src/lib/wrap-health.test.ts src/features/system/compat-patch.test.ts
+          pnpm exec vitest run src/features/vm/engine-editor.test.tsx src/features/wrap/index.test.tsx src/lib/slash-line.test.ts src/features/vm/engine-contract.test.ts src/features/vm/persona-contract.test.ts src/lib/wrap-health.test.ts src/features/system/compat-patch.test.ts
           pnpm exec vitest run src/config/nav.test.ts src/features/auth/route-guard.test.ts src/features/users/user-concurrency.test.ts src/features/vm/vm-perms.test.ts
           pnpm exec vitest run src/lib/session-cache.test.ts src/lib/api.test.ts src/features/vm/use-vm-test-chat.test.tsx
           pnpm exec vitest run src/lib/random-uuid.test.ts
@@ -350,6 +355,10 @@ jobs:
         env:
           UI_BROWSER_EXE: /usr/bin/google-chrome
         run: node --test test/browser/claude-reset-actions.test.mjs
+      - name: Proxy protocols and KVM kernel actions
+        env:
+          UI_BROWSER_EXE: /usr/bin/google-chrome
+        run: node --test test/browser/proxy-kvm.test.mjs
       - name: Account API key management UI
         run: node scripts/smoke-openai-apikey-ui.mjs
       - name: Browser close retry UI

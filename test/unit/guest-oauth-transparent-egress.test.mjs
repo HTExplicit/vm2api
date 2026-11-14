@@ -1,6 +1,131 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { runGuestOAuthAuthService } from '../../src/lib/oauth/guest-oauth-helper.mjs'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import {
+  finishOAuthImport,
+  prepareSlotOAuth,
+  runGuestOAuthAuthService,
+} from '../../src/lib/oauth/guest-oauth-helper.mjs'
+
+test('OAuth without native telemetry uses the persisted bound exit without starting the slot', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-legacy-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(root, 'vms'))
+  for (const health of [{ ok: true }, { ok: true, vm_telemetry: true, telemetry_ready: false }]) {
+    for (const [proxy, expectedProxy] of [
+      [{ id: 'px-bound', host: '127.0.0.1', port: 20881 }, 'socks5h://127.0.0.1:20881'],
+      [{ id: 'px-http', scheme: 'http', host: '127.0.0.1', port: 20882 }, 'http://127.0.0.1:20882'],
+      [{ id: 'px-local' }, ''],
+    ]) {
+      const vm = { id: 'vm-01', runtime: { type: 'docker' }, status: 'running', schedulable: false, proxy }
+      const vmFile = path.join(root, 'vms', `${vm.id}.json`)
+      const before = JSON.stringify(vm)
+      fs.writeFileSync(vmFile, before)
+      const inputs = []
+      for (const payload of [
+        { operation: 'exchange_code', code: 'fixture-code', code_verifier: 'fixture-verifier', state: 'fixture-state' },
+        { operation: 'session_key', session_key: 'sk-ant-sid-fixture', runtime_mode: 'setup-token' },
+      ]) {
+        const credential = await runGuestOAuthAuthService(
+          { ...payload, proxy_url: 'socks5h://127.0.0.1:1' },
+          {
+            exec: {
+              projectRoot: root,
+              vmId: vm.id,
+              vm: { ...vm, proxy: { id: 'px-stale', host: '127.0.0.1', port: 1 } },
+            },
+            prepare: (options) =>
+              prepareSlotOAuth({
+                ...options,
+                readHealth: async () => health,
+                startReady: async () => assert.fail('OAuth must not start or restart a legacy slot'),
+              }),
+            runDocker: async () => assert.fail('Legacy OAuth must not execute in the slot'),
+            postTelemetry: async () => assert.fail('Missing telemetry must not delay OAuth'),
+            runNative: async (input) => {
+              inputs.push(input)
+              return { access_token: 'fixture-access', refresh_token: 'fixture-refresh' }
+            },
+          },
+        )
+        assert.equal(credential.access_token, 'fixture-access')
+        assert.equal(await finishOAuthImport(credential, true), null)
+        assert.deepEqual(inputs.at(-1), {
+          ...payload,
+          proxy_url: expectedProxy,
+        })
+      }
+      assert.equal(inputs.length, 2)
+      assert.equal(fs.readFileSync(vmFile, 'utf8'), before)
+    }
+  }
+})
+
+test('OAuth rejects unbound and policy-blocked exits before health or helper execution', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-boundary-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(root, 'vms'))
+  for (const [proxy, code] of [
+    [null, 'proxy_required'],
+    [{ id: 'px-ipv6', host: '2001:db8::1', port: 1080 }, 'ipv6_disabled'],
+  ]) {
+    const vm = { id: 'vm-01', runtime: { type: 'docker' }, status: 'stopped', schedule_off: true, proxy }
+    const file = path.join(root, 'vms', `${vm.id}.json`)
+    const before = JSON.stringify(vm)
+    fs.writeFileSync(file, before)
+    await assert.rejects(
+      prepareSlotOAuth({
+        exec: { projectRoot: root, vmId: vm.id },
+        readHealth: async () => assert.fail('A forbidden exit must not reach the kernel'),
+        startReady: async () => assert.fail('A forbidden exit must not start the slot'),
+      }),
+      { code },
+    )
+    assert.equal(fs.readFileSync(file, 'utf8'), before)
+  }
+})
+
+test('a legacy helper error ends one exchange without starting or replaying the slot path', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-oauth-once-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.mkdirSync(path.join(root, 'vms'))
+  const vm = {
+    id: 'vm-01',
+    runtime: { type: 'docker' },
+    status: 'stopped',
+    schedule_off: true,
+    proxy: { id: 'px-bound', host: '127.0.0.1', port: 20881 },
+  }
+  const file = path.join(root, 'vms', `${vm.id}.json`)
+  const before = JSON.stringify(vm)
+  fs.writeFileSync(file, before)
+  const failure = Object.assign(new Error('fixture provider rejection'), { code: 'fixture_rejected' })
+  let attempts = 0
+  await assert.rejects(
+    runGuestOAuthAuthService(
+      { operation: 'exchange_code', code: 'fixture-code' },
+      {
+        exec: { projectRoot: root, vmId: vm.id },
+        prepare: (options) =>
+          prepareSlotOAuth({
+            ...options,
+            readHealth: async () => ({ ok: false }),
+            startReady: async () => assert.fail('The selected controller path cannot start the slot'),
+          }),
+        runNative: async () => {
+          attempts += 1
+          throw failure
+        },
+        runDocker: async () => assert.fail('The failed controller exchange cannot replay inside the slot'),
+      },
+    ),
+    (error) => error === failure,
+  )
+  assert.equal(attempts, 1)
+  assert.equal(fs.readFileSync(file, 'utf8'), before)
+})
 
 test('guest OAuth helper delegates egress selection to the slot network', async () => {
   const inputs = []
