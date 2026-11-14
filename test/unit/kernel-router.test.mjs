@@ -1287,52 +1287,76 @@ test('writeKernelConfig uses identity when official_full has no persona_inject',
   assert.equal(overridden.system_layout, 'zero')
 })
 
-test('kernel.json rename keeps the control-plane gid while adopting the slot uid', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-owner-'))
-  const vm = { id: 'vm-10', inference_engine: 'rust' }
-  const owner = slotRuntimeOwner(vm)
-  const calls = []
-  const chown = mock.method(fs, 'chownSync', (file, uid, gid) => {
-    calls.push({ file, uid, gid })
+for (const privileged of [true, false]) {
+  unixTest(`kernel.json rename assigns ${privileged ? 'slot' : 'control-plane'} gid before publication`, () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-owner-'))
+    const vm = { id: 'vm-10', inference_engine: 'rust' }
+    const owner = slotRuntimeOwner(vm)
+    const controlGid = 4321
+    const expectedGid = privileged ? owner.gid : controlGid
+    const getuid = mock.method(process, 'getuid', () => (privileged ? 0 : 10001))
+    const getgid = mock.method(process, 'getgid', () => controlGid)
+    const calls = []
+    const chown = mock.method(fs, 'chownSync', (file, uid, gid) => {
+      calls.push({ file, uid, gid })
+    })
+    const renameSync = fs.renameSync.bind(fs)
+    const rename = mock.method(fs, 'renameSync', (from, to) => {
+      if (String(to).endsWith(`${path.sep}kernel.json`)) {
+        assert.deepEqual(
+          calls.findLast((call) => call.file === from),
+          {
+            file: from,
+            uid: owner.uid,
+            gid: expectedGid,
+          },
+        )
+      }
+      return renameSync(from, to)
+    })
+    const kernelOwned = () => calls.filter((call) => String(call.file).includes(`${path.sep}kernel.json`))
+    try {
+      assert.equal(owner.uid, Number(process.env.KIN_VM_UID_BASE || 10000) + 10)
+      assert.equal(owner.gid, Number(process.env.KIN_VM_GID || 987))
+      assert.equal(String(owner.uid), socksUidFor(vm))
+      const zero = { compatibility: { persona_preset: 'zero', cache_ttl: '5m' } }
+      const full = { compatibility: { persona_preset: 'official_full', cache_ttl: '5m' } }
+      const first = writeKernelConfig(root, vm, { token: 'tok', routing: zero })
+      assert.ok(
+        calls.some((call) => call.file === first.tokenPath || String(call.file).startsWith(`${first.tokenPath}.`)),
+      )
+      calls.length = 0
+      const changed = writeKernelConfig(root, vm, { token: 'tok', routing: full })
+      assert.equal(changed.changed, true)
+      const published = kernelOwned()
+      assert.ok(published.length >= 1)
+      assert.ok(
+        published.every((call) => call.uid === owner.uid && call.gid === expectedGid),
+        JSON.stringify(published),
+      )
+      assert.ok(
+        published.some(
+          (call) => call.file !== changed.configPath && String(call.file).startsWith(`${changed.configPath}.`),
+        ),
+      )
+      calls.length = 0
+      const again = writeKernelConfig(root, vm, { token: 'tok', routing: full })
+      assert.equal(again.changed, false)
+      assert.equal(fs.readFileSync(again.configPath, 'utf8').includes('"persona_preset": "official_full'), true)
+      assert.ok(
+        kernelOwned().some(
+          (call) => call.file === again.configPath && call.uid === owner.uid && call.gid === expectedGid,
+        ),
+      )
+    } finally {
+      rename.mock.restore()
+      chown.mock.restore()
+      getgid.mock.restore()
+      getuid.mock.restore()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
   })
-  const kernelOwned = () => calls.filter((call) => String(call.file).includes(`${path.sep}kernel.json`))
-  try {
-    assert.equal(owner.uid, Number(process.env.KIN_VM_UID_BASE || 10000) + 10)
-    assert.equal(owner.gid, Number(process.env.KIN_VM_GID || 987))
-    assert.equal(String(owner.uid), socksUidFor(vm))
-    const zero = { compatibility: { persona_preset: 'zero', cache_ttl: '5m' } }
-    const full = { compatibility: { persona_preset: 'official_full', cache_ttl: '5m' } }
-    const first = writeKernelConfig(root, vm, { token: 'tok', routing: zero })
-    assert.ok(
-      calls.some((call) => call.file === first.tokenPath || String(call.file).startsWith(`${first.tokenPath}.`)),
-    )
-    calls.length = 0
-    const changed = writeKernelConfig(root, vm, { token: 'tok', routing: full })
-    assert.equal(changed.changed, true)
-    const published = kernelOwned()
-    const controlGid = process.getgid()
-    assert.ok(published.length >= 1)
-    assert.ok(
-      published.every((call) => call.uid === owner.uid && call.gid === controlGid),
-      JSON.stringify(published),
-    )
-    assert.ok(
-      published.some(
-        (call) => call.file !== changed.configPath && String(call.file).startsWith(`${changed.configPath}.`),
-      ),
-    )
-    calls.length = 0
-    const again = writeKernelConfig(root, vm, { token: 'tok', routing: full })
-    assert.equal(again.changed, false)
-    assert.equal(fs.readFileSync(again.configPath, 'utf8').includes('"persona_preset": "official_full'), true)
-    assert.ok(
-      kernelOwned().some((call) => call.file === again.configPath && call.uid === owner.uid && call.gid === controlGid),
-    )
-  } finally {
-    chown.mock.restore()
-    fs.rmSync(root, { recursive: true, force: true })
-  }
-})
+}
 
 test('named slot ids keep the shared runtime owner when kernel config is rewritten', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-named-owner-'))

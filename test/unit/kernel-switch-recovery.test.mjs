@@ -185,7 +185,7 @@ for (const placement of ['local', 'cluster']) {
             assert.equal(project, root)
             assert.equal(selected.id, vm.id)
             assert.equal(getVm(root, vm.id).dataplane, vm.dataplane)
-            assert.equal(getVm(root, vm.id).schedule_hold.reason, 'maintenance')
+            assert.deepEqual(getVm(root, vm.id).schedule_hold, priorHold)
             assert.equal(routing.inference.dataplane, 'wrap')
             if (placement === 'local') await projectCragUniversalVm(project, selected)
             else await new Promise(setImmediate)
@@ -204,7 +204,7 @@ for (const placement of ['local', 'cluster']) {
             assert.equal(exec.vm.runtime.type, 'kvm')
             assert.equal(exec.vm.runtime.container, vm.runtime.container)
             assert.equal(exec.vm.node_id, vm.node_id)
-            assert.equal(getVm(root, vm.id).schedule_hold.reason, 'maintenance')
+            assert.deepEqual(getVm(root, vm.id).schedule_hold, priorHold)
             events.push('restart')
             return { ok: true }
           },
@@ -289,7 +289,7 @@ for (const placement of ['local', 'cluster']) {
         },
         kernelPolicyOps: {
           projectCragUniversalVm: async () => {
-            assert.equal(getVm(root, vm.id).schedule_hold.reason, 'maintenance')
+            assert.deepEqual(getVm(root, vm.id).schedule_hold, priorHold)
             assert.equal(getVm(root, vm.id).dataplane, vm.dataplane)
             events.push('project')
             if (placement === 'local') throw new Error('license directory unavailable')
@@ -424,7 +424,7 @@ for (const [label, placement, endpoint] of [
             startSlotReady: async () => assert.fail('kernel switching must preserve the KVM guest'),
             restartRustKernel: async () => {
               const selected = getVm(root, vm.id)
-              assert.equal(selected.schedule_hold.reason, 'maintenance')
+              assert.deepEqual(selected.schedule_hold, priorHold)
               const config = JSON.parse(fs.readFileSync(path.join(root, 'vms', vm.id, 'run/kernel.json')))
               assert.equal(config.dataplane, target)
               assert.equal(config.runtime_kind, 'kvm')
