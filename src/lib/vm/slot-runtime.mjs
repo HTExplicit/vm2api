@@ -84,7 +84,7 @@ export async function destroySlot(vm, projectRoot, opts = {}) {
       return { ok: false, code: 'codex_kernel_stop_failed', error: stopped.reason || 'Codex kernel did not stop' }
     }
   }
-  return (opts.ops?.destroy || host.destroy)(vm)
+  return (opts.ops?.destroy || host.destroy)(vm, opts)
 }
 
 /** Reload guest worker so a new bind-mounted / virtiofs binary is picked up. Recreate only when the bound egress network moved; otherwise never docker rm. */

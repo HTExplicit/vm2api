@@ -13,7 +13,7 @@ export function calendarExpiry(issued, term) {
   const date = new Date(issued * 1000)
   const day = date.getUTCDate()
   date.setUTCDate(1)
-  date.setUTCMonth(date.getUTCMonth() + ({ '1m': 1, '6m': 6, '1y': 12 })[term])
+  date.setUTCMonth(date.getUTCMonth() + ({ '1m': 1, '3m': 3, '6m': 6, '1y': 12 })[term])
   const last = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate()
   date.setUTCDate(Math.min(day, last))
   return Math.floor(date.getTime() / 1000)
@@ -85,7 +85,44 @@ export function issueUniversalCode(root, overrides = {}) {
     claims,
   }
 }
-export function seedEncryptedPackage(root, { revision = '' } = {}) {
+export function signSubscriptionBytes(root, prefix, raw) {
+  const bytes = Buffer.isBuffer(raw) ? raw : Buffer.from(raw)
+  const signature = crypto.sign(null, Buffer.concat([Buffer.from(`${prefix}\0`), bytes]), fixtureAuthority(root).privateKey)
+  return `${prefix}.${bytes.toString('base64url')}.${signature.toString('base64url')}`
+}
+export function issueHostEntitlement(root, hostId, overrides = {}) {
+  const now = Math.floor(Date.now() / 1000)
+  const claims = {
+    version: 1, product: 'crag-v2', host_id: hostId, revision: 1,
+    issued_at: now - 60, expires_at: now + 86400, slot_limit: 2, ...overrides,
+  }
+  return { claims, code: signSubscriptionBytes(root, 'CRAGH1', JSON.stringify(claims)) }
+}
+export function issueSlotPermit(root, machineCode, hostId, overrides = {}, wrap = {}) {
+  const authority = fixtureAuthority(root)
+  const challenge = JSON.parse(Buffer.from(machineCode.split('.')[1], 'base64url'))
+  const keyId = wrap.keyId || sha(authority.payloadKey)
+  const ephemeral = crypto.generateKeyPairSync('x25519')
+  const publicKey = crypto.createPublicKey({
+    key: { kty: 'OKP', crv: 'X25519', x: wrap.devicePublicKey || challenge.device_public_key }, format: 'jwk',
+  })
+  const shared = crypto.diffieHellman({ privateKey: ephemeral.privateKey, publicKey })
+  const key = crypto.hkdfSync('sha256', shared, Buffer.from(keyId, 'hex'), Buffer.from('CRAG-LICENSE-KEYWRAP-V1\0'), 32)
+  const nonce = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, nonce)
+  cipher.setAAD(Buffer.from(wrap.aad ?? `${challenge.vm_id}\0${challenge.machine_id_hash}\0${challenge.device_public_key}\0${keyId}`))
+  const ciphertext = Buffer.concat([cipher.update(wrap.payload || authority.payloadKey), cipher.final()])
+  const claims = {
+    version: 1, product: 'crag-v2', host_id: hostId, seat: 1, vm_id: challenge.vm_id,
+    machine_id_hash: challenge.machine_id_hash, device_public_key: challenge.device_public_key,
+    payload_key_id: keyId, wrapped_key: {
+      ephemeral_public_key: ephemeral.publicKey.export({ format: 'jwk' }).x,
+      nonce: nonce.toString('base64url'), ciphertext: ciphertext.toString('base64url'), tag: cipher.getAuthTag().toString('base64url'),
+    }, ...overrides,
+  }
+  return { claims, code: signSubscriptionBytes(root, 'CRAGS1', JSON.stringify(claims)) }
+}
+export function seedEncryptedPackage(root, { revision = '', payloadKey = fixtureAuthority(root).payloadKey } = {}) {
   const authority = fixtureAuthority(root)
   const arch = process.arch === 'arm64' ? 'arm64' : 'amd64'
   const dir = path.join(root, 'share/crag/kernels/v2', arch)
@@ -95,12 +132,12 @@ export function seedEncryptedPackage(root, { revision = '' } = {}) {
   elf.writeUInt16LE(3, 16); elf.writeUInt16LE(arch === 'amd64' ? 62 : 183, 18); elf.writeUInt32LE(1, 20)
   elf.write(revision, 96)
   const nonce = crypto.randomBytes(12)
-  const cipher = crypto.createCipheriv('aes-256-gcm', authority.payloadKey, nonce)
+  const cipher = crypto.createCipheriv('aes-256-gcm', payloadKey, nonce)
   cipher.setAAD(Buffer.from('CRAG-V2-PAYLOAD-V1\0'))
   const encrypted = Buffer.concat([cipher.update(elf), cipher.final()])
   const payloadBytes = Buffer.concat([Buffer.from('CRAGV2E1'), nonce, cipher.getAuthTag(), encrypted])
   const pub = authority.publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)
-  const signed = { product: 'crag-v2', format: 'CRAGV2E1', algorithm: 'aes-256-gcm', key_id: sha(authority.payloadKey), plaintext_sha256: sha(elf), ciphertext_sha256: sha(payloadBytes) }
+  const signed = { product: 'crag-v2', format: 'CRAGV2E1', algorithm: 'aes-256-gcm', key_id: sha(payloadKey), plaintext_sha256: sha(elf), ciphertext_sha256: sha(payloadBytes) }
   const files = { 'crag-v2': elf, 'claude-code-2.1.321/claude': elf, 'crag-v2.payload.enc': payloadBytes, 'crag-license-public.pem': authority.publicKey.export({ format: 'pem', type: 'spki' }) }
   for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), body, { mode: name === 'crag-v2' || name.endsWith('/claude') ? 0o755 : 0o644 })
   const manifest = { family: 'crag', version: 'v2', arch, runtime: 'native', entrypoint: 'crag-v2', encrypted: true,

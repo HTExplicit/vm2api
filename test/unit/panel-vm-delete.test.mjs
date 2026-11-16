@@ -207,3 +207,54 @@ test('deleting a slot drops cached record and credential entries', async () => {
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('subscription teardown receives the project root and confirmed destroy options before slot cleanup', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-del-subscription-'))
+  t.after(() => fs.rmSync(root, { recursive: true }))
+  seed(root, 'vm-01')
+  const events = []
+  const { handlePanel, response } = handler(root, {
+    codexBrowserLogin: {
+      async cancel() {
+        events.push('oauth')
+      },
+    },
+    openaiApiManager: {
+      async cancel() {
+        events.push('platform')
+      },
+    },
+    slotBrowserManager: {
+      async close() {
+        events.push('browser')
+      },
+    },
+    cragSubscription: {
+      async teardown(vm, destroy) {
+        assert.equal(vm.id, 'vm-01')
+        events.push('subscription')
+        const result = await destroy(true)
+        assert.equal(result.teardownConfirmed, true)
+        return { ...result, reclaim_pending: true }
+      },
+    },
+    destroySlot(vm, projectRoot, options) {
+      assert.equal(vm.id, 'vm-01')
+      assert.equal(projectRoot, root)
+      assert.deepEqual(options, { requireConfirmation: true })
+      assert.equal(fs.existsSync(path.join(root, 'vms/vm-01.json')), true)
+      events.push('destroy')
+      return { ok: true, teardownConfirmed: true }
+    },
+    proxyPool: {
+      unbindVm() {
+        events.push('unbind')
+      },
+    },
+  })
+  await handlePanel({ method: 'DELETE' }, {}, new URL('http://localhost/api/panel/vms/vm-01'))
+  assert.equal(response.status, 200, JSON.stringify(response.body))
+  assert.deepEqual(response.body.data, { deleted: 'vm-01', reclaim_pending: true })
+  assert.deepEqual(events, ['oauth', 'platform', 'browser', 'subscription', 'destroy', 'unbind'])
+  assert.equal(fs.existsSync(path.join(root, 'vms/vm-01.json')), false)
+})

@@ -1,28 +1,20 @@
+import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import {
   assertAuthLoginReady,
-  authLoginSessionDir,
-  extractAuthLoginUrl,
-  isPersistentAuthLoginSession,
   officialLoginCredentialToOauth,
+  nativeLoginLaunch,
+  readNativeLoginOauth,
   resolveAuthLoginClaude,
-  stopClaudeAuthLoginSession,
 } from '../../src/lib/oauth/claude-auth-login.mjs'
 import { FULL_OAUTH_SCOPE } from '../../src/lib/oauth/oauth-contract.mjs'
 import { prepareSlotOAuth } from '../../src/lib/oauth/guest-oauth-helper.mjs'
-
-test('extractAuthLoginUrl reads the official manual CAI link', () => {
-  const url =
-    'https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&scope=user%3Aprofile'
-  const raw = `If the browser didn't open, visit: \x1b]8;;${url}\x07${url}\x1b]8;;\x07`
-  assert.equal(extractAuthLoginUrl(raw), url)
-  const wrapped = 'https://claude.com/cai/oauth/authorize?code=true&\nclient_id=abc&state=xyz'
-  assert.equal(extractAuthLoginUrl(wrapped), 'https://claude.com/cai/oauth/authorize?code=true&client_id=abc&state=xyz')
-})
+import { createImportCommit } from '../../src/lib/oauth/import-commit.mjs'
 
 test('officialLoginCredentialToOauth keeps a full refresh grant and rejects setup tokens', () => {
   const oauth = officialLoginCredentialToOauth({
@@ -63,50 +55,137 @@ test('officialLoginCredentialToOauth keeps a full refresh grant and rejects setu
   )
 })
 
-test('auth login session stays reusable until force regenerate or login_ready', () => {
-  const session = {
-    alive: true,
-    auth_url: 'https://claude.com/cai/oauth/authorize?code=true',
-    expired: false,
-    status: 'waiting_auth',
+test('native login validates expiry and reads the official profile alongside its grant', async () => {
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600
+  const grant = {
+    accessToken: 'fixture-access',
+    refreshToken: 'fixture-refresh',
+    scope: 'user:profile user:inference',
+    expiresAt,
+    email: 'old@example.test',
+    accountUuid: 'old-account',
+    orgUuid: 'old-org',
+    rateLimitTier: 'default_claude_max_5x',
   }
-  assert.equal(isPersistentAuthLoginSession(session), true)
-  assert.equal(isPersistentAuthLoginSession(session, { force: true }), false)
-  assert.equal(isPersistentAuthLoginSession({ ...session, status: 'login_ready' }), false)
-  assert.equal(isPersistentAuthLoginSession({ ...session, alive: false }), false)
-  assert.equal(
-    isPersistentAuthLoginSession(session, { cliBin: '/home/kincli/.kin/crag-v2/claude-code-2.1.317/claude' }),
-    false,
+  const profile = {
+    emailAddress: 'native@example.test',
+    accountUuid: 'native-account',
+    organizationUuid: 'native-org',
+  }
+  const oauth = await readNativeLoginOauth(
+    async () => ({
+      exitCode: 0,
+      stdout: `${JSON.stringify({ claudeAiOauth: grant })}\n\x1e\n${JSON.stringify({ oauthAccount: profile })}`,
+    }),
+    '/tmp/fixture-native-login',
   )
-  assert.equal(
-    isPersistentAuthLoginSession({ ...session, cli_bin: '/native/claude' }, { cliBin: '/native/claude' }),
-    true,
-  )
-  assert.equal(
-    isPersistentAuthLoginSession({ ...session, cli_bin: '/native/claude' }, { cliBin: '/home/kincli/.kin/cli-node' }),
-    false,
+  assert.equal(oauth.expires_at, expiresAt)
+  assert.equal(oauth.email, profile.emailAddress)
+  assert.equal(oauth.account_uuid, profile.accountUuid)
+  assert.equal(oauth.org_uuid, profile.organizationUuid)
+  assert.equal(oauth.rate_limit_tier, grant.rateLimitTier)
+
+  for (const expiresAt of [0, Math.floor(Date.now() / 1000) - 1, 'invalid']) {
+    assert.throws(() => officialLoginCredentialToOauth({ ...grant, expiresAt }), { code: 'auth_login_expired' })
+  }
+  assert.throws(() => officialLoginCredentialToOauth({ ...grant, scope: 'user:inference' }), {
+    code: 'auth_login_scope',
+  })
+  await assert.rejects(
+    readNativeLoginOauth(async () => ({ exitCode: 1, stdout: JSON.stringify(grant) }), '/tmp/fixture-native-login'),
+    { code: 'auth_login_incomplete' },
   )
 })
 
-test('auth uses native CC for wrap slots and honors an explicit executable', async () => {
-  const vm = { id: 'vm-01', dataplane: 'wrap' }
-  const native = resolveAuthLoginClaude(vm)
-  assert.equal(native.native, true)
-  assert.equal(native.bin, resolveAuthLoginClaude({ ...vm, dataplane: 'crag' }).bin)
-  assert.match(native.bin, /crag-v2\/claude-code-[^/]+\/claude$/)
-  const custom = "/opt/Claude Code/it's claude"
-  assert.equal(resolveAuthLoginClaude(vm, custom).bin, custom)
-  for (const invalid of ['claude', '/tmp/claude\n', '/tmp/claude\0', '/tmp/', 42]) {
-    assert.throws(() => resolveAuthLoginClaude(vm, invalid), { code: 'invalid_claude_path' })
+test('only successful native login exposes its fresh private grant', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-auth-login-test-'))
+  const bin = path.join(root, 'claude')
+  const config = path.join(root, 'login')
+  const launch = nativeLoginLaunch(bin, config)
+  const grant = JSON.stringify({
+    claudeAiOauth: {
+      accessToken: 'new-access',
+      refreshToken: 'new-refresh',
+      scopes: ['user:profile', 'user:inference'],
+      expiresAt: Date.now() + 3600_000,
+    },
+  })
+  const run = (args, env = process.env) => {
+    const { status, stdout } = spawnSync(args[0], args.slice(1), { encoding: 'utf8', env })
+    return { exitCode: status, stdout }
   }
-  await assert.rejects(
-    assertAuthLoginReady('/tmp/unused', vm, {
-      inspect: () => ({ running: true }),
-      cliBin: custom,
-      cliExists: async () => false,
-    }),
-    { code: 'claude_cli_missing' },
-  )
+  const env = { ...process.env, ...Object.fromEntries(launch.env.map((pair) => pair.split('='))) }
+  const stub = "#!/bin/sh\nprintf '%s' " + `'${grant}' > "$CLAUDE_CONFIG_DIR/.credentials.json"\n`
+  try {
+    fs.writeFileSync(bin, stub + 'exit 1\n', { mode: 0o755 })
+    assert.equal(run(launch.cmd, env).exitCode, 1)
+    await assert.rejects(readNativeLoginOauth(run, config), { code: 'auth_login_incomplete' })
+    fs.rmSync(config, { recursive: true })
+    fs.writeFileSync(bin, stub)
+    assert.equal(run(launch.cmd, env).exitCode, 0)
+    assert.equal(fs.statSync(config).mode & 0o777, 0o700)
+    const oauth = await readNativeLoginOauth(run, config)
+    assert.equal(oauth.refresh_token, 'new-refresh')
+    assert.equal(oauth.source, 'claude-auth-login')
+    assert.match(resolveAuthLoginClaude({ id: 'vm-01', dataplane: 'wrap' }), /crag-v2\/claude-code-[^/]+\/claude$/)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('native login publishes the grant and existing CC link without probing the inference worker', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-auth-login-publish-'))
+  const priorMock = process.env.KIN_CRS_MOCK
+  delete process.env.KIN_CRS_MOCK
+  const id = 'vm-01'
+  const slot = path.join(root, 'vms', id)
+  const vmPath = `${slot}.json`
+  const home = path.join(slot, 'cli-home', '.claude')
+  const run = path.join(slot, 'run')
+  fs.mkdirSync(run, { recursive: true })
+  const socket = path.join(run, 'kernel.sock')
+  let probes = 0
+  const server = http.createServer((_req, res) => {
+    probes++
+    res.end(JSON.stringify({ ok: false, engine: 'rust', cli_pid: 1, ready_slots: 1 }))
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(socket, resolve)
+  })
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve))
+    fs.rmSync(root, { recursive: true, force: true })
+    if (priorMock === undefined) delete process.env.KIN_CRS_MOCK
+    else process.env.KIN_CRS_MOCK = priorMock
+  })
+  const existing = { id, status: 'running', dataplane: 'crag', runtime: { kernel_socket: socket } }
+  fs.writeFileSync(vmPath, JSON.stringify(existing))
+  const { commitImportedOauth } = createImportCommit({ cfg: { paths: { project: root } } })
+  const oauth = officialLoginCredentialToOauth({
+    accessToken: 'native-test-access',
+    refreshToken: 'native-test-refresh',
+    expiresAt: Date.now() + 3_600_000,
+    scopes: ['user:profile', 'user:inference'],
+    email: 'native-test@example.test',
+  })
+  const result = await commitImportedOauth({
+    vmId: id,
+    vmPath,
+    existing,
+    oauth,
+    fromNativeLogin: true,
+    skipOfficialCc: true,
+  })
+  assert.equal(result.ok, true, result.error?.message)
+  assert.equal(probes, 0)
+  const panel = JSON.parse(fs.readFileSync(vmPath, 'utf8')).claude
+  assert.equal(panel.email, 'native-test@example.test')
+  assert.equal(panel.has_refresh, true)
+  assert.equal(panel.refresh_token, undefined)
+  assert.equal(fs.readlinkSync(path.join(home, '.credentials.json')), 'credentials.json')
+  const grant = JSON.parse(fs.readFileSync(path.join(home, '.credentials.json'), 'utf8'))
+  assert.equal(grant.claudeAiOauth.refreshToken, 'native-test-refresh')
 })
 
 test('auth readiness refuses stopped containers and never falls back to cli-node', async () => {
@@ -197,53 +276,6 @@ test('prepareSlotOAuth requires runtime readiness, not telemetry acknowledgement
       }),
     })
     assert.equal(flat.configDir, '/home/kincli/.claude')
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test('an old manual login completion cannot clean a newer CLI session', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-auth-login-owner-'))
-  const dir = authLoginSessionDir(root, 'vm-23')
-  try {
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ session_id: 'new-session' }))
-    const unexpected = async () => assert.fail('must not touch the new session')
-    const result = await stopClaudeAuthLoginSession(root, 'vm-23', {
-      sessionId: 'old-session',
-      execDetach: unexpected,
-    })
-    assert.equal(result.skipped, true)
-    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8')).session_id, 'new-session')
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test('manual session cleanup removes legacy isolation metadata without touching its old HOME', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-auth-login-legacy-'))
-  const vmId = 'vm-24'
-  const dir = authLoginSessionDir(root, vmId)
-  const sessionId = 'a'.repeat(32)
-  const oldHome = path.join(root, 'vms', vmId, 'cli-home', '.cache', 'oauth-browser', sessionId)
-  try {
-    fs.mkdirSync(dir, { recursive: true })
-    fs.mkdirSync(oldHome, { recursive: true })
-    fs.writeFileSync(path.join(root, 'vms', `${vmId}.json`), JSON.stringify({ id: vmId }))
-    fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ session_id: sessionId }))
-    fs.writeFileSync(path.join(dir, 'isolation.json'), JSON.stringify({ session_id: sessionId }))
-    fs.writeFileSync(path.join(oldHome, 'preserve.txt'), 'old session data')
-    const commands = []
-    await stopClaudeAuthLoginSession(root, vmId, {
-      sessionId,
-      execDetach: async (_connect, _id, command) => commands.push(command),
-    })
-    assert.equal(fs.existsSync(path.join(dir, 'status.json')), false)
-    assert.equal(fs.existsSync(path.join(dir, 'isolation.json')), false)
-    assert.equal(fs.readFileSync(path.join(oldHome, 'preserve.txt'), 'utf8'), 'old session data')
-    assert.equal(commands.length, 1)
-    assert.match(commands[0].at(-1), /auth login/)
-    assert.doesNotMatch(commands[0].at(-1), /rm|oauth-browser/)
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

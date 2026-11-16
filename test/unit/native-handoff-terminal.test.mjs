@@ -6,6 +6,7 @@ import path from 'node:path'
 import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
+import { activateFixture, seedEncryptedPackage } from '../fixtures/crag-license.mjs'
 
 const MODEL = 'claude-haiku-4-5'
 const HEALTH = {
@@ -70,7 +71,11 @@ function response() {
 }
 
 function handler({ root, protocol, run }) {
-  const routing = { compatibility: {}, failover: { stream_keepalive_ms: 1000, queue_keepalive_delay_ms: 5000 } }
+  const routing = {
+    inference: { engine: 'rust', dataplane: 'crag', crag_kernel_version: 'v2' },
+    compatibility: {},
+    failover: { stream_keepalive_ms: 1000, queue_keepalive_delay_ms: 5000 },
+  }
   const routingFile = path.join(root, 'routing.json')
   fs.writeFileSync(routingFile, JSON.stringify(routing))
   const input = {
@@ -142,7 +147,7 @@ async function invoke(instance, res, protocol) {
   )
 }
 
-async function fixture(t, protocol, emit) {
+async function fixture(t, protocol, emit, health = HEALTH) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-native-terminal-'))
   const socketPath =
     process.platform === 'win32' ? `\\\\.\\pipe\\kin-native-terminal-${randomUUID()}` : path.join(root, 'kernel.sock')
@@ -171,9 +176,13 @@ async function fixture(t, protocol, emit) {
     homeDir: path.join(root, 'cli-home'),
     vm: {
       id: 'native-terminal-test',
+      dataplane: 'crag',
+      crag_kernel_version: 'v2',
       runtime: { kernel_socket: socketPath, worker_run_dir: root, worker_token_file: tokenPath },
     },
   }
+  seedEncryptedPackage(root)
+  assert.equal(activateFixture(root, exec.vm).license.valid, true)
   const instance = handler({
     root,
     protocol,
@@ -184,7 +193,7 @@ async function fixture(t, protocol, emit) {
         attemptMeta: {
           cliHop: true,
           cragPrint: true,
-          preparedHop: { decision: { wanted: 'rust', blocked: false }, ready: { ok: true, health: HEALTH } },
+          preparedHop: { decision: { wanted: 'rust', blocked: false }, ready: { ok: true, health } },
         },
         deliveryMode: 'realtime',
         onCommit() {},
@@ -240,6 +249,50 @@ for (const protocol of ['openai.chat', 'openai.completions']) {
       assert.doesNotMatch(output, /kin_provider_result|response\.completed|message_stop/)
     })
   }
+
+  test(`${protocol} v2 native provider failure uses one public error and keeps raw facts private`, async (t) => {
+    const res = await fixture(
+      t,
+      protocol,
+      (upstream) => {
+        upstream.writeHead(200, { 'content-type': 'text/event-stream' })
+        upstream.write(partial())
+        upstream.end(
+          frame(
+            summary({
+              schema_version: 2,
+              provider_complete: false,
+              usage_complete: false,
+              stop_reason: null,
+              http_status: 200,
+              public_status: 503,
+              error: { type: 'provider_private', message: 'private-native-observation' },
+            }),
+          ) +
+            frame({
+              type: 'error',
+              error: { type: 'overloaded_error', code: 'server_is_overloaded', message: 'Public overload' },
+            }),
+        )
+      },
+      { ...HEALTH, capabilities: [...HEALTH.capabilities, 'provider_result_v2'] },
+    )
+    const output = res.chunks.join('')
+    const data = output
+      .split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trim())
+    const events = data.filter((value) => value !== '[DONE]').map((value) => JSON.parse(value))
+    assert.match(output, /partial output/)
+    assert.equal(events.filter((event) => event.error).length, 1)
+    assert.equal(data.filter((value) => value === '[DONE]').length, 1)
+    assert.equal(res.writableEnded, true)
+    assert.doesNotMatch(output, /private-native-observation|kin_provider_result|response\.completed|message_stop/)
+    assert.equal(
+      events.some((event) => event.choices?.some((choice) => choice.finish_reason != null)),
+      false,
+    )
+  })
 
   test(`${protocol} native failure before output keeps its JSON error status`, async (t) => {
     const res = await fixture(t, protocol, (upstream) => {

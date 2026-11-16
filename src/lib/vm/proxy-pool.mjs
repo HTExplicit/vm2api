@@ -932,6 +932,19 @@ export class ProxyPool extends EventEmitter {
     return { ok: true, proxy: this.publicProxy(p) }
   }
 
+  /** Adopt an already committed slot rename without replaying binding or probe writes. */
+  adoptRenamedVmId(fromId, toId) {
+    for (const proxy of this.state.proxies) {
+      const ids = boundVmIdsOf(proxy)
+      if (ids.includes(fromId)) {
+        setBoundVmIds(
+          proxy,
+          ids.map((id) => (id === fromId ? toId : id)),
+        )
+      }
+    }
+  }
+
   unbind(proxyId, vmId = null) {
     const p = this.state.proxies.find((x) => x.id === proxyId)
     if (!p) return { ok: false, error: 'proxy_not_found' }

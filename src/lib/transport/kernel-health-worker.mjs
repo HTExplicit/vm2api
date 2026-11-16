@@ -3,7 +3,7 @@ import { workerHealth } from './go-worker-client.mjs'
 
 const controllers = new Map()
 
-parentPort.on('message', async ({ type, id, exec, timeoutMs }) => {
+parentPort.on('message', async ({ type, id, exec, timeoutMs, requireInternalToken }) => {
   if (type === 'abort') {
     controllers.get(id)?.abort()
     return
@@ -11,7 +11,7 @@ parentPort.on('message', async ({ type, id, exec, timeoutMs }) => {
   const controller = new AbortController()
   controllers.set(id, controller)
   try {
-    const health = await workerHealth(exec, { timeoutMs, signal: controller.signal })
+    const health = await workerHealth(exec, { timeoutMs, signal: controller.signal, requireInternalToken })
     parentPort.postMessage({ id, health })
   } catch (error) {
     parentPort.postMessage({

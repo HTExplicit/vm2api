@@ -592,6 +592,7 @@ export function createHandleProtocol(deps) {
     const assembler = createClaudeMessageAssembler()
     const workerResult = await dispatchStreamInference({
       exec: candidate.exec,
+      admitCragInference: deps.admitCragInference,
       body,
       reqHeaders,
       timeoutMs,
@@ -1826,6 +1827,7 @@ export function createHandleProtocol(deps) {
             const transportRouting = getRouting()
             const preparedHop = await prepareInferenceHop({
               exec: selected.exec,
+              admitCragInference: deps.admitCragInference,
               routing: transportRouting,
               slotWaitMs: selected.slotWaitMs,
               slotWaitDeadlineMs: selected.slotWaitDeadlineMs,
@@ -1862,6 +1864,7 @@ export function createHandleProtocol(deps) {
                 officialPassthrough,
                 capabilities: Array.isArray(caps) ? caps : [],
                 agentSummary: !!summarySession,
+                foldSystemMessages: routingNow?.compatibility?.crag_fold_history_system !== false,
               })
               hopBody = await materializeRemoteImageSources(hopBody)
               if (identity) {
@@ -1881,13 +1884,21 @@ export function createHandleProtocol(deps) {
                 rewriteTools: routingNow?.compatibility?.tool_name_rewrite !== false,
               })
               hopBody = scrubbed.body
+              if (
+                caps?.includes('generation_controls_v3') &&
+                hopBody.cache_ttl == null &&
+                hopBody.crag_options?.cache_ttl == null
+              ) {
+                // Carry the resolved session/menu default separately from usage accounting.
+                hopBody.cache_ttl = requestedCacheTtl
+              }
               preserveCacheBreakpoints = true
               cacheTtl = null
               personaHideTokens = 0
               logBag.inference_engine = resolveInferenceEngine(selected.vm, routingNow)
               logBag.persona_preset = cragPersona
               logBag.crag_print = {
-                transport: 'print',
+                transport: preparedHop.ready.health?.transport,
                 persona: cragPersona,
                 prompt_mode: hopBody.crag_prompt?.mode || 'default',
               }
@@ -2148,6 +2159,7 @@ export function createHandleProtocol(deps) {
           try {
             return await dispatchStreamInference({
               exec: candidate.exec,
+              admitCragInference: deps.admitCragInference,
               cacheTtl,
               preserveCacheBreakpoints,
               cliHop: attemptMeta?.cliHop === true,
@@ -2244,6 +2256,17 @@ export function createHandleProtocol(deps) {
           message_id: provider?.message_id ?? null,
           stop_reason: provider?.stop_reason ?? null,
           usage_complete: provider?.usage_complete === true,
+          ...(provider?.schema_version === 2
+            ? {
+                provider_complete: provider.provider_complete,
+                handoff_complete: provider.handoff_complete ?? null,
+                delivery_complete: provider.delivery_complete ?? null,
+                response_valid: provider.response_valid ?? null,
+                source: provider.source ?? null,
+                http_status: provider.http_status ?? null,
+                public_status: provider.public_status ?? null,
+              }
+            : {}),
         },
       }
     }

@@ -316,6 +316,16 @@ export async function pushCragSlot(vm, projectRoot, session = null, { required =
   return { ok: true, pushed: published.written.length > 0, digest: payload.digest, ...published }
 }
 
+/** Stage both Claude kernels on a fresh node slot without changing its guest selector. */
+export async function stageFreshClaudeKernels(vm, projectRoot) {
+  const session = await nodeSession(vmNodeId(vm))
+  await prepareRemoteDir(session, vm)
+  const wrap = await pushLiveWrap(vm, projectRoot, session, { required: true })
+  if (!wrap.ok) throw Object.assign(new Error(wrap.error || wrap.code), { code: wrap.code })
+  const crag = await pushCragSlot(vm, projectRoot, session, { required: true })
+  return { ok: true, wrap, crag }
+}
+
 /** Stop-accept install: both kernels land in slot-bin. The live entry is renamed over, never unlinked. */
 export async function pushKernelSelection(vm, projectRoot, kernel) {
   if (!vmNodeId(vm)) return { ok: false, code: 'not_cluster_slot', error: '不是集群槽' }
@@ -389,6 +399,13 @@ export async function pullSlotCredentials(vm, slotDir, session = null) {
     record = mirrorWorkerCredentialsToVm(vmPath, path.join(slotDir, 'cli-home'))
   }
   if (record) vm.claude = record.claude
+  if (!isCodexVm(vm)) {
+    await remoteSymlink(
+      await openSftp(s.client),
+      'credentials.json',
+      `${remoteSlotDir(s.host, vm.id)}/claude/.credentials.json`,
+    )
+  }
   return same ? { pulled: false, reason: 'same' } : { pulled: true }
 }
 
@@ -406,11 +423,17 @@ export async function reconcileSlotCredentials(vm, slotDir, session) {
 export async function ensureRemoteOfficialCredentialLink(vm, slotDir, session = null) {
   const s = session || (await nodeSession(vmNodeId(vm)))
   const remoteCred = `${remoteSlotDir(s.host, vm.id)}/${remoteSlotPath(CREDENTIALS)}`
-  const remote = await readRemoteFileNoFollow(s.client, remoteCred)
-  if (!remote) return { linked: false, reason: 'remote_missing' }
-  await prepareRemoteDir(s, vm)
   const sftp = await openSftp(s.client)
-  await remoteSymlink(sftp, 'credentials.json', `${remoteSlotDir(s.host, vm.id)}/claude/.credentials.json`)
+  const regular = await new Promise((resolve, reject) => {
+    sftp.lstat(remoteCred, (error, stat) => {
+      if (error?.code === 2) return resolve(null)
+      if (error) return reject(error)
+      resolve(stat.isFile())
+    })
+  })
+  if (regular === null) return { linked: false, reason: 'remote_missing' }
+  if (!regular) return { linked: false, reason: 'remote_not_regular' }
+  await remoteSymlink(sftp, 'credentials.json', `${path.posix.dirname(remoteCred)}/.credentials.json`)
   return { linked: true }
 }
 

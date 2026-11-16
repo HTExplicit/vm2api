@@ -4,7 +4,7 @@
  * The slot joins the bound SOCKS5's transparent network; the worker
  * dials origin directly. Missing bound proxy refuses start.
  */
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -16,7 +16,8 @@ import { runtimeKind, isKvmRuntime, RUNTIME_KVM } from './runtime-kind.mjs'
 import { isCodexVm } from './vm-kind.mjs'
 import { defaultSeedPolicy, isTelemetryEnabled } from '../protocol/seed-policy.mjs'
 import { kernelBinPath, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
-import { checkCragLicense, projectCragUniversalVm } from './crag-license.mjs'
+import { checkCragLicense, cragTargetIds, projectCragUniversalVm } from './crag-license.mjs'
+import { CRAG_HOST_MOUNT, cragSubscriptionPublicDirectory } from './crag-subscription-paths.mjs'
 import { workerPaths as transportWorkerPaths } from '../transport/go-worker-client.mjs'
 import {
   assertCliHopAllowed,
@@ -27,7 +28,7 @@ import {
 } from './slot-engine.mjs'
 import { profileForPreset } from '../identity/official-profiles.mjs'
 import { ensureSlotClaudeOwnership, chownSlotRuntimeFile, replaceSlotOwnedFile } from '../oauth/oauth-credentials.mjs'
-import { materializeResolvedKernel } from './wrap-cli-runtime.mjs'
+import { installedCragV2Root, materializeResolvedKernel } from './wrap-cli-runtime.mjs'
 import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mjs'
 import { ensureSlotComputer, rememberComputer } from '../identity/slot-computer.mjs'
 import { coerceRfc4122Uuid } from '../identity/rfc4122-uuid.mjs'
@@ -45,6 +46,7 @@ import {
   KVM_BUILD_DIR,
 } from './os-catalog.mjs'
 import { slotMemory, slotDockerCpus, memoryMiB } from './machine-spec.mjs'
+import { slotCreationLimits } from './slot-capacity.mjs'
 import { ensureKvmMachineRecord, kvmContainerEnvIncomplete, kvmMachineFields } from './kvm-machine.mjs'
 import { probeLocalKvm } from './kvm-host.mjs'
 import { slotExecArgv } from './slot-exec.mjs'
@@ -114,18 +116,19 @@ export function timezoneForIndex(i) {
  * hosts that cached an older tag. Unreachable registry falls back to the local image,
  * then to the in-repo Dockerfile.
  */
-export function ensureSlotImage(kernel, { run = sh, projectRoot, runtime } = {}) {
+export async function ensureSlotImage(kernel, { run = shAsync, projectRoot, runtime } = {}) {
   const kvm = runtime === 'kvm' || runtime === RUNTIME_KVM
   const image = kvm ? kvmImageForKernel(kernel) : imageForKernel(kernel)
-  if (run(['docker', 'pull', image], { timeout: 300_000 }).ok) return { ok: true, action: 'pulled', image }
-  if (run(['docker', 'image', 'inspect', image], { timeout: 10_000 }).ok) return { ok: true, action: 'present', image }
+  if ((await run(['docker', 'pull', image], { timeout: 300_000 })).ok) return { ok: true, action: 'pulled', image }
+  if ((await run(['docker', 'image', 'inspect', image], { timeout: 10_000 })).ok)
+    return { ok: true, action: 'present', image }
   if (kvm) {
     const dir = path.join(projectRoot || MODULE_ROOT, KVM_BUILD_DIR)
     if (!fs.existsSync(path.join(dir, 'Dockerfile'))) {
       return { ok: false, error: `guest image ${image} not available and no build context at ${dir}` }
     }
     const cloud = (OS_CATALOG[kernel] || OS_CATALOG['ubuntu-24.04']).kvm?.cloud_image || ''
-    const built = run(['docker', 'build', '-t', image, '--build-arg', `CLOUD_IMAGE_URL=${cloud}`, dir], {
+    const built = await run(['docker', 'build', '-t', image, '--build-arg', `CLOUD_IMAGE_URL=${cloud}`, dir], {
       timeout: 900_000,
     })
     if (!built.ok) return { ok: false, error: built.stderr || `docker build ${image} failed` }
@@ -135,7 +138,7 @@ export function ensureSlotImage(kernel, { run = sh, projectRoot, runtime } = {})
   if (!fs.existsSync(path.join(dir, 'Dockerfile'))) {
     return { ok: false, error: `guest image ${image} not available and no build context at ${dir}` }
   }
-  const built = run(['docker', 'build', '-t', image, dir], { timeout: 900_000 })
+  const built = await run(['docker', 'build', '-t', image, dir], { timeout: 900_000 })
   if (!built.ok) return { ok: false, error: built.stderr || `docker build ${image} failed` }
   return { ok: true, action: 'built', image }
 }
@@ -161,6 +164,28 @@ export function nextNumericIndex(vms) {
   return n
 }
 
+function shAsync(argv, opts = {}) {
+  return new Promise((resolve) => {
+    execFile(
+      argv[0],
+      argv.slice(1),
+      {
+        encoding: 'utf8',
+        timeout: opts.timeout ?? 90_000,
+        maxBuffer: 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        resolve({
+          ok: !error,
+          stdout: String(stdout || '').trim(),
+          stderr: String(stderr || error?.message || '').trim(),
+          ...(error ? { code: error.code } : {}),
+        })
+      },
+    )
+  })
+}
+
 function sh(argv, opts = {}) {
   try {
     const out = execFileSync(argv[0], argv.slice(1), {
@@ -181,6 +206,31 @@ function sh(argv, opts = {}) {
 
 export function containerName(vmId) {
   return `kin-${String(vmId || '').replace(/^vm-/, '')}`
+}
+
+/** Read-only admission for a stopped slot container's id change. */
+export function preflightSlotContainerDiscard(vmId, { run = sh } = {}) {
+  const name = containerName(vmId)
+  const outcome = inspectContainerOutcome(name, { run })
+  if (outcome.status === 'error') return { ok: false, code: 'container_inspect_failed', error: outcome.error }
+  if (outcome.status === 'missing') return { ok: true, exists: false }
+  if (outcome.container.running || outcome.container.restarting) {
+    return { ok: false, code: 'vm_running', error: '容器仍在运行，不能改编号' }
+  }
+  return { ok: true, exists: true }
+}
+
+/** Remove a stopped slot container so the next boot is created under a new id. */
+export function discardSlotContainer(vmId, { run = sh } = {}) {
+  const preflight = preflightSlotContainerDiscard(vmId, { run })
+  if (!preflight.ok) return preflight
+  if (!preflight.exists) return { ok: true, removed: false }
+  const name = containerName(vmId)
+  const removed = run(['docker', 'rm', name])
+  if (!removed.ok && !isDockerInspectNotFound(removed)) {
+    return { ok: false, code: 'container_remove_failed', error: removed.stderr || '移除旧容器失败' }
+  }
+  return { ok: true, removed: true }
 }
 
 export function officialCcUidGid(vmId) {
@@ -259,6 +309,80 @@ function updateSlotRestartPolicy(vm, existing, run) {
   if (!existing || existing.restartPolicy === policy) return { ok: true, changed: false }
   const result = run(['docker', 'update', '--restart', policy, existing.name])
   return { ...result, changed: result.ok === true }
+}
+
+/** A preinstalled, stopped slot can obtain a permit without starting its worker. */
+export function assertCragSubscriptionTarget(
+  projectRoot,
+  vm,
+  routing,
+  { reclaim = false, allowPrepared = false } = {},
+) {
+  const unsupported = () =>
+    Object.assign(new Error('A verified local Linux Docker CRAG v2 slot is required.'), {
+      status: 409,
+      code: 'crag_subscription_target_unready',
+    })
+  if (
+    process.platform !== 'linux' ||
+    !/^vm-[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(vm?.id || '') ||
+    vm.node_id ||
+    isKvmRuntime(vm) ||
+    isCodexVm(vm) ||
+    resolveKernelDataplane(vm, routing) !== 'crag' ||
+    resolveCragKernelVersion(vm, routing) !== 'v2'
+  )
+    throw unsupported()
+
+  const slot = containerName(vm.id)
+  const outcome = inspectContainerOutcome(slot, { run: (args) => sh(args, { timeout: 3000 }) })
+  const prepared = allowPrepared && outcome.status === 'missing' && vm.status === 'stopped' && vm.schedulable === false
+  if (!prepared) {
+    if (outcome.status !== 'found' || !outcome.container?.running) throw unsupported()
+    const result = sh(['docker', 'inspect', '--format', '{{json .Mounts}}', slot], { timeout: 3000 })
+    try {
+      if (!result.ok) throw unsupported()
+      const mounts = JSON.parse(result.stdout)
+      const mount = Array.isArray(mounts) && mounts.find((item) => item.Destination === CRAG_HOST_MOUNT)
+      const source = cragSubscriptionPublicDirectory(projectRoot)
+      if (mount?.Type !== 'bind' || mount.RW !== false || mount.Source !== toHostPath(source, { projectRoot }))
+        throw unsupported()
+    } catch {
+      throw unsupported()
+    }
+  }
+  try {
+    if (!installedCragV2Root(projectRoot, vm)) throw unsupported()
+    cragTargetIds(projectRoot, vm)
+  } catch {
+    throw unsupported()
+  }
+  // A stopped slot only stages verified files. The normal start path still
+  // requires the signed permit and creates the read-only entitlement mount.
+  if (prepared) return true
+  const capabilities = sh(['docker', 'exec', slot, '/home/kincli/.kin/crag-v2/crag-v2', '--license-capabilities'], {
+    timeout: 3000,
+  })
+  try {
+    if (capabilities.ok) {
+      const flags = JSON.parse(capabilities.stdout)
+      if (flags.host_subscription === 1 && (!reclaim || flags.host_subscription_reclaim === 1)) return true
+    }
+  } catch {}
+  throw unsupported()
+}
+
+/** An enabled slot has both current host authorization and a ready local runtime. */
+export function isCragSubscriptionSlotEnabled(projectRoot, vm, routing, opts) {
+  if (vm.status !== 'running' || vm.node_id || isCodexVm(vm) || isKvmRuntime(vm)) return false
+  const { ok, license } = checkCragLicense(projectRoot, vm, routing)
+  if (!ok || license?.scope !== 'host') return false
+  try {
+    return assertCragSubscriptionTarget(projectRoot, vm, routing, opts)
+  } catch (error) {
+    if (error.code === 'crag_subscription_target_unready') return false
+    throw error
+  }
 }
 
 /** A stopped installation must not be revived by Docker policy before a manual start. */
@@ -1036,9 +1160,17 @@ export function buildKvmRunArgs({
 
 /** Creation-only resources: restarting an existing container does not change its limits. */
 export function dockerSlotResourceArgs(vm, routing) {
-  const memory = slotMemory(vm, routing)
+  const { memory, pids } = slotCreationLimits(vm, routing)
   const cpus = slotDockerCpus(vm)
-  return ['--memory', memory, '--memory-swap', memory, ...(cpus > 0 ? ['--cpus', String(cpus)] : [])]
+  return [
+    '--memory',
+    memory,
+    '--memory-swap',
+    memory,
+    '--pids-limit',
+    String(pids),
+    ...(cpus > 0 ? ['--cpus', String(cpus)] : []),
+  ]
 }
 
 export async function startVmRuntime(
@@ -1189,7 +1321,7 @@ export async function startVmRuntime(
   if (!kvm && !computer?.mac) return { ok: false, error: 'computer MAC missing' }
   host = computer.hostname
 
-  const img = ensureSlotImage(kernel, { projectRoot, runtime: runtimeKind(vm) })
+  const img = await ensureSlotImage(kernel, { projectRoot, runtime: runtimeKind(vm) })
   if (!img.ok) return img
 
   try {
@@ -1242,6 +1374,20 @@ export async function startVmRuntime(
           `${hostOf(machineIdFile)}:/var/lib/dbus/machine-id:ro`,
         ]
       : []
+    if (
+      process.platform === 'linux' &&
+      !vm.node_id &&
+      !codex &&
+      resolveKernelDataplane(vm, resolvedRouting) === 'crag' &&
+      resolveCragKernelVersion(vm, resolvedRouting) === 'v2'
+    ) {
+      const directory = cragSubscriptionPublicDirectory(projectRoot)
+      fs.mkdirSync(directory, { mode: 0o755, recursive: true })
+      if (fs.realpathSync(directory) !== directory) {
+        return { ok: false, code: 'crag_subscription_directory_invalid', error: 'Invalid CRAG subscription directory' }
+      }
+      machineMounts.push('--mount', `type=bind,source=${hostOf(directory)},target=${CRAG_HOST_MOUNT},readonly`)
+    }
     args = [
       'docker',
       'run',
@@ -1255,8 +1401,6 @@ export async function startVmRuntime(
       '--restart',
       slotRestartPolicy(vm),
       ...dockerSlotResourceArgs(vm, resolvedRouting),
-      '--pids-limit',
-      '256',
       '--user',
       runtimeUser(vm),
       ...(typeof process.getuid === 'function' && process.getuid() === 0
@@ -1346,8 +1490,35 @@ export async function startVmRuntime(
 }
 
 /** Explicit factory reset / delete only. Never call from Node deploy. */
-export function destroyVmRuntime(vm, { run = sh } = {}) {
+// For reclaim, the distinction between Docker returning 404 and Docker being unreachable is irreversible.
+function confirmVmTeardown(vm, run) {
+  const name = containerName(vm.id)
+  const inspect = () => run(['docker', 'container', 'inspect', '--format', '{{.Id}}', name], { timeout: 3000 })
+  const missing = (r) =>
+    !r.ok &&
+    r.code === 1 &&
+    !r.stdout &&
+    [
+      `Error: No such container: ${name}`,
+      `Error: No such object: ${name}`,
+      `Error response from daemon: No such container: ${name}`,
+    ].includes(r.stderr?.trim())
+  const failure = { ok: false, code: 'vm_teardown_unconfirmed', error: 'Could not confirm Docker container teardown' }
+  const before = inspect()
+  let action = 'absent'
+  if (!missing(before)) {
+    if (!before.ok || !/^[a-f0-9]{64}$/.test(before.stdout)) return failure
+    const removed = run(['docker', 'rm', '-f', before.stdout], { timeout: 60_000 })
+    if (!removed.ok || !missing(inspect())) return failure
+    action = 'removed'
+  }
+  if (vm.runtime) vm.runtime = { ...vm.runtime, pid: null, ip: null, stopped: true, removed: true }
+  return { ok: true, action, teardownConfirmed: true, runtime: vm.runtime || null }
+}
+
+export function destroyVmRuntime(vm, { requireConfirmation = false, run = sh } = {}) {
   if (!vm?.id) return { ok: false, error: 'vm required' }
+  if (requireConfirmation) return confirmVmTeardown(vm, run)
   const name = containerName(vm.id)
   const inspected = inspectContainerOutcome(name, { run })
   if (inspected.status === 'error') return { ok: false, error: inspected.error }

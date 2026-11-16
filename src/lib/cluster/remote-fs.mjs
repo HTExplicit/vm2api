@@ -48,6 +48,7 @@ function sftpError(err, what) {
 
 /** SFTP WRITE payloads stay under the 32 KiB every server accepts. */
 const WRITE_CHUNK = 32 * 1024
+const WRITE_WINDOW = 32
 
 /**
  * Atomic, symlink-safe write. `owner` is only set when the SSH user is root (the
@@ -99,9 +100,18 @@ async function writeRemoteFileBody(sftp, file, data, { mode = 0o600, owner = nul
   let handle = null
   try {
     handle = await call((cb) => sftp.open(tmp, 'wx', { mode }, cb))
-    for (let off = 0; off < data.length; off += WRITE_CHUNK) {
-      const len = Math.min(WRITE_CHUNK, data.length - off)
-      await call((cb) => sftp.write(handle, data, off, len, off, cb))
+    // Bound memory and requests while keeping distant nodes' SFTP windows full.
+    // Settle the whole batch before closing/unlinking a handle after any failure.
+    for (let start = 0; start < data.length; start += WRITE_CHUNK * WRITE_WINDOW) {
+      const writes = []
+      const end = Math.min(data.length, start + WRITE_CHUNK * WRITE_WINDOW)
+      for (let off = start; off < end; off += WRITE_CHUNK) {
+        const len = Math.min(WRITE_CHUNK, data.length - off)
+        writes.push(call((cb) => sftp.write(handle, data, off, len, off, cb)))
+      }
+      const settled = await Promise.allSettled(writes)
+      const failed = settled.find((result) => result.status === 'rejected')
+      if (failed) throw failed.reason
     }
     await call((cb) => sftp.fchmod(handle, mode, cb))
     if (owner) await call((cb) => sftp.fchown(handle, owner.uid, owner.gid, cb))
@@ -143,10 +153,21 @@ export async function readRemoteFileNoFollow(client, file, { maxBytes = 1 << 20 
 
 /** Symlink ownership is never checked by the kernel, so root-created links are fine. */
 export async function remoteSymlink(sftp, target, linkPath) {
-  await call((cb) => sftp.unlink(linkPath, cb)).catch(() => {})
+  const tmp = `${linkPath}.${crypto.randomUUID()}.tmp`
+  let created = false
   try {
-    await call((cb) => sftp.symlink(target, linkPath, cb))
+    let stat
+    try {
+      stat = await call((cb) => sftp.lstat(linkPath, cb))
+    } catch (err) {
+      if (err.code !== 2) throw err
+    }
+    if (stat?.isSymbolicLink() && (await call((cb) => sftp.readlink(linkPath, cb))) === target) return
+    await call((cb) => sftp.symlink(target, tmp, cb))
+    created = true
+    await call((cb) => sftp.ext_openssh_rename(tmp, linkPath, cb))
   } catch (err) {
+    if (created) await call((cb) => sftp.unlink(tmp, cb)).catch(() => {})
     throw sftpError(err, `创建链接 ${linkPath} 失败`)
   }
 }

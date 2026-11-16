@@ -192,6 +192,20 @@ const cases = [
     },
   })),
   {
+    name: 'lifetime identities split independently while preserving the original billing slot',
+    rows: [
+      row('lifetime-first', { usage_account_id: 'openai:first', input_tokens: -10, total_cost: -0.5 }),
+      row('lifetime-second', { usage_account_id: 'openai:second', input_tokens: 31, total_cost: 0.25 }),
+      row('lifetime-second-again', { usage_account_id: 'openai:second', input_tokens: 2, total_cost: 0.125 }),
+    ],
+    accountWindows: windows,
+    check(result) {
+      assert.equal(result.accounts.length, 1)
+      assert.equal(findAccount(result, 'A').requests, 3)
+      assert.equal(findAccount(result, 'A').input_tokens, 23)
+    },
+  },
+  {
     name: 'fable matching trims JS whitespace, folds case, and prefers nonempty upstream model',
     rows: [
       row('fable-model', { model: '  FaBlE-test  ', upstream_model: null }),
@@ -358,6 +372,34 @@ function fixtureDatabase(records) {
   return db
 }
 
+function assertBillingStats(actual, expected, db, message) {
+  const { lifetime_accounts, ...existing } = actual
+  assert.deepStrictEqual(existing, expected, message)
+  const lifetime = new Map(
+    db
+      .prepare('SELECT account_id, total_cost, total_tokens FROM account_lifetime_usage_archive')
+      .all()
+      .map((record) => [record.account_id, { ...record }]),
+  )
+  for (const record of db.prepare('SELECT * FROM usage_logs').all()) {
+    const account = record.usage_account_id || record.final_account_id || record.account_id
+    if (!account || (!record.usage_account_id && (account === record.vm_id || account === '—'))) continue
+    const previous = lifetime.get(account) || { account_id: account, total_cost: 0, total_tokens: 0 }
+    previous.total_cost += record.total_cost || 0
+    previous.total_tokens +=
+      (record.input_tokens || 0) +
+      (record.output_tokens || 0) +
+      (record.cache_read_tokens || 0) +
+      (record.cache_creation_tokens || 0)
+    lifetime.set(account, previous)
+  }
+  const normalize = (rows) =>
+    rows
+      .map((record) => ({ ...record, total_cost: Number(record.total_cost.toFixed(8)) }))
+      .sort((left, right) => left.account_id.localeCompare(right.account_id))
+  assert.deepStrictEqual(normalize(lifetime_accounts), normalize([...lifetime.values()]), `${message}: lifetime usage`)
+}
+
 const cacheScopes = [
   windows,
   [{ account_id: 'B', vm_id: 'vm-b', reset_5h: iso(NOW + HOUR) }],
@@ -381,7 +423,7 @@ function cacheCase(name, verify, records = [row('cache-A'), row('cache-B', { acc
     const compareFresh = (accountWindows) => {
       const actual = patched.billingStats({ accountWindows })
       const expected = original.billingStats({ now: clockNow, accountWindows })
-      assert.deepStrictEqual(actual, expected, `${name}: cached result versus fresh original`)
+      assertBillingStats(actual, expected, db, `${name}: cached result versus fresh original`)
       return actual
     }
     verify({ db, original, patched, calls, compareFresh })
@@ -406,7 +448,7 @@ try {
       const expected = original.billingStats(options)
       fixture.check?.(expected)
       const actual = patched.billingStats(options)
-      assert.deepStrictEqual(actual, expected, fixture.name)
+      assertBillingStats(actual, expected, db, fixture.name)
       assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), [])
       rowsChecked += fixture.rows.length
       console.log(`PASS ${fixture.name}`)
@@ -494,7 +536,7 @@ try {
       for (let i = 0; i < 2; i++) {
         const options = { now: clockNow, accountWindows: cacheScopes[0] }
         const actual = patched.billingStats(options)
-        assert.deepStrictEqual(actual, original.billingStats(options))
+        assertBillingStats(actual, original.billingStats(options), db, 'explicit time bypasses the live base')
         assert.equal(actual.total.requests, 3, 'explicit time reads rows added after cached base')
         assert.strictEqual(patched._billingBaseCache, base, 'explicit time does not replace base')
         assert.deepStrictEqual([...patched._billingStatsCache.entries()], outerEntries)
@@ -503,10 +545,15 @@ try {
     },
   )
 
-  cacheCase('explicit opts.now does not populate an initially empty base', ({ original, patched, calls }) => {
+  cacheCase('explicit opts.now does not populate an initially empty base', ({ db, original, patched, calls }) => {
     for (let i = 0; i < 2; i++) {
       const options = { now: clockNow, accountWindows: cacheScopes[i] }
-      assert.deepStrictEqual(patched.billingStats(options), original.billingStats(options))
+      assertBillingStats(
+        patched.billingStats(options),
+        original.billingStats(options),
+        db,
+        'explicit time leaves base empty',
+      )
       assert.equal(patched._billingBaseCache == null, true)
       assert.equal(patched._billingStatsCache.size, 0)
     }
@@ -523,7 +570,7 @@ console.log(
     cache_cases: cacheCasesChecked,
     rows: rowsChecked,
     fixed_now: iso(NOW),
-    comparison: 'complete billingStats deepStrictEqual',
+    comparison: 'existing billingStats deepStrictEqual and independent lifetime totals',
     database: ':memory:',
     production_writes: 0,
   }),

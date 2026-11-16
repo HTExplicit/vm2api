@@ -505,6 +505,155 @@ unixTest('callGoWorker sends envelope over authenticated Unix socket', async () 
   }
 })
 
+unixTest('final inference admission rejects call and stream before opening the worker request', async () => {
+  let requests = 0
+  const fx = await fixture((_req, res) => {
+    requests++
+    res.end('{}')
+  })
+  const rejection = {
+    ok: false,
+    status: 403,
+    body: { type: 'error', error: { type: 'permission_error', code: 'license_crag_host_over_quota' } },
+    terminalState: 'rejected',
+    transportError: false,
+  }
+  try {
+    for (const send of [callGoWorker, streamGoWorker]) {
+      for (const managedCrag of [false, true]) {
+        let admissions = 0
+        let started = 0
+        const result = await send({
+          exec: fx.exec,
+          managedCrag,
+          envelope: { body: { model: 'claude-test', messages: [{ role: 'user', content: 'hi' }] }, headers: {} },
+          timeoutMs: 3000,
+          beforeInferencePost: () => {
+            admissions++
+            return rejection
+          },
+          onCommit: () => started++,
+        })
+        assert.equal(result, rejection)
+        assert.equal(admissions, 1)
+        assert.equal(started, 0)
+      }
+    }
+    assert.equal(requests, 0, 'a denied request must not execute on the worker')
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest(
+  'V3 keeps execution default TTL separate from caller cache accounting and omits legacy beta fields',
+  async () => {
+    let posted
+    const fx = await fixture(async (req, res) => {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      posted = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'ok' }] }))
+    })
+    try {
+      const body = {
+        model: 'claude-test',
+        system: [{ type: 'text', text: 'caller', cache_control: { type: 'ephemeral', ttl: '5m' } }],
+        messages: [{ role: 'user', content: 'hi' }],
+      }
+      const result = await callGoWorker({
+        exec: {
+          ...fx.exec,
+          workerStatus: { runtime_variant: 'crag-v2', capabilities: ['generation_controls_v3', 'prompt_append'] },
+        },
+        body,
+        cliHop: true,
+        cragPrint: true,
+        cacheTtl: null,
+        routing: { compatibility: { cache_ttl: '1h' } },
+      })
+      assert.equal(result.ok, true)
+      assert.equal(posted.cache_ttl, '1h')
+      assert.equal(posted.preserve_cache_breakpoints, true)
+      assert.equal(Object.hasOwn(posted.body, 'betas'), false)
+      assert.deepEqual(posted.body.system, body.system)
+    } finally {
+      await fx.close()
+    }
+  },
+)
+
+unixTest(
+  'V2 provider facts are negotiated without native handoff and remain private in call and stream results',
+  async () => {
+    const facts = {
+      type: 'kin_provider_result',
+      schema_version: 2,
+      provider_complete: true,
+      usage_complete: true,
+      message_id: 'msg_provider_attempt',
+      model: 'claude-provider-model',
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 12, output_tokens: 4 },
+      run_id: 'run_fixture',
+      turn_id: 'turn_fixture',
+      attempt_id: 1,
+      http_status: 200,
+    }
+    const fx = await fixture(async (req, res) => {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const posted = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      assert.equal(posted.gateway_policy.provider_result_v2, true)
+      assert.equal(Object.hasOwn(posted.gateway_policy, 'native_handoff_v1'), false)
+      const body = {
+        type: 'message',
+        id: 'msg_agent_aggregate',
+        role: 'assistant',
+        model: 'claude-agent-model',
+        content: [{ type: 'text', text: 'agent result' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 20, output_tokens: 8 },
+      }
+      if (!posted.stream) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ...body, _kin_provider_result: facts }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`event: kin_provider_result\ndata: ${JSON.stringify(facts)}\n\n`)
+      writeData(res, { type: 'message_start', message: { ...body, content: [], stop_reason: null } })
+      writeData(res, { type: 'content_block_start', index: 0, content_block: body.content[0] })
+      writeData(res, { type: 'content_block_stop', index: 0 })
+      writeData(res, { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: body.usage })
+      writeData(res, { type: 'message_stop' })
+      res.end()
+    })
+    try {
+      for (const send of [callGoWorker, streamGoWorker]) {
+        const lines = []
+        const result = await send({
+          exec: { ...fx.exec, workerStatus: { runtime_variant: 'crag-v2', capabilities: ['provider_result_v2'] } },
+          managedCrag: true,
+          envelope: { body: { model: 'claude-test', messages: [{ role: 'user', content: 'hi' }] }, headers: {} },
+          timeoutMs: 3000,
+          onEvent: (line) => lines.push(line),
+        })
+        assert.equal(result.ok, true)
+        assert.equal(result.nativeHandoff, false)
+        assert.deepEqual(result.providerResult, facts)
+        assert.equal(result.body.id, 'msg_agent_aggregate')
+        assert.equal(result.body.model, 'claude-agent-model')
+        assert.doesNotMatch(JSON.stringify(result.body) + lines.join('\n'), /kin_provider_result|run_fixture/)
+        assert.equal(result.headers['x-kin-provider-result'], undefined)
+      }
+    } finally {
+      await fx.close()
+    }
+  },
+)
+
 unixTest('callGoWorker puts caller cwd only in an authorized native Unix socket envelope', async () => {
   const posted = []
   const fx = await fixture(async (req, res) => {

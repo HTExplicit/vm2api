@@ -348,7 +348,14 @@ test('tenant cannot delete a self-created slot; admin still can', async (t) => {
   assert.equal(tenantDel.body?.error?.code, 'forbidden')
   assert.ok(fs.existsSync(path.join(root, 'vms', 'vm-mine.json')))
 
-  const adminDel = await makeHandler(root, ADMIN, {}, {}).call('DELETE', '/api/panel/vms/vm-mine')
+  const adminDel = await makeHandler(
+    root,
+    ADMIN,
+    {},
+    {
+      destroySlot: () => ({ ok: true, action: 'absent' }),
+    },
+  ).call('DELETE', '/api/panel/vms/vm-mine')
   assert.equal(adminDel.status, 200, JSON.stringify(adminDel.body))
   assert.equal(adminDel.body?.data?.deleted, 'vm-mine')
 })

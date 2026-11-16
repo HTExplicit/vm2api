@@ -26,7 +26,7 @@ export function imageAssets(manifest) {
       existing.sources.push(source)
     } else assets.set(file.asset, { file, sources: [source] })
   }
-  assert.equal(assets.size, 21, 'the release contains twenty-one pinned upstream assets')
+  assert.equal(assets.size, 22, 'the release contains twenty-two pinned upstream assets')
   assets.set('kin-egress', { sources: ['image-bin/kin-egress'] })
   return assets
 }
@@ -56,7 +56,7 @@ export function verifyCragArchive(manifest, dir) {
     const packageRoot = fs.existsSync(wrapper) ? wrapper : staging
     const checked = verifyCragV2Tree(packageRoot, { arch: 'amd64' })
     assert.equal(checked.ok, true, `CRAG archive signature verification failed: ${checked.code}`)
-    assert.equal(members.length, 8, 'the CRAG factory contains eight pinned members')
+    assert.equal(members.length, 9, 'the CRAG factory contains nine pinned members')
     for (const file of members) {
       const relative = file.path.slice('share/crag/kernels/v2/amd64/'.length)
       assert.ok(
@@ -95,7 +95,7 @@ export function writeProvenance({ manifest, dir, image, sourceCommit, upstreamBu
       release: manifest.release,
       build: {
         ...upstreamBuild,
-        source_record: 'docs/releases/v1.4.091-binaries.json',
+        source_record: 'docs/releases/v1.4.110-binaries.json',
         assets: upstreamBuild.assets.filter((asset) => pinnedAssets.some((item) => item.name === asset.name)),
       },
       crag: cragBuild,
@@ -170,15 +170,15 @@ function main() {
       dir: opts.dest,
       image: opts.image,
       sourceCommit: capture('git', ['rev-parse', 'HEAD']),
-      upstreamBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.091-binaries.json'), 'utf8')),
-      cragBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.091-crag.json'), 'utf8')),
+      upstreamBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.110-binaries.json'), 'utf8')),
+      cragBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.110-crag.json'), 'utf8')),
       assets: [...expected],
     }),
   )
   verifyDraft(readRelease(), opts.tag)
   run('gh', ['release', 'upload', opts.tag, '--clobber', ...expected.map((file) => path.join(opts.dest, file.name))])
   verifyReleaseAssets(readRelease(), opts.tag, expected)
-  console.log(`All 23 draft assets verified for ${opts.image}; twenty-one upstream pins and image-built egress match`)
+  console.log(`All 24 draft assets verified for ${opts.image}; twenty-two upstream pins and image-built egress match`)
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main()

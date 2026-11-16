@@ -4,7 +4,111 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { createKernelWatchdog, isKernelWatchdogTarget } from '../../src/lib/transport/kernel-watchdog.mjs'
-import { kernelFaults } from '../../src/lib/transport/rust-kernel-client.mjs'
+import { kernelFaults, rustKernelPaths } from '../../src/lib/transport/rust-kernel-client.mjs'
+import { configureSlotCapacity } from '../../src/lib/vm/slot-capacity.mjs'
+
+// These tests cover other behaviour on the legacy fixed 20 native slots;
+// plan-based capacity has its own tests (slot-capacity*.test.mjs).
+configureSlotCapacity({ enabled: false })
+
+// A stale runtime_start_failed lock with a now-healthy kernel is a leftover
+// from a start that timed out on a flaky node link; health proves it wrong.
+function staleLockFixture(root, id, lockAgeMs, reason = 'runtime_start_failed') {
+  fs.mkdirSync(path.join(root, 'vms', id, 'cli-home'), { recursive: true })
+  const at = new Date(Date.now() - lockAgeMs).toISOString()
+  const vmFile = path.join(root, 'vms', `${id}.json`)
+  fs.writeFileSync(
+    vmFile,
+    JSON.stringify({ id, status: 'running', schedulable: false, unschedulable: { reason, detail: null, at } }),
+  )
+  return vmFile
+}
+
+test('a healthy kernel lifts its stale runtime_start_failed lock while preserving operator schedule-off', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wd-stalelock-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const vms = ['vm-locked', 'vm-off'].map((id) => {
+    const file = staleLockFixture(root, id, 11 * 60_000)
+    const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (id === 'vm-off') {
+      vm.schedule_off = true
+      vm.schedule_off_reason = 'maintenance'
+      fs.writeFileSync(file, JSON.stringify(vm))
+    }
+    return { ...vm, inference_engine: 'rust' }
+  })
+  const wd = createKernelWatchdog({
+    probeVm: (vm) => ({ vmId: vm.id }),
+    health: async () => ({ healthy: true, ok: true, ready_slots: 1, closed_slots: 0 }),
+    listTargets: () => vms,
+    homeDirFor: (vm) => path.join(root, 'vms', vm.id, 'cli-home'),
+    config: { restart_backoff_sec: [60], restart_window_sec: 3600 },
+  })
+  try {
+    await wd.tick()
+    for (const vm of vms) {
+      const after = JSON.parse(fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`), 'utf8'))
+      assert.equal(after.unschedulable, undefined)
+      assert.equal(after.schedulable, !vm.schedule_off)
+      assert.equal(after.schedule_off, vm.schedule_off)
+      assert.equal(after.schedule_off_reason, vm.schedule_off_reason)
+    }
+  } finally {
+    wd.stop?.()
+  }
+})
+
+test('a fresh runtime_start_failed lock is left alone (start may still be in flight)', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wd-stalelock-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const vmFile = staleLockFixture(root, 'vm-fresh', 2 * 60_000)
+  const wd = createKernelWatchdog({
+    probeVm: (vm) => ({ vmId: vm.id }),
+    health: async () => ({ healthy: true, ok: true, ready_slots: 1, closed_slots: 0 }),
+    listTargets: () => [
+      {
+        id: 'vm-fresh',
+        inference_engine: 'rust',
+        status: 'running',
+        unschedulable: { reason: 'runtime_start_failed', at: new Date(Date.now() - 2 * 60_000).toISOString() },
+      },
+    ],
+    homeDirFor: () => path.join(root, 'vms', 'vm-fresh', 'cli-home'),
+    config: { restart_backoff_sec: [60], restart_window_sec: 3600 },
+  })
+  try {
+    await wd.tick()
+    assert.equal(JSON.parse(fs.readFileSync(vmFile, 'utf8')).unschedulable?.reason, 'runtime_start_failed')
+  } finally {
+    wd.stop?.()
+  }
+})
+
+test('a healthy kernel never lifts locks it does not own (no_credential)', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wd-stalelock-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const vmFile = staleLockFixture(root, 'vm-ticket', 11 * 60_000, 'no_credential')
+  const wd = createKernelWatchdog({
+    probeVm: (vm) => ({ vmId: vm.id }),
+    health: async () => ({ healthy: true, ok: true, ready_slots: 1, closed_slots: 0 }),
+    listTargets: () => [
+      {
+        id: 'vm-ticket',
+        inference_engine: 'rust',
+        status: 'running',
+        unschedulable: { reason: 'no_credential', at: new Date(Date.now() - 11 * 60_000).toISOString() },
+      },
+    ],
+    homeDirFor: () => path.join(root, 'vms', 'vm-ticket', 'cli-home'),
+    config: { restart_backoff_sec: [60], restart_window_sec: 3600 },
+  })
+  try {
+    await wd.tick()
+    assert.equal(JSON.parse(fs.readFileSync(vmFile, 'utf8')).unschedulable?.reason, 'no_credential')
+  } finally {
+    wd.stop?.()
+  }
+})
 
 test('watchdog targets inherited rust; stored go is rust; skips Codex and stopped', () => {
   const rustRouting = { inference: { engine: 'rust' } }
@@ -94,22 +198,114 @@ test('container restarts are bounded, spaced out, then the VM is faulted until h
     assert.equal(faults.length, 1)
     assert.match(faults[0][1], /2 recovery attempts: cli restarts spent/)
     assert.ok(kernelFaults.has('vm-loop'), 'faulted VM is skipped by scheduling')
+    now = 1_000_000
+    await wd.tick()
+    assert.deepEqual(ensured, [60_000, 360_000], 'a faulted VM stays quiet inside the hourly retry cooldown')
+    assert.equal(faults.length, 1, 'fault is reported once')
     now = 10_000_000
     await wd.tick()
-    assert.deepEqual(ensured, [60_000, 360_000], 'a faulted VM is not restarted again')
-    assert.equal(faults.length, 1, 'fault is reported once')
+    assert.deepEqual(ensured, [60_000, 360_000, 10_000_000], 'the hourly retry budget fires after fault_retry_sec')
+    assert.equal(faults.length, 1, 'retrying does not re-report the fault')
+    now = 10_060_000
+    await wd.tick()
+    assert.deepEqual(
+      ensured,
+      [60_000, 360_000, 10_000_000],
+      'only one retry per fault_retry_sec window, even mid-window ticks',
+    )
 
     health = { ok: true, healthy: true, ready_slots: 20, cli_pid: 7 }
     await wd.tick()
     assert.equal(kernelFaults.has('vm-loop'), false, 'healthy again clears the fault')
     health = { ok: true, healthy: false, unhealthy_reason: 'again' }
     await wd.tick()
-    assert.deepEqual(ensured, [60_000, 360_000], 'fresh recovery also respects the first backoff')
+    assert.deepEqual(ensured, [60_000, 360_000, 10_000_000], 'fresh recovery also respects the first backoff')
     now += 60_000
     await wd.tick()
-    assert.deepEqual(ensured, [60_000, 360_000, 10_060_000])
+    assert.deepEqual(ensured, [60_000, 360_000, 10_000_000, 10_120_000])
   } finally {
     kernelFaults.delete('vm-loop')
+  }
+})
+
+test('a faulted VM keeps one hourly revival retry for a down container', async () => {
+  let now = 0
+  const revived = []
+  const faults = []
+  const wd = createKernelWatchdog({
+    // 探针拿不到 relay → 走 observeRuntime，容器躺平（issue #1018 的形态）。
+    probeVm: () => null,
+    observeRuntime: async () => ({ state: 'stopped' }),
+    config: { restart_backoff_sec: [60, 300], restart_window_sec: 3600, fault_retry_sec: 3600 },
+    listTargets: () => [{ id: 'vm-down', inference_engine: 'rust', status: 'running' }],
+    homeDirFor: () => '/tmp/vm-down',
+    health: async () => null,
+    revive: async (vm) => {
+      revived.push([vm.id, now])
+      return { ok: true }
+    },
+    onFault: (vm, reason) => faults.push([vm.id, reason]),
+    now: () => now,
+  })
+  try {
+    await wd.tick() // 首退避未到
+    now = 60_000
+    await wd.tick() // revive #1
+    now = 360_000
+    await wd.tick() // revive #2
+    now = 380_000
+    await wd.tick() // budget 耗尽 → fault
+    assert.equal(revived.length, 2)
+    assert.equal(faults.length, 1)
+    assert.ok(kernelFaults.has('vm-down'))
+    now = 1_000_000
+    await wd.tick() // 冷却（380_000 + 3_600_000）未到：不重试
+    assert.equal(revived.length, 2, 'inside the cooldown a faulted container stays down')
+    now = 4_000_000
+    await wd.tick() // 到点：每小时一次的复活重试
+    assert.deepEqual(revived[2], ['vm-down', 4_000_000])
+    now = 4_100_000
+    await wd.tick() // 窗口内：不多试
+    assert.equal(revived.length, 3, 'only one revival retry per hour')
+  } finally {
+    kernelFaults.delete('vm-down')
+  }
+})
+
+test('fault_retry_sec=0 keeps the old behavior: a faulted VM never restarts again', async () => {
+  let now = 0
+  let health = { ok: true, healthy: false, unhealthy_reason: 'cli restarts spent' }
+  const ensured = []
+  const wd = createKernelWatchdog({
+    observeRuntime: async () => ({ state: 'running' }),
+    config: { restart_backoff_sec: [60, 300], restart_window_sec: 3600, fault_retry_sec: 0 },
+    listTargets: () => [{ id: 'vm-legacy', inference_engine: 'rust' }],
+    homeDirFor: () => '/tmp/vm-legacy',
+    health: async () => health,
+    ensure: async () => {
+      ensured.push(now)
+      return { ok: true }
+    },
+    now: () => now,
+  })
+  try {
+    await wd.tick()
+    now = 60_000
+    await wd.tick()
+    now = 360_000
+    await wd.tick()
+    now = 380_000
+    await wd.tick()
+    assert.deepEqual(ensured, [60_000, 360_000])
+    assert.ok(kernelFaults.has('vm-legacy'))
+    now = 100_000_000
+    await wd.tick()
+    assert.deepEqual(ensured, [60_000, 360_000], 'fault_retry_sec=0 disables the low-frequency retry')
+    health = { ok: true, healthy: true, ready_slots: 1, cli_pid: 1 }
+    await wd.tick()
+    assert.equal(kernelFaults.has('vm-legacy'), false, 'operator/health recovery still clears the fault')
+  } finally {
+    kernelFaults.delete('vm-legacy')
   }
 })
 
@@ -345,4 +541,37 @@ test('hold waits for a restart already in flight, and the boot after it is skipp
   await drained
   await ticking
   assert.deepEqual(actions, ['ensure:start', 'ensure:end'], 'no boot once the slot is held')
+})
+
+test('watchdog reloads a kernel only when its live slot count is off; a stale file is just rewritten', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-wd-slots-'))
+  const homeDirFor = (vm) => path.join(root, 'vms', vm.id, 'cli-home')
+  const configOf = (id) => rustKernelPaths({ vmId: id, homeDir: homeDirFor({ id }), vm: { id } }).configPath
+  const capacity = { 'vm-file': 20, 'vm-live': 10 }
+  const files = { 'vm-file': 10, 'vm-live': 20 }
+  for (const [id, n] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(configOf(id)), { recursive: true })
+    fs.writeFileSync(configOf(id), JSON.stringify({ slots_per_worker: n }))
+  }
+  const ensured = []
+  const wd = createKernelWatchdog({
+    observeRuntime: async () => ({ state: 'running' }),
+    listTargets: () => [
+      { id: 'vm-file', inference_engine: 'rust' },
+      { id: 'vm-live', inference_engine: 'rust' },
+    ],
+    homeDirFor,
+    health: async (exec) => ({ ok: true, healthy: true, ready_slots: 1, cli_pid: 1, capacity: capacity[exec.vmId] }),
+    ensure: async (exec) => {
+      ensured.push(exec.vmId)
+      return { ok: true }
+    },
+  })
+  try {
+    await wd.tick()
+    assert.deepEqual(ensured, ['vm-live'], 'only the kernel running another count is reloaded')
+    assert.equal(JSON.parse(fs.readFileSync(configOf('vm-file'), 'utf8')).slots_per_worker, 20)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

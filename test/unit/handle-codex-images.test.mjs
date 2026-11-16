@@ -114,6 +114,7 @@ test('generations posts the JSON body to the Codex Images endpoint as the slot',
   assert.equal(logBag.image_model, 'gpt-image-2.5-flare')
   assert.equal(logBag.sent_model, JSON.parse(calls[0].init.body).model)
   assert.equal(logBag.upstream_response_model, 'image-returned')
+  assert.equal(logBag.usage_account_id, 'openai:vm-a')
   assert.equal(res.body.model, 'image-returned')
   assert.deepEqual(logBag.image_usage, USAGE)
   assert.equal(stats.by_route['openai.images'], 1)
