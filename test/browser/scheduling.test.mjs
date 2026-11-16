@@ -359,7 +359,7 @@ test(
         ),
       };
     });
-    assert.ok(geometry.width >= 268);
+    assert.equal(geometry.width, 268);
     assert.ok(geometry.cellWidth >= 308);
     assert.equal(geometry.belowWindows, true);
     assert.equal(geometry.switchBeforeBar, true);
@@ -370,7 +370,7 @@ test(
     assert.ok(
       geometry.segments.every(
         (segment) =>
-          segment.width >= 24 && segment.height === 6 && segment.top === 9,
+          segment.width === 24 && segment.height === 6 && segment.top === 9,
       ),
     );
     assert.deepEqual(
@@ -493,7 +493,7 @@ test(
     await page.keyboard.press("Escape");
     assert.deepEqual(writes, [], "display options never modify a slot");
     assert.deepEqual(healthRequests, [], "display options never query a kernel");
-    const screenshots = path.join(root, ".tmp/11704-ui");
+    const screenshots = path.join(root, ".tmp/11705-ui");
     fs.mkdirSync(screenshots, { recursive: true });
     await availableRow.scrollIntoViewIfNeeded();
     await claudeRow.scrollIntoViewIfNeeded();
@@ -737,8 +737,7 @@ test(
       layoutWidth: el.clientWidth,
       renderedWidth: el.getBoundingClientRect().width,
     }));
-    assert.ok(zoomGeometry.layoutWidth >= 268);
-    assert.ok(Math.abs(zoomGeometry.renderedWidth - zoomGeometry.layoutWidth * 1.5) < 2);
+    assert.deepEqual(zoomGeometry, { layoutWidth: 268, renderedWidth: 402 });
     await capture("dark-150pct");
     await page.evaluate(() => {
       document.documentElement.style.zoom = "";
@@ -794,7 +793,7 @@ test(
         .getBoundingClientRect().height,
     }));
     assert.equal(coarseGeometry.target, 44);
-    assert.ok(coarseGeometry.width >= 44);
+    assert.equal(coarseGeometry.width, 44);
     assert.equal(coarseGeometry.visible, 6);
     await coarseContext.close();
     for (role of ["user", "super"]) {

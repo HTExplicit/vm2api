@@ -89,7 +89,7 @@ export function VmSchedulingCell({ vm }: { vm: Vm }) {
         aria-label={`${vm.id} 调度优先级`}
         aria-description={priorityDescription}
         aria-busy={mutation.isPending || undefined}
-        className='flex min-w-0 flex-1 items-center gap-1'
+        className='flex w-[268px] shrink-0 items-center gap-1 [@media(pointer:coarse)]:w-[488px]'
       >
         {perms.admin ? (
           <Tooltip>
@@ -121,7 +121,7 @@ export function VmSchedulingCell({ vm }: { vm: Vm }) {
             {automaticSegment}
           </span>
         )}
-        <div className='flex min-w-60 flex-1 [@media(pointer:coarse)]:min-w-[440px]'>
+        <div className='flex w-60 shrink-0 [@media(pointer:coarse)]:w-[440px]'>
           {LEVELS.map((value) => {
             const filled = levelOk && value <= level
             const segment = (
