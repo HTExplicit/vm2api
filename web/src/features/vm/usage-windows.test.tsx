@@ -3,6 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { CodexCreditSummary } from './codex-credit-summary'
 import { VmUsageWindows } from './usage-windows'
+import { vmWindows } from './vm-rack-model'
+import { windowTiming } from './window-timing'
 
 function render(
   five: number | null,
@@ -213,5 +215,74 @@ describe('Codex quota readings after a quota error', () => {
     )
     expect(tiny).toContain('API $0')
     expect(tiny).not.toContain('API $-0')
+  })
+})
+
+describe('window timing from measured quota and reset', () => {
+  const reset = '2026-11-16T10:00:00Z'
+  const now = Date.parse(reset) - 2.5 * 3600_000
+  it('keeps true zero usage separate from unknown usage', () => {
+    const base = { key: '5h' as const, label: '5H', reset, note: null }
+    expect(windowTiming({ ...base, pct: 0 }, now)).toMatchObject({
+      elapsedPct: 50,
+      pace: 0,
+      fullInMs: null,
+    })
+    expect(windowTiming({ ...base, pct: null }, now)).toMatchObject({
+      elapsedPct: 50,
+      pace: null,
+      fullInMs: null,
+    })
+  })
+  it('projects only a measured pace that fills before the real reset', () => {
+    expect(
+      windowTiming({ key: '5h', label: '5H', reset, note: null, pct: 75 }, now)
+    ).toMatchObject({ elapsedPct: 50, pace: 1.5, fullInMs: 3_000_000 })
+    expect(
+      windowTiming(
+        { key: '5h', label: '5H', reset: null, note: null, pct: 75 },
+        now
+      )
+    ).toMatchObject({ elapsedPct: null, pace: null, fullInMs: null })
+  })
+
+  it('uses the same Codex sample duration and leaves an unknown duration unestimated', () => {
+    const sample: Vm = {
+      id: 'codex-timing',
+      family: 'codex',
+      platform: 'openai',
+      has_token: true,
+      codex_usage: {
+        pending_refresh: true,
+        windows: [{ id: '5h', used_percent: null }],
+        last_success: {
+          windows: [
+            {
+              id: '5h',
+              used_percent: 75,
+              reset_at: reset,
+              window_minutes: 120,
+            },
+          ],
+        },
+      },
+    }
+    const measured = vmWindows(sample)[0]
+    expect(measured.durationMs).toBe(120 * 60_000)
+    expect(
+      windowTiming(measured, Date.parse(reset) - 60 * 60_000)
+    ).toMatchObject({ elapsedPct: 50, pace: 1.5, fullInMs: 1_200_000 })
+    const unknown = vmWindows({
+      ...sample,
+      codex_usage: {
+        windows: [{ id: '5h', used_percent: 75, reset_at: reset }],
+      },
+    })[0]
+    expect(unknown.durationMs).toBeNull()
+    expect(windowTiming(unknown, now)).toMatchObject({
+      elapsedPct: null,
+      pace: null,
+      fullInMs: null,
+    })
   })
 })

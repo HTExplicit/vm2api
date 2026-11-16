@@ -97,11 +97,24 @@ export type WindowReadout = {
   pct: number | null
   note: string | null
   reset: unknown
+  /** undefined uses the Claude window; null means the measured duration is unknown. */
+  durationMs?: number | null
 }
 
 /** 5H → 7D → Fable；无读数的 Fable 窗口展示探测状态。 */
 export function vmWindows(vm: Vm): WindowReadout[] {
   const display = codexQuotaDisplayVm(vm)
+  const codex = isCodexVm(vm)
+  const durationOf = (id: '5h' | '7d') => {
+    const minutes = display.codex_usage?.windows?.find(
+      (window) => window.id === id
+    )?.window_minutes
+    return typeof minutes === 'number' &&
+      Number.isFinite(minutes) &&
+      minutes > 0
+      ? minutes * 60_000
+      : null
+  }
   const probed = (w: '5h' | '7d') =>
     vm.has_token && windowProbed(display, w) ? usedPctOf(display, w) : null
   const windows: WindowReadout[] = [
@@ -111,6 +124,7 @@ export function vmWindows(vm: Vm): WindowReadout[] {
       pct: probed('5h'),
       note: null,
       reset: display.reset_5h,
+      ...(codex ? { durationMs: durationOf('5h') } : {}),
     },
     {
       key: '7d',
@@ -118,6 +132,7 @@ export function vmWindows(vm: Vm): WindowReadout[] {
       pct: probed('7d'),
       note: null,
       reset: display.reset_7d,
+      ...(codex ? { durationMs: durationOf('7d') } : {}),
     },
   ]
   const fable = fableRow(vm)

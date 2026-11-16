@@ -402,6 +402,51 @@ function cwdRequest(stream, fields = {}) {
   }
 }
 
+unixTest('public CRAG handler preserves folded controls through normalization and client scrubbing', async (t) => {
+  const fixture = await protocolKernelFixture(t, { health: printHealth, staleHealth: ordinaryHealth })
+  const longMarker = { type: 'ephemeral', ttl: '1h', scope: 'global' }
+  const shortMarker = { type: 'ephemeral' }
+  const format = { type: 'json_schema', schema: { type: 'object', properties: {}, additionalProperties: false } }
+  const input = cwdRequest(false, {
+    model: 'claude-haiku-5-5',
+    output_config: { effort: 'high', format },
+    tools: [{ name: 'Read', input_schema: { type: 'object', properties: {} } }],
+    messages: [
+      { role: 'user', content: 'read the fixture' },
+      { role: 'system', content: 'Hermes Agent environment update', output_config: { effort: 'medium' } },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'fixture-read', name: 'Read', input: {} }] },
+      { role: 'system', content: [{ type: 'text', text: 'keep this anchor', cache_control: longMarker }] },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'fixture-read', content: 'fixture contents', cache_control: shortMarker },
+        ],
+      },
+      { role: 'system', content: [], output_config: { effort: 'max' } },
+      { role: 'system', content: 'clear this point', clear_at: 'tool_uses' },
+    ],
+  })
+  const before = structuredClone(input)
+  const { envelope, extra } = await fixture.send(input)
+  for (const body of [envelope.body, extra.outbound_body]) {
+    assert.deepEqual(body.output_config, { effort: 'max', format })
+    assert.deepEqual(
+      body.messages.map((message) => message.role),
+      ['user', 'assistant', 'system', 'user', 'system'],
+    )
+    assert.match(body.messages[0].content.at(-1).text, /Claude Code environment update/)
+    assert.deepEqual(body.messages[2].content[0].cache_control, longMarker)
+    assert.deepEqual(body.messages[3].content[0].cache_control, shortMarker)
+    assert.equal(body.messages.at(-1).clear_at, 'tool_uses')
+    assert.equal(body.messages.at(-1).content[0].text, 'clear this point')
+    assert.equal(
+      body.messages.some((message) => message.role === 'system' && message.content.length === 0),
+      false,
+    )
+  }
+  assert.deepEqual(input, before)
+})
+
 for (const stream of [false, true]) {
   for (const [preset, mode] of [
     ['official_full', 'append'],

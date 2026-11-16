@@ -10,6 +10,7 @@ import {
   LOCAL_HOST_KEY,
   createHostMemoryPressure,
   hostKeyOf,
+  hostMemoryPressureOf,
   hostMemoryLevelForVm,
   installHostMemoryPressure,
   nextPressureLevel,
@@ -127,4 +128,18 @@ test('installed instance answers hostMemoryLevelForVm; none installed is ok', (t
   assert.equal(hostMemoryLevelForVm({ id: 'vm-01', node_id: 'node-b' }), HOST_PRESSURE_TIGHT)
   assert.equal(hostKeyOf({ node_id: 'node-b' }), 'node-b')
   assert.equal(hostKeyOf({}), LOCAL_HOST_KEY)
+})
+
+test('host status reads machine pressure without changing admission levels', (t) => {
+  t.after(() => installHostMemoryPressure(null))
+  installHostMemoryPressure(null)
+  assert.equal(hostMemoryPressureOf(), null)
+  const pressure = installHostMemoryPressure(createHostMemoryPressure({ log: quiet }))
+  pressure.sample(LOCAL_HOST_KEY, { total: 100, available: 5 })
+  pressure.sample('node-b', { total: 100, available: 15 })
+  assert.deepEqual(hostMemoryPressureOf(), { level: HOST_PRESSURE_CRITICAL, ratio: 0.05 })
+  assert.deepEqual(hostMemoryPressureOf('node-b'), { level: HOST_PRESSURE_TIGHT, ratio: 0.15 })
+  assert.equal(hostMemoryPressureOf('unknown'), null)
+  assert.equal(hostMemoryLevelForVm({ id: 'vm-local' }), HOST_PRESSURE_CRITICAL)
+  assert.equal(hostMemoryLevelForVm({ id: 'vm-node', node_id: 'node-b' }), HOST_PRESSURE_TIGHT)
 })

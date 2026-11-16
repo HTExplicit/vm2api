@@ -70,7 +70,7 @@ function transport(files, { tag = 'v1.2.3', size, redirect } = {}) {
       return Response.json(
         endpoint.endsWith('/releases')
           ? [{ tag_name: `payload-2026.11.15-crag-${tag.slice(1)}`, draft: false, assets }]
-          : { tag_name: tag, assets },
+          : { tag_name: tag, draft: false, assets },
       )
     }
     const index = Number(String(url).split('/').at(-1)) - 1
@@ -151,7 +151,7 @@ test('catalog exposes exactly two products with honest versions and no paths or 
   assert.equal(rows[0].updated_at, null)
   assert.deepEqual(rows[1].release_options, [
     { tag: 'payload-2026.11.16-crag-3.1.2', label: '3.1.2 标准版' },
-    { tag: 'payload-2026.11.16-crag-3.0.9-legacy', label: '3.0.9 旧离线授权兼容版' },
+    { tag: 'payload-2026.11.16-crag-3.1.2-legacy', label: '3.1.2 旧授权兼容版' },
   ])
   assert.equal(JSON.stringify(rows).includes(root), false)
   assert.equal(JSON.stringify(rows).includes('public_key'), false)
@@ -159,6 +159,22 @@ test('catalog exposes exactly two products with honest versions and no paths or 
   fs.appendFileSync(path.join(pkg, 'crag-v2.payload.enc'), 'tampered')
   assert.equal(describeKernelCatalog(root)[1].ready, false)
 })
+
+for (const tag of ['payload-2026.11.16-crag-3.1.2-legacy', 'payload-2026.11.16-crag-3.0.9-legacy']) {
+  test(`explicit legacy pull retains the fixed size check for ${tag}`, {
+    skip: cragV2Arch() !== 'amd64',
+  }, async (t) => {
+    const root = fixture(t)
+    const factory = seedEncryptedPackage(root)
+    const before = snapshot(factory)
+    const http = transport({ [CRAG_V2_RELEASE_ASSET]: archive(factory) }, { tag })
+    const result = await pullKernelRelease(root, { kernel: 'crag', tag }, http)
+    assert.equal(result.code, 'kernel_size_mismatch')
+    assert.deepEqual(http.seen, [`https://api.github.com/repos/${CRAG_RELEASE_REPO}/releases/tags/${tag}`])
+    assert.deepEqual(snapshot(factory), before)
+    assert.equal(cragV2PackageRoot(root), factory)
+  })
+}
 
 test('CLI pull downloads only the free pair, installs both, and preserves legacy factory assets', async (t) => {
   const root = fixture(t)

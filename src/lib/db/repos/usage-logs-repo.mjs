@@ -1294,11 +1294,12 @@ export class UsageLogsRepo {
         accountsTotal: [...bySlot.values()].sort((left, right) => right.total_cost - left.total_cost),
         accountsToday: this.costByAccount({ since: todayStart }),
         lifetimeAccounts: [...lifetime.values()],
+        health: this.healthBuckets({ now }),
       }
       base.expires_at = Date.now() + BILLING_STATS_CACHE_TTL_MS
       if (cacheable) this._billingBaseCache = base
     }
-    const { accountsTotal, accountsToday, lifetimeAccounts } = base
+    const { accountsTotal, accountsToday, lifetimeAccounts, health } = base
     // The per-account queries already cover every row. Re-sum them for the
     // global buckets instead of scanning the entire usage table two more times.
     // This matters on multi-GB databases where each synchronous full scan also
@@ -1364,6 +1365,7 @@ export class UsageLogsRepo {
         window_7d_unpriced: Number(w7.unpriced || 0),
         window_7d_start: aligned ? new Date(since7).toISOString() : sevenDStart,
         window_fable,
+        health_24h: health.get(keyOf(a)) || null,
       }
     })
     const window5h = aligned
@@ -1470,6 +1472,70 @@ export class UsageLogsRepo {
       out[field] = Math.round(out[field] * 1e8) / 1e8
     }
     return out
+  }
+
+  /**
+   * Request health per slot: `[[success, errors] x slots]`, oldest first, last
+   * slot ends at `now`. Success / error use the SLA predicates so the counts
+   * agree with window_7d_success / window_7d_errors. Rows with neither are
+   * skipped. Keyed like billingStats accounts (`account_id\0vm_id`), or by
+   * vm_id when `vmId` is given.
+   */
+  healthBuckets({ now = Date.now(), slots = 48, slotMin = 30, vmId = null } = {}) {
+    const slotMs = slotMin * 60_000
+    const start = now - slots * slotMs
+    const sinceIso = new Date(start).toISOString()
+    const rows = this.db
+      .prepare(
+        `
+      SELECT
+        COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, ''), vm_id, '—') AS account_id,
+        vm_id,
+        created_at,
+        CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END AS success,
+        CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END AS errors
+      FROM usage_logs
+      WHERE created_at >= ?${vmId ? ' AND vm_id = ?' : ''}
+    `,
+      )
+      .all(...(vmId ? [sinceIso, String(vmId)] : [sinceIso]))
+    const out = new Map()
+    for (const row of rows) {
+      if (!row.success && !row.errors) continue
+      const at = Date.parse(row.created_at)
+      if (!Number.isFinite(at) || at < start || at > now) continue
+      const i = Math.min(slots - 1, Math.floor((at - start) / slotMs))
+      const key = vmId ? String(vmId) : row.account_id + '\0' + (row.vm_id || '')
+      let buckets = out.get(key)
+      if (!buckets) {
+        buckets = Array.from({ length: slots }, () => [0, 0])
+        out.set(key, buckets)
+      }
+      buckets[i][0] += row.success ? 1 : 0
+      buckets[i][1] += row.errors ? 1 : 0
+    }
+    return out
+  }
+
+  /** Failed requests for one slot since `since`, grouped by error code, most frequent first. */
+  topErrors({ vmId, since, limit = 5 }) {
+    return this.db
+      .prepare(
+        `
+      SELECT COALESCE(NULLIF(error_code, ''), CAST(status AS TEXT), 'error') AS code,
+        MAX(status) AS status, COUNT(*) AS count, MAX(created_at) AS last_at
+      FROM usage_logs
+      WHERE vm_id = ? AND created_at >= ? AND ${SLA_ERROR_PRED}
+      GROUP BY 1 ORDER BY count DESC, last_at DESC LIMIT ?
+    `,
+      )
+      .all(String(vmId), since, Math.max(1, Math.min(20, Number(limit) || 5)))
+      .map((r) => ({
+        code: r.code,
+        status: r.status == null ? null : Number(r.status),
+        count: Number(r.count),
+        last_at: r.last_at,
+      }))
   }
 
   ownerBilling({ ownerUserId = null, since = null, until = null, groupBy = 'vm' } = {}) {

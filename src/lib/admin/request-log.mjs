@@ -737,6 +737,22 @@ export class RequestLogStore {
     return usageRead({ kind: 'repo', method: 'billingStatsReadOnly', args: [opts] })
   }
 
+  healthBuckets(opts = {}) {
+    return this.repo.healthBuckets(opts)
+  }
+
+  async healthBucketsAsync(opts = {}) {
+    return this._readStats('healthBuckets', opts)
+  }
+
+  topErrors(opts) {
+    return this.repo.topErrors(opts)
+  }
+
+  async topErrorsAsync(opts) {
+    return this._readStats('topErrors', opts)
+  }
+
   ownerBilling(opts = {}) {
     return this.repo.ownerBilling(opts)
   }

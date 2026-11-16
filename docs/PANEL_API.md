@@ -91,7 +91,7 @@ GPT 订阅主动刷新仅管理员，普通 user 不可调用；其他普通租�
 | GET/PUT | `/vms/:id/seed-settings` | 播种；面板默认锁定，解锁后改、播种前确认。`settings.json` 可编辑 env（经 `extra_env`）与 `theme`；`autoUpdates`/`grove_enabled` 与 TZ/LANG/LC_ALL、telemetry/bedrock/vertex 等契约 env 只读展示，TZ/LANG 经 PUT `timezone` / `timezone_follow_proxy` / `locale` 写入槽位后再播种，不经 `extra_env`；`claude_setting` 可编辑。`GET ?debug=1` 额外返回 `telemetry_log`（最近 40 行脱敏上传审计，默认不带） |
 | POST | `/vms/:id/collect-identity` | guest 采集（locale/tz/`guest_machine_id`、槽内 `/etc/os-release` 的 `VERSION_ID`、系统与架构）；Codex Analytics 只使用这次采集的运行环境 |
 | POST | `/vms/:id/reload` | 重载该槽 worker |
-| GET | `/kernels` | 仅 admin/master。返回两种产品 `kernels`（`cli-node` 默认免费、`crag` 签名加密 V2）、本地包的就绪状态、按 VM 的公开 `licenses` 与 `installations`。`install_licenses` 单独报告当前下载包的授权结果。CRAG 的 `release_options` 提供 3.1.2 标准版和 3.0.9 旧离线授权兼容版的完整发行标签，`payload_tag` 标识已下载或已安装的实际包（仅在可识别时返回）。不初始化身份、不签发许可，不返回机器码、注册码或私钥 |
+| GET | `/kernels` | 仅 admin/master。返回两种产品 `kernels`（`cli-node` 默认免费、`crag` 签名加密 V2）、本地包的就绪状态、按 VM 的公开 `licenses` 与 `installations`。`install_licenses` 单独报告当前下载包的授权结果。CRAG 的 `release_options` 提供 3.1.2 标准版和 3.1.2 旧授权兼容版的完整发行标签，`payload_tag` 标识已下载或已安装的实际包（仅在可识别时返回）。不初始化身份、不签发许可，不返回机器码、注册码或私钥 |
 | GET | `/kernels/releases` | 返回近期具备完整附件的公开版本。`cli-node` 使用应用标签 `vX.Y.Z`，`crag` 使用完整载荷标签，同版本不同载荷分别列出 |
 | POST | `/kernels/pull` | `{ kernel: "cli-node" \| "crag", tag?: string }`。只更新安装包缓存，不安装、不停 VM。cli-node 接受 `vX.Y.Z`；CRAG 另接受完整 `payload-YYYY.MM.DD-crag-X.Y.Z[-legacy]` 标签。省略 `tag` 拉取最新，CRAG 默认和普通版本号不匹配 `-legacy`。返回 `release.payload_tag`；已固定的 CRAG 包另校验归档 SHA-256，拉取失败保留当前包 |
 | POST | `/kernels/install` | `{ targets: [{ id, kernel: "cli-node" \| "crag", expected_tag?, payload_tag?, reissue? }] }`：必须给出非空显式范围；`expected_tag` 与 CRAG `payload_tag` 必须匹配确认的当前缓存。同源管理员会话可在确认指定 CRAG 包时提交 `reissue: true`，授权本机 Docker 槽在缺少许可或载荷不匹配时使用已激活的宿主订阅。向 Authority `/bind` 申请目标包许可，有有效的同槽宿主许可则重签，否则普通绑定，可能占用一个剩余名额。许可在停机前验证，恢复不发送重签标记；KVM 与集群仍使用匹配的离线许可。验证后直接停止并安装，不暂停调度或等待在途请求；原运行槽重启并经健康检查，原停止槽保持停止。逐槽报告实际 `version` / `payload_tag` 与结果。 |
@@ -104,7 +104,7 @@ GPT 订阅主动刷新仅管理员，普通 user 不可调用；其他普通租�
 | POST | `/vms/:id/wrap-cli/repair` | 单槽重装 kernel。`{ wrap, kernel }`；wrap 成功时 HTTP 200 |
 | POST / GET | `/vms/:id/kernel-switch` | 仅 admin/master。POST `{ dataplane: "crag" \| "wrap", crag_kernel_version?: "v2" \| "" }`，授权及参数预检后返回 202 任务；GET 返回本进程该槽最近任务或 `null`。任务含 `id,vm_id,dataplane,crag_kernel_version,status,started_at,finished_at,error`，`status` 为 `running` / `succeeded` / `failed`，失败 `error={code,message}`。同槽进行中再次提交回 409 `kernel_switch_in_progress`；202 不表示已切换成功 |
 | POST | `/vms/:id/start` · `/stop` | 容器生命周期。`start` 可传 `{ ensure_kernel: true }`，仅本次 GPT 开机确保内核就绪，默认 `false`；不改全局按需启动设置。运行中容器除非显式 recreate，禁止 `docker rm -f` |
-| GET | `/vms/:id/health` | 仅检查内核，返回 `{ id, kernel: { go_health, rust_health, codex_health } }`，不发模型请求；核验实际槽位还须结合实时记录、`kin.vm.id` 容器标签及真实内核 |
+| GET | `/vms/:id/health` | 仅 admin/master。省略 `range` 保持内核检查，返回 `{ id, kernel: { go_health, rust_health, codex_health } }`；显式 `range=24h` 或 `range=7d` 返回请求日志聚合的 `{ range, slot_min, start, buckets, top_errors }`，24h 使用 48 个半小时桶，7d 使用 84 个两小时桶，其他值返回 400。两条路径都不发模型请求；核验实际槽位还须结合实时记录、`kin.vm.id` 容器标签及真实内核 |
 | GET | `/vms/:id/diagnose` | 只读检查凭证、出口、容器、所选内核和自动恢复状态；CRAG 满载进程池不要求常驻 `cli_pid`，返回忙碌而非故障 |
 | POST | `/vms/:id/recover` | 按当前选择的 cli-node / CRAG 执行关机 → 开机 → 就绪诊断，不暂停调度、不等待在途请求；仅完整成功后清除请求熔断。授权错误在停机前拒绝；启动失败保留故障与不可调度原因 |
 | POST | `/vms/:id/activate` | 写入 `vms/active.json` 与 DB `active_vm`；列表/详情 `vm.active === true` 表示当前指针。管理台表格、机架、详情与行菜单可切换 |
@@ -284,12 +284,12 @@ OpenAI 图像模型不进入 GPT 对话矩阵，单独由 `image_tools` 管理�
 
 收据主密钥保存在数据目录的 `crag-shop-private/receipt.key`，仅控制进程可读；迁移安装或恢复订单库时，须单独安全备份并恢复同一份密钥。标准数据库备份不含该密钥，已有订单而密钥丢失时服务拒绝重建密钥。
 
-宿主订阅状态 `GET /crag-subscription` 仅管理员可查。`used_slots` / `available_slots` 表示应用锁用量；旧 `enabled_slots` 不用于统计实际服役。`ready` 仍表示有可绑定的 VM。H2 受签名名单 10,000 槽上限约束。仅受支持的 H1 宿主可通过 `POST /crag-subscription/upgrade`（JSON `{}`）升级；确认本机 Docker 槽已销毁后才释放 H2 应用锁，停机不释放。回收中断可以通过 `POST /crag-subscription/recover`（JSON `{}`）继续，未确认的销毁不会被判为成功。
+宿主订阅状态 `GET /crag-subscription` 仅管理员可查。`used_slots` / `available_slots` 表示当前宿主机的总绑定用量，含此面板管理的集群订阅槽；旧 `enabled_slots` 不用于统计实际服役。`ready` 表示有兼容的绑定目标。H2 受签名名单 10,000 槽上限约束。仅受支持的 H1 宿主可通过 `POST /crag-subscription/upgrade`（JSON `{}`）升级；确认 Docker 槽已销毁后才释放 H2 应用锁，停机不释放。回收中断可以通过 `POST /crag-subscription/recover`（JSON `{}`）继续，未确认的销毁不会被判为成功。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/crag-subscription/redeem` | 管理员同源登录会话，JSON `{ "redemption_code": "<CRAGR1 宿主码>" }`，无需已有 VM，不自动绑定或启动。没有可信发行包时返回 `409 crag_subscription_host_package_unready`，不核销。新套餐替换额度上限；兑换中断可用 `/crag-subscription/recover` 继续同步。 |
-| POST | `/vms/:id/crag-license/bind` | 管理员同源登录会话，JSON `{}`，将有效宿主订阅绑定到合格的本机 Linux Docker CRAG v2 槽；回读槽授权确认 `license.valid` 与 `license.scope`。 |
+| POST | `/vms/:id/crag-license/bind` | 管理员同源登录会话，JSON `{}`。本机和集群 Linux Docker CRAG v2 槽共享当前宿主订阅额度；绑定不启动或重启槽位。集群槽启动时挂载只读许可与权益，不下发兑换码或鉴权凭据。回读槽授权确认 `license.valid` 与 `license.scope`；已运行且缺少挂载的槽需按正常流程重启。 |
 
 可选 `runtime` 返回实际运行的 `running_vms`、`ready_vms`、`unknown_vms`、`host_running_vms`、`host_unknown_vms`、`host_runtime_available`、`host_over_limit`、`checked_at` 和逐 VM 明细 `vms`。独立授权计入全局服役但不占宿主额度；未知不视为零。宿主订阅超额或无法核实在额度内时，新的宿主授权推理请求分别返回 `403 license_crag_host_over_quota` 或 `403 license_crag_host_usage_unverified`，不取消在途请求、不代替逐槽许可。
 

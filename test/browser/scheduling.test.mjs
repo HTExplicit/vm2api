@@ -82,6 +82,8 @@ test(
     const rejectedOrigins = [];
     const errors = [];
     const writes = [];
+    const healthRequests = [];
+    let rejectHealth = false;
     let role = "admin";
     let releasePending;
     let delayNext = false;
@@ -99,6 +101,21 @@ test(
       has_token: true,
       email: "offline@example.test",
       reset_7d: "2026-11-21T01:00:00Z",
+      utilization_5h: 0.42,
+      utilization_7d: 0.18,
+      codex_usage: {
+        pending_refresh: true,
+        last_success_at: "2026-11-16T07:00:00Z",
+      },
+      codex_credits: { status: "available", balance: 12.5 },
+      openai_api: {
+        has_key: true,
+        balance: "25.50",
+        balance_refresh_interval_minutes: 0,
+      },
+      health_24h: Array.from({ length: 48 }, (_, i) =>
+        i === 47 ? [99, 1] : [0, 0],
+      ),
     };
     const visualRows = [
       {
@@ -125,6 +142,12 @@ test(
       email: `${row.id}@example.test`,
       schedulable: true,
       schedule_state: "on",
+      health_24h:
+        row.id === "offline-manual6"
+          ? null
+          : row.id === "offline-manual10"
+            ? undefined
+            : vm.health_24h,
     }));
     await context.route("**/*", async (route) => {
       const request = route.request();
@@ -141,6 +164,43 @@ test(
       if (url.pathname === "/api/panel/vms" && request.method() === "GET") {
         return route.fulfill({
           json: { ok: true, data: { items: [vm, ...visualRows] } },
+        });
+      }
+      if (url.pathname.endsWith("/health")) {
+        assert.equal(request.method(), "GET");
+        const range = url.searchParams.get("range");
+        assert.ok(range === "24h" || range === "7d");
+        healthRequests.push({ role, path: url.pathname, range });
+        if (rejectHealth) {
+          rejectHealth = false;
+          return route.fulfill({
+            status: 503,
+            json: { ok: false, error: { message: "离线健康查询失败" } },
+          });
+        }
+        const sample = [vm, ...visualRows].find(
+          (item) => url.pathname === `/api/panel/vms/${item.id}/health`,
+        );
+        return route.fulfill({
+          json: {
+            ok: true,
+            data: {
+              range,
+              slot_min: range === "7d" ? 120 : 30,
+              start: "2026-11-15T08:00:00Z",
+              buckets: sample.health_24h,
+              top_errors: sample.health_24h
+                ? [
+                    {
+                      code: "offline_error",
+                      status: 502,
+                      count: 1,
+                      last_at: "2026-11-16T07:00:00Z",
+                    },
+                  ]
+                : [],
+            },
+          },
         });
       }
       assert.equal(url.pathname, "/api/panel/vms/offline-slot");
@@ -199,6 +259,7 @@ test(
       exact: true,
     });
     await block(6).waitFor();
+    assert.equal(await page.getByLabel(/额度待刷新/).count(), 0);
     assert.equal(await bar.getByRole("button").count(), 10);
     for (let n = 1; n <= 10; n++) assert.equal(await block(n).innerText(), "");
     const boxes = await bar.getByRole("button").evaluateAll((buttons) =>
@@ -259,34 +320,33 @@ test(
       "rgba(0, 0, 0, 0)",
     );
 
-    const visualRow = page.getByRole("button", {
-      name: "查看 offline-auto1 详情",
-      exact: true,
+    const visualRow = page.locator("[data-vm-row]").filter({
+      has: page.getByRole("group", {
+        name: "offline-auto1 调度优先级",
+        exact: true,
+      }),
     });
     const visualBar = visualRow.getByRole("group", {
       name: "offline-auto1 调度优先级",
       exact: true,
     });
-    const alignment = await visualBar.evaluate((el) => {
-      const segment = el.querySelector('[data-slot="priority-segment"]');
-      const row = el.closest('[role="button"]');
-      const statusDot = row.querySelector("div.track-recessed > span");
-      return {
-        difference:
-          segment.getBoundingClientRect().top -
-          statusDot.getBoundingClientRect().top,
-        priority: getComputedStyle(segment).backgroundColor,
-        status: getComputedStyle(statusDot).backgroundColor,
-      };
-    });
-    assert.equal(alignment.difference, 0);
-    assert.equal(alignment.priority, alignment.status);
+    const sla = visualRow.getByRole("img", { name: /近 24h 请求健康/ });
+    const slaGeometry = await sla.evaluate((el) => ({
+      width: el.getBoundingClientRect().width,
+      height: el.getBoundingClientRect().height,
+      slots: el.children.length,
+    }));
+    assert.deepEqual(slaGeometry, { width: 104, height: 12, slots: 48 });
+    const automaticColor = await visualBar
+      .locator('[data-slot="priority-segment"]')
+      .first()
+      .evaluate((el) => getComputedStyle(el).backgroundColor);
     const manualColor = await page
       .getByRole("group", { name: "offline-manual6 调度优先级", exact: true })
       .locator('[data-slot="priority-segment"]')
       .first()
       .evaluate((el) => getComputedStyle(el).backgroundColor);
-    assert.notEqual(manualColor, alignment.priority);
+    assert.notEqual(manualColor, automaticColor);
     for (const id of ["offline-auto1", "offline-manual6", "offline-manual10"]) {
       const priority = page.getByRole("group", {
         name: `${id} 调度优先级`,
@@ -363,19 +423,127 @@ test(
       await page.getByText("周窗口重置", { exact: true }).count(),
       0,
     );
-    const screenshots = path.join(root, ".tmp/11302-scheduling");
+    assert.equal(
+      await page
+        .getByRole("region", { name: "offline-slot 明细", exact: true })
+        .count(),
+      0,
+    );
+    assert.deepEqual(healthRequests, []);
+    const row = bar.locator("xpath=ancestor::*[@data-vm-row]");
+    const expand = row.getByRole("button", {
+      name: "展开 offline-slot 明细",
+      exact: true,
+    });
+    const detail = page.getByRole("region", {
+      name: "offline-slot 明细",
+      exact: true,
+    });
+    await row.focus();
+    await page.keyboard.press("Enter");
+    await detail.getByText("99.0%", { exact: true }).waitFor();
+    const rangeTargets = await detail
+      .getByRole("group", { name: "健康时间范围", exact: true })
+      .getByRole("button")
+      .evaluateAll((buttons) =>
+        buttons.map((el) => {
+          const box = el.getBoundingClientRect();
+          return box.width >= 24 && box.height >= 24;
+        }),
+      );
+    assert.deepEqual(rangeTargets, [true, true]);
+    assert.equal(await detail.getByRole("region").count(), 3);
+    await detail.getByLabel(/额度待刷新，最近测量/).waitFor();
+    await detail.getByText("余额 12.5 点", { exact: true }).waitFor();
+    assert.equal(
+      await detail
+        .getByRole("button", { name: "API配置", exact: true })
+        .count(),
+      1,
+    );
+    rejectHealth = true;
+    await detail.getByRole("button", { name: "7D", exact: true }).click();
+    await detail
+      .getByText("加载失败：离线健康查询失败", { exact: true })
+      .waitFor();
+    await detail.getByRole("button", { name: "24h", exact: true }).click();
+    await detail.getByText("99.0%", { exact: true }).waitFor();
+    assert.deepEqual(
+      healthRequests.map(({ range }) => range),
+      ["24h", "7d"],
+    );
+    await row.focus();
+    await page.keyboard.press("Space");
+    assert.equal(await detail.count(), 0);
+    await row
+      .getByRole("button", { name: "打开 offline-slot 详情页", exact: true })
+      .click();
+    assert.equal(await detail.count(), 0);
+    await row.focus();
+    await page.keyboard.press("Shift+Enter");
+    assert.equal(
+      await page.getByRole("status", { name: "详情打开次数" }).innerText(),
+      "2",
+    );
+    await row
+      .getByText("offline@example.test", { exact: true })
+      .evaluate((el) => {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      });
+    await row.dispatchEvent("click");
+    assert.equal(await detail.count(), 0);
+    await page.evaluate(() => window.getSelection().removeAllRanges());
+    await row.getByText("offline@example.test", { exact: true }).click();
+    await detail.waitFor();
+    await row.focus();
+    await page.keyboard.press("Escape");
+    assert.equal(await detail.count(), 0);
+    await page
+      .getByRole("button", { name: "展开 offline-manual6 明细", exact: true })
+      .click();
+    const emptyDetail = page.getByRole("region", {
+      name: "offline-manual6 明细",
+      exact: true,
+    });
+    await emptyDetail.getByText("该时段无请求", { exact: true }).waitFor();
+    await page
+      .getByRole("button", { name: "收起 offline-manual6 明细", exact: true })
+      .click();
+    const screenshots = path.join(root, ".tmp/117-ui");
     fs.mkdirSync(screenshots, { recursive: true });
     const capture = async (name) => {
       await page.screenshot({
         path: path.join(screenshots, `${name}-rows.png`),
         fullPage: true,
       });
+      await expand.click();
+      await detail.getByText("99.0%", { exact: true }).waitFor();
+      await page.locator("div.overflow-x-auto").evaluate((el) => {
+        el.scrollLeft = 0;
+      });
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await page.screenshot({
+        path: path.join(screenshots, `${name}-expanded.png`),
+        fullPage: true,
+      });
+      await row
+        .getByRole("button", { name: "收起 offline-slot 明细", exact: true })
+        .click();
+      await visualBar.scrollIntoViewIfNeeded();
+      await page.evaluate(() => window.scrollTo(0, 0));
       const first = await visualBar.boundingBox();
       const cell = await visualBar.locator("..").boundingBox();
       const last = await page
-        .getByRole("button", {
-          name: "查看 offline-manual10 详情",
-          exact: true,
+        .locator("[data-vm-row]")
+        .filter({
+          has: page.getByRole("group", {
+            name: "offline-manual10 调度优先级",
+            exact: true,
+          }),
         })
         .boundingBox();
       await page.screenshot({
@@ -457,11 +625,18 @@ test(
     }));
     assert.deepEqual(coarseGeometry, { target: 40, visible: 6 });
     await coarseContext.close();
-    role = "user";
-    await page.reload();
-    await bar.waitFor();
-    assert.equal(await bar.getByRole("button").count(), 0);
-    assert.equal(await auto.count(), 0);
+    for (role of ["user", "super"]) {
+      await page.reload();
+      await bar.waitFor();
+      const beforeHealth = healthRequests.length;
+      assert.equal(await bar.getByRole("button").count(), 0);
+      assert.equal(await auto.count(), 0);
+      await expand.click();
+      await detail
+        .getByText("健康明细仅管理员可查看", { exact: true })
+        .waitFor();
+      assert.equal(healthRequests.length, beforeHealth);
+    }
     assert.equal(writes.length, 4);
     assert.deepEqual(rejectedOrigins, []);
     assert.deepEqual(errors, []);

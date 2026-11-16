@@ -43,7 +43,7 @@
 
 ## 本 fork 的发布来源
 
-本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，主分支为 `main`，当前维护版 `v1.4.11302` 基于官方 `v1.4.113`（`2e77eff5`），版本与升级说明见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随上游 `main` 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始，合入 031 后从 3101 开始，合入 032 后从 3201 开始，合入 036 后从 3601 开始，合入 038 后从 3801 开始，合入 041 后从 4101 开始。
+本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，主分支为 `main`，当前维护版 `v1.4.11701` 基于官方 `v1.4.117`（`87ddea0b`），版本与升级说明见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随上游 `main` 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始，合入 031 后从 3101 开始，合入 032 后从 3201 开始，合入 036 后从 3601 开始，合入 038 后从 3801 开始，合入 041 后从 4101 开始。
 
 旧 `maint` 分支仅保留已发布版本的安装链接兼容；新开发、PR 和 CI 统一使用 `main`。
 
@@ -51,7 +51,7 @@
 
 控制面镜像默认使用 `ghcr.io/htexplicit/vm2api`，通过 `VM2API_IMAGE` 配置；`VM2API_GITHUB_REPO` 指定发布仓库，Compose 会传入控制面，面板更新默认检查本 fork 的公开 Release。槽位闭源二进制由 `deploy/payload.json` 固定上游来源、版本、大小和 SHA256；`kin-egress` 与控制面 helper 从本 fork 源码编译，客体系统镜像来源保持原配置。
 
-当前发布 **linux/amd64** 控制面镜像、23 个载荷附件及 `build-provenance.json`，共 24 个附件。载荷全部从同一最终镜像按 digest 提取；22 个上游资产按官方 1.4.113 的不可变载荷发行 `payload-2026.11.16-crag-3.1.2` 固定大小与 SHA256，包含缓存 TTL 修复版 CLI 2.1.321、Codex kernel 0.1.2、四个 glibc 文件及未重建的 CRAG 3.1.2 standard 签名出厂包和完整归档；`kin-egress` 使用镜像内由 fork 源码编译的同一份字节。来源清单记录提交、镜像 digest 和实际附件校验值。发布流程先准备草稿，再构建推送版本镜像并提取、校验、上传附件，核验 GHCR 匿名访问后才移动镜像 `latest` 并公开 Release。若新建包为私有，维护者需设为 Public；匿名访问检查失败时保留草稿，修正包权限后可重跑失败的 `publish` job。当前不提供 ARM64 控制面镜像。
+当前发布 **linux/amd64** 控制面镜像、23 个载荷附件及 `build-provenance.json`，共 24 个附件。载荷全部从同一最终镜像按 digest 提取；22 个上游资产按官方 1.4.117 沿用的不可变载荷发行 `payload-2026.11.16-crag-3.1.2` 固定大小与 SHA256，包含缓存 TTL 修复版 CLI 2.1.321、Codex kernel 0.1.2、四个 glibc 文件及未重建的 CRAG 3.1.2 standard 签名出厂包和完整归档；`kin-egress` 使用镜像内由 fork 源码编译的同一份字节。来源清单记录提交、镜像 digest 和实际附件校验值。发布流程先准备草稿，再构建推送版本镜像并提取、校验、上传附件，核验 GHCR 匿名访问后才移动镜像 `latest` 并公开 Release。若新建包为私有，维护者需设为 Public；匿名访问检查失败时保留草稿，修正包权限后可重跑失败的 `publish` job。当前不提供 ARM64 控制面镜像。
 
 普通 CLI/Codex 集群槽不依赖可选 CRAG 包，cc-node 继续可选。镜像携带原签名 `v3.1.2` standard 工厂包；入口仅在工厂缺失时预装，已有工厂、自定义来源和下载选择保持，预装不选择或激活 CRAG。控制面升级不主动拉取最新 CRAG 或当前应用标签的 CLI，统一收尾按当前模板和已选缓存同步适用槽的差异，并核验服务。运行中的 Claude 槽有载荷差异时可能重启；停止槽不开机，人工调度关闭保持，内核重启不暂停调度。非空且全部为本地 Codex 时跳过 CRAG 与无适用目标 CLI 同步，启动恢复器在控制面替换后补起 Codex 内核。CRAG 下载与应用发布分仓，内核页通过固定载荷标签拉取和明确确认安装；已选下载缓存优先于工厂，同步不构成长期固定已装版本。
 
@@ -59,7 +59,7 @@
 
 Claude Code 默认使用槽内原生授权终端生成链接并处理回调。CAI、Setup Token 授权链接和 Cookie 换票先只读探测运行内核能力；原生遥测未就绪时，控制面 helper 通过槽的当前持久绑定出口完成换票与 bootstrap，不为遥测启动或重启槽，也不在失败后重放。KVM 支持可信 CRAG 预装、切核、CRAGU1 离线授权及缺版本重装，保留磁盘、原内核选择和启停调度。
 
-调度等级、Claude 内存准入、容量收敛和低频恢复采用官方默认，保留 fork 的准入与停止意图。列表将调度开关和优先级合并显示，10 段连续块条支持直接设级及切回自动，优先级区域不再显示重置日期；详情和机架布局保持。CRAG 标准包和旧离线兼容包按完整发行标签选择。管理员明确确认本机 Docker 的 CRAG 重装时，可使用已激活宿主订阅的同槽许可或剩余名额，许可验证通过后才停机；KVM 和集群的离线授权边界保持。订阅目录、本人订单和 Canvas 预览沿用官方功能；应用标题每 3 小时检查本 fork Release，可关闭提示，不自动安装。宿主身份只读挂载，控制面升级不创建订单或初始化订阅。
+调度等级、Claude 内存准入、容量收敛和低频恢复采用官方默认，保留 fork 的准入与停止意图。列表将调度开关和优先级合并显示，10 段连续块条支持直接设级及切回自动，优先级区域不再显示重置日期；详情和机架布局保持。CRAG 3.1.2 标准包和旧授权兼容包按完整发行标签选择，3.0.9 legacy 保留显式历史标签。列表近 24h 请求健康、错误时间线和行展开只读取请求日志，不发模型探测；宿主内存压力在总览与集群宿主处展示。本机与集群 Linux Docker 槽可绑定当前控制面宿主已激活的订阅，保留旧槽 ID 和同槽名额；明确确认重装时验证目标许可后才停机，KVM 与离线授权边界保持。订阅目录、本人订单和 Canvas 预览沿用官方功能；应用标题每 3 小时检查本 fork Release，可关闭提示，不自动安装。宿主身份只读挂载，控制面升级不创建订单或初始化订阅。
 
 GPT 登录与 OpenAI Platform 共用 [ShardBrowser](https://github.com/ProxyShard/ShardBrowser) 和 Puppeteer Core。管理员在「设置 → OpenAI → 账号浏览器」安装内核，无需浏览器授权 key；公开镜像只含控制组件、独立安装助手和系统依赖，内核在部署端从官方获取。采用有头浏览器、虚拟显示和软件图形渲染，全局一次一个窗口。每槽首次选择 Linux 指纹模板并保留原生 profile，固定英文，时区跟随绑定代理的已检测位置；关闭时仅导出 Billing 所需的 Cookie。面板独立检查和更新内核及组件，更新前关闭当前窗口；安装仅核对文件和实际版本，不运行页面自检，失败由管理员重试。升级到 1.4.8402 会清除旧 CloakBrowser 网页状态及其授权 key，保留 OAuth 凭据、Platform API key、账号和业务记录，相关网页按需重新登录；后续应用升级保留新内核缓存与 profile。
 

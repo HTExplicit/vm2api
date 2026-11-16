@@ -578,3 +578,124 @@ test('unpricedModels lists unpriced rows', () => {
     db.close()
   }
 })
+
+test('healthBuckets counts SLA success / errors per 30-minute slot and skips idle slots', () => {
+  const { dir, db, repo } = freshDb()
+  try {
+    const now = Date.parse('2026-11-15T12:00:00.000Z')
+    const at = (minAgo) => new Date(now - minAgo * 60_000).toISOString()
+    seed(repo, [
+      { vm_id: 'vm-a', account_id: 'acc-a', created_at: at(5), status: 200 },
+      { vm_id: 'vm-a', account_id: 'acc-a', created_at: at(10), status: 500, error_code: 'api_error' },
+      { vm_id: 'vm-a', account_id: 'acc-a', created_at: at(31), status: 200 },
+      { vm_id: 'vm-a', account_id: 'acc-a', created_at: at(61), status: 200 },
+      { vm_id: 'vm-a', account_id: 'acc-a', created_at: at(24 * 60 - 1), status: 200 },
+      { vm_id: 'vm-a', account_id: 'acc-a', created_at: at(24 * 60 + 1), status: 200 },
+      { vm_id: 'vm-b', account_id: 'acc-b', created_at: at(40), status: 502 },
+    ])
+    const all = repo.healthBuckets({ now })
+    const a = all.get('acc-a\0vm-a')
+    assert.equal(a.length, 48)
+    assert.deepEqual(a[47], [1, 1], 'last slot holds the two newest rows')
+    assert.deepEqual(a[46], [1, 0], '31 minutes ago falls in the previous slot')
+    assert.deepEqual(a[45], [1, 0], '61 minutes ago falls two slots back')
+    assert.deepEqual(a[0], [1, 0], 'oldest in-range row lands in slot 0')
+    assert.equal(
+      a.reduce((n, [ok, err]) => n + ok + err, 0),
+      5,
+      'rows older than 24h are excluded',
+    )
+    assert.deepEqual(all.get('acc-b\0vm-b')[46], [0, 1], 'all-failure slot')
+    assert.equal(all.has('acc-c\0vm-c'), false, 'idle slot has no entry')
+
+    const byVm = repo.healthBuckets({ now, vmId: 'vm-b', slots: 84, slotMin: 120 })
+    assert.equal(byVm.get('vm-b').length, 84)
+    assert.deepEqual(byVm.get('vm-b')[83], [0, 1])
+
+    const top = repo.topErrors({ vmId: 'vm-a', since: at(60) })
+    assert.deepEqual(
+      top.map((r) => [r.code, r.count]),
+      [['api_error', 1]],
+    )
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('billingStats attaches health_24h per account row', () => {
+  const { dir, db, repo } = freshDb()
+  try {
+    const now = Date.now()
+    seed(repo, [{ vm_id: 'vm-a', account_id: 'acc-a', created_at: new Date(now - 60_000).toISOString(), status: 200 }])
+    const row = repo.billingStats({ now }).accounts.find((r) => r.account_id === 'acc-a')
+    assert.equal(row.health_24h.length, 48)
+    assert.deepEqual(row.health_24h[47], [1, 0])
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('request health shares fork terminal-state and cancellation SLA classification', () => {
+  const { dir, db, repo } = freshDb()
+  try {
+    const now = Date.parse('2026-11-16T12:00:00.000Z')
+    const created_at = new Date(now - 60_000).toISOString()
+    seed(
+      repo,
+      [
+        { status: 200, final_state: 'verified' },
+        { status: 200, final_state: 'incomplete' },
+        { status: 200, final_state: 'transport_error', error_code: 'ECONNRESET' },
+        { status: 504, final_state: 'error', error_code: 'upstream_timeout' },
+        { status: 499, final_state: 'cancelled', error_code: 'client_cancelled' },
+        { status: 429, final_state: 'rejected', error_code: 'upstream_rate_limit' },
+        { status: 503, final_state: 'rejected', error_code: 'quota_5h_safety' },
+        { status: 502, final_state: 'error', error_code: 'upstream_auth_error' },
+      ].map((row) => ({ ...row, created_at, vm_id: 'vm-a', account_id: 'selected', final_account_id: 'served' })),
+    )
+    const all = repo.healthBuckets({ now })
+    assert.equal(all.has('selected\0vm-a'), false, 'attribute to the actual serving account')
+    assert.deepEqual(all.get('served\0vm-a')[47], [4, 4])
+    assert.deepEqual(repo.healthBuckets({ now, vmId: 'vm-a' }).get('vm-a')[47], [4, 4])
+    const bill = repo.billingStats({ now }).accounts.find((row) => row.account_id === 'served')
+    assert.equal(bill.window_7d_success, 4)
+    assert.equal(bill.window_7d_errors, 4)
+    assert.deepEqual(bill.health_24h[47], [bill.window_7d_success, bill.window_7d_errors])
+    assert.deepEqual(
+      new Set(repo.topErrors({ vmId: 'vm-a', since: created_at }).map((row) => row.code)),
+      new Set(['200', 'ECONNRESET', 'upstream_timeout', 'upstream_auth_error']),
+    )
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('billing health shares the 10-second base across account-window scopes', () => {
+  const { dir, db, repo } = freshDb()
+  const realNow = Date.now
+  try {
+    let clock = Date.parse('2026-11-16T12:00:00.000Z')
+    Date.now = () => clock
+    seed(repo, [{ vm_id: 'vm-a', account_id: 'acc-a', created_at: new Date(clock - 1000).toISOString() }])
+    const healthBuckets = repo.healthBuckets.bind(repo)
+    let healthReads = 0
+    repo.healthBuckets = (opts) => {
+      healthReads++
+      return healthBuckets(opts)
+    }
+    const first = repo.billingStats().accounts[0].health_24h
+    const otherScope = repo.billingStats({ accountWindows: [{ account_id: 'acc-a', vm_id: 'vm-a' }] })
+    assert.strictEqual(otherScope.accounts[0].health_24h, first)
+    assert.equal(healthReads, 1)
+    clock += 10_001
+    repo.billingStats({ accountWindows: [{ account_id: 'acc-a', vm_id: 'vm-a' }] })
+    assert.equal(healthReads, 2)
+  } finally {
+    Date.now = realNow
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

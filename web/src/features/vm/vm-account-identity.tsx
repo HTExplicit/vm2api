@@ -27,7 +27,13 @@ function PlatformMark({ vm }: { vm: Vm }) {
   )
 }
 
-export function VmAccountIdentity({ vm }: { vm: Vm }) {
+export function VmAccountIdentity({
+  vm,
+  showQuotaSample = true,
+}: {
+  vm: Vm
+  showQuotaSample?: boolean
+}) {
   const email = vm.email?.trim() || ''
   const registration = credentialRegistrationOf(vm)
   const crag = (vm.resolved_dataplane ?? vm.dataplane) === 'crag'
@@ -48,7 +54,7 @@ export function VmAccountIdentity({ vm }: { vm: Vm }) {
           {email || '未绑定邮箱'}
         </div>
         <ActiveVmBadge vm={vm} />
-        <CodexQuotaSampleStatus vm={vm} compact />
+        {showQuotaSample ? <CodexQuotaSampleStatus vm={vm} compact /> : null}
       </div>
       <div className='flex min-w-0 flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground'>
         {isCodexVm(vm) ? (

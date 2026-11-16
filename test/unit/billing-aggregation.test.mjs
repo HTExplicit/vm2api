@@ -374,6 +374,7 @@ function fixtureDatabase(records) {
 
 function assertBillingStats(actual, expected, db, message) {
   const { lifetime_accounts, ...existing } = actual
+  existing.accounts = existing.accounts.map(({ health_24h, ...account }) => account)
   assert.deepStrictEqual(existing, expected, message)
   const lifetime = new Map(
     db

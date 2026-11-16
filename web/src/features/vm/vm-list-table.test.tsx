@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
+import { VmAccountIdentity } from './vm-account-identity'
 import { VmTable } from './vm-list-table'
 import { VmSchedulingBlock, VmSchedulingEditor } from './vm-scheduling'
 
@@ -11,7 +12,10 @@ vi.mock('./vm-action-menu', () => ({ VmActionMenu: () => null }))
 vi.mock('./vm-owner-line', () => ({ VmRentedMark: () => null }))
 vi.mock('./vm-perms', () => ({ useVmPerms: () => ({ admin: false }) }))
 vi.mock('./use-vm-column-order', () => ({
-  useVmColumnOrder: () => ({ order: ['vm', 'sched'], isDefault: true }),
+  useVmColumnOrder: () => ({
+    order: ['vm', 'sched', 'status'],
+    isDefault: true,
+  }),
 }))
 vi.mock('@/components/ui/dialog', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/ui/dialog')>()),
@@ -62,6 +66,37 @@ describe('VM scheduling priority', () => {
     expect(render({ weight: 4 })).toContain(
       'aria-description="自动调度优先级，当前等级 未知"'
     )
+  })
+})
+
+describe('VM row interaction and request health', () => {
+  it('keeps full details separate from the row expansion control', () => {
+    const html = render()
+    expect(html).toContain('aria-label="打开 vm-01 详情页"')
+    expect(html).toContain('aria-expanded="false"')
+    expect(html).toContain('aria-controls="vm-row-detail-vm-01"')
+    expect(html).not.toContain('role="button"')
+  })
+
+  it('distinguishes known request SLA, no requests and unknown data', () => {
+    const buckets: [number, number][] = Array.from({ length: 48 }, (_, i) =>
+      i === 47 ? [99, 1] : [0, 0]
+    )
+    const html = render({
+      health_24h: buckets,
+      inflight: 3,
+      seats_max: 5,
+      seats_used: 2,
+    })
+    expect(html).toContain('>99.0%</span>')
+    expect(html).toContain('99/100 成功')
+    expect(html).not.toMatch(/在飞|席位|调度关/)
+    expect(
+      render({ health_24h: Array.from({ length: 48 }, () => [0, 0]) })
+    ).toContain('24h 无请求')
+    expect(render({ health_24h: null })).toContain('24h 无请求')
+    expect(render()).toContain('24h 未知')
+    expect(render()).not.toContain('24h 无请求')
   })
 })
 
@@ -147,7 +182,8 @@ describe('VM account column kernel label', () => {
   })
 
   it('keeps the measured OpenAI plan and pending quota marker in the shared identity', () => {
-    const html = render({
+    const vm: Vm = {
+      id: 'vm-01',
       platform: 'openai',
       has_token: true,
       plan_type: 'team',
@@ -156,10 +192,14 @@ describe('VM account column kernel label', () => {
         pending_refresh: true,
         last_success_at: '2026-11-15T01:00:00Z',
       },
-    })
+    }
+    const html = render(vm)
     expect(html).toContain('>Business</span>')
     expect(html).not.toContain('>Plus</span>')
-    expect(html).toContain('aria-label="额度待刷新，最近测量：')
+    expect(html).not.toContain('aria-label="额度待刷新，最近测量：')
+    expect(renderToStaticMarkup(<VmAccountIdentity vm={vm} />)).toContain(
+      'aria-label="额度待刷新，最近测量：'
+    )
     expect(html).not.toContain('订阅 未知')
   })
 })

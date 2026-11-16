@@ -301,26 +301,29 @@ test('resolveSlotState reads records written before the migration', () => {
   assert.equal(leftover.schedule_state, 'restricted')
 })
 
-test('host memory pressure shows as a new-session restriction on the panel', async (t) => {
+test('host memory pressure stays on the host, not on each slot', async (t) => {
   const { installHostMemoryPressure } = await import('../../src/lib/cluster/host-memory-pressure.mjs')
-  const levels = { 'node-a': 'tight', local: 'critical' }
-  installHostMemoryPressure({ levelForVm: (vm) => levels[vm.node_id || 'local'] || 'ok' })
+  let pressure = 'critical'
+  installHostMemoryPressure({ levelForVm: () => pressure, snapshot: () => [] })
   t.after(() => installHostMemoryPressure(null))
-  const tight = resolveSlotState({ vm: { schedulable: true, node_id: 'node-a' } })
-  assert.equal(tight.schedule_state, 'restricted')
-  assert.equal(tight.restriction_reason, 'host_memory_tight')
-  assert.equal(tight.restriction_scope, 'new_session')
-  assert.equal(tight.restriction_soft, true)
-  assert.equal(tight.restriction_text, '主机内存紧张')
-  const critical = resolveSlotState({ vm: { schedulable: true } })
-  assert.equal(critical.restriction_reason, 'host_memory_critical')
-  assert.equal(critical.restriction_soft, false)
-  assert.equal(critical.restriction_text, '主机内存告急')
-  assert.equal(resolveSlotState({ vm: { family: 'codex', schedulable: true } }).schedule_state, 'on')
-  assert.equal(
-    resolveSlotState({ vm: { platform: 'openai', schedulable: true, node_id: 'node-a' } }).schedule_state,
-    'on',
-  )
-  levels.local = 'ok'
-  assert.equal(resolveSlotState({ vm: { schedulable: true } }).schedule_state, 'on')
+  // The scheduler's host gate stays separate from operator and per-slot state.
+  for (pressure of ['critical', 'tight']) {
+    for (const vm of [
+      { family: 'claude', schedulable: true },
+      { family: 'claude', schedulable: true, node_id: 'node-a' },
+      { family: 'codex', schedulable: true },
+      { platform: 'openai', schedulable: true, node_id: 'node-a' },
+    ]) {
+      const before = structuredClone(vm)
+      assert.equal(resolveSlotState({ vm }).schedule_state, 'on')
+      assert.deepEqual(vm, before)
+      assert.equal(resolveSlotState({ vm: { ...vm, schedule_off: true } }).schedule_state, 'off')
+      const blocked = resolveSlotState({ vm: { ...vm, unschedulable: { reason: 'credential_blocked' } } })
+      assert.equal(blocked.schedule_state, 'unschedulable')
+      assert.equal(blocked.unschedulable_reason, 'credential_blocked')
+      const quota = resolveSlotState({ vm, availability: { key: 'quota', reason: 'quota_5h' } })
+      assert.equal(quota.schedule_state, 'restricted')
+      assert.equal(quota.restriction_reason, 'quota_5h')
+    }
+  }
 })

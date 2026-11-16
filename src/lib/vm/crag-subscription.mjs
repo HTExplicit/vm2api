@@ -15,6 +15,7 @@ import { cragSubscriptionPublicDirectory } from './crag-subscription-paths.mjs'
 import { isValidVmId } from './vm-file.mjs'
 import { cragV2PackageRoot } from './wrap-cli-runtime.mjs'
 import { resolveKernelDataplane } from './slot-engine.mjs'
+import { publishClusterSubscription } from '../cluster/crag-subscription-files.mjs'
 
 const AUTHORITY = 'https://crag.fkcodex.com'
 const localFilesystems = new Set([0xef53, 0x794c7630, 0x58465342, 0x9123683e, 0x2fc12fc1, 0xf2f52010])
@@ -27,7 +28,9 @@ const terminalRedeem = new Map([
 const authorityErrors = new Map([
   ...terminalRedeem,
   ['host_binding_conflict', 409],
-  ['host_subscription_inactive', 409],
+  ['host_subscription_inactive', 403],
+  ['auth_forbidden', 403],
+  ['not_found', 404],
   ['slot_limit_reached', 409],
   ['renewal_unavailable', 409],
   ['request_conflict', 409],
@@ -98,7 +101,7 @@ function projection(data, claims) {
   if (Object.hasOwn(data, 'reclaim_supported') && data.reclaim_supported !== reclaim) throw invalidRights()
   return result
 }
-const isOrderVmId = (id) => typeof id === 'string' && /^vm-[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)
+export const isCragOrderVmId = (id) => typeof id === 'string' && id.length <= 131 && isValidVmId(id)
 
 function checkParents(directory) {
   for (let current = directory; ; current = path.dirname(current)) {
@@ -228,6 +231,7 @@ export function createCragSubscription({
   assertReady,
   isSlotEnabled,
   runtimeInventory,
+  publishClusterBinding = publishClusterSubscription,
   fetchImpl = globalThis.fetch,
   origin = AUTHORITY,
   machineIdFile,
@@ -338,17 +342,25 @@ export function createCragSubscription({
   }
 
   async function orderTarget(hostId, vmId) {
-    if (!isOrderVmId(vmId)) throw fail('crag_subscription_target_unready', 409)
+    if (!isCragOrderVmId(vmId)) throw fail('crag_subscription_target_unready', 409)
     const vm = getTarget ? await getTarget(vmId) : (await listTargets()).find(({ id }) => id === vmId)
     if (vm?.id !== vmId) throw fail('crag_subscription_target_unready', 409)
-    const options = { reclaim: current(hostId, vm)?.claims.version === 2, allowPrepared: true }
+    const options = { allowPrepared: true }
     if ((await assertReady(vm, options)) === false) throw fail('crag_subscription_target_unready', 409)
     preserveOtherLicense(vm)
     const machineCode = prepareCragSubscriptionBinding(projectRoot, vm)
     const { payloadKeyId, issuerId } = cragTargetIds(projectRoot, vm)
     // Pin both the actual device key and the persisted VM owner, not Docker's mutable container ID.
     const fingerprint = createHash('sha256')
-      .update(JSON.stringify([hostId, machineCode, vm.owner_user_id ?? null, payloadKeyId]))
+      .update(
+        JSON.stringify([
+          hostId,
+          machineCode,
+          vm.owner_user_id ?? null,
+          payloadKeyId,
+          ...(vm.node_id ? [vm.node_id] : []),
+        ]),
+      )
       .digest('hex')
     return { vm, machineCode, payloadKeyId, issuerId, fingerprint }
   }
@@ -403,6 +415,21 @@ export function createCragSubscription({
     try {
       if (!readCragSubscriptionReleaseCandidate(projectRoot, vm, hostId)) return null
       let rights = readLocalRights()
+      if (vm.node_id) {
+        if (rights.pending || !rights.claims) return usageUnverified()
+        if (vm.status === 'running' && getCragLicense(projectRoot, vm).license.valid) {
+          try {
+            await publishClusterBinding(projectRoot, vm)
+          } catch {
+            return cragLicenseDeniedResult({
+              code: 'license_crag_cluster_sync_failed',
+              error: '集群槽授权未同步，请检查节点连接后重试。',
+            })
+          }
+          if (!unchangedRights(rights, readLocalRights())) return usageUnverified()
+        }
+        return null
+      }
       const deadline = performance.now() + 4000
       for (let pass = 0; pass < 2; pass++) {
         if (rights.pending || !rights.claims) return usageUnverified()
@@ -713,11 +740,19 @@ export function createCragSubscription({
     }
     let data
     try {
-      data = await authority('bind', hostId, credential(hostId), {
+      const key = credential(hostId)
+      const request = {
         machine_code: machineCode,
         payload_key_id: payloadKeyId,
         ...(reissue && { reissue: true }),
-      })
+      }
+      try {
+        data = await authority('bind', hostId, key, request)
+      } catch (error) {
+        if (install || reissue || error.code !== 'payload_key_conflict') throw error
+        if (!vm.node_id && getCragLicense(projectRoot, vm).license.code !== 'license_payload_key_mismatch') throw error
+        data = await authority('bind', hostId, key, { ...request, reissue: true })
+      }
     } catch (error) {
       if (
         roster &&
@@ -725,6 +760,8 @@ export function createCragSubscription({
           'slot_limit_reached',
           'host_binding_conflict',
           'host_subscription_inactive',
+          'not_found',
+          'auth_forbidden',
           'payload_key_unknown',
           'payload_key_conflict',
         ].includes(error.code)
@@ -746,6 +783,10 @@ export function createCragSubscription({
         return { seat: data.seat, activated }
       }
       options.verifiedRights = confirmed.claims
+      activateCragSubscriptionBinding(projectRoot, vm, data.slot_permit, {
+        ...options,
+        candidateEntitlement: confirmed.code,
+      })
       publish(entitlementFile, confirmed.code, 0o644)
     } else if (data.entitlement !== previous.code) {
       throw invalidRights()
@@ -813,19 +854,18 @@ export function createCragSubscription({
     status: () => status(),
     admitInference,
     async listOrderTargets() {
-      let options
       try {
         const hostId = identity()
         storage()
-        options = { reclaim: current(hostId)?.claims.version === 2, allowPrepared: true }
+        current(hostId)
       } catch {
         return []
       }
       const targets = []
       for (const vm of await listTargets()) {
-        if (!isOrderVmId(vm.id)) continue
+        if (!isCragOrderVmId(vm.id)) continue
         try {
-          if ((await assertReady(vm, options)) === false) continue
+          if ((await assertReady(vm, { allowPrepared: true })) === false) continue
           preserveOtherLicense(vm)
           targets.push(vm.id)
         } catch (error) {
@@ -877,7 +917,7 @@ export function createCragSubscription({
       })
     },
     async teardown(vm, destroy) {
-      if (process.platform !== 'linux' || vm.node_id) return destroy(false)
+      if (process.platform !== 'linux') return destroy(false)
       let hostId, previous
       try {
         hostId = identity()

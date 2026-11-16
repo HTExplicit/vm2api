@@ -203,6 +203,30 @@ test('H1 and H2 limits use fresh rights and corrupted permits give an upper boun
   assert.equal((await inv.snapshot(expired)).host_over_limit, null)
 })
 
+test('cluster host permits remain visible without counting a remote kernel as local host use', async (t) => {
+  const f = fixture(t)
+  seedEncryptedPackage(f.root)
+  const remote = f.add('vm-remote', { node_id: 'node-a' })
+  bindPlacement({
+    projectRoot: f.root,
+    manager: {
+      slotRelayPaths: (_node, id) => ({ kernel: path.join(f.root, `${id}.sock`) }),
+      nodePlatform: () => 'linux',
+    },
+  })
+  t.after(unbindPlacement)
+  const rights = f.entitlement(1)
+  f.bind(remote, 1)
+  const result = await f
+    .inventory({ health: async () => assert.fail('the accepted current hop already supplied strict evidence') })
+    .snapshot({ ...rights, currentHop: { id: remote.id, health: live } })
+  assert.equal(result.vms[remote.id].scope, 'host')
+  assert.equal(result.vms[remote.id].state, 'running')
+  assert.equal(result.running_vms, 1)
+  assert.equal(result.host_running_vms, 0)
+  assert.equal(result.host_unknown_vms, 0)
+})
+
 test('a permit installed during probing contributes to the host upper bound', async (t) => {
   const f = fixture(t)
   seedEncryptedPackage(f.root)

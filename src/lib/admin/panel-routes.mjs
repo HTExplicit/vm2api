@@ -3721,11 +3721,31 @@ export function createPanelHandler(ctx) {
         return json(res, 200, panel.ok({ vm: summarizeVm(saved, cfg.paths.project, ctx.routingConfig) }))
       }
 
-      // GET /api/panel/vms/:id/health — kernel-only check for upgrade verification.
+      // Without range, keep the kernel-only check used by upgrade verification.
       if (req.method === 'GET' && /^\/api\/panel\/vms\/[^/]+\/health$/.test(p)) {
         const id = p.split('/')[4]
         const vm = getVm(cfg.paths.project, id)
         if (!vm) return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'vm not found' } })
+        const range = url.searchParams.get('range')
+        if (range !== null) {
+          if (range !== '24h' && range !== '7d')
+            return json(res, 400, { ok: false, error: { code: 'invalid_range', message: 'range must be 24h or 7d' } })
+          if (!requestLog) return json(res, 503, { ok: false, error: { message: 'request log unavailable' } })
+          const shape = range === '7d' ? { slots: 84, slotMin: 120 } : { slots: 48, slotMin: 30 }
+          const now = Date.now()
+          const start = new Date(now - shape.slots * shape.slotMin * 60_000).toISOString()
+          const [health, topErrors] = await Promise.all([
+            requestLog.healthBucketsAsync({ now, vmId: id, ...shape }),
+            requestLog.topErrorsAsync({ vmId: id, since: start }),
+          ])
+          return json(res, 200, {
+            range,
+            slot_min: shape.slotMin,
+            start,
+            buckets: health.get(id) || null,
+            top_errors: topErrors,
+          })
+        }
         const health = await panelKernelHealth({ id, vm })
         return json(
           res,
@@ -3757,22 +3777,22 @@ export function createPanelHandler(ctx) {
               message: isCodexVm(vm) ? '请选择 Claude 虚拟机' : 'CRAG v2 不支持 macOS 原生节点',
             },
           })
-        const offlineOnlyPlacement = Boolean(vm.node_id) || isKvmRuntime(vm)
+        const deviceUnsupported = Boolean(vm.node_id) || isKvmRuntime(vm)
         try {
           if (req.method === 'GET')
             return json(res, 200, panel.ok(getCragLicense(cfg.paths.project, vm, { initialize: true })))
           const body = await readBody(req, 32768)
           const registrationCode = typeof body?.registration_code === 'string' ? body.registration_code.trim() : ''
-          if (offlineOnlyPlacement && !registrationCode.startsWith('CRAGU1.')) {
+          const online = registrationCode.startsWith('CRAGR1.')
+          if (deviceUnsupported && !online && !registrationCode.startsWith('CRAGU1.')) {
             return json(res, 400, {
               ok: false,
               error: {
                 code: 'crag_v2_unsupported_placement',
-                message: 'KVM 和集群槽只能激活 CRAGU1 离线通用码。设备注册码仍需要本机 Linux Docker 槽。',
+                message: '设备注册码需要本机 Linux Docker 槽；也可使用 CRAGU1 离线码。',
               },
             })
           }
-          const online = registrationCode.startsWith('CRAGR1.')
           if (online && (req.apiKeyKind || !panelIdentity(req).user || !sameOriginPost(req, cfg.base_url))) {
             return json(res, 403, {
               ok: false,
@@ -3785,6 +3805,12 @@ export function createPanelHandler(ctx) {
             if (kind === 'host') {
               activated = await ctx.cragSubscription.activateVoucher(vm.id, registrationCode)
             } else {
+              if (deviceUnsupported) {
+                return json(res, 400, {
+                  ok: false,
+                  error: { code: 'crag_v2_unsupported_placement', message: '设备兑换码需要本机 Linux Docker 槽。' },
+                })
+              }
               activated = await redeemCragDeviceVoucher(cfg.paths.project, vm, registrationCode, {
                 getTarget: () => getVm(cfg.paths.project, vm.id),
                 routing: ctx.routingConfig,
@@ -5328,7 +5354,7 @@ export function createPanelHandler(ctx) {
         const cragCapableNodes = new Set()
         if (wanted.mode === 'auto' && ident.role === 'admin' && runtime !== RUNTIME_KVM && !exitPinsHost) {
           const picked = await (ctx.pickPlacement || pickPlacement)({
-            vm: { machine },
+            vm: { ...kindProbe, machine },
             vms: existing,
             routing: ctx.routingConfig,
             policy:

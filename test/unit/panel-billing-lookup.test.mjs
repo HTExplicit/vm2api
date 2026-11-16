@@ -92,6 +92,7 @@ test('VM list separates current-account lifetime usage from older slot usage', a
             cache_read_tokens: 90000,
             window_5h_tokens: 40,
             window_7d_tokens: 900,
+            health_24h: [[3, 1]],
             today: { input_tokens: 200, output_tokens: 300, cache_read_tokens: 9000, cache_creation_tokens: 500 },
           },
         ],
@@ -104,6 +105,8 @@ test('VM list separates current-account lifetime usage from older slot usage', a
   assert.deepEqual(byId['vm-07'].lifetime_usage, { cost: 2, tokens: 9000 })
   assert.equal(byId['vm-07'].window_5h_tokens, 40)
   assert.equal(byId['vm-07'].window_7d_tokens, 900)
+  assert.deepEqual(byId['vm-07'].health_24h, [[3, 1]])
+  assert.equal(byId['vm-08'].health_24h, null)
   // Claude input excludes cache; 今日 must count the cache buckets too (input + output alone was 500).
   assert.equal(byId['vm-07'].today_tokens, 10000)
   assert.equal(byId['vm-08'].total_tokens, 0)
