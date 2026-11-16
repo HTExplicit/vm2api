@@ -2,10 +2,20 @@ import { type ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { STATUS_BAR_ITEMS } from './status-bar-options'
 import { VmAccountIdentity } from './vm-account-identity'
 import { VmTable } from './vm-list-table'
 import { VmSchedulingBlock, VmSchedulingEditor } from './vm-scheduling'
+
+const visibility = vi.hoisted(() => ({ label: true, bar: true, proxy: true }))
+vi.mock('./status-bar-options', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./status-bar-options')>()),
+  useStatusBarShow: () => ({ show: visibility, toggle: vi.fn() }),
+}))
+afterEach(() =>
+  Object.assign(visibility, { label: true, bar: true, proxy: true })
+)
 
 vi.mock('./vm-actions-context', () => ({ useVmActions: () => ({}) }))
 vi.mock('./vm-action-menu', () => ({ VmActionMenu: () => null }))
@@ -90,13 +100,119 @@ describe('VM row interaction and request health', () => {
     })
     expect(html).toContain('>99.0%</span>')
     expect(html).toContain('99/100 成功')
-    expect(html).not.toMatch(/在飞|席位|调度关/)
     expect(
       render({ health_24h: Array.from({ length: 48 }, () => [0, 0]) })
     ).toContain('24h 无请求')
     expect(render({ health_24h: null })).toContain('24h 无请求')
     expect(render()).toContain('24h 未知')
     expect(render()).not.toContain('24h 无请求')
+  })
+})
+
+describe('official status header and independent display options', () => {
+  const active: Partial<Vm> = {
+    has_token: true,
+    schedule_state: 'on',
+    availability: { key: 'ok', usable: true, text: '池内可用' },
+    inflight: 3,
+    seats_max: 5,
+    seats_used: 2,
+    queue_depth: 1,
+    health_24h: [[99, 1]],
+  }
+
+  it('restores the official menu keys and labels without changing their storage names', () => {
+    expect(STATUS_BAR_ITEMS).toEqual([
+      ['label', '状态'],
+      ['bar', '健康'],
+      ['proxy', '代理'],
+    ])
+  })
+
+  it('shows the actual status, positive in-flight count and occupied or queued seats', () => {
+    const html = render(active)
+    expect(html).toContain('>池内可用</span>')
+    expect(html).toContain('title="在飞 3"')
+    expect(html).toContain('席位 2/5 · 排队 1')
+    expect(render({ ...active, seats_used: 0, queue_depth: 1 })).toContain(
+      '席位 0/5 · 排队 1'
+    )
+    expect(render({ ...active, seats_used: 2, queue_depth: 0 })).toContain(
+      '席位 2/5'
+    )
+  })
+
+  it.each([
+    { name: 'no in-flight requests', over: { inflight: 0 } },
+    {
+      name: 'bad account',
+      over: { availability: { key: 'bad', usable: false, text: '无效凭证' } },
+    },
+    {
+      name: 'no credential',
+      over: {
+        has_token: false,
+        availability: { key: 'none', usable: false, text: '无凭证' },
+      },
+    },
+    { name: 'manually off', over: { schedule_state: 'off' } },
+  ] satisfies Array<{ name: string; over: Partial<Vm> }>)(
+    'hides the in-flight marker for $name',
+    ({ over }) => {
+      expect(render({ ...active, ...over })).not.toContain('title="在飞 ')
+    }
+  )
+
+  it.each(['cool', 'quota'] as const)(
+    'keeps positive in-flight requests visible for %s status',
+    (key) => {
+      expect(
+        render({
+          ...active,
+          availability: { key, usable: false, text: '仍有在途请求' },
+        })
+      ).toContain('title="在飞 3"')
+    }
+  )
+
+  it.each([
+    { seats_max: null, seats_used: 2, queue_depth: 1 },
+    { seats_max: undefined, seats_used: 2, queue_depth: 1 },
+    { seats_max: 5, seats_used: 0, queue_depth: 0 },
+  ])(
+    'hides the seat marker without a seat limit or active occupancy',
+    (over) => {
+      expect(render({ ...active, ...over })).not.toContain('席位 ')
+    }
+  )
+
+  it('hides only the entire status header when 状态 is disabled', () => {
+    Object.assign(visibility, { label: false, bar: true, proxy: false })
+    const html = render(active)
+    expect(html).not.toMatch(/池内可用|title="在飞 |席位 /)
+    expect(html).toContain(
+      'role="img" aria-label="近 24h 请求健康：99/100 成功"'
+    )
+    expect(html).toContain('>99.0%</span>')
+    expect(html).toContain('99/100 成功')
+  })
+
+  it('hides the health bar, percentage and summary together when 健康 is disabled', () => {
+    Object.assign(visibility, { label: true, bar: false, proxy: false })
+    const html = render(active)
+    expect(html).toContain('>池内可用</span>')
+    expect(html).toContain('title="在飞 3"')
+    expect(html).toContain('席位 2/5 · 排队 1')
+    expect(html).not.toMatch(/近 24h 请求健康|99\.0%|99\/100 成功/)
+  })
+
+  it('keeps the proxy display independent of both status and health', () => {
+    Object.assign(visibility, { label: false, bar: false, proxy: true })
+    const html = render(active)
+    expect(html).toContain('title="缺代理"')
+    expect(html).not.toMatch(/池内可用|title="在飞 |席位 |近 24h 请求健康/)
+    visibility.proxy = false
+    expect(render(active)).not.toContain('title="缺代理"')
   })
 })
 

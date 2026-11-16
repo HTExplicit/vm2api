@@ -11,8 +11,8 @@ import {
 } from '@/components/ui/dropdown-menu'
 
 export const STATUS_BAR_ITEMS = [
-  ['label', '健康摘要'],
-  ['bar', '请求健康条'],
+  ['label', '状态'],
+  ['bar', '健康'],
   ['proxy', '代理'],
 ] as const
 
