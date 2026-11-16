@@ -5,6 +5,9 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { runFleetUpdate, fleetStatus, isWorkerProcessUp, applyNativeTelemetry } from '../../src/lib/vm/fleet-update.mjs'
+import { initializeSlotSeedFiles } from '../../src/lib/vm/slot-seed.mjs'
+import { slotHost } from '../../src/lib/vm/slot-host.mjs'
+import { withVmLock } from '../../src/lib/vm/vm-file.mjs'
 
 function writeSlot(root, id, extra = {}) {
   const dir = path.join(root, 'vms')
@@ -189,6 +192,7 @@ test('CRAG telemetry publishes settings and applies at idle without changing sch
   let active = 0
   let bootEnabled = false
   let nextError = null
+  let beforeApply
   const server = http.createServer(async (req, res) => {
     res.setHeader('content-type', 'application/json')
     if (req.headers['x-internal-token'] !== 'fixture-internal-token') {
@@ -216,6 +220,9 @@ test('CRAG telemetry publishes settings and applies at idle without changing sch
     for await (const chunk of req) value += chunk
     const { enabled } = JSON.parse(value)
     events.push(['apply', enabled])
+    const pending = beforeApply
+    beforeApply = undefined
+    await pending?.()
     if (nextError || enabled !== bootEnabled) {
       res.writeHead(409).end(JSON.stringify({ error: { type: nextError || 'telemetry_restart_required' } }))
       return
@@ -268,6 +275,75 @@ test('CRAG telemetry publishes settings and applies at idle without changing sch
   assert.equal(read(settingsPath).env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, undefined)
   assert.equal((await apply()).applied, true)
   assert.deepEqual(events.splice(0), [['apply', true]])
+
+  for (const changeRevision of [false, true]) {
+    await t.test(
+      `telemetry publication releases seed before lifecycle locking (superseded=${changeRevision})`,
+      { timeout: 5000 },
+      async () => {
+        const deferred = () => {
+          let resolve
+          const promise = new Promise((done) => {
+            resolve = done
+          })
+          return { promise, resolve }
+        }
+        bootEnabled = false
+        const applyEntered = deferred()
+        const allowApply = deferred()
+        const vmLocked = deferred()
+        beforeApply = async () => {
+          applyEntered.resolve()
+          await allowApply.promise
+        }
+        const settings = read(settingsPath)
+        settings.env.CUSTOM_KEEP = 'from-existing-settings'
+        fs.writeFileSync(settingsPath, JSON.stringify(settings))
+        const telemetry = apply()
+        await applyEntered.promise
+        const initialize = withVmLock(vmPath, async () => {
+          const current = read(vmPath)
+          const initializing = initializeSlotSeedFiles(root, current, slotHost(current))
+          // This lifecycle operation now owns VM and is queued on seed-publication.
+          vmLocked.resolve()
+          const seed = await initializing
+          if (changeRevision) {
+            const updated = read(vmPath)
+            updated.seed_policy.telemetry_disabled = true
+            fs.writeFileSync(vmPath, JSON.stringify(updated))
+          }
+          return seed
+        })
+        await vmLocked.promise
+        allowApply.resolve()
+        const [observed, seed] = await Promise.all([telemetry, initialize])
+        assert.equal(seed.wrote, true)
+        assert.equal(read(settingsPath).env.CUSTOM_KEEP, 'from-existing-settings')
+        assert.equal(read(vmPath).schedule_hold, undefined)
+        assert.equal(read(vmPath).schedulable, true)
+        if (changeRevision) {
+          assert.equal(observed.code, 'telemetry_publication_superseded')
+          assert.equal(observed.applied, false)
+          assert.equal(
+            events.some(([event]) => event === 'restart'),
+            false,
+          )
+        } else {
+          assert.equal(observed.ok, true, JSON.stringify(observed))
+          assert.equal(observed.applied, true)
+          assert.equal(observed.restarted, true)
+          assert.equal(events.filter(([event]) => event === 'restart').length, 1)
+        }
+        events.length = 0
+        if (changeRevision) {
+          const current = read(vmPath)
+          current.seed_policy.telemetry_disabled = false
+          fs.writeFileSync(vmPath, JSON.stringify(current))
+          bootEnabled = true
+        }
+      },
+    )
+  }
 
   writeSlot(root, id, {
     dataplane: 'crag',

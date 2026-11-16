@@ -3,11 +3,6 @@ import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
 import type { StatusTone } from '@/types/status'
 import { GripVertical, RotateCcw } from 'lucide-react'
-import {
-  expiresAtToMs,
-  fmtResetClock,
-  resetCountdown,
-} from '@/lib/fable-status'
 import { fmtNum } from '@/lib/format'
 import { tierVisual } from '@/lib/tier-visual'
 import { cn } from '@/lib/utils'
@@ -31,10 +26,6 @@ import {
 import { StatusMark } from '@/components/status-mark'
 import { ProxyChip } from '@/features/proxies/proxy-chip'
 import {
-  SchedulableSwitch,
-  vmSchedulableProps,
-} from '@/features/vm/schedulable-switch'
-import {
   StatusBarOptions,
   useStatusBarShow,
   type StatusBarShow,
@@ -51,16 +42,12 @@ import {
 import { VmAccountIdentity } from '@/features/vm/vm-account-identity'
 import { VmActionMenu } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
-import {
-  resetRemainVisual,
-  schedulingPriorityTextClass,
-} from '@/features/vm/vm-type-visual'
+import { VmSchedulingCell } from '@/features/vm/vm-scheduling-cell'
 
 /** 列的宽度与弹性；顺序由 `useVmColumnOrder` 决定，不写死在这里。 */
 const COL_CLS: Record<VmColumnKey | 'actions', string> = {
   vm: 'min-w-[170px] flex-[1.15]',
-  sched: 'min-w-[62px] flex-[0.3]',
-  type: 'min-w-[156px] flex-[0.85]',
+  sched: 'min-w-[260px] flex-[1.15]',
   status: 'min-w-[140px] flex-[1.1]',
   req: 'min-w-[124px] flex-[0.7]',
   usage: 'min-w-[208px] flex-[1.3]',
@@ -121,69 +108,6 @@ function StatusReason({ vm, tone }: { vm: Vm; tone: StatusTone }) {
       </TooltipTrigger>
       <TooltipContent>{title}</TooltipContent>
     </Tooltip>
-  )
-}
-
-function ResetMeter({ resetAt, now }: { resetAt: unknown; now: number }) {
-  const resetMs = expiresAtToMs(resetAt)
-  const clock = fmtResetClock(resetAt)
-  if (!clock || !resetMs) return null
-  const visual = resetRemainVisual(resetMs, now)
-  const left = resetCountdown(resetAt, now)
-  return (
-    <div className='min-w-0 space-y-1' title='周窗口重置'>
-      <div
-        className='h-1.5 overflow-hidden rounded-full track-recessed'
-        aria-hidden
-      >
-        <div
-          className='h-full rounded-full transition-[width,background-color] duration-200 motion-reduce:transition-none'
-          style={{
-            width: `${visual.overdue ? 100 : visual.pct}%`,
-            backgroundColor: visual.color,
-          }}
-        />
-      </div>
-      <div
-        className={cn(
-          'truncate font-mono text-[11px] tabular-nums',
-          visual.textClass
-        )}
-      >
-        重置 {clock.slice(0, 11)}
-        {left ? ` · ${left}` : ''}
-      </div>
-    </div>
-  )
-}
-
-function SchedulingPriorityCell({ vm, now }: { vm: Vm; now: number }) {
-  const level = Number(vm.schedule_level)
-  const levelOk = Number.isInteger(level) && level >= 1 && level <= 10
-  return (
-    <div className='min-w-0 space-y-1'>
-      <span
-        className='text-xs whitespace-nowrap text-muted-foreground'
-        title={
-          levelOk
-            ? `${vm.schedule_level_mode === 'manual' ? '手动' : '自动'}调度优先级，数值越大越优先`
-            : '没有调度优先级'
-        }
-      >
-        调度优先级{' '}
-        <span
-          className={cn(
-            'font-semibold tabular-nums',
-            schedulingPriorityTextClass(level)
-          )}
-        >
-          {levelOk ? level : '—'}
-        </span>
-      </span>
-      {vm.has_token ? (
-        <ResetMeter resetAt={vm.reset_7d || vm.reset_7d_oi} now={now} />
-      ) : null}
-    </div>
   )
 }
 
@@ -365,15 +289,7 @@ const COLUMNS: Record<
   vm: { label: '账号', cell: ({ vm }) => <SlotCell vm={vm} /> },
   sched: {
     label: '调度',
-    cell: ({ vm }) => (
-      <div onClick={(e) => e.stopPropagation()}>
-        <SchedulableSwitch {...vmSchedulableProps(vm)} />
-      </div>
-    ),
-  },
-  type: {
-    label: '调度优先级',
-    cell: ({ vm, now }) => <SchedulingPriorityCell vm={vm} now={now} />,
+    cell: ({ vm }) => <VmSchedulingCell vm={vm} />,
   },
   status: {
     label: '状态',

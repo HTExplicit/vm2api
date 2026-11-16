@@ -58,6 +58,18 @@ const LICENSE_LABELS: Record<CragLicenseStatus['status'], string> = {
   invalid: '授权无效',
   unconfigured: '未配置',
 }
+
+function supportsSubscription(vm?: Vm) {
+  return (
+    !!vm &&
+    !vm.node_id &&
+    !['darwin', 'macos'].includes(vm.node_platform || '') &&
+    String(vm.runtime?.type || vm.runtime_type || 'docker')
+      .trim()
+      .toLowerCase() === 'docker'
+  )
+}
+
 const VM_STATUS: Record<string, string> = {
   running: '运行中',
   stopped: '已停用',
@@ -163,10 +175,15 @@ export function WrapSamplePage() {
   const confirmedCrag = confirm?.find((target) => target.kernel === 'crag')
   const confirmedCragTag = confirmedCrag?.payload_tag
   const confirmedCragLabel = cragReleaseLabel(confirmedCragTag)
-  const missingLicenses = (confirm || []).filter(
-    (target) =>
-      target.kernel === 'crag' && !catalog.data?.licenses[target.id]?.valid
-  )
+  const installLicenses =
+    catalog.data?.install_licenses ?? catalog.data?.licenses
+  const canRequestSubscription = (id: string) => {
+    const code = installLicenses?.[id]?.code
+    return (
+      supportsSubscription(vmById.get(id)) &&
+      (code === 'license_required' || code === 'license_payload_key_mismatch')
+    )
+  }
 
   function requestInstall(targets: KernelTarget[]) {
     if (!canEdit || busy || !targets.length) return
@@ -202,25 +219,20 @@ export function WrapSamplePage() {
       )
       return
     }
-    const unlicensed = targets.find(
-      (target) =>
-        target.kernel === 'crag' && !catalog.data?.licenses[target.id]?.valid
-    )
-    if (unlicensed && targets.length === 1) {
-      const vm = vmById.get(unlicensed.id)
-      toast.error(`${vm?.name || unlicensed.id} 需要 CRAG 授权`)
-      if (vm) setLicenseVm(vm)
-      return
-    }
+    const pinned = targets.map((target): KernelTarget => {
+      const product = products.get(target.kernel)
+      return {
+        ...target,
+        ...(product?.payload_tag
+          ? { payload_tag: product.payload_tag }
+          : { expected_tag: product?.release_tag }),
+        ...(target.kernel === 'crag' &&
+          (product?.payload_tag || product?.release_tag) &&
+          canRequestSubscription(target.id) && { reissue: true }),
+      }
+    })
     installTrigger.current = document.activeElement as HTMLElement | null
-    setConfirm(
-      targets.map((target) => {
-        const product = products.get(target.kernel)
-        return product?.payload_tag
-          ? { ...target, payload_tag: product.payload_tag }
-          : { ...target, expected_tag: product?.release_tag }
-      })
-    )
+    setConfirm(pinned)
   }
 
   async function runInstall(targets: KernelTarget[]) {
@@ -635,6 +647,9 @@ export function WrapSamplePage() {
                 <div role='rowgroup' className='divide-y'>
                   {rows.map(({ vm, kernel }) => {
                     const license = catalog.data?.licenses[vm.id]
+                    const mismatch =
+                      installLicenses?.[vm.id]?.code ===
+                      'license_payload_key_mismatch'
                     const installed = catalog.data?.installations?.[vm.id]
                     const result = job?.results[vm.id]
                     const runtime = cragStatus?.runtime?.vms[vm.id]
@@ -809,6 +824,13 @@ export function WrapSamplePage() {
                                     UTC
                                   </div>
                                 ) : null}
+                                {canEdit && !macNative && mismatch ? (
+                                  <p className='text-sm text-muted-foreground'>
+                                    {supportsSubscription(vm)
+                                      ? '确认重装时会尝试使用本机已激活的宿主订阅。若未取得新许可，原内核不会停用。'
+                                      : '当前下载包需要匹配的离线许可。现有许可可继续用于原内核。'}
+                                  </p>
+                                ) : null}
                               </div>
                               <Button
                                 variant='ghost'
@@ -890,7 +912,14 @@ export function WrapSamplePage() {
         }
         desc={
           <>
-            按所选内核安装，运行中的槽重启并完成健康检查，停止的槽保持停止；原人工调度和凭证限制保留。凭据、授权和工作数据不变。
+            按所选内核安装，运行中的槽重启并完成健康检查，停止的槽保持停止；原人工调度和凭证限制保留。凭据和工作数据不变。
+            {confirm?.some((target) => target.reissue) ? (
+              <p className='mt-2'>
+                标记为「订阅授权」的 VM
+                会在停机前申请许可。有本槽订阅许可则同槽重签，否则使用一个剩余订阅名额。未取得有效许可的
+                VM 不会停机。
+              </p>
+            ) : null}
             {confirmedCrag ? (
               <p className='mt-2 wrap-anywhere'>
                 CRAG 当前缓存标签：{confirmedCragTag || '未记录'}
@@ -903,12 +932,11 @@ export function WrapSamplePage() {
         }
         confirmText='确认重装'
         cancelBtnText='取消'
-        disabled={!canEdit || busy || missingLicenses.length > 0}
+        disabled={!canEdit || busy}
         destructive
         className='motion-reduce:animate-none [&_button]:min-h-11'
         handleConfirm={() => {
-          if (confirm && canEdit && !busy && !missingLicenses.length)
-            void runInstall(confirm)
+          if (confirm && canEdit && !busy) void runInstall(confirm)
         }}
       >
         <ul className='max-h-56 space-y-2 overflow-y-auto rounded-lg bg-muted/50 p-3 text-sm'>
@@ -923,20 +951,11 @@ export function WrapSamplePage() {
               <span className='shrink-0 font-medium'>
                 {KERNEL_NAMES[target.kernel]}
                 {target.expected_tag ? ` ${target.expected_tag}` : ''}
-                {target.kernel === 'crag' &&
-                !catalog.data?.licenses[target.id]?.valid
-                  ? ' · 待授权'
-                  : ''}
+                {target.reissue ? ' · 订阅授权' : ''}
               </span>
             </li>
           ))}
         </ul>
-        {missingLicenses.length ? (
-          <p role='alert' className='text-sm text-destructive'>
-            {missingLicenses.length} 台 CRAG 尚未授权，请先在对应 VM
-            行激活。未执行任何重装或停用。
-          </p>
-        ) : null}
       </ConfirmDialog>
       {licenseVm ? (
         <KernelLicenseDialog

@@ -259,7 +259,7 @@ import { isKvmRuntime, RUNTIME_KVM } from '../vm/runtime-kind.mjs'
 import { hostProxyUrlForVm, slotHost } from '../vm/slot-host.mjs'
 import { syncIpv6ProxyEgress } from '../vm/proxy-policy-runtime.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
-import { writeSlotSeedFiles } from '../vm/slot-seed.mjs'
+import { initializeSlotSeedFiles, writeSlotSeedFiles } from '../vm/slot-seed.mjs'
 import {
   egressEnabled,
   ensureProxyEgress,
@@ -1361,6 +1361,14 @@ export function createPanelHandler(ctx) {
         await projectKvmCragSwitchLicense(current, desired, previousRouting, ctx.routingConfig)
       } catch (error) {
         return { ok: false, id, code: error.code, error: error.message }
+      }
+    }
+    if (kernelSwitch && !isCodexVm(desired)) {
+      try {
+        const initialize = ctx.kernelPolicyOps?.initializeSlotSeedFiles || initializeSlotSeedFiles
+        await initialize(cfg.paths.project, desired, slotHost(desired))
+      } catch {
+        return { ok: false, id, code: 'kernel_seed_failed', error: 'Claude Code 初始化配置生成或发布失败' }
       }
     }
     const restartFailed = (result) => {
@@ -3121,6 +3129,7 @@ export function createPanelHandler(ctx) {
       if (req.method === 'GET' && p === '/api/panel/kernels') {
         const vms = keyScopeVms(req).filter((vm) => !isCodexVm(vm))
         const licenses = Object.create(null)
+        const installLicenses = Object.create(null)
         const installations = Object.create(null)
         for (const summary of vms) {
           const vm = getVm(cfg.paths.project, summary.id)
@@ -3128,9 +3137,19 @@ export function createPanelHandler(ctx) {
           // Inventory is read-only: only the explicit activation endpoint creates identities.
           const { license } = getCragLicense(cfg.paths.project, vm, { initialize: false })
           licenses[vm.id] = license
+          installLicenses[vm.id] = getCragLicense(cfg.paths.project, vm, { preferInstalled: false }).license
           if (summary.kernel_installation) installations[vm.id] = summary.kernel_installation
         }
-        return json(res, 200, panel.ok({ kernels: describeKernelCatalog(cfg.paths.project), licenses, installations }))
+        return json(
+          res,
+          200,
+          panel.ok({
+            kernels: describeKernelCatalog(cfg.paths.project),
+            licenses,
+            install_licenses: installLicenses,
+            installations,
+          }),
+        )
       }
       if (req.method === 'GET' && p === '/api/panel/kernels/releases') {
         try {
@@ -3176,6 +3195,15 @@ export function createPanelHandler(ctx) {
         const selection = validateKernelTargets(cfg.paths.project, body?.targets)
         if (!selection.ok)
           return json(res, selection.status, { ok: false, error: { code: selection.code, message: selection.error } })
+        if (body.targets.some((target) => target.reissue === true)) {
+          const identity = panelIdentity(req)
+          if (req.apiKeyKind || identity.role !== 'admin' || !identity.user || !sameOriginPost(req, cfg.base_url)) {
+            return json(res, 403, {
+              ok: false,
+              error: { code: 'forbidden', message: '只有从面板确认重装的管理员才能重新签发订阅许可。' },
+            })
+          }
+        }
         // Check the entire explicit scope before the first target can be stopped.
         if (body.targets.some((target) => userMissesVmId(req, cfg.paths.project, target.id))) {
           return json(res, 403, { ok: false, error: { code: 'forbidden', message: '无权管理所选虚拟机' } })
@@ -3187,6 +3215,7 @@ export function createPanelHandler(ctx) {
           watchdog: ctx.kernelWatchdog,
           poolScheduler: ctx.poolScheduler,
           ops: ctx.kernelInstallOps,
+          cragSubscription: ctx.cragSubscription,
         })
         return json(res, 200, panel.ok(report))
       }
@@ -3292,6 +3321,25 @@ export function createPanelHandler(ctx) {
                   },
                 })
               }
+            }
+            try {
+              const nextRouting = targets.all
+                ? { ...previous, inference: { ...previous.inference, dataplane: parsed.value } }
+                : previous
+              const initialize = ctx.kernelPolicyOps?.initializeSlotSeedFiles || initializeSlotSeedFiles
+              for (const id of syncArgs.body.ids) {
+                const vm = getVm(cfg.paths.project, id)
+                if (!vm || isCodexVm(vm)) continue
+                const desired = targets.all ? vm : vmWithSlotPolicyPatch(vm, { dataplane: parsed.value })
+                if (resolveKernelDataplane(vm, previous) === resolveKernelDataplane(desired, nextRouting)) continue
+                if (checkCragLicense(cfg.paths.project, desired, nextRouting).ok)
+                  await initialize(cfg.paths.project, desired, slotHost(desired))
+              }
+            } catch {
+              return json(res, 503, {
+                ok: false,
+                error: { code: 'kernel_seed_failed', message: 'Claude Code 初始化配置生成或发布失败' },
+              })
             }
             try {
               if (targets.all) {

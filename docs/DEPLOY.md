@@ -38,25 +38,25 @@ CRAG V2 的资产、工作区和设备授权目录分别使用 Linux 私有 run 
 
 挂 `docker.sock`，`network_mode: host`。安装目录不再限定 `/opt/vm2api`：控制面自省 `docker inspect vm2api` 的 Mounts，把槽的 `-v` 源换算成宿主路径；也可用 `VM2API_HOST_ROOT` 显式指定。
 
-「内核」页拉取的二进制以独立缓存发布：默认内核使用 `share/wrap-cli-releases`，CRAG 使用 `share/crag/kernels/v2` 的 packages 子目录及原子 `current-<arch>.json` 指针。完成对应包校验后才切换，保留当前与上一快照；无指针时沿用出厂包，已有指针损坏时拒绝而不静默降级。只读出厂挂载无需改权限。镜像默认的 `KIN_KERNEL_BIN=<项目>/bin/kin-kernel` 支持更新，真正外部自定义路径覆盖仍固定，不会被拉取替换。amd64 镜像启动时通过 `publish-crag-factory.mjs` 校验并发布完整签名出厂包至 `share/crag/kernels/v2/amd64`；首次提供信任锚，后续只接受相同发行公钥，不改下载指针或槽位资料。显式 `KIN_CRAG_V2_ROOT` 覆盖保持不变。发布源缺少授权归档时可继续使用本地有效包，但自动获取返回失败，不能用 legacy ELF 代替。
+「内核」页拉取的二进制以独立缓存发布：默认内核使用 `share/wrap-cli-releases`，CRAG 使用 `share/crag/kernels/v2` 的 packages 子目录及原子 `current-<arch>.json` 指针。完成对应包校验后才切换，保留当前与上一快照；无指针时沿用出厂包，已有指针损坏时拒绝而不静默降级。只读出厂挂载无需改权限。镜像默认的 `KIN_KERNEL_BIN=<项目>/bin/kin-kernel` 支持更新，真正外部自定义路径覆盖仍固定，不会被拉取替换。amd64 镜像启动时通过 `seed-crag.mjs` 在出厂目录缺少时预装完整签名包至 `share/crag/kernels/v2/amd64`；已有工厂、下载指针及显式 `KIN_CRAG_V2_ROOT` 保持不变，不初始化身份或授权。镜像附带的新标准包不会自动替换已有出厂包。下载源缺少授权归档时返回失败，不能用 legacy ELF 代替。
 
 ### CRAG V2 二进制更新
 
-CRAG 从固定供应仓 `dofastted/vm2api` 的公开 payload Release 下载 `crag-v2-licensed-amd64.tar.gz` 签名加密包，无需私有供应仓凭据。「内核」页提供 `payload-2026.11.16-crag-3.1.1`（默认标准版，沿用 `CRAGK1` 策略）和 `payload-2026.11.16-crag-3.0.9-legacy`（支持仍有效的 `CRAGU1`）。需要保留旧离线授权时选「3.0.9 旧离线授权兼容版」拉取，再对相应槽重装；拉取本身不影响运行中的槽。两包共用当前下载指针，不代表全局安装或同时为不同槽选定下载源。
+CRAG 从固定供应仓 `dofastted/vm2api` 的公开 payload Release 下载 `crag-v2-licensed-amd64.tar.gz` 签名加密包，无需私有供应仓凭据。「内核」页提供 `payload-2026.11.16-crag-3.1.2`（默认标准版，沿用 `CRAGK1` 策略，支持可回收宿主名册 `CRAGH2`）和 `payload-2026.11.16-crag-3.0.9-legacy`（支持仍有效的 `CRAGU1`）。需要保留旧离线授权时选「3.0.9 旧离线授权兼容版」拉取，再对相应槽重装；拉取本身不影响运行中的槽。两包共用当前下载指针，不代表全局安装或同时为不同槽选定下载源。宿主订阅启用 `CRAGH2` 后不要回滚到 3.1.1 及更早内核。
 
-内核页可分别选择 CRAG 和 cli-node 的历史发行版本，默认拉取最新；下载只更新待安装缓存，确认重装后才应用到所选槽。一键 `install` / `upgrade` 和独立 `crag-update` 未指定 `--crag-version` 时也选择最新的标准载荷；普通 `vX.Y.Z` 不选择 `-legacy`。依赖旧离线授权的环境做后续升级时要继续显式指定兼容标签，或者跳过内核同步。`manifest.version` 的 `v2` 是协议族，实际下载发行版见缓存指针的 `release.payload_tag`。
+内核页可分别选择 CRAG 和 cli-node 的历史发行版本，默认拉取最新；下载只更新待安装缓存。应用安装与升级不主动拉取新 CRAG 或当前应用标签的 CLI，统一收尾仍会将当前模板或已选下载缓存按差异同步到适用槽；手动拉取的新缓存可在后续同步时应用，并非永久固定槽内版本。独立 `crag-update` 未指定 `--crag-version` 时选择最新标准载荷；普通 `vX.Y.Z` 不选择 `-legacy`。依赖旧离线授权时应继续选择兼容标签。`manifest.version` 的 `v2` 是协议族，实际下载发行版见缓存指针的 `release.payload_tag`。
 
-amd64 一键安装/升级通过共享收尾完成出厂包初始化和最新版获取；全本地 Codex 安装跳过 CRAG 拉取及无适用目标的槽位同步。也可在服务器独立更新，不升级或重启控制面：
+全本地 Codex 安装和升级跳过无适用目标的槽位同步。需要主动获取并应用新 CRAG 时，可使用内核页明确安装，或在服务器独立更新而不重启控制面：
 
 ```bash
-sudo bash /opt/vm2api/deploy/install.sh crag-update --crag-version v3.1.1
+sudo bash /opt/vm2api/deploy/install.sh crag-update --crag-version v3.1.2
 # 原样保留旧离线授权（整机 CRAG 更新；只迁移指定槽请用面板）
 sudo bash /opt/vm2api/deploy/install.sh crag-update --crag-version payload-2026.11.16-crag-3.0.9-legacy
 # 省略 --crag-version：从 vm2api 公开 payload Release 选最新完整签名包
 sudo bash /opt/vm2api/deploy/install.sh crag-update
 ```
 
-需要包含 `scripts/publish-crag-factory.mjs`、`scripts/update-crag.mjs` 的消费端源码/镜像；只下载一个新版 shell 到旧镜像不足以补齐 Node 更新器。支持已有 Docker 控制面和主机 Node 部署；读取进程环境或 `.env` 的 `VM2API_API_KEY` / `KIN_API_KEY`。无 `.env` 的主机 systemd 部署可由 root 从既有 `vm2api.service` 进程环境读取 key/port，不复制或打印完整环境；也可用进程环境 `PORT` 指定本地控制面端口。本 fork 的安装器与面板升级共用 `fleet-services.mjs` 收尾：全本地 Codex 直接跳过；其余安装在可信 CRAG 出厂包存在时执行一次供应包拉取与校验，不改变槽位内核选择或授权。安装器的 `--no-start` / `--no-sync-wrap` 跳过收尾，显式 `crag-update --no-start` 报错。主机 Node 部署首次使用须带有发行配置固定的公钥摘要或可信出厂包。
+需要包含 `scripts/seed-crag.mjs`、`scripts/update-crag.mjs` 的消费端源码/镜像；只下载一个新版 shell 到旧镜像不足以补齐 Node 更新器。支持已有 Docker 控制面和主机 Node 部署；读取进程环境或 `.env` 的 `VM2API_API_KEY` / `KIN_API_KEY`。无 `.env` 的主机 systemd 部署可由 root 从既有 `vm2api.service` 进程环境读取 key/port，不复制或打印完整环境；也可用进程环境 `PORT` 指定本地控制面端口。本 fork 的安装器与面板升级共用 `fleet-services.mjs` 收尾：全本地 Codex 直接跳过；其余槽按当前模板或已选缓存同步，再更新适用的服务与遥测策略，不主动下载新包或切换槽位内核选择。安装器的 `--no-start` / `--no-sync-wrap` 跳过收尾，显式 `crag-update --no-start` 报错。主机 Node 部署首次使用须带有发行配置固定的公钥摘要或可信出厂包。
 
 更新顺序：供应仓完整包下载和原信任锚签名/成员 SHA/ELF 校验 → 原子切换下载指针 → 全槽清点 → 检查已有 CRAG V2 槽 → 有变化时直接受管同步/必要时重载对应槽（不暂停调度、不等待在途请求） → 核验实际运行 memfd SHA 与签名 payload 承诺一致。安装目录哈希相同不能视为已更新运行进程。
 
@@ -102,7 +102,7 @@ docker compose up -d
 curl -sS --noproxy '*' http://127.0.0.1:8787/health
 ```
 
-`bin/` 与 `share/wrap-cli` 由镜像入口写入挂载目录，完整签名 CRAG 出厂包发布到 `share/crag/kernels/v2/amd64`，保留发行公钥和已有下载缓存选择；`src/config` 缺文件时用镜像内默认值补齐。入口不再按 `KIN_AUTO_SYNC_WRAP` 后台启动旧同步。安装器/面板统一收尾按当前 fork Release 拉取 CLI pair，检查 wrap Claude 的实际差异，仅对变化槽执行一次重启安装，CRAG 由独立更新器处理，其他槽沿原同步路径；不额外重装 Codex。手工 Compose 更换镜像后，通过内核页显式拉取并安装所选槽，不能仅凭出厂文件变化认定槽内副本已更新。
+`bin/` 与 `share/wrap-cli` 由镜像入口写入挂载目录，完整签名 CRAG 出厂包仅在缺少时预装到 `share/crag/kernels/v2/amd64`，已有工厂与下载缓存选择保留；`src/config` 缺文件时用镜像内默认值补齐。入口不再按 `KIN_AUTO_SYNC_WRAP` 后台启动旧同步。安装器/面板统一收尾按当前模板或已选缓存同步，运行槽有载荷差异或未完成重启时才按原生命周期重启，停止槽只同步文件；不额外重装 Codex。手工 Compose 更换镜像后，通过内核页显式拉取并安装所选槽，不能仅凭出厂文件变化认定槽内副本已更新。
 KVM / Docker 槽位将宿主 `data/run/slot-guest-bin/`（仅含 `kin-worker`、`kin-kernel` 两个文件，**不会**挂载整个 `bin/`）只读挂进容器，避免单文件 bind mount 在升级替换二进制后仍粘旧 inode，也避免把 `kin-egress`、`kin-api-kernel` 等其它 helper 暴露进槽位 PATH。此后升级 worker/kernel **不必重建槽位**；若容器仍是旧版单文件挂载创建的，须 **重建该槽位容器一次** 才能切换到 staging 目录挂载。
 槽位系统镜像优先 `docker pull ghcr.io/dofastted/kin-os-*`，拉不到时在建槽阶段用仓内 Dockerfile 兜底构建（启动不阻塞）。
 
@@ -277,6 +277,10 @@ sudo bash /opt/vm2api/deploy/install.sh check
 ```
 
 面板：`GET /api/panel/version`、`GET /api/panel/changelog`、`POST /api/panel/update`。确认更新后，控制面会通过已挂载的 `docker.sock` 自省当前 Compose 项目和全部配置文件，拉起独立升级助手。助手记录更新前正常运行的槽位，按源码/镜像模式更新，保留已有 `src/config` 配置并 `--force-recreate` 控制面；通过健康检查、版本接口和槽位详情接口确认后端版本正确、此前健康的槽内内核仍能通过控制面鉴权，完成后才报告成功。忙碌但进程健康的槽位不视为故障；更新前已故障或停止的槽位不计入本次回归检查。助手失败时保留 `docker logs vm2api-upgrade-<project>`；容器里没有可识别的 Compose 服务时返回 `409 host_upgrade_required`，响应里带同一条 curl 命令。槽位内核健康检查不调用模型，不消耗上游额度。
+
+Docker 内的本机 CRAG 订阅需要宿主 `/etc/machine-id` 只读挂载到控制面的 `/run/crag-host-machine-id`，不能用容器自己的机器 ID。新版面板镜像升级助手发现现有 Compose 缺少该挂载时，会追加仅包含该挂载的持久覆盖文件，不改已有数据卷。仍在使用旧助手的部署，可通过官方 `install.sh upgrade` 更新 Compose，或在现有自定义 Compose 中加入同一只读挂载后重建控制面。手动使用旧 Compose 文件时也须带上覆盖文件。
+
+如果服务健康但本机 CRAG 订阅显示「状态不可用」，用 `namei -l` 核对实际数据目录的每级父目录。CRAG 会拒绝组或其他用户可写的父目录；确认安装根目录无需组写权限后，只移除该目录的组写位，不要递归修改数据目录和槽位权限。
 
 ## 已部署机升级到 1.2.22
 

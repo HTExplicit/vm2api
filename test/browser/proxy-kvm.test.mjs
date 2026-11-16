@@ -630,3 +630,113 @@ test(
     assert.deepEqual(errors, [])
   }
 )
+
+test(
+  "confirmed Docker CRAG reinstall pins the target and requests subscription authorization",
+  {
+    timeout: 60_000,
+  },
+  async (t) => {
+    const vm = {
+      id: "offline-subscription",
+      name: "离线订阅槽",
+      status: "stopped",
+      runtime_type: "docker",
+      resolved_dataplane: "crag",
+      resolved_crag_kernel_version: "v2",
+    };
+    const payloadTag = "payload-2026.11.16-crag-3.1.2";
+    const installs = [];
+    const { page, rejectedOrigins, errors } = await openFixture(t, {
+      view: "kvm",
+      api: async (route, request, pathname) => {
+        const respond = (data) => route.fulfill({ json: { ok: true, data } });
+        if (pathname === "/api/panel/me") return respond({ role: "admin" });
+        if (pathname === "/api/panel/dashboard") return respond({ vms: [vm] });
+        if (pathname === "/api/panel/crag-subscription")
+          return respond({
+            ready: true,
+            state: "active",
+            slot_limit: 2,
+            used_slots: 0,
+          });
+        if (pathname === "/api/panel/kernels")
+          return respond({
+            kernels: [
+              {
+                id: "crag",
+                name: "CRAG",
+                paid: true,
+                ready: true,
+                version: "3.1.2",
+                payload_tag: payloadTag,
+                release_options: [{ tag: payloadTag, label: "标准 3.1.2" }],
+              },
+            ],
+            licenses: {
+              [vm.id]: { valid: true, status: "valid", scope: "device" },
+            },
+            install_licenses: {
+              [vm.id]: {
+                valid: false,
+                status: "invalid",
+                code: "license_payload_key_mismatch",
+              },
+            },
+            installations: {},
+          });
+        assert.equal(pathname, "/api/panel/kernels/install");
+        assert.equal(request.method(), "POST");
+        installs.push(request.postDataJSON());
+        return respond({
+          ok: true,
+          total: 1,
+          ok_count: 1,
+          failed_count: 0,
+          items: [
+            {
+              id: vm.id,
+              kernel: "crag",
+              ok: true,
+              restarted: false,
+              stopped: true,
+              status: "stopped",
+              version: "3.1.2",
+              payload_tag: payloadTag,
+            },
+          ],
+        });
+      },
+    });
+    const trigger = page.getByRole("button", {
+      name: "重装 离线订阅槽",
+      exact: true,
+    });
+    const dialog = page.getByRole("alertdialog");
+    await trigger.click();
+    await dialog.waitFor();
+    assert.match(await dialog.innerText(), /否则使用一个剩余订阅名额/);
+    assert.equal(installs.length, 0);
+    await dialog.getByRole("button", { name: "取消", exact: true }).click();
+    await dialog.waitFor({ state: "hidden" });
+    await page.waitForFunction(
+      () =>
+        document.activeElement?.getAttribute("aria-label") ===
+        "重装 离线订阅槽",
+    );
+    assert.equal(installs.length, 0);
+    await trigger.click();
+    await dialog.getByRole("button", { name: "确认重装", exact: true }).click();
+    await dialog.waitFor({ state: "hidden" });
+    await page.getByText("安装完成，保持停止", { exact: true }).waitFor();
+    assert.deepEqual(installs, [
+      {
+        targets: [
+          { id: vm.id, kernel: "crag", payload_tag: payloadTag, reissue: true },
+        ],
+      },
+    ]);
+    assert.deepEqual(rejectedOrigins, []);
+    assert.deepEqual(errors, []);
+  },
+);

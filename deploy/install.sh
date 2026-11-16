@@ -72,11 +72,11 @@ usage() {
 
 选项:
   --version vX.Y.Z     指定 tag（可带 -amd64 / -arm64 后缀，须与宿主架构一致）
-  --crag-version TAG   指定 CRAG Release：vX.Y.Z 或 payload-YYYY.MM.DD-crag-X.Y.Z[-legacy]（省略为最新正式版）
+  --crag-version TAG   crag-update 的目标：vX.Y.Z 或 payload-YYYY.MM.DD-crag-X.Y.Z[-legacy]（省略为最新标准载荷）
   --dir PATH           安装目录（默认 ${INSTALL_DIR}）
   --yes                非交互
   --no-start           只拉代码，不 compose up
-  --no-sync-wrap       跳过 CRAG 获取及槽内 CLI / kernel 同步
+  --no-sync-wrap       跳过槽内 CLI / kernel 同步和服务收尾
   --from-source        clone 仓库并在本机构建镜像（默认拉预构建镜像）
   -h, --help           帮助
 EOF
@@ -696,7 +696,7 @@ refresh_slot_services() {
   if ! docker exec "$SERVICE_NAME" test -f /opt/vm2api/scripts/fleet-services.mjs >/dev/null 2>&1; then
     err "控制面缺少槽刷新脚本，不能确认槽内二进制已换到当前版本"
     exit 1
-  elif ! docker exec "$SERVICE_NAME" node /opt/vm2api/scripts/fleet-services.mjs /opt/vm2api 4 "$CRAG_TARGET_VERSION"; then
+  elif ! docker exec "$SERVICE_NAME" node /opt/vm2api/scripts/fleet-services.mjs /opt/vm2api 4; then
     err "槽内二进制刷新失败，见上方逐槽报告；失败的槽可能仍在跑旧的 cli-node / kin-egress"
     exit 1
   fi

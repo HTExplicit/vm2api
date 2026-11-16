@@ -1252,6 +1252,29 @@ test('writeKernelConfig projects thinking display and preserves it only without 
   }
 })
 
+test('CRAG session policy follows the panel unless the VM pins its seat limit', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-seats-'))
+  const vm = { id: 'vm-09' }
+  const routing = { inference: { dataplane: 'crag', session_slots: 10, prewarm_enabled: true } }
+  const write = (slot, options) =>
+    JSON.parse(fs.readFileSync(writeKernelConfig(root, slot, options).configPath, 'utf8'))
+  try {
+    const inherited = write({ ...vm, policy: { sessionSlots: 20, sessionSlotsOverride: false } }, { routing })
+    assert.equal(inherited.slots_per_worker, 20)
+    assert.equal(inherited.session_slots, 10)
+    assert.equal(inherited.prewarm_enabled, true)
+    assert.equal(write(vm).session_slots, 10)
+    assert.equal(write(vm).prewarm_enabled, true)
+    routing.inference.prewarm_enabled = false
+    const pinned = write({ ...vm, policy: { sessionSlots: 4, sessionSlotsOverride: true } }, { routing })
+    assert.equal(pinned.session_slots, 4)
+    assert.equal(pinned.prewarm_enabled, false)
+    assert.equal(write({ ...vm, dataplane: 'wrap' }, { routing }).prewarm_enabled, undefined)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('model effort changes rewrite kernel.json without a routing save or restart', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-effort-'))
   const routing = { compatibility: { persona_preset: 'official' } }
@@ -2621,6 +2644,9 @@ test('native V2 idle reload distinguishes runnable ceiling from live tool waits'
     active: 0,
     waiting: 1,
     queued: 0,
+    cleaning: 0,
+    active_requests: 1,
+    prewarm_enabled: true,
     pids: [42],
   }
   let observed
@@ -2643,7 +2669,7 @@ test('native V2 idle reload distinguishes runnable ceiling from live tool waits'
     })
     await firstProbe
     assert.deepEqual(restarts, [])
-    status = { ...status, ready_slots: 4, waiting: 0, pids: [] }
+    status = { ...status, ready_slots: 3, waiting: 0, active_requests: 0, prewarm_ready: 1, pids: [43] }
     const deadline = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('native idle reload did not complete')), 3000)
     })
@@ -2653,4 +2679,88 @@ test('native V2 idle reload distinguishes runnable ceiling from live tool waits'
     clearTimeout(timer)
     resetWrapRecycleState()
   }
+})
+
+test('live-only policy reload defers if a running slot is stopped while health is unavailable', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-policy-stop-'))
+  const id = 'vm-policy-stop'
+  const file = path.join(root, 'vms', `${id}.json`)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const vm = { id, status: 'running', schedule_off: true, schedulable: false, policy: { priority: 8 } }
+  fs.writeFileSync(file, JSON.stringify(vm))
+  let observe
+  const observed = new Promise((resolve) => {
+    observe = resolve
+  })
+  let restarts = 0
+  let timer
+  t.after(() => {
+    clearTimeout(timer)
+    resetWrapRecycleState()
+    fs.rmSync(root, { recursive: true })
+  })
+  const request = requestKernelReloadWhenIdle(
+    { vmId: id, projectRoot: root },
+    {
+      requireLiveKernel: true,
+      pollMs: 10,
+      health: async () => {
+        observe()
+        return { ok: false }
+      },
+      restart: async () => {
+        restarts += 1
+        return { ok: true }
+      },
+    },
+  )
+  await observed
+  assert.equal(restarts, 0)
+  const stopped = { ...vm, status: 'stopped', runtime: { stopped: true } }
+  fs.writeFileSync(file, JSON.stringify(stopped))
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('stopped policy reload did not settle')), 3000)
+  })
+  assert.deepEqual(await Promise.race([request.done, deadline]), { ok: true, reason: 'deferred_until_start' })
+  assert.equal(restarts, 0)
+  assert.deepEqual(JSON.parse(fs.readFileSync(file)), stopped)
+})
+
+test('live-only policy reload ignores idle prewarm processes and preserves manual scheduling', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-crag-policy-prewarm-'))
+  const id = 'vm-policy-prewarm'
+  const file = path.join(root, 'vms', `${id}.json`)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const vm = { id, status: 'running', schedule_off: true, schedulable: false, policy: { priority: 8 } }
+  fs.writeFileSync(file, JSON.stringify(vm))
+  t.after(() => {
+    resetWrapRecycleState()
+    fs.rmSync(root, { recursive: true })
+  })
+  let restarts = 0
+  const request = requestKernelReloadWhenIdle(
+    { vmId: id, projectRoot: root },
+    {
+      requireLiveKernel: true,
+      health: async () => ({
+        ok: true,
+        runtime_variant: 'crag-v2',
+        active: 0,
+        waiting: 0,
+        active_requests: 0,
+        queued: 0,
+        cleaning: 0,
+        prewarm_enabled: true,
+        prewarm_ready: 1,
+        pids: [42],
+      }),
+      restart: async () => {
+        restarts += 1
+        return { ok: true }
+      },
+    },
+  )
+  assert.deepEqual(await request.done, { ok: true })
+  assert.equal(restarts, 1)
+  assert.deepEqual(JSON.parse(fs.readFileSync(file)), vm)
 })

@@ -22,11 +22,11 @@ const encryptedAsset = pinned.files.find(
 ).asset
 const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex')
 
-test('current payload pins match the recorded 110 supplier release and original signed CRAG source', () => {
+test('current payload pins match the recorded 113 supplier release and original signed CRAG source', () => {
   const upstream = JSON.parse(
-    fs.readFileSync(new URL('../../docs/releases/v1.4.110-binaries.json', import.meta.url), 'utf8'),
+    fs.readFileSync(new URL('../../docs/releases/v1.4.113-binaries.json', import.meta.url), 'utf8'),
   )
-  const crag = JSON.parse(fs.readFileSync(new URL('../../docs/releases/v1.4.110-crag.json', import.meta.url), 'utf8'))
+  const crag = JSON.parse(fs.readFileSync(new URL('../../docs/releases/v1.4.113-crag.json', import.meta.url), 'utf8'))
   assert.equal(pinned.release, upstream.payload_release)
   assert.equal(pinned.crag_release, upstream.native.release)
   assert.equal(
@@ -56,7 +56,7 @@ test('current payload pins match the recorded 110 supplier release and original 
   assert.equal(upstream.native.fork_rebuilt, false)
   assert.equal(upstream.recorded_by, 'HTExplicit/vm2api')
   assert.equal(upstream.record_type, 'supplier_release_observation')
-  assert.equal(crag.application_release, 'v1.4.110')
+  assert.equal(crag.application_release, 'v1.4.113')
   assert.equal(upstream.application_commit, crag.application_commit)
   assert.equal(upstream.native.source_commit, crag.source_publication.commit)
   assert.equal(upstream.native.core_plaintext_sha256, crag.core_plaintext_sha256)
@@ -67,7 +67,7 @@ test('current payload pins match the recorded 110 supplier release and original 
   assert.equal(crag.supplier_sources.core_sha256, crag.core_plaintext_sha256)
   assert.equal(crag.source_publication.record_sha256, upstream.payload_source.sources_asset.sha256)
   const previous = JSON.parse(
-    fs.readFileSync(new URL('../../docs/releases/v1.4.091-crag.json', import.meta.url), 'utf8'),
+    fs.readFileSync(new URL('../../docs/releases/v1.4.110-crag.json', import.meta.url), 'utf8'),
   )
   assert.equal(crag.authorization_public_key_id, previous.authorization_public_key_id)
   assert.equal(
@@ -75,37 +75,32 @@ test('current payload pins match the recorded 110 supplier release and original 
     previous.assets['crag-v2-amd64-crag-license-public.pem'],
   )
   assert.equal(crag.authorization_migration.previous_product_key_id, previous.product_key_id)
-  assert.notEqual(crag.product_key_id, previous.product_key_id)
+  assert.equal(crag.product_key_id, previous.product_key_id)
+  assert.equal(crag.authorization_migration.product_key_changed_from_previous_package, false)
+  assert.equal(crag.authorization_migration.previous_package_version, '3.1.1')
   for (const workflow of Object.values(upstream.official_workflows)) {
     assert.equal(workflow.source_commit, upstream.application_commit)
     assert.equal(workflow.conclusion, 'success')
   }
 })
 
-test('the 110 payload changes only signed CRAG assets and adds the signed unpack note', () => {
+test('the 113 payload changes only five signed CRAG assets from the 110 release', () => {
   const previous = JSON.parse(
-    fs.readFileSync(new URL('../../docs/releases/v1.4.091-binaries.json', import.meta.url), 'utf8'),
+    fs.readFileSync(new URL('../../docs/releases/v1.4.110-binaries.json', import.meta.url), 'utf8'),
   )
   const changed = []
   for (const [name, { file }] of imageAssets(pinned)) {
     if (!file) continue
-    const previousName = name.replace('v3.1.1', 'v2.8.18')
+    const previousName = name.replace('v3.1.2', 'v3.1.1')
     const original = previous.assets.find((asset) => asset.name === previousName)
-    if (name === 'crag-v2-amd64-unpack-note.md') {
-      assert.equal(original, undefined)
-      changed.push(name)
-      continue
-    }
     assert.ok(original, `${name}: previous supplier asset missing`)
     if (file.sha256 !== original.sha256) changed.push(name)
   }
   assert.deepEqual(changed.sort(), [
-    'crag-v2-amd64-LICENSES.txt',
-    'crag-v2-amd64-kernel.json.example',
     'crag-v2-amd64-unpack-note.md',
-    'crag-v2-amd64-v3.1.1-crag-v2',
-    'crag-v2-amd64-v3.1.1-crag-v2.payload.enc',
-    'crag-v2-amd64-v3.1.1-manifest.json',
+    'crag-v2-amd64-v3.1.2-crag-v2',
+    'crag-v2-amd64-v3.1.2-crag-v2.payload.enc',
+    'crag-v2-amd64-v3.1.2-manifest.json',
     'crag-v2-licensed-amd64.tar.gz',
   ])
 })
@@ -135,11 +130,11 @@ test('the complete release derives twenty-two pinned assets and image-built egre
   assert.equal(expected.length, 23)
   const digestOf = (name) => expected.find((asset) => asset.name === name).digest.slice('sha256:'.length)
   const upstreamBuild = {
-    application_release: 'v1.4.110',
+    application_release: 'v1.4.113',
     assets: expected.map((asset) => ({ name: asset.name, size: asset.size, sha256: digestOf(asset.name) })),
   }
   const cragBuild = {
-    application_release: 'v1.4.110',
+    application_release: 'v1.4.113',
     core_plaintext_sha256: 'core-commitment',
     assets: Object.fromEntries(
       expected.filter((asset) => asset.name.startsWith('crag-v2-')).map((asset) => [asset.name, digestOf(asset.name)]),
@@ -162,13 +157,13 @@ test('the complete release derives twenty-two pinned assets and image-built egre
   assert.equal(provenance.image, image)
   assert.equal(provenance.source_commit, 'fork-source')
   assert.equal(provenance.assets.length, 23)
-  assert.equal(provenance.upstream.build.application_release, 'v1.4.110')
+  assert.equal(provenance.upstream.build.application_release, 'v1.4.113')
   assert.equal(
     provenance.upstream.build.assets.some((asset) => asset.name === 'kin-egress'),
     false,
   )
   assert.equal(provenance.upstream.build.assets.length, 22)
-  assert.equal(provenance.upstream.build.source_record, 'docs/releases/v1.4.110-binaries.json')
+  assert.equal(provenance.upstream.build.source_record, 'docs/releases/v1.4.113-binaries.json')
   assert.deepEqual(provenance.upstream.crag, cragBuild)
   for (const name of ['kin-worker', 'cli-node']) {
     const recorded = upstreamBuild.assets.find((asset) => asset.name === name)

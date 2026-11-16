@@ -1,5 +1,6 @@
 import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
+import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -12,6 +13,8 @@ import { kvmKernelSelector, selectChangedPayloadFiles } from '../../src/lib/clus
 import { describeKernelCatalog, pullKernelRelease } from '../../src/lib/admin/kernel-catalog.mjs'
 import { getVm, patchVmRecord, summarizeVm } from '../../src/lib/vm/vm-registry.mjs'
 import { withVmLock } from '../../src/lib/vm/vm-file.mjs'
+import { initializeSlotSeedFiles } from '../../src/lib/vm/slot-seed.mjs'
+import { slotHost } from '../../src/lib/vm/slot-host.mjs'
 import { activateCragLicense, cragLicenseDirectory } from '../../src/lib/vm/crag-license.mjs'
 import { cragV2PackageRoot } from '../../src/lib/vm/wrap-cli-runtime.mjs'
 import { writeKernelConfig } from '../../src/lib/transport/rust-kernel-supervisor.mjs'
@@ -79,10 +82,72 @@ function fixture(t, patch = {}) {
   return { root, vm, home, run }
 }
 const target = (kernel = 'crag') => [{ id: 'vm-13', kernel }]
+
+for (const kernel of ['crag', 'cli-node']) {
+  for (const existing of [false, true]) {
+    test(`${kernel} installation initializes settings before restart (${existing ? 'existing' : 'missing'} settings)`, async (t) => {
+      const { root, vm, home } = fixture(t)
+      if (kernel === 'crag') activateFixture(root, vm)
+      const file = path.join(home, '.claude', 'settings.json')
+      if (existing) {
+        fs.writeFileSync(file, JSON.stringify({ permissions: { allow: ['Read'] }, env: { CUSTOM: 'keep' } }))
+      }
+      const life = lifecycle(root, {
+        startSlotReady() {
+          const settings = JSON.parse(fs.readFileSync(file, 'utf8'))
+          assert.equal(settings.autoUpdates, false)
+          assert.equal(settings.env.TZ, 'UTC')
+          if (existing) {
+            assert.deepEqual(settings.permissions, { allow: ['Read'] })
+            assert.equal(settings.env.CUSTOM, 'keep')
+          }
+          assert.equal(fs.statSync(file).mode & 0o777, 0o600)
+          assert.equal(fs.readFileSync(path.join(home, '.claude', 'credentials.json'), 'utf8'), 'protected-credential')
+          return { ok: true, rust_ok: true }
+        },
+      })
+      const result = await installKernelTargets({ projectRoot: root, targets: target(kernel), ops: life.ops })
+      assert.equal(result.ok, true, JSON.stringify(result))
+    })
+  }
+  test(`${kernel} cluster installation publishes VM settings before restart`, async (t) => {
+    const { root, home, run } = fixture(t, { node_id: 'node-settings' })
+    let published = false
+    const life = lifecycle(root, {
+      checkCragLicense: () => ({ ok: true }),
+      deployBakedKernel: () => ({ ok: true }),
+      writeKernelConfig: () => ({ configPath: path.join(run, 'kernel.json'), runDir: run }),
+      initializeSlotSeedFiles(project, candidate) {
+        return initializeSlotSeedFiles(project, candidate, {
+          async seedFiles() {
+            return { files: { 'settings.json': JSON.stringify({ env: { CUSTOM: 'from-node' } }) } }
+          },
+          async syncSeed() {
+            const settings = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'))
+            assert.equal(settings.env.CUSTOM, 'from-node')
+            assert.equal(settings.env.TZ, 'UTC')
+            published = true
+            return { published: true }
+          },
+        })
+      },
+      startSlotReady() {
+        assert.equal(published, true)
+        return { ok: true, rust_ok: true }
+      },
+    })
+    const result = await installKernelTargets({ projectRoot: root, targets: target(kernel), ops: life.ops })
+    assert.equal(result.ok, true, JSON.stringify(result))
+  })
+}
+
 function lifecycle(root, extra = {}) {
   let stopCount = 0
   return {
     ops: {
+      initializeSlotSeedFiles(project, candidate) {
+        return initializeSlotSeedFiles(project, candidate, slotHost({ ...candidate, node_id: null }))
+      },
       stopSlot(vm) {
         stopCount++
         assert.equal(getVm(root, vm.id).status, 'running')
@@ -344,6 +409,7 @@ test('installing an originally stopped slot preserves power and manual schedulin
     projectRoot: root,
     targets: target('cli-node'),
     ops: {
+      initializeSlotSeedFiles: lifecycle(root).ops.initializeSlotSeedFiles,
       describeKernelCatalog: () => [{ id: 'cli-node', ready: true }],
       stopSlot() {
         assert.equal(getVm(root, vm.id).kernel_operation.was_running, false)
@@ -494,7 +560,7 @@ for (const invalid of [
   })
 }
 
-for (const state of ['unlicensed', 'expired', 'wrong-vm', 'package-tamper']) {
+for (const state of ['unlicensed', 'expired', 'wrong-vm', 'package-tamper', 'different-payload']) {
   test(`paid preflight rejects ${state} before stop and preserves payload, identity and grant bytes`, async (t) => {
     const { root, vm, home } = fixture(t)
     if (state !== 'unlicensed') {
@@ -507,6 +573,7 @@ for (const state of ['unlicensed', 'expired', 'wrong-vm', 'package-tamper']) {
         )
       if (state === 'wrong-vm')
         fs.writeFileSync(codeFile, issueFixtureCode(root, active.machine_code, { vm_id: 'vm-other' }).code)
+      if (state === 'different-payload') seedEncryptedPackage(root, { payloadKey: randomBytes(32) })
       if (state === 'package-tamper') {
         const pkg = path.join(
           root,
@@ -522,8 +589,16 @@ for (const state of ['unlicensed', 'expired', 'wrong-vm', 'package-tamper']) {
     const record = fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`))
     const result = await installKernelTargets({
       projectRoot: root,
-      targets: target(),
+      targets: state === 'different-payload' ? [{ ...target()[0], expected_tag: 'v1.4.104', reissue: true }] : target(),
+      cragSubscription: {
+        authorizeInstall() {
+          throw Object.assign(new Error('inactive'), { code: 'host_subscription_inactive' })
+        },
+      },
       ops: {
+        ...(state === 'different-payload' && {
+          describeKernelCatalog: () => [{ id: 'crag', ready: true, release_tag: 'v1.4.104' }],
+        }),
         stopSlot() {
           assert.fail('preflight cannot stop')
         },
@@ -531,10 +606,126 @@ for (const state of ['unlicensed', 'expired', 'wrong-vm', 'package-tamper']) {
     })
     assert.equal(result.ok, false)
     assert.equal(result.items[0].stopped, false)
+    if (state === 'different-payload') assert.equal(result.items[0].code, 'host_subscription_inactive')
     assert.equal(fs.readFileSync(path.join(home, '.kin', 'kin-kernel.bin'), 'utf8'), 'previous-kernel')
-    assert.deepEqual(fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`)), record)
+    const saved = fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`))
+    if (state === 'different-payload') {
+      assert.equal(getVm(root, vm.id).status, 'running')
+      assert.equal(getVm(root, vm.id).kernel_operation, undefined)
+      assert.equal(getVm(root, vm.id).schedule_hold, undefined)
+    } else {
+      assert.deepEqual(saved, record)
+    }
     if (beforeGrant) assert.deepEqual(fs.readFileSync(codeFile), beforeGrant)
     else assert.equal(fs.existsSync(cragLicenseDirectory(root, vm)), false)
+  })
+}
+
+test('a confirmed CRAG reinstall obtains and rechecks a subscription permit before stopping the slot', async (t) => {
+  const { root } = fixture(t)
+  const events = []
+  let authorized = false
+  const life = lifecycle(root)
+  const result = await installKernelTargets({
+    projectRoot: root,
+    targets: [{ ...target()[0], expected_tag: 'v1.4.104', reissue: true }],
+    cragSubscription: {
+      authorizeInstall(vm) {
+        events.push('bind')
+        activateFixture(root, vm)
+        authorized = true
+      },
+    },
+    ops: {
+      ...life.ops,
+      describeKernelCatalog: () => [{ id: 'crag', ready: true, release_tag: 'v1.4.104' }],
+      checkCragLicense(_root, _vm, _routing, options) {
+        assert.equal(options.preferInstalled, false)
+        events.push('verify')
+        return authorized ? { ok: true } : { ok: false, code: 'license_payload_key_mismatch' }
+      },
+      stopSlot(vm) {
+        events.push('stop')
+        return life.ops.stopSlot(vm)
+      },
+    },
+  })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.deepEqual(events, ['verify', 'bind', 'verify', 'stop'])
+})
+
+for (const running of [true, false]) {
+  test(`confirmed subscription installation preserves ${running ? 'running manual-off' : 'stopped'} intent`, async (t) => {
+    const { root, vm } = fixture(t, {
+      status: running ? 'running' : 'stopped',
+      schedule_off: true,
+      schedule_off_reason: 'manual',
+    })
+    let authorized = false
+    let authorizations = 0
+    let starts = 0
+    const life = lifecycle(root, {
+      describeKernelCatalog: () => [{ id: 'crag', ready: true, release_tag: 'v1.4.113' }],
+      checkCragLicense: () => (authorized ? { ok: true } : { ok: false, code: 'license_required' }),
+      stopSlot() {
+        assert.equal(authorized, true, 'authorization must be verified before stop')
+        assert.equal(getVm(root, vm.id).schedule_hold, undefined)
+        return { ok: true }
+      },
+      startSlotReady() {
+        starts++
+        assert.equal(running, true, 'a stopped slot must remain stopped')
+        return { ok: true, rust_ok: true }
+      },
+    })
+    const result = await installKernelTargets({
+      projectRoot: root,
+      targets: [{ ...target()[0], expected_tag: 'v1.4.113', reissue: true }],
+      cragSubscription: {
+        authorizeInstall(candidate) {
+          authorizations++
+          activateFixture(root, candidate)
+          authorized = true
+        },
+      },
+      ops: life.ops,
+    })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.equal(authorizations, 1)
+    assert.equal(starts, Number(running))
+    assert.equal(result.items[0].restarted, running)
+    const saved = getVm(root, vm.id)
+    assert.equal(saved.status, running ? 'running' : 'stopped')
+    assert.equal(saved.schedule_off, true)
+    assert.equal(saved.schedule_off_reason, 'manual')
+    assert.equal(saved.schedule_hold, undefined)
+  })
+}
+
+for (const patch of [{ runtime: { type: 'kvm' } }, { node_id: 'remote-node' }]) {
+  test(`subscription installation never binds unsupported placement ${JSON.stringify(patch)}`, async (t) => {
+    const { root, vm, home } = fixture(t, patch)
+    const before = fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`))
+    const result = await installKernelTargets({
+      projectRoot: root,
+      targets: [{ ...target()[0], expected_tag: 'v1.4.113', reissue: true }],
+      cragSubscription: {
+        authorizeInstall() {
+          assert.fail('KVM and cluster require a matching offline grant')
+        },
+      },
+      ops: {
+        describeKernelCatalog: () => [{ id: 'crag', ready: true, release_tag: 'v1.4.113' }],
+        checkCragLicense: () => ({ ok: false, code: 'license_required' }),
+        stopSlot() {
+          assert.fail('failed licensing must not stop the slot')
+        },
+      },
+    })
+    assert.equal(result.items[0].code, 'license_required')
+    assert.equal(result.items[0].stopped, false)
+    assert.deepEqual(fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`)), before)
+    assert.equal(fs.readFileSync(path.join(home, '.kin', 'kin-kernel.bin'), 'utf8'), 'previous-kernel')
   })
 }
 
@@ -712,7 +903,7 @@ test('cluster Docker CRAG install is not rejected as a local-only slot', async (
   assert.equal(result.items[0].stopped, false)
 })
 
-for (const stage of ['policy', 'materialize', 'config']) {
+for (const stage of ['policy', 'materialize', 'seed', 'config']) {
   test(`post-stop ${stage} failure retains previous selection and remains durably stopped`, async (t) => {
     const { root, vm } = fixture(t, { dataplane: 'crag', crag_kernel_version: 'v2' })
     const life = lifecycle(root, {
@@ -721,6 +912,13 @@ for (const stage of ['policy', 'materialize', 'config']) {
         : {}),
       ...(stage === 'materialize'
         ? { materializeResolvedKernel: () => ({ ok: false, code: 'disk_full', error: 'disk full' }) }
+        : {}),
+      ...(stage === 'seed'
+        ? {
+            initializeSlotSeedFiles: () => {
+              throw Object.assign(new Error('publish denied'), { code: 'seed_publish_failed' })
+            },
+          }
         : {}),
       ...(stage === 'config'
         ? {

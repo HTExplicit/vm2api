@@ -6,22 +6,18 @@
  * cluster_unavailable.
  *
  *   1. wait until every node that hosts a slot has a ready link
- *   2. update the trusted CRAG package, then install changed wrap slots once
- *      through the server's restart transaction; sync other payloads
+ *   2. sync the currently selected cache or factory payload through the server
  *   3. telemetry: publish the saved policy to supported Claude slots and await its acknowledgment
  */
 import fs from 'node:fs/promises'
 import http from 'node:http'
-import { setTimeout as delay } from 'node:timers/promises'
 import path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
-import { verifyCragV2Tree } from '../src/lib/vm/wrap-cli-runtime.mjs'
 import { isCodexVm } from '../src/lib/vm/vm-kind.mjs'
-import { updateCrag } from './update-crag.mjs'
 
 const root = String(process.argv[2] || process.env.KIN_PROJECT_ROOT || '/opt/vm2api').replace(/\/+$/, '')
 const concurrency = Number(process.argv[3] || 4)
-const cragTag = String(process.argv[4] || '')
 const port = String(process.env.PORT || '8787')
 const base = String(process.env.KIN_AUTO_SYNC_BASE || `http://127.0.0.1:${port}`).replace(/\/+$/, '')
 const envKey = String(process.env.VM2API_API_KEY || process.env.KIN_API_KEY || '').trim()
@@ -136,64 +132,12 @@ function summarizeKernelSync(report) {
   }
 }
 
-/** One post-upgrade pass; the installer owns each changed wrap slot's restart. */
-export async function refreshFleetKernels(projectRoot, vms, { api, cragUpdate = updateCrag, cragVersion = '' } = {}) {
-  if (vms.length && vms.every((vm) => isCodexVm(vm) && !vm.node_id)) {
-    return { ok: true, total: 0, ok_count: 0, failed_count: 0, changed_count: 0, items: [], crag: null }
+/** Sync the existing selected source once; downloading a different package is explicit. */
+export async function refreshFleetKernels(_projectRoot, vms, { api } = {}) {
+  if (!vms.length || vms.every((vm) => isCodexVm(vm) && !vm.node_id)) {
+    return { ok: true, total: 0, ok_count: 0, failed_count: 0, changed_count: 0, items: [] }
   }
-  const factory = path.join(projectRoot, 'share/crag/kernels/v2', process.arch === 'arm64' ? 'arm64' : 'amd64')
-  let crag = null
-  let hasFactory = false
-  try {
-    await fs.access(path.join(factory, 'manifest.json'))
-    hasFactory = true
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error
-  }
-  if (hasFactory) {
-    const verified = verifyCragV2Tree(factory)
-    if (!verified.ok) throw new Error(`CRAG factory invalid: ${verified.code}`)
-    crag = await cragUpdate(projectRoot, { tag: cragVersion, api: (endpoint, body) => api('POST', endpoint, body) })
-  }
-  const wrap = vms.filter(
-    (vm) =>
-      vm.family === 'claude' &&
-      vm.node_platform !== 'darwin' &&
-      (vm.resolved_dataplane || vm.dataplane || 'wrap') === 'wrap',
-  )
-  let checked = { ok: true, items: [] }
-  let installed = { ok: true, items: [] }
-  if (wrap.length) {
-    const version = await api('GET', '/api/panel/version')
-    if (!version.current_tag) throw new Error('running release tag is unavailable')
-    await api('POST', '/api/panel/kernels/pull', { kernel: 'cli-node', tag: version.current_tag })
-    checked = await api('POST', '/api/panel/wrap-cli/sync', { ids: wrap.map((vm) => vm.id), restart: false })
-    if (checked.ok !== true || checked.failed_count) throw new Error('wrap kernel inspection failed')
-    const targets = checked.items
-      .filter((item) => item.kernel_changed)
-      .map((item) => ({ id: item.id, kernel: 'cli-node' }))
-    if (targets.length) {
-      installed = await api('POST', '/api/panel/kernels/install', { targets })
-      if (installed.ok !== true || installed.failed_count) throw new Error('wrap kernel installation failed')
-    }
-  }
-  const managed = new Set(wrap.map((vm) => vm.id))
-  const rest = vms.filter((vm) => !managed.has(vm.id) && (vm.resolved_dataplane || vm.dataplane) !== 'crag')
-  const legacy = rest.length
-    ? await api('POST', '/api/panel/wrap-cli/sync', { ids: rest.map((vm) => vm.id), restart: true })
-    : { ok: true, items: [] }
-  const installedById = new Map(installed.items.map((item) => [item.id, item]))
-  const items = [...checked.items.map((item) => ({ ...item, ...installedById.get(item.id) })), ...legacy.items]
-  const failed_count = items.filter((item) => !item.ok).length
-  return {
-    ok: legacy.ok === true && failed_count === 0,
-    total: items.length,
-    ok_count: items.length - failed_count,
-    failed_count,
-    changed_count: items.filter((item) => item.kernel_changed).length,
-    items,
-    crag,
-  }
+  return api('POST', '/api/panel/wrap-cli/sync', { ids: vms.map((vm) => vm.id), restart: true })
 }
 
 async function main() {
@@ -227,7 +171,6 @@ async function main() {
       {
         api: async (method, endpoint, body) =>
           dataOf(endpoint, await call(key, method, endpoint, body, SYNC_TIMEOUT_MS)),
-        cragVersion: cragTag,
       },
     )
     const kernels = summarizeKernelSync(refreshed)
@@ -251,7 +194,6 @@ async function main() {
         ...report,
         skipped_not_applicable: vms.length - ids.length,
         kernel_sync: kernels,
-        crag: refreshed.crag,
       }),
     )
     if (report.skipped_count) {
