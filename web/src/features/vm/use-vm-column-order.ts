@@ -1,12 +1,6 @@
 import { useCallback, useState } from 'react'
 
-export const VM_COLUMN_KEYS = [
-  'vm',
-  'sched',
-  'status',
-  'usage',
-  'cost',
-] as const
+export const VM_COLUMN_KEYS = ['vm', 'status', 'usage', 'cost'] as const
 
 export type VmColumnKey = (typeof VM_COLUMN_KEYS)[number]
 

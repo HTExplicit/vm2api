@@ -22,7 +22,7 @@ const fixture = fileURLToPath(
 ).replaceAll("\\", "/");
 
 test(
-  "list scheduling uses one column and saves exact independent changes",
+  "list scheduling sits below usage and saves exact independent changes",
   { timeout: 90_000 },
   async (t) => {
     assert.ok(
@@ -82,6 +82,7 @@ test(
     const rejectedOrigins = [];
     const errors = [];
     const writes = [];
+    const switchWrites = [];
     const healthRequests = [];
     let rejectHealth = false;
     let role = "admin";
@@ -236,6 +237,15 @@ test(
           },
         });
       }
+      if (url.pathname === "/api/panel/vms/offline-slot/schedulable") {
+        assert.equal(request.method(), "POST");
+        const body = request.postDataJSON();
+        assert.deepEqual(Object.keys(body), ["schedulable"]);
+        switchWrites.push(body);
+        vm.schedulable = body.schedulable;
+        vm.schedule_state = body.schedulable ? "on" : "off";
+        return route.fulfill({ json: { ok: true, data: { vm } } });
+      }
       assert.equal(url.pathname, "/api/panel/vms/offline-slot");
       assert.equal(request.method(), "PATCH");
       const body = request.postDataJSON();
@@ -293,9 +303,15 @@ test(
     });
     await block(6).waitFor();
     assert.equal(await page.getByLabel(/额度待刷新/).count(), 0);
-    assert.equal(await bar.getByRole("button").count(), 10);
+    assert.equal(await bar.getByRole("button").count(), 11);
+    assert.equal(await auto.innerText(), "");
+    assert.equal(await page.getByText("调度", { exact: true }).count(), 0);
+    assert.equal(await page.getByText("用量窗口", { exact: true }).count(), 1);
     for (let n = 1; n <= 10; n++) assert.equal(await block(n).innerText(), "");
-    const boxes = await bar.getByRole("button").evaluateAll((buttons) =>
+    const manualButtons = bar.getByRole("button", {
+      name: /^offline-slot 调度优先级 \d+$/,
+    });
+    const boxes = await manualButtons.evaluateAll((buttons) =>
       buttons.map((el) => {
         const r = el.getBoundingClientRect();
         return { x: r.x, width: r.width, height: r.height };
@@ -305,18 +321,31 @@ test(
     for (let n = 1; n < boxes.length; n++)
       assert.ok(Math.abs(boxes[n].x - boxes[n - 1].x - boxes[n - 1].width) < 1);
     const geometry = await bar.evaluate((el) => {
-      const buttons = [...el.querySelectorAll("button")];
+      const buttons = [...el.querySelectorAll("button")].filter((button) =>
+        button.querySelector('[data-slot="priority-segment"]'),
+      );
       const segments = buttons.map((button) =>
         button.querySelector('[data-slot="priority-segment"]'),
       );
       const rect = el.getBoundingClientRect();
-      const cell = el.parentElement;
-      const firstRow = cell.firstElementChild;
+      const controls = el.parentElement;
+      const cell = controls.closest('[data-slot="vm-usage-cell"]');
+      const windows = cell.firstElementChild.getBoundingClientRect();
+      const toggle = controls.querySelector('[role="switch"]').getBoundingClientRect();
+      const automatic = el.querySelector('button').getBoundingClientRect();
+      const automaticSegment = el.querySelector('[data-slot="priority-auto-segment"]').getBoundingClientRect();
+      const firstManual = buttons[0].getBoundingClientRect();
       return {
         width: rect.width,
-        columnWidth: cell.parentElement.getBoundingClientRect().width,
-        firstRowHeight: firstRow.getBoundingClientRect().height,
-        firstRowGap: getComputedStyle(firstRow).columnGap,
+        cellWidth: cell.getBoundingClientRect().width,
+        belowWindows: controls.getBoundingClientRect().top >= windows.bottom,
+        switchCenter: toggle.top + toggle.height / 2,
+        barCenter: rect.top + rect.height / 2,
+        switchBeforeBar: toggle.right < rect.left,
+        automaticGap: firstManual.left - automatic.right,
+        automaticHeight: automaticSegment.height,
+        automaticTop: automaticSegment.top,
+        manualTop: buttons[0].querySelector('[data-slot="priority-segment"]').getBoundingClientRect().top,
         segments: segments.map((segment, index) => ({
           width: segment.getBoundingClientRect().width,
           height: segment.getBoundingClientRect().height,
@@ -330,14 +359,18 @@ test(
         ),
       };
     });
-    assert.equal(geometry.width, 240);
-    assert.equal(geometry.columnWidth, 256);
-    assert.equal(geometry.firstRowHeight, 24);
-    assert.equal(geometry.firstRowGap, "8px");
+    assert.ok(geometry.width >= 268);
+    assert.ok(geometry.cellWidth >= 308);
+    assert.equal(geometry.belowWindows, true);
+    assert.equal(geometry.switchBeforeBar, true);
+    assert.ok(Math.abs(geometry.switchCenter - geometry.barCenter) < 1);
+    assert.equal(geometry.automaticGap, 4);
+    assert.equal(geometry.automaticHeight, 6);
+    assert.equal(geometry.automaticTop, geometry.manualTop);
     assert.ok(
       geometry.segments.every(
         (segment) =>
-          segment.width === 24 && segment.height === 6 && segment.top === 5,
+          segment.width >= 24 && segment.height === 6 && segment.top === 9,
       ),
     );
     assert.deepEqual(
@@ -385,7 +418,7 @@ test(
         name: `${id} 调度优先级`,
         exact: true,
       });
-      assert.equal(await priority.locator("..").innerText(), "自动");
+      assert.equal(await priority.locator("..").innerText(), "");
     }
     const availableRow = page.locator("[data-vm-row]").filter({
       has: page.getByRole("group", {
@@ -460,14 +493,14 @@ test(
     await page.keyboard.press("Escape");
     assert.deepEqual(writes, [], "display options never modify a slot");
     assert.deepEqual(healthRequests, [], "display options never query a kernel");
-    const screenshots = path.join(root, ".tmp/11703-ui");
+    const screenshots = path.join(root, ".tmp/11704-ui");
     fs.mkdirSync(screenshots, { recursive: true });
     await availableRow.scrollIntoViewIfNeeded();
     await claudeRow.scrollIntoViewIfNeeded();
     const availableBounds = await availableRow.boundingBox();
     const claudeBounds = await claudeRow.boundingBox();
     await page.screenshot({
-      path: path.join(screenshots, "restored-status-rows.png"),
+      path: path.join(screenshots, "usage-scheduling-rows.png"),
       clip: {
         x: availableBounds.x,
         y: availableBounds.y,
@@ -521,6 +554,9 @@ test(
     );
     assert.equal(writes.length, 3);
     assert.deepEqual(writes.at(-1), { schedule_level: 8 });
+    assert.equal(await auto.isDisabled(), true);
+    await auto.evaluate((el) => el.click());
+    assert.equal(writes.length, 3);
     await block(10).evaluate((el) => el.click());
     assert.equal(writes.length, 3);
     releasePending();
@@ -551,6 +587,20 @@ test(
       0,
     );
     assert.deepEqual(healthRequests, []);
+    const scheduleSwitch = bar.locator("..").getByRole("switch");
+    await scheduleSwitch.click();
+    await page.waitForFunction(() =>
+      document.querySelector('[aria-label="offline-slot 调度优先级"]')
+        ?.parentElement.querySelector('[role="switch"]')?.getAttribute("aria-checked") === "true",
+    );
+    await scheduleSwitch.click();
+    await page.waitForFunction(() =>
+      document.querySelector('[aria-label="offline-slot 调度优先级"]')
+        ?.parentElement.querySelector('[role="switch"]')?.getAttribute("aria-checked") === "false",
+    );
+    assert.deepEqual(switchWrites, [{ schedulable: true }, { schedulable: false }]);
+    assert.equal(writes.length, 4);
+    assert.equal(await block(8).getAttribute("aria-pressed"), "true");
     const row = bar.locator("xpath=ancestor::*[@data-vm-row]");
     const expand = row.getByRole("button", {
       name: "展开 offline-slot 明细",
@@ -654,8 +704,7 @@ test(
         .click();
       await visualBar.scrollIntoViewIfNeeded();
       await page.evaluate(() => window.scrollTo(0, 0));
-      const first = await visualBar.boundingBox();
-      const cell = await visualBar.locator("..").boundingBox();
+      const cell = await visualBar.locator('xpath=ancestor::*[@data-slot="vm-usage-cell"]').boundingBox();
       const last = await page
         .locator("[data-vm-row]")
         .filter({
@@ -668,9 +717,9 @@ test(
       await page.screenshot({
         path: path.join(screenshots, `${name}-column.png`),
         clip: {
-          x: first.x - 4,
+          x: Math.max(0, cell.x - 4),
           y: cell.y - 4,
-          width: Math.min(430, page.viewportSize().width - first.x + 4),
+          width: Math.min(cell.width + 8, page.viewportSize().width - Math.max(0, cell.x - 4)),
           height: last.y + last.height - cell.y + 8,
         },
       });
@@ -688,7 +737,8 @@ test(
       layoutWidth: el.clientWidth,
       renderedWidth: el.getBoundingClientRect().width,
     }));
-    assert.deepEqual(zoomGeometry, { layoutWidth: 240, renderedWidth: 360 });
+    assert.ok(zoomGeometry.layoutWidth >= 268);
+    assert.ok(Math.abs(zoomGeometry.renderedWidth - zoomGeometry.layoutWidth * 1.5) < 2);
     await capture("dark-150pct");
     await page.evaluate(() => {
       document.documentElement.style.zoom = "";
@@ -738,11 +788,14 @@ test(
     await coarseBlock.waitFor();
     const coarseGeometry = await coarseBlock.evaluate((el) => ({
       target: el.getBoundingClientRect().height,
+      width: el.getBoundingClientRect().width,
       visible: el
         .querySelector('[data-slot="priority-segment"]')
         .getBoundingClientRect().height,
     }));
-    assert.deepEqual(coarseGeometry, { target: 40, visible: 6 });
+    assert.equal(coarseGeometry.target, 44);
+    assert.ok(coarseGeometry.width >= 44);
+    assert.equal(coarseGeometry.visible, 6);
     await coarseContext.close();
     for (role of ["user", "super"]) {
       await page.reload();

@@ -8,7 +8,7 @@ import {
 
 afterEach(() => vi.unstubAllGlobals())
 
-it('removes the old priority and request columns without moving saved columns', () => {
+it('removes retired columns without moving saved columns', () => {
   vi.stubGlobal('localStorage', {
     getItem: () =>
       JSON.stringify(['cost', 'type', 'usage', 'vm', 'sched', 'req', 'status']),
@@ -17,12 +17,12 @@ it('removes the old priority and request columns without moving saved columns', 
     return <output>{useVmColumnOrder().order.join(',')}</output>
   }
   expect(renderToStaticMarkup(<Columns />)).toBe(
-    '<output>cost,usage,vm,sched,status</output>'
+    '<output>cost,usage,vm,status</output>'
   )
 })
 
 describe('normalizeColumnOrder', () => {
-  it('drops retired type / req keys from a stored order and keeps the rest', () => {
+  it('drops retired type / req / sched keys from a stored order and keeps the rest', () => {
     expect(
       normalizeColumnOrder([
         'cost',
@@ -33,14 +33,13 @@ describe('normalizeColumnOrder', () => {
         'sched',
         'usage',
       ])
-    ).toEqual(['cost', 'vm', 'status', 'sched', 'usage'])
+    ).toEqual(['cost', 'vm', 'status', 'usage'])
   })
 
   it('fills missing keys and survives garbage', () => {
     expect(normalizeColumnOrder(['usage'])).toEqual([
       'usage',
       'vm',
-      'sched',
       'status',
       'cost',
     ])

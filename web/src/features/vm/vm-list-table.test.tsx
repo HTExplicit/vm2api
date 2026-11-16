@@ -23,7 +23,7 @@ vi.mock('./vm-owner-line', () => ({ VmRentedMark: () => null }))
 vi.mock('./vm-perms', () => ({ useVmPerms: () => ({ admin: false }) }))
 vi.mock('./use-vm-column-order', () => ({
   useVmColumnOrder: () => ({
-    order: ['vm', 'sched', 'status'],
+    order: ['vm', 'status', 'usage'],
     isDefault: true,
   }),
 }))
@@ -52,7 +52,9 @@ describe('VM scheduling priority', () => {
         weight: 42,
       }
       const list = render(vm)
-      expect(list).toContain('>调度</span>')
+      expect(list).not.toContain('>调度</span>')
+      expect(list).toContain('>用量窗口</span>')
+      expect(list).toContain('data-slot="vm-usage-cell"')
       expect(list).toContain('aria-label="vm-01 调度优先级"')
       expect(list).toContain('aria-description="手动调度优先级，当前等级 8"')
       expect(list).not.toMatch(/background-color:[^";]+[^>]*>调度优先级/)
