@@ -2,11 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import http from 'node:http'
-import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
 import { refreshFleetKernels } from '../../scripts/fleet-services.mjs'
-import { seedEncryptedPackage } from '../fixtures/crag-license.mjs'
 
 function runFleet(env) {
   return new Promise((resolve, reject) => {
@@ -296,62 +292,32 @@ test('a supported slot telemetry failure still makes fleet finalization fail', a
   )
 })
 
-test('trusted factory stays untouched in an all-local-Codex fleet', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-crag-'))
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  seedEncryptedPackage(root)
-  const result = await refreshFleetKernels(root, [{ id: 'gpt-a', family: 'codex' }], {
-    api: async () => assert.fail('local Codex has no slot payload to synchronize'),
-    cragUpdate: async () => assert.fail('local Codex must not download CRAG or change its pointer'),
-  })
-  assert.deepEqual(result, {
-    ok: true,
-    total: 0,
-    ok_count: 0,
-    failed_count: 0,
-    changed_count: 0,
-    items: [],
-    crag: null,
-  })
+test('all-local-Codex and empty fleets make no payload requests', async () => {
+  for (const vms of [[], [{ id: 'gpt-a', family: 'codex' }]]) {
+    const result = await refreshFleetKernels('/unused', vms, {
+      api: async () => assert.fail('there is no applicable slot payload to synchronize'),
+    })
+    assert.deepEqual(result, { ok: true, total: 0, ok_count: 0, failed_count: 0, changed_count: 0, items: [] })
+  }
 })
 
-test('wrap refresh pulls the running tag and installs changed slots once without legacy overlap', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-wrap-'))
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+test('fleet sync uses the existing selection once without downloading or installing a different package', async () => {
   const vms = [
-    { id: 'wrap-new', family: 'claude', resolved_dataplane: 'wrap', status: 'running', has_token: false },
+    { id: 'wrap-new', family: 'claude', resolved_dataplane: 'wrap', status: 'running' },
     { id: 'wrap-same', family: 'claude', resolved_dataplane: 'wrap', status: 'stopped' },
     { id: 'gpt-a', family: 'codex' },
     { id: 'crag-a', family: 'claude', resolved_dataplane: 'crag' },
   ]
   const calls = []
-  const api = async (method, endpoint, body) => {
-    calls.push({ method, endpoint, body })
-    if (endpoint === '/api/panel/version') return { current_tag: 'v1.4.6901' }
-    if (endpoint === '/api/panel/kernels/pull') return { kernel: { ready: true } }
-    if (endpoint === '/api/panel/kernels/install')
-      return { ok: true, items: [{ id: 'wrap-new', ok: true, restarted: true }] }
-    if (body.restart === false)
-      return {
-        ok: true,
-        items: [
-          { id: 'wrap-new', ok: true, kernel_changed: true },
-          { id: 'wrap-same', ok: true, kernel_changed: false },
-        ],
-      }
-    return { ok: true, items: [{ id: 'gpt-a', ok: true }] }
-  }
-  const result = await refreshFleetKernels(root, vms, { api })
-  assert.equal(result.ok, true)
-  assert.deepEqual(calls, [
-    { method: 'GET', endpoint: '/api/panel/version', body: undefined },
-    { method: 'POST', endpoint: '/api/panel/kernels/pull', body: { kernel: 'cli-node', tag: 'v1.4.6901' } },
-    { method: 'POST', endpoint: '/api/panel/wrap-cli/sync', body: { ids: ['wrap-new', 'wrap-same'], restart: false } },
-    {
-      method: 'POST',
-      endpoint: '/api/panel/kernels/install',
-      body: { targets: [{ id: 'wrap-new', kernel: 'cli-node' }] },
+  const report = { ok: true, items: vms.map((vm) => ({ id: vm.id, ok: true })) }
+  const result = await refreshFleetKernels('/unused', vms, {
+    api: async (method, endpoint, body) => {
+      calls.push({ method, endpoint, body })
+      return report
     },
-    { method: 'POST', endpoint: '/api/panel/wrap-cli/sync', body: { ids: ['gpt-a'], restart: true } },
+  })
+  assert.equal(result, report)
+  assert.deepEqual(calls, [
+    { method: 'POST', endpoint: '/api/panel/wrap-cli/sync', body: { ids: vms.map((vm) => vm.id), restart: true } },
   ])
 })

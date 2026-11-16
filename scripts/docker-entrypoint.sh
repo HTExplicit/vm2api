@@ -80,7 +80,7 @@ if [ -f /opt/vm2api/image-crag/kin-kernel ]; then
     mv -f "$dest.new" "$dest"
   fi
 fi
-node /opt/vm2api/scripts/publish-crag-factory.mjs "$ROOT"
+node /opt/vm2api/scripts/seed-crag.mjs "$ROOT" /opt/vm2api/image-crag
 
 if [ ! -S /var/run/docker.sock ]; then
   echo "vm2api: /var/run/docker.sock not mounted; slot create/start will fail." >&2

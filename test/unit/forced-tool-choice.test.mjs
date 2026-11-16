@@ -8,6 +8,7 @@ import { prepareAnthropicRequest } from '../../src/lib/protocol/anthropic-policy
 import { prepareCliHopBody } from '../../src/lib/protocol/outbound-attempt.mjs'
 import { getCapabilities, normalizePolicy, validateToolChoice } from '../../src/lib/protocol/model-policy.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
+import { finalizeWorkerPayload } from '../../src/lib/transport/go-worker-client.mjs'
 
 openDatabase({ dbPath: ':memory:' })
 after(() => closeDatabase())
@@ -64,8 +65,91 @@ test('supported forced choices survive API and CLI assembly without adding stric
   }
 })
 
+test('worker defaults do not enable thinking when Haiku forces a tool', () => {
+  for (const model of ['claude-haiku-4-5', 'claude-haiku-5-5']) {
+    for (const choice of [{ type: 'tool', name: 'chosen' }, { type: 'any' }]) {
+      const body = { ...fixture(), model, tool_choice: choice }
+      delete body.thinking
+      assert.doesNotThrow(() => validateToolChoice(body))
+      for (const cragPrint of [false, true]) {
+        const out = finalizeWorkerPayload({
+          body: cragPrint ? body : prepareCliHopBody(body),
+          cliHop: true,
+          cragPrint,
+          exec: { workerStatus: { runtime_variant: 'crag-v2', capabilities: ['model_directive'] } },
+        }).body
+        assert.deepEqual(out.thinking, { type: 'disabled' })
+        assert.deepEqual(out.tool_choice, choice)
+        assert.equal(out.tools[0].strict, undefined)
+        assert.equal(out.crag_model?.capabilities.requires_adaptive, cragPrint ? false : undefined)
+        assert.equal(
+          out.crag_model?.capabilities.supports_adaptive,
+          cragPrint ? model === 'claude-haiku-5-5' : undefined,
+        )
+      }
+      assert.equal(body.thinking, undefined)
+    }
+  }
+})
+
+test('Haiku rejects explicit effort that would turn thinking back on with a forced tool', () => {
+  for (const choice of [{ type: 'tool', name: 'chosen' }, { type: 'any' }]) {
+    for (const effort of ['xhigh', 'max']) {
+      for (const controls of [
+        { output_config: { effort } },
+        { reasoning_effort: effort },
+        { reasoning: { effort } },
+        { output_config: { effort: 'low' }, messages: [{ ...messages[0], output_config: { effort } }] },
+        { output_config: { effort }, messages: [{ ...messages[0], output_config: { effort: 'low' } }] },
+      ]) {
+        const body = { ...fixture(), ...controls, tool_choice: choice }
+        const before = structuredClone(body)
+        assert.throws(
+          () => validateToolChoice(body),
+          (error) => error.status === 400 && error.body.error.code === 'tool_choice_incompatible',
+        )
+        assert.deepEqual(body, before)
+      }
+    }
+    assert.doesNotThrow(() =>
+      validateToolChoice({ ...fixture(), tool_choice: choice, output_config: { effort: 'high' } }),
+    )
+    assert.throws(
+      () =>
+        validateToolChoice({ ...fixture(), tool_choice: choice, thinking: { type: 'disabled', budget_tokens: 1024 } }),
+      (error) => error.status === 400 && error.body.error.code === 'tool_choice_incompatible',
+    )
+  }
+})
+
+test('Fable uses its adaptive default without changing compatible caller tool choices', () => {
+  for (const model of ['fable', 'claude-fable-5.1', 'claude-fable-5-2']) {
+    for (const thinking of [undefined, { type: 'disabled' }, { type: 'disabled', display: 'summarized' }]) {
+      const body = { ...fixture(), model, tool_choice: { type: 'auto' }, thinking }
+      const before = structuredClone(body)
+      assert.doesNotThrow(() => validateToolChoice(body))
+      for (const out of [
+        prepareAnthropicRequest(body),
+        finalizeWorkerPayload({ body: prepareCliHopBody(body), cliHop: true }).body,
+        finalizeWorkerPayload({
+          body,
+          cliHop: true,
+          exec: { workerStatus: { runtime_variant: 'crag-v2', capabilities: ['model_directive'] } },
+        }).body,
+      ]) {
+        assert.equal(out.thinking?.type, 'adaptive')
+        if (thinking?.display) assert.equal(out.thinking.display, thinking.display)
+        assert.deepEqual(out.tool_choice, body.tool_choice)
+        assert.equal(out.max_tokens, body.max_tokens)
+        if (out.crag_model) assert.equal(out.crag_model.capabilities.requires_adaptive, true)
+      }
+      assert.deepEqual(body, before)
+    }
+  }
+})
+
 test('unsupported thinking and malformed choices fail explicitly', () => {
-  for (const model of ['claude-opus-5-5', 'claude-opus-5.5', 'claude-sonnet-5-5']) {
+  for (const model of ['claude-opus-5-5', 'claude-opus-5.5', 'claude-sonnet-5-5', 'fable', 'claude-fable-5-2']) {
     const input = { ...fixture(), model }
     const before = structuredClone(input)
     assert.throws(

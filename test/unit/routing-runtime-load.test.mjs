@@ -87,6 +87,40 @@ test('applyVmSessionSlots updates only native admission policy', () => {
   }
 })
 
+test('a stopped CRAG seat edit publishes native policy without changing power or scheduling intent', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-routing-stopped-crag-'))
+  const id = 'vm-stopped-crag'
+  const file = path.join(root, 'vms', `${id}.json`)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const vm = {
+    id,
+    status: 'stopped',
+    dataplane: 'crag',
+    crag_kernel_version: 'v2',
+    schedule_off: true,
+    schedulable: false,
+    runtime: { stopped: true },
+    policy: { priority: 8, sessionSlots: 20, sessionSlotsOverride: false },
+  }
+  fs.writeFileSync(file, JSON.stringify(vm))
+  t.after(() => fs.rmSync(root, { recursive: true }))
+  const runtime = createRoutingRuntime({
+    cfg: { paths: { project: root } },
+    routingConfig: { inference: { dataplane: 'crag', prewarm_enabled: true, session_slots: 10 } },
+  })
+  runtime.applyVmSessionSlots(id, 4)
+  const saved = JSON.parse(fs.readFileSync(file))
+  assert.equal(saved.status, 'stopped')
+  assert.deepEqual(saved.runtime, vm.runtime)
+  assert.equal(saved.schedule_off, true)
+  assert.equal(saved.schedulable, false)
+  assert.equal(saved.schedule_hold, undefined)
+  assert.deepEqual(saved.policy, { priority: 8, sessionSlots: 4, sessionSlotsOverride: true })
+  const config = JSON.parse(fs.readFileSync(path.join(root, 'vms', id, 'run', 'kernel.json')))
+  assert.equal(config.session_slots, 4)
+  assert.equal(config.prewarm_enabled, true)
+})
+
 test('persistRoutingPatch reconciles inherited Claude session slots and preserves overrides', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-routing-session-default-'))
   const vms = path.join(root, 'vms')

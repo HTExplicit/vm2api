@@ -21,6 +21,8 @@ import { isKvmRuntime } from './runtime-kind.mjs'
 import { startSlotReady, stopSlot } from './slot-runtime.mjs'
 import { officialCcUidGid, suspendVmRuntimeRestart } from './vm-runtime.mjs'
 import { materializeResolvedKernel } from './wrap-cli-runtime.mjs'
+import { initializeSlotSeedFiles } from './slot-seed.mjs'
+import { slotHost } from './slot-host.mjs'
 import { pushKernelSelection } from '../cluster/remote-slot-files.mjs'
 import { accountIdOf } from '../pool/pool-scheduler.mjs'
 import { unitCircuit } from '../pool/unit-circuit.mjs'
@@ -129,6 +131,12 @@ export function validateKernelTargets(projectRoot, targets) {
     if (target.payload_tag !== undefined && (target.kernel !== 'crag' || !isCragPayloadTag(target.payload_tag))) {
       return { ok: false, status: 400, code: 'kernel_target_invalid', error: 'CRAG 载荷版本无效' }
     }
+    if (
+      target.reissue !== undefined &&
+      (target.reissue !== true || target.kernel !== 'crag' || !(target.payload_tag || target.expected_tag))
+    ) {
+      return { ok: false, status: 400, code: 'kernel_target_invalid', error: '重签必须明确指定 CRAG 安装包版本' }
+    }
     if (ids.has(target.id)) {
       return { ok: false, status: 400, code: 'kernel_target_duplicate', error: '同一虚拟机不能重复选择' }
     }
@@ -148,6 +156,7 @@ export async function installKernelTargets({
   routing = {},
   watchdog,
   poolScheduler,
+  cragSubscription,
   ops = {},
   resumeId = null,
 }) {
@@ -216,11 +225,24 @@ export async function installKernelTargets({
           const changedPayload = (stopped = false) =>
             failure(target, 'crag_payload_changed', 'CRAG 下载版本已变更，请刷新并重新确认安装', stopped)
           if (!matchesPayload(product)) return changedPayload()
-          if (target.kernel === 'crag') {
-            const grant = (ops.checkCragLicense || checkCragLicense)(projectRoot, desired, routing, {
-              preferInstalled: false,
-            })
-            if (!grant.ok) return failure(target, grant.code || 'license_required', grant.error || '请先激活 CRAG 授权')
+          const licenseCheck = ops.checkCragLicense || checkCragLicense
+          const checkTargetLicense = () => licenseCheck(projectRoot, desired, routing, { preferInstalled: false })
+          const grant = target.kernel === 'crag' ? checkTargetLicense() : null
+          const useSubscription =
+            grant &&
+            !grant.ok &&
+            ['license_required', 'license_payload_key_mismatch'].includes(grant.code) &&
+            target.reissue === true &&
+            !resumeId &&
+            !clusterVm &&
+            !isKvmRuntime(vm) &&
+            !!cragSubscription?.authorizeInstall
+          if (grant && !grant.ok && !useSubscription) {
+            const message =
+              grant.code === 'license_payload_key_mismatch'
+                ? '下载包与已有许可使用不同的加密密钥。请选用兼容包或为当前包激活许可。'
+                : grant.error || '请先激活 CRAG 授权'
+            return failure(target, grant.code || 'license_required', message)
           }
           phase = 'kernel_operation_persist_failed'
           operationId = resumeId || randomUUID()
@@ -253,6 +275,23 @@ export async function installKernelTargets({
                 `缓存版本已变化，请重新拉取并确认 ${target.expected_tag}`,
               )
             if (!matchesPayload(current)) return changedPayload()
+          }
+          if (useSubscription) {
+            try {
+              await cragSubscription.authorizeInstall(desired)
+            } catch (error) {
+              const code = error?.code || 'crag_subscription_install_failed'
+              const messages = {
+                host_subscription_inactive: '本机没有已激活且有效的宿主订阅。请先激活订阅，或选用现有许可兼容的包。',
+                slot_limit_reached: '宿主订阅没有剩余绑定槽位。请释放额度，或选用现有许可兼容的包。',
+                crag_subscription_sync_pending: '上一次订阅操作未确认。请先同步宿主订阅状态，再重试重装。',
+                crag_subscription_authority_unavailable: '授权服务器未确认本次操作。请先刷新宿主订阅状态，再重试重装。',
+              }
+              const message = Object.hasOwn(messages, code) ? messages[code] : `未能为下载包签发本槽许可（${code}）。`
+              return failure(target, code, message)
+            }
+            const grant = checkTargetLicense()
+            if (!grant.ok) return failure(target, grant.code || 'license_required', grant.error || '重签许可校验失败')
           }
           phase = 'kernel_stop_failed'
           const halt = await (ops.stopSlot || stopSlot)(vm)
@@ -307,6 +346,8 @@ export async function installKernelTargets({
             interrupted = baked && INTERRUPTED_COMMAND.test(laid?.code || '')
             return failure(target, laid?.code || phase, laid?.error || '内核文件安装失败', true)
           }
+          phase = 'kernel_seed_failed'
+          await (ops.initializeSlotSeedFiles || initializeSlotSeedFiles)(projectRoot, candidate, slotHost(candidate))
           phase = 'kernel_config_failed'
           const config = (ops.writeKernelConfig || writeKernelConfig)(projectRoot, candidate, {
             routing,

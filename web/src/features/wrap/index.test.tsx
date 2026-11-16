@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import type { Vm } from '@/types/panel-vm'
+import type { CragLicenseStatus, Vm } from '@/types/panel-vm'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CragHostStatus } from '@/features/vm/queries'
@@ -9,6 +9,8 @@ import type { KernelInstallation } from './queries'
 const state = vi.hoisted(() => ({
   vms: [] as Vm[],
   installations: {} as Record<string, KernelInstallation>,
+  licenses: {} as Record<string, CragLicenseStatus>,
+  installLicenses: undefined as Record<string, CragLicenseStatus> | undefined,
   role: 'admin',
   host: undefined as CragHostStatus | undefined,
   hostError: false,
@@ -45,7 +47,8 @@ vi.mock('@tanstack/react-query', async (importOriginal) => ({
             kernels: [
               { id: 'crag', paid: true, ready: true, version: '3.0.8' },
             ],
-            licenses: {},
+            licenses: state.licenses,
+            install_licenses: state.installLicenses,
             installations: state.installations,
           }
         : queryKey.includes('dashboard')
@@ -80,12 +83,42 @@ function render(vm: Partial<Vm> = {}) {
 
 beforeEach(() => {
   state.installations = {}
+  state.licenses = {}
+  state.installLicenses = undefined
   state.role = 'admin'
   state.host = undefined
   state.hostError = false
   state.hostEnabled = false
   state.hostInterval = undefined
 })
+
+it.each(['host', 'device', 'kernel'] as const)(
+  'offers subscription fallback with a valid %s permit for the old package',
+  (scope) => {
+    state.licenses['vm-old'] = {
+      status: 'valid',
+      valid: true,
+      vm_id: 'vm-old',
+      scope,
+    }
+    state.installLicenses = {
+      'vm-old': {
+        status: 'invalid',
+        valid: false,
+        vm_id: 'vm-old',
+        code: 'license_payload_key_mismatch',
+      },
+    }
+    const vm = { runtime_type: 'docker', resolved_dataplane: 'crag' } as const
+    expect(render(vm)).toContain('确认重装时会尝试使用本机已激活的宿主订阅')
+    expect(render(vm)).toContain('授权有效')
+    expect(render({ ...vm, node_id: 'cluster-node' })).toContain(
+      '当前下载包需要匹配的离线许可'
+    )
+    state.installLicenses = { ...state.licenses }
+    expect(render(vm)).not.toContain('确认重装时会尝试使用本机已激活的宿主订阅')
+  }
+)
 
 describe('KVM CRAG repair on the kernel page', () => {
   it('offers explicit CRAG reinstall when the current kernel is cli-node', () => {

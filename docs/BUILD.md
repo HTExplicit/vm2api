@@ -4,7 +4,7 @@ git 里只有源码。`bin/`、`web/dist`、`share/crag` 与 `share/wrap-cli` �
 
 - `web/dist`、`kin-api-kernel`、`kin-redact` 与 `kin-egress` 在最终控制面镜像内从 fork 源码构建。`kin-egress` 保留 fork 的出口逻辑并包含 HTTP CONNECT 支持。
 - 其余 linux amd64 kernel / helper、Claude CLI、完整签名加密 CRAG native v2 包与 glibc shim 由 [`deploy/payload.json`](../deploy/payload.json) 按大小和 SHA-256 固定。清单的 `release` 指向已公开、不可变的 payload Release，可独立于应用版本；`npm run fetch:payload` 与镜像构建使用同一清单，校验失败即停止。
-- 当前载荷来源为官方 `payload-2026.11.16-crag-3.1.1`，使用 CRAG `3.1.1` standard 原签名包；CLI `2.1.321` 缓存 TTL 修复字节与其余固定资产保持。CRAG 在私有仓库 `dofastted/crag` 构建，公开资产及原始 `SOURCES.json` 由供应方的 vm2api payload Release 分发。应用、发行工作流及资产来源见 [110 供应来源记录](releases/v1.4.110-binaries.json)，签名包及来源声明见 [CRAG 3.1.1 来源](releases/v1.4.110-crag.json)。这些记录由 fork 根据供应方公开发行整理，不声明独立重建或重签；来源与完整性校验不等于生产运行验收。
+- 当前载荷来源为官方 `payload-2026.11.16-crag-3.1.2`，使用 CRAG `3.1.2` standard 原签名包；CLI `2.1.321` 缓存 TTL 修复字节与其余固定资产保持。CRAG 在私有仓库 `dofastted/crag` 构建，公开资产及原始 `SOURCES.json` 由供应方的 vm2api payload Release 分发。应用、发行工作流及资产来源见 [113 供应来源记录](releases/v1.4.113-binaries.json)，签名包及来源声明见 [CRAG 3.1.2 来源](releases/v1.4.113-crag.json)。这些记录由 fork 根据供应方公开发行整理，不声明独立重建或重签；来源与完整性校验不等于生产运行验收。
 
 ## 完整应用交付
 
@@ -12,7 +12,7 @@ git 里只有源码。`bin/`、`web/dist`、`share/crag` 与 `share/wrap-cli` �
 
 1. 下载并校验目标正式版清单引用的完整资产集，只更新来源可核验的成员，不从未提交的本地 `bin/` 取出厂文件。`--pin` 会重算全部本地文件，仅用于已完整核验的隔离 staging；再以 `--check` 校验、`--stage <目录>` 导出同名资产。
 2. 保持载荷下载源与应用版本分离。清单只引用已经公开下载的不可变发行；CRAG 的 `crag_release` 指定独立安装包版本，完整归档由 `share/crag/crag-v2-licensed-amd64.tar.gz` 清单项交付，并与同包九个出厂成员核验签名和字节一致。
-3. 出厂包固定为 standard；legacy 包按面板明确选择的独立版本安装，不混入 standard 工厂。迁移保持原授权材料和现有槽选择；预装不激活授权或切换内核。提交清单、构建来源、应用 `VERSION` 与 `CHANGELOG.md`，通过 PR CI 后合并。tag 落在包含这些改动的云端合并结果，不能重打历史 tag。
+3. 镜像出厂包固定为 3.1.2 standard；宿主首次缺少工厂时预装，已有工厂、自定义来源及下载选择保留。legacy 包按面板明确选择的独立版本安装，不混入 standard 工厂。迁移保持原授权材料和现有槽选择；预装不激活授权或切换内核。提交清单、构建来源、应用 `VERSION` 与 `CHANGELOG.md`，通过 PR CI 后合并。tag 落在包含这些改动的云端合并结果，不能重打历史 tag。
 4. 推送 tag 后先建草稿 Release，再构建并推送 linux/amd64 控制面版本镜像。`scripts/release-assets.mjs` 从该最终镜像的精确 digest 提取 22 个上游固定资产和 fork 自编 `kin-egress`，核验来源后生成 `build-provenance.json`，共 24 个附件。
 5. 核对附件与镜像，并确认 GHCR 匿名可读取后，工作流才移动 `latest` 并公开 Release。当前不构建 ARM64 helper、ARM64 控制面镜像或多架构 manifest；不另附 `payload.json` 或 `SHA256SUMS`。
 6. 发布后按目标版本部署并核验控制面与运行中进程。包下载和出厂文件更新不代表槽内进程已更新；安装、升级与恢复保持现有启停、人工调度及内核选择。CRAG 原生交接只按运行中内核声明的能力启用。
@@ -134,7 +134,7 @@ docker compose up -d --build
 curl -sS --noproxy '*' http://127.0.0.1:8787/health
 ```
 
-槽位容器不会被升级脚本无条件 `docker rm`。从 1.2.22 开始，一键更新默认把 `share/wrap-cli` 同步到本机槽并重启槽内 dataplane；集群槽在同一次同步里重建内容哈希镜像并换容器。仅在明确需要延后时使用 `--no-sync-wrap`。
+槽位容器不会被升级脚本无条件 `docker rm`。一键更新不主动拉取最新 CRAG 或当前应用版本的 CLI，收尾仍按当前模板或已选缓存同步适用槽：有字节变化时可能重启运行中的 dataplane，停止槽保持停止；集群槽按内容哈希复用或更新镜像。这不是永久固定槽内版本。仅在明确需要延后时使用 `--no-sync-wrap`。
 
 **本机 Node + systemd**
 

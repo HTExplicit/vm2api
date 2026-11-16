@@ -11,7 +11,7 @@ vi.mock('./vm-action-menu', () => ({ VmActionMenu: () => null }))
 vi.mock('./vm-owner-line', () => ({ VmRentedMark: () => null }))
 vi.mock('./vm-perms', () => ({ useVmPerms: () => ({ admin: false }) }))
 vi.mock('./use-vm-column-order', () => ({
-  useVmColumnOrder: () => ({ order: ['vm', 'type'], isDefault: true }),
+  useVmColumnOrder: () => ({ order: ['vm', 'sched'], isDefault: true }),
 }))
 vi.mock('@/components/ui/dialog', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/ui/dialog')>()),
@@ -20,7 +20,9 @@ vi.mock('@/components/ui/dialog', async (importOriginal) => ({
 
 function render(over: Partial<Vm> = {}) {
   return renderToStaticMarkup(
-    <VmTable vms={[{ id: 'vm-01', email: 'account@example.com', ...over }]} />
+    <QueryClientProvider client={new QueryClient()}>
+      <VmTable vms={[{ id: 'vm-01', email: 'account@example.com', ...over }]} />
+    </QueryClientProvider>
   )
 }
 
@@ -36,9 +38,10 @@ describe('VM scheduling priority', () => {
         weight: 42,
       }
       const list = render(vm)
-      expect(list).toContain('>调度优先级</')
+      expect(list).toContain('>调度</span>')
+      expect(list).toContain('aria-label="vm-01 调度优先级"')
       expect(list).toContain(
-        '>调度优先级 <span class="font-semibold tabular-nums text-blue-800 dark:text-blue-200">8</span>'
+        '手动 <span class="font-semibold tabular-nums text-blue-800 dark:text-blue-200">8</span>'
       )
       expect(list).not.toMatch(/background-color:[^";]+[^>]*>调度优先级/)
       expect(list).not.toMatch(/等级|权重/)
@@ -59,7 +62,7 @@ describe('VM scheduling priority', () => {
 
   it('does not substitute legacy weight when priority is missing', () => {
     expect(render({ weight: 4 })).toContain(
-      '>调度优先级 <span class="font-semibold tabular-nums text-muted-foreground">—</span>'
+      '自动 <span class="font-semibold tabular-nums text-muted-foreground">—</span>'
     )
   })
 })

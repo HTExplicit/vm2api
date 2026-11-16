@@ -71,6 +71,9 @@ jobs:
           failed=0
           for file in \
             test/unit/forced-tool-choice.test.mjs \
+            test/unit/haiku-55-policy.test.mjs \
+            test/unit/opus-55-policy.test.mjs \
+            test/unit/model-policy-fable51.test.mjs \
             test/unit/sonnet-55-policy.test.mjs \
             test/unit/between-tools.test.mjs \
             test/unit/between-tools-ingress.test.mjs \
@@ -312,6 +315,8 @@ jobs:
             test/unit/panel-vm-create.test.mjs \
             test/unit/docker-slot-cpu.test.mjs \
             test/unit/slot-shell-kvm.test.mjs \
+            test/unit/health-probe.test.mjs \
+            test/unit/slot-seed.test.mjs \
             test/unit/vm-package.test.mjs; do
             node --test "$file" || failed=$((failed + 1))
           done
@@ -371,6 +376,8 @@ jobs:
           pnpm exec vitest run src/features/risk/jev-usage.test.tsx
           pnpm exec vitest run src/features/cluster/model.test.ts src/features/cluster/connection-rows.test.ts
           pnpm exec vitest run src/features/billing/crag-commerce.test.tsx src/features/billing/crag-plan-picker.test.tsx src/features/billing/crag-shop.test.tsx src/features/vm/vm-type-visual.test.ts src/features/vm/vm-owner.test.ts src/features/vm/vm-list-table.test.tsx src/lib/login-terminal.test.ts src/lib/cred-type.test.ts src/lib/vm-usage.test.ts
+          pnpm exec vitest run src/features/billing/crag-plan-content.test.tsx src/features/billing/crag-preview-channel.test.tsx src/features/billing/crag-preview-field.test.tsx src/features/billing/crag-preview.test.tsx src/lib/release-check.test.ts
+          pnpm exec vitest run src/features/vm/vm-scheduling-cell.test.tsx src/features/vm/use-vm-column-order.test.tsx
           pnpm build
       - name: Platform configuration retry UI
         run: node scripts/smoke-platform-retry-ui.mjs
@@ -384,6 +391,10 @@ jobs:
         env:
           UI_BROWSER_EXE: /usr/bin/google-chrome
         run: node --test test/browser/proxy-kvm.test.mjs
+      - name: Direct scheduling priority controls
+        env:
+          UI_BROWSER_EXE: /usr/bin/google-chrome
+        run: node --test test/browser/scheduling.test.mjs
       - name: Account API key management UI
         run: node scripts/smoke-openai-apikey-ui.mjs
       - name: Browser close retry UI

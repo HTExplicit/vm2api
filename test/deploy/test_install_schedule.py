@@ -77,7 +77,7 @@ docker() {
                             self.assertEqual(result.returncode, int(should_refresh and failed), result.stderr)
                             lines = trace.read_text().splitlines() if trace.exists() else []
                             self.assertEqual(lines, [
-                                "exec vm2api node /opt/vm2api/scripts/fleet-services.mjs /opt/vm2api 4 v2.0.2"
+                                "exec vm2api node /opt/vm2api/scripts/fleet-services.mjs /opt/vm2api 4"
                             ] if should_refresh else [])
                             if should_refresh and failed:
                                 self.assertNotIn("安装完成", result.stdout)

@@ -149,14 +149,15 @@ export async function applyNativeTelemetry({
   const initial = { ok: false, wrote: false, published: false, applied: false, state: 'unknown' }
   if (!vm?.id || !projectRoot) return { ...initial, code: 'invalid_vm' }
   const vmPath = path.join(projectRoot, 'vms', `${vm.id}.json`)
-  return withVmLock(`seed-publication:${vmPath}`, async () => {
-    const result = { ...initial, supported: true }
-    const current = () => {
-      const record = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-      if (record.id !== vm.id) throw new Error('vm_record_changed')
-      return record
-    }
-    try {
+  const result = { ...initial, supported: true }
+  const current = () => {
+    const record = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
+    if (record.id !== vm.id) throw new Error('vm_record_changed')
+    return record
+  }
+  let restartRequest
+  try {
+    const publication = await withVmLock(`seed-publication:${vmPath}`, async () => {
       let record = current()
       let host = slotHost(record)
       if (host.native || normalizeVmKind(record).kind !== 'claude') {
@@ -219,18 +220,10 @@ export async function applyNativeTelemetry({
         const verified = await verifyCragTelemetry(exec, enabled, timeoutMs)
         if (publicationRevision(current()) !== revision) return superseded
         if (verified.code !== 'telemetry_restart_required' || !lifecycle) return { ...result, ...verified }
-        const restarted = await restartForCragTelemetry({
-          projectRoot,
-          vmPath,
-          current,
-          revision,
-          enabled,
-          timeoutMs,
-          lifecycle,
-          ops,
-        })
-        if (publicationRevision(current()) !== revision) return superseded
-        return { ...result, ...restarted }
+        // The caller's lifecycle operation takes VM then seed-publication.
+        // Complete publication before acquiring that VM lock for a restart.
+        restartRequest = { projectRoot, vmPath, current, revision, enabled, timeoutMs, lifecycle, ops }
+        return result
       }
       const written = syncNativeTelemetry(record, projectRoot, routing, { publish: false })
       if (!written.supported || !written.wrote) return { ...result, code: written.error || 'telemetry_config_failed' }
@@ -271,18 +264,24 @@ export async function applyNativeTelemetry({
         await sleep(100)
       } while (Date.now() < deadline)
       return { ...result, code: 'telemetry_not_ready', error: 'native telemetry did not acknowledge policy' }
-    } catch {
-      return {
-        ...result,
-        code: result.published
-          ? 'telemetry_observation_unavailable'
-          : result.wrote
-            ? 'telemetry_publish_failed'
-            : 'telemetry_config_failed',
-        error: 'VM telemetry configuration is unavailable',
-      }
+    })
+    if (!restartRequest) return publication
+    const restarted = await restartForCragTelemetry(restartRequest)
+    if (publicationRevision(current()) !== restartRequest.revision) {
+      return { ...result, code: 'telemetry_publication_superseded', error: 'VM 配置已更改，未确认遥测应用' }
     }
-  })
+    return { ...result, ...restarted }
+  } catch {
+    return {
+      ...result,
+      code: result.published
+        ? 'telemetry_observation_unavailable'
+        : result.wrote
+          ? 'telemetry_publish_failed'
+          : 'telemetry_config_failed',
+      error: 'VM telemetry configuration is unavailable',
+    }
+  }
 }
 
 function sleep(ms) {
