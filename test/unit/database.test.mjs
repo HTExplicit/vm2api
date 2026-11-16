@@ -176,10 +176,11 @@ test('migration 053 adds unknown observed models without rewriting historical mo
     `)
     const before = { ...db.prepare('SELECT * FROM usage_logs WHERE id = ?').get('log-legacy') }
     applyMigrations(db, { migrationsDir: migrations })
-    const { sent_model, upstream_response_model, failure_diagnostics_json, ...after } = db
+    const { sent_model, upstream_response_model, failure_diagnostics_json, usage_account_id, ...after } = db
       .prepare('SELECT * FROM usage_logs WHERE id = ?')
       .get('log-legacy')
     assert.equal(failure_diagnostics_json, null)
+    assert.equal(usage_account_id, null)
     assert.equal(sent_model, null)
     assert.equal(upstream_response_model, null)
     assert.deepEqual(after, before)
@@ -203,6 +204,76 @@ test('migrations are idempotent across reopen', () => {
   const db = openDatabase({ dataDir: tmp })
   const rows = db.prepare('SELECT version FROM schema_migrations').all()
   assert.equal(rows.length, new Set(rows.map((r) => r.version)).size)
+})
+
+test('migration 059 onward preserves the published 9102 ledger, browser state and diagnostics', () => {
+  const migrations = path.resolve('src/lib/db/migrations')
+  const oldDir = path.join(tmp, 'published-9102')
+  fs.mkdirSync(oldDir)
+  for (const file of fs.readdirSync(migrations)) {
+    if (file.endsWith('.sql') && file < '059') fs.copyFileSync(path.join(migrations, file), path.join(oldDir, file))
+  }
+  const dbPath = path.join(tmp, 'upgrade-9102.db')
+  let db = new DatabaseSync(dbPath)
+  try {
+    applyMigrations(db, { migrationsDir: oldDir })
+    db.exec(`
+      INSERT INTO users (id, email, username, password_hash) VALUES ('kept-user', 'kept@example.test', 'kept-user', 'kept-hash');
+      INSERT INTO api_keys (id, key, key_hash, quota_used) VALUES ('kept-key', 'kept-secret', 'kept-key-hash', 7);
+      INSERT INTO accounts (id, vm_id, credentials, schedulable) VALUES ('kept-account', 'kept-slot', '{"refresh":"kept"}', 0);
+      INSERT INTO vms (id, status, vm_json, access_token, refresh_token, schedulable)
+        VALUES ('kept-slot', 'stopped', '{"id":"kept-slot","schedule_off":true}', 'kept-access', 'kept-refresh', 0);
+      INSERT INTO slot_browser_profiles (vm_id, fingerprint_json, storage_state_enc, billing_session_enc, created_at, updated_at)
+        VALUES ('kept-slot', 'kept-fingerprint', 'kept-storage', 'kept-billing', 'created', 'updated');
+      INSERT INTO openai_api_accounts (account_id, fingerprint_json, storage_state_enc, created_at, updated_at)
+        VALUES ('kept-account', 'kept-platform-fingerprint', 'kept-platform-storage', 'created', 'updated');
+      INSERT INTO usage_logs (id, request_id, created_at, status, error_code, input_tokens, output_tokens, total_cost, failure_diagnostics_json)
+        VALUES ('kept-log', 'kept-request', 'before', 502, 'ECONNRESET', 12, 4, 0.03, '{"phase":"stream","kernelRunId":"kept-run"}');
+      UPDATE settings SET value = 'true' WHERE key = 'account_browser_shard_migrated';
+    `)
+    const preservedTables = [
+      'users',
+      'api_keys',
+      'accounts',
+      'vms',
+      'slot_browser_profiles',
+      'openai_api_accounts',
+      'settings',
+    ]
+    const before = Object.fromEntries(
+      preservedTables.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()]),
+    )
+    const beforeLogs = db.prepare('SELECT * FROM usage_logs').all()
+    const ledger = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()
+    const oldColumns = db
+      .prepare('PRAGMA table_info(usage_logs)')
+      .all()
+      .map((row) => row.name)
+    assert.deepEqual(applyMigrations(db, { migrationsDir: migrations }), [
+      '059_account_lifetime_usage.sql',
+      '060_crag_shop_orders.sql',
+      '061_crag_shop_commerce.sql',
+      '062_crag_shop_activation.sql',
+    ])
+    assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '059' ORDER BY version").all(), ledger)
+    for (const table of preservedTables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), before[table])
+    assert.deepEqual(db.prepare(`SELECT ${oldColumns.join(', ')} FROM usage_logs`).all(), beforeLogs)
+    assert.equal(
+      db.prepare("SELECT usage_account_id FROM usage_logs WHERE id = 'kept-log'").get().usage_account_id,
+      null,
+    )
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM account_lifetime_usage_archive').get().count, 0)
+    assert.equal(db.prepare('PRAGMA quick_check').get().quick_check, 'ok')
+    const completeLedger = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()
+    db.close()
+    db = new DatabaseSync(dbPath)
+    assert.deepEqual(applyMigrations(db, { migrationsDir: migrations }), [])
+    assert.deepEqual(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all(), completeLedger)
+    for (const table of preservedTables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), before[table])
+    assert.deepEqual(db.prepare(`SELECT ${oldColumns.join(', ')} FROM usage_logs`).all(), beforeLogs)
+  } finally {
+    db.close()
+  }
 })
 
 test('migration 037 normalizes OpenAI input including NULL route fields; SUM(prompt) holds', () => {
@@ -480,6 +551,10 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       '056_cloakbrowser_web_sessions.sql',
       '057_shardbrowser_web_sessions.sql',
       '058_usage_logs_failure_diagnostics.sql',
+      '059_account_lifetime_usage.sql',
+      '060_crag_shop_orders.sql',
+      '061_crag_shop_commerce.sql',
+      '062_crag_shop_activation.sql',
     ])
     const { risk_review_enabled, ...after } = db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy')
     assert.equal(risk_review_enabled, 0)

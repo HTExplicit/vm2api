@@ -9,10 +9,11 @@ import {
   resumePendingKernelInstalls,
 } from '../../src/lib/vm/kernel-install.mjs'
 import { kvmKernelSelector, selectChangedPayloadFiles } from '../../src/lib/cluster/remote-slot-files.mjs'
-import { describeKernelCatalog } from '../../src/lib/admin/kernel-catalog.mjs'
+import { describeKernelCatalog, pullKernelRelease } from '../../src/lib/admin/kernel-catalog.mjs'
 import { getVm, patchVmRecord, summarizeVm } from '../../src/lib/vm/vm-registry.mjs'
 import { withVmLock } from '../../src/lib/vm/vm-file.mjs'
 import { activateCragLicense, cragLicenseDirectory } from '../../src/lib/vm/crag-license.mjs'
+import { cragV2PackageRoot } from '../../src/lib/vm/wrap-cli-runtime.mjs'
 import { writeKernelConfig } from '../../src/lib/transport/rust-kernel-supervisor.mjs'
 import {
   activateFixture,
@@ -101,8 +102,56 @@ function lifecycle(root, extra = {}) {
   }
 }
 
+test('versioned reinstall refuses stale caches before stopping and prevents competing cache publication', async (t) => {
+  const { root, vm } = fixture(t)
+  const template = path.join(root, 'share/wrap-cli')
+  const metadata = path.join(template, 'RELEASE.json')
+  fs.writeFileSync(metadata, JSON.stringify({ version: '1.2.3', tag: 'v1.2.3' }))
+  const life = lifecycle(root, {
+    async startSlotReady() {
+      const competing = await pullKernelRelease(
+        root,
+        { kernel: 'cli-node' },
+        {
+          fetchImpl: async () =>
+            Response.json({
+              tag_name: 'v1.2.4',
+              assets: ['kin-kernel', 'cli-node'].map((name, index) => ({
+                name,
+                url: `https://api.github.com/repos/HTExplicit/vm2api/releases/assets/${index + 1}`,
+              })),
+            }),
+        },
+      )
+      assert.equal(competing.code, 'kernel_pull_busy')
+      return { ok: true }
+    },
+  })
+  const install = (expected_tag) =>
+    installKernelTargets({
+      projectRoot: root,
+      targets: [{ id: vm.id, kernel: 'cli-node', expected_tag }],
+      ops: life.ops,
+    })
+  const stale = await install('v1.2.2')
+  assert.equal(stale.items[0].code, 'kernel_release_changed')
+  assert.equal(life.stops(), 0)
+  assert.equal(getVm(root, vm.id).status, 'running')
+  const success = await install('v1.2.3')
+  assert.equal(success.ok, true, JSON.stringify(success))
+  assert.equal(getVm(root, vm.id).kernel_installation.version, '1.2.3')
+})
+
 test('native switch stops before real replacement, writes candidate config and commits only after success', async (t) => {
   const { root, vm, home, run } = fixture(t)
+  const factory = cragV2PackageRoot(root)
+  const base = path.dirname(factory)
+  const snapshot = 'packages/amd64-00000000-0000-4000-8000-000000000000'
+  fs.cpSync(factory, path.join(base, snapshot), { recursive: true })
+  fs.writeFileSync(
+    path.join(base, 'current-amd64.json'),
+    JSON.stringify({ package: snapshot, release: { tag: 'v3.0.4', version: '3.0.4' } }),
+  )
   activateFixture(root, vm)
   const licenseDir = cragLicenseDirectory(root, vm)
   const identity = fs.readFileSync(path.join(licenseDir, 'device.json'))
@@ -118,7 +167,7 @@ test('native switch stops before real replacement, writes candidate config and c
   let held = false
   const result = await installKernelTargets({
     projectRoot: root,
-    targets: target(),
+    targets: [{ ...target()[0], expected_tag: 'v3.0.4' }],
     ops: life.ops,
     watchdog: {
       hold() {
@@ -138,6 +187,7 @@ test('native switch stops before real replacement, writes candidate config and c
   const persisted = getVm(root, vm.id)
   assert.equal(persisted.dataplane, 'crag')
   assert.equal(persisted.crag_kernel_version, 'v2')
+  assert.equal(persisted.kernel_installation.version, '3.0.4')
   assert.equal(persisted.status, 'running')
   assert.equal(persisted.runtime.stopped, false)
   assert.equal(persisted.runtime.worker_run_dir, run)
@@ -242,7 +292,13 @@ for (const wasRunning of [true, false]) {
   test(`interrupted cluster install restores its original running intent after reconnect: ${wasRunning}`, async (t) => {
     const { root, vm, run } = fixture(t, { node_id: 'node-recovery', status: 'stopped' })
     patchVmRecord(root, vm.id, {
-      kernel_operation: { id: 'lost-command', kernel: 'cli-node', phase: 'pending', recovery_attempts: 0, was_running: wasRunning },
+      kernel_operation: {
+        id: 'lost-command',
+        kernel: 'cli-node',
+        phase: 'pending',
+        recovery_attempts: 0,
+        was_running: wasRunning,
+      },
     })
     let ready = false
     const life = lifecycle(root, {
@@ -278,10 +334,15 @@ for (const wasRunning of [true, false]) {
 test('installing an originally stopped slot preserves power and manual scheduling intent', async (t) => {
   const hold = { reason: 'proxy_cooldown', detail: { tag: 'keep-proxy' } }
   const { root, vm, run } = fixture(t, {
-    node_id: 'node-idle', status: 'stopped', schedule_off: true, schedule_off_reason: 'disabled', schedule_hold: hold,
+    node_id: 'node-idle',
+    status: 'stopped',
+    schedule_off: true,
+    schedule_off_reason: 'disabled',
+    schedule_hold: hold,
   })
   const result = await installKernelTargets({
-    projectRoot: root, targets: target('cli-node'),
+    projectRoot: root,
+    targets: target('cli-node'),
     ops: {
       describeKernelCatalog: () => [{ id: 'cli-node', ready: true }],
       stopSlot() {
@@ -291,7 +352,9 @@ test('installing an originally stopped slot preserves power and manual schedulin
       suspendVmRuntimeRestart: () => ({ ok: true }),
       deployBakedKernel: () => ({ ok: true }),
       writeKernelConfig: () => ({ configPath: path.join(run, 'kernel.json'), runDir: run }),
-      startSlotReady() { assert.fail('must not start an originally stopped slot') },
+      startSlotReady() {
+        assert.fail('must not start an originally stopped slot')
+      },
     },
   })
   assert.equal(result.ok, true, JSON.stringify(result))
@@ -784,6 +847,32 @@ test('package publication during asynchronous stop reports the version actually 
   assert.equal(result.items[0].version, '2.0.0')
   assert.equal(getVm(root, vm.id).kernel_installation.version, '2.0.0')
   assert.ok(fs.readFileSync(path.join(home, '.kin', 'kin-kernel.bin')).equals(elf('new-publication')))
+})
+
+test('a confirmed CRAG payload cannot install another variant of the same version', async (t) => {
+  const { root, vm } = fixture(t)
+  activateFixture(root, vm)
+  const standard = 'payload-2026.11.15-crag-3.0.5'
+  const legacy = `${standard}-legacy`
+  let cached = standard
+  const life = lifecycle(root, {
+    describeKernelCatalog: () => [{ id: 'crag', ready: true, version: '3.0.5', payload_tag: cached }],
+  })
+  const install = () =>
+    installKernelTargets({
+      projectRoot: root,
+      targets: [{ id: vm.id, kernel: 'crag', payload_tag: legacy }],
+      ops: life.ops,
+    })
+  const refused = await install()
+  assert.equal(refused.items[0].code, 'crag_payload_changed')
+  assert.equal(refused.items[0].stopped, false)
+  assert.equal(getVm(root, vm.id).status, 'running')
+  cached = legacy
+  const installed = await install()
+  assert.equal(installed.ok, true, JSON.stringify(installed))
+  assert.equal(installed.items[0].payload_tag, legacy)
+  assert.equal(summarizeVm(getVm(root, vm.id), root).kernel_installation.payload_tag, legacy)
 })
 
 test('failed STOPPED persistence keeps the watchdog held rather than reviving stale running intent', async (t) => {

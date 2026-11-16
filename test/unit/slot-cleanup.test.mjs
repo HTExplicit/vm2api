@@ -37,12 +37,15 @@ test('delete waits for the local Codex kernel before destroying its container', 
   const vm = { id: 'vm-delete', family: 'codex', runtime_type: 'docker' }
   const calls = []
   const result = await destroySlot(vm, '/project', {
+    requireConfirmation: true,
     ops: {
       stopCodexKernelAndWait: async (exec) => {
         calls.push(['stop', exec.vmId, exec.projectRoot])
         return { ok: true }
       },
-      destroy: async () => {
+      destroy: async (selected, options) => {
+        assert.strictEqual(selected, vm)
+        assert.equal(options.requireConfirmation, true)
         calls.push(['destroy'])
         return { ok: true }
       },

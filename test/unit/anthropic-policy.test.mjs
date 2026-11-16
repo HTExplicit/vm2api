@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { validateToolChoice } from '../../src/lib/protocol/model-policy.mjs'
 import {
   prepareAnthropicRequest,
   stripInvalidThinkingBlocks,
@@ -746,6 +747,23 @@ test('third-party Hermes body is rewritten before the upstream hop', () => {
   assert.match(result.body.messages[0].content, /Hermes Agent/)
 })
 
+test('a forced native web search keeps its declared provider tool name', () => {
+  const search = { type: 'web_search_20250305', name: 'web_search', max_uses: 8 }
+  const choice = { type: 'tool', name: 'web_search' }
+  const { body, reverse } = toStandardAnthropicBody({
+    model: 'claude-sonnet-5',
+    max_tokens: 128,
+    messages: [{ role: 'user', content: 'Search the web' }],
+    thinking: { type: 'disabled' },
+    tools: [search],
+    tool_choice: choice,
+  })
+  assert.deepEqual(body.tools, [search])
+  assert.deepEqual(body.tool_choice, choice)
+  assert.deepEqual(reverse, {})
+  assert.doesNotThrow(() => validateToolChoice(body))
+})
+
 test('official Claude Code tool names stay, stray mcp_ names do not', () => {
   const result = scrubUpstreamClientBody(
     {
@@ -1049,4 +1067,14 @@ test('already-Claude image blocks and unusable image_url parts pass through', ()
   })
   assert.deepEqual(body.messages[0].content[0], { type: 'image', source })
   assert.deepEqual(body.messages[0].content[1], { type: 'image_url', image_url: {} })
+})
+
+test('tool choice retains a native tool name outside the caller tool rewrite map', () => {
+  const result = scrubUpstreamClientBody({
+    tool_choice: { type: 'tool', name: 'Read' },
+    tools: [{ name: 'custom_lookup', input_schema: { type: 'object' } }],
+    messages: [{ role: 'user', content: 'read the file' }],
+  })
+  assert.equal(result.body.tool_choice.name, 'Read')
+  assert.equal(result.body.tools[0].name, 'mcp__custom_lookup')
 })

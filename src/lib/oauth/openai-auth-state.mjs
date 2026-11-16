@@ -6,6 +6,7 @@ import { clearOpenAIAccountHold, openAIAccountHold } from '../pool/openai-accoun
 
 const REVOKED =
   /^(invalid_grant|oauth_invalid_grant|oauth_revoked|token_revoked|refresh_token_reused|refresh_token_invalid)$/
+const STRUCTURAL_REFRESH = /^(refresh_rejected|refresh_empty|missing_refresh_token)$/
 
 function record(projectRoot, vmId) {
   return readJsonCached(path.join(projectRoot, 'vms', `${vmId}.json`))
@@ -76,21 +77,31 @@ function clearAuthHold(vmId) {
 export function recordOpenaiAuthResult(context, { status, source, error, message, authenticated = false } = {}) {
   if (!isOpenaiAuthCurrent(context)) return false
   const vm = record(context.projectRoot, context.vmId)
-  const blocked = Number(status) === 401 || REVOKED.test(String(error || ''))
+  const code = String(error || '')
+  const refreshError = source === 'oauth_refresh' && (REVOKED.test(code) || STRUCTURAL_REFRESH.test(code)) ? code : null
+  const blocked = Number(status) === 401 || REVOKED.test(code) || !!refreshError
   if (!blocked && !authenticated) return true
-  if (!blocked && !vm.codex?.auth_block) return true
+  if (!blocked && !vm.codex?.auth_block && !vm.refresh_error && !vm.codex?.refresh_error) return true
   vm.codex = { ...(vm.codex || {}), auth_revision: context.revision + 1 }
   if (blocked) {
     vm.codex.auth_block = {
       account_id: context.accountId,
-      reason: REVOKED.test(String(error || '')) ? error : 'upstream_401',
+      reason: refreshError || (REVOKED.test(code) ? code : 'upstream_401'),
       source,
       status: Number(status) || null,
       at: new Date().toISOString(),
       message: message || 'OpenAI 认证失败，已停止分配，请刷新凭据',
     }
+    if (refreshError) {
+      vm.refresh_error = refreshError
+      if (vm.codex.refresh_error !== refreshError) vm.codex.refresh_error_at = vm.codex.auth_block.at
+      vm.codex.refresh_error = refreshError
+    }
   } else {
     delete vm.codex.auth_block
+    delete vm.refresh_error
+    delete vm.codex.refresh_error
+    delete vm.codex.refresh_error_at
     clearAuthHold(context.vmId)
   }
   vm.updated_at = new Date().toISOString()
@@ -110,6 +121,9 @@ export function resetOpenaiAuth(projectRoot, vmId) {
     credential_revision: context.credentialRevision + 1,
   }
   delete vm.codex.auth_block
+  delete vm.refresh_error
+  delete vm.codex.refresh_error
+  delete vm.codex.refresh_error_at
   vm.updated_at = new Date().toISOString()
   atomicWriteJson(path.join(projectRoot, 'vms', `${vmId}.json`), vm, { mode: 0o600 })
   clearAuthHold(vmId)

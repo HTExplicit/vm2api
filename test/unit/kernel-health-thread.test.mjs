@@ -129,6 +129,37 @@ if (process.argv.includes('--client-once')) {
         assert.equal(result.reachable, false)
       })
 
+      await t.test('authenticated CRAG facts cross the worker boundary only with token authentication', async () => {
+        await configure({
+          body: {
+            ok: true,
+            runtime_variant: 'crag-v2',
+            effective_config: { slot_limit: 3 },
+            internalTokenAuthenticated: true,
+          },
+        })
+        const ordinary = await workerHealth(exec, { timeoutMs: 600 })
+        assert.equal(Object.hasOwn(ordinary, 'internalTokenAuthenticated'), false)
+        const authenticated = await workerHealth(exec, { timeoutMs: 600, requireInternalToken: true })
+        assert.equal(authenticated.internalTokenAuthenticated, true)
+        assert.deepEqual(authenticated.fixture.headers, [token, token])
+        await configure({
+          status: 503,
+          body: { ok: false, runtime_variant: 'crag-v2', effective_config: { slot_limit: 3 } },
+        })
+        const degraded = await workerHealth(exec, { timeoutMs: 600, requireInternalToken: true })
+        assert.equal(degraded.internalTokenAuthenticated, true)
+        assert.equal(degraded.ok, false)
+        await configure({ body: { ok: true, runtime_variant: 'crag-v2', internalTokenAuthenticated: true } })
+        const missing = await workerHealth(exec, { timeoutMs: 600, requireInternalToken: true })
+        assert.equal(Object.hasOwn(missing, 'internalTokenAuthenticated'), false)
+        await configure({ status: 401, body: { ok: true, runtime_variant: 'crag-v2', effective_config: {} } })
+        const rejected = await workerHealth(exec, { timeoutMs: 600, requireInternalToken: true })
+        assert.equal(rejected.ok, false)
+        assert.equal(rejected.status, 401)
+        assert.equal(Object.hasOwn(rejected, 'internalTokenAuthenticated'), false)
+      })
+
       await t.test('pre-aborted and in-flight requests preserve cancellation', async () => {
         await configure({ delayMs: 1000 })
         const cancelled = new AbortController()

@@ -402,6 +402,103 @@ test('log coverage follows recorded prunes, not the oldest row or the current re
   }
 })
 
+test('lifetime usage follows the account across slots and survives repeated pruning', () => {
+  const { db, repo } = freshDb()
+  try {
+    const old = new Date(Date.now() - 30 * 86400_000).toISOString()
+    seed(repo, [
+      { created_at: old, vm_id: 'vm-01', final_account_id: 'claude-a', input_tokens: 10, total_cost: 1 },
+      { vm_id: 'vm-02', account_id: 'claude-a', cache_read_tokens: 20, total_cost: 2 },
+      { vm_id: 'vm-02', account_id: 'claude-b', output_tokens: 15, total_cost: 4 },
+      { created_at: old, vm_id: 'vm-01', usage_account_id: 'openai:a', cache_creation_tokens: 7, total_cost: 1 },
+      { vm_id: 'vm-03', usage_account_id: 'openai:a', output_tokens: 3, total_cost: 2 },
+      { created_at: old, vm_id: 'vm-03', account_id: 'vm-03', input_tokens: 20, total_cost: 4 },
+    ])
+    const lifetime = () =>
+      repo
+        .billingStats({ now: Date.now() })
+        .lifetime_accounts.sort((left, right) => left.account_id.localeCompare(right.account_id))
+    const expected = [
+      { account_id: 'claude-a', total_cost: 0.000036, total_tokens: 30 },
+      { account_id: 'claude-b', total_cost: 0.000225, total_tokens: 15 },
+      { account_id: 'openai:a', total_cost: 0.00007125, total_tokens: 10 },
+    ]
+    assert.deepEqual(lifetime(), expected)
+    assert.equal(repo.cleanup({ retainDays: 7 }).usage_logs, 3)
+    assert.deepEqual(lifetime(), expected)
+    assert.equal(repo.cleanup({ retainDays: 7 }).usage_logs, 0)
+    assert.deepEqual(lifetime(), expected)
+  } finally {
+    db.close()
+  }
+})
+
+test('lifetime account identity preserves committed stream failure diagnostics and classification', () => {
+  const { db, repo } = freshDb()
+  try {
+    const diagnostics = {
+      kernelRequestId: 'kernel-fixture',
+      phase: 'stream',
+      lastEventType: 'response.output_text.delta',
+      lastEventAgoMs: 10,
+      responseCommitted: true,
+      usageState: 'partial',
+    }
+    seed(repo, [
+      {
+        request_id: 'lifetime-failed-stream',
+        vm_id: 'vm-a',
+        account_id: 'slot-identity',
+        usage_account_id: 'openai:fixture',
+        final_state: 'transport_error',
+        failure_diagnostics: diagnostics,
+        input_tokens: 10,
+        output_tokens: 2,
+      },
+    ])
+    const record = repo.getByRequestId('lifetime-failed-stream')
+    assert.equal(record.usage_account_id, 'openai:fixture')
+    assert.deepEqual(record.failure_diagnostics, diagnostics)
+    assert.equal(record.final_state, 'transport_error')
+    assert.ok(record.error_class)
+    const bill = repo.billingStats({ now: Date.now() })
+    assert.equal(bill.total.errors, 1)
+    assert.equal(bill.total.success, 0)
+    assert.equal(bill.lifetime_accounts[0].account_id, 'openai:fixture')
+    assert.equal(bill.lifetime_accounts[0].total_tokens, 12)
+  } finally {
+    db.close()
+  }
+})
+
+test('a failed prune rolls back the lifetime archive and leaves the original logs intact', () => {
+  const { db, repo } = freshDb()
+  try {
+    seed(repo, [
+      {
+        request_id: 'prune-rollback',
+        created_at: new Date(Date.now() - 30 * 86400_000).toISOString(),
+        usage_account_id: 'openai:fixture',
+        input_tokens: 10,
+      },
+    ])
+    db.exec(
+      "CREATE TRIGGER fail_usage_delete BEFORE DELETE ON usage_logs BEGIN SELECT RAISE(ABORT, 'fixture delete failure'); END",
+    )
+    assert.throws(() => repo.cleanup({ retainDays: 7 }), /fixture delete failure/)
+    assert.equal(repo.count(), 1)
+    assert.deepEqual(db.prepare('SELECT * FROM account_lifetime_usage_archive').all(), [])
+    assert.equal(db.prepare("SELECT value FROM settings WHERE key = 'usage_logs_pruned_through'").get(), undefined)
+    db.exec('DROP TRIGGER fail_usage_delete')
+    assert.equal(repo.cleanup({ retainDays: 7 }).usage_logs, 1)
+    const archived = db.prepare('SELECT * FROM account_lifetime_usage_archive').get()
+    assert.equal(archived.account_id, 'openai:fixture')
+    assert.equal(archived.total_tokens, 10)
+  } finally {
+    db.close()
+  }
+})
+
 test('window_fable only counts fable rows since reset_7d_oi', () => {
   const { db, repo } = freshDb()
   try {

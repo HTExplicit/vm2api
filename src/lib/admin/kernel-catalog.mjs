@@ -15,25 +15,132 @@ import {
   WRAP_KERNEL_BIN,
   wrapKernelWrapperScript,
 } from '../vm/wrap-cli-runtime.mjs'
+import { isReleaseTag } from './release.mjs'
 import {
   CRAG_V2_RELEASE_ASSET,
   fetchKernelReleaseMetadata,
+  isCragPayloadTag,
   openKernelReleaseAsset,
-  selectReleaseAsset,
+  selectCragV2Asset,
   selectKernelAsset,
   selectCliNodeAsset,
   MAX_KERNEL_DOWNLOAD_BYTES,
   MAX_CLI_NODE_DOWNLOAD_BYTES,
+  MAX_CRAG_V2_DOWNLOAD_BYTES,
 } from './release-kernel.mjs'
 
-const MAX_ARCHIVE = 512 * 1024 * 1024
+const MAX_ARCHIVE = MAX_CRAG_V2_DOWNLOAD_BYTES
 const MAX_EXPANDED = 768 * 1024 * 1024
 const MAX_MEMBERS = 64
 const verificationCache = new Map()
+const installingCaches = new Set()
 const coded = (code, message) => Object.assign(new Error(message), { code })
 const baseFor = (root, kernel) =>
   kernel === 'crag' ? path.join(root, 'share/crag/kernels/v2') : path.join(root, 'share/wrap-cli-releases')
 const archFor = (kernel) => (kernel === 'crag' ? cragV2Arch() : 'amd64')
+const CRAG_PINNED_RELEASES = [
+  {
+    tag: 'payload-2026.11.16-crag-3.1.1',
+    label: '3.1.1 标准版',
+    size: 170863146,
+    manifestSha256: '3c6ee46a9eea024273f2377bd8fa544230899c690c2bc46ff7dd205bcf12fa1d',
+    sha256: '9ed1a4fe2931d44c946aef5288dfc3665f877451b73f0fc55338dc93f135f720',
+  },
+  {
+    tag: 'payload-2026.11.16-crag-3.1.0',
+    size: 170903030,
+    manifestSha256: '9e406141c6fb796c7f47faefc6b603b6f386fe0cb4eff31e1dc4f69021fd75e5',
+    sha256: '009678bf98c1c1d1707105ca19a37a9b05a2859bc4582fd1f16fd0b245f16e25',
+  },
+  {
+    tag: 'payload-2026.11.16-crag-3.0.9',
+    size: 169637207,
+    manifestSha256: '2fa0fa5ec860563855659a9209bdb686ba04e37b267ba57f4890494fd898ed73',
+    sha256: 'dab028d2041dc29ac07a6afc6d1d12e73dd33f1417b22a56dbe19a94ac2cc0cd',
+  },
+  {
+    tag: 'payload-2026.11.16-crag-3.0.9-legacy',
+    label: '3.0.9 旧离线授权兼容版',
+    size: 169718051,
+    manifestSha256: '9c608280cfbfb38463f44a5a0125edd84279bd469d18607d9a07bce2e2960ef8',
+    sha256: '95b320100f188ac868a9b8d801c1795ddea03b4fcdb7a311cb53c7912739bd18',
+  },
+  {
+    tag: 'payload-2026.11.15-crag-3.0.8',
+    size: 169316226,
+    manifestSha256: 'ba6582b37790ab2ffca20c366c08318c4c909df6e7470699b8d81aa403b6cea2',
+    sha256: 'a5a386056dff5852e2902d809301aa1cdd4003a3067721d97db9abb1bcf0f079',
+  },
+  {
+    tag: 'payload-2026.11.15-crag-3.0.8-legacy',
+    size: 169274806,
+    manifestSha256: '1893360f958668f1940c86081a0e7a7b72be67704a5c287d94bfc3dd550b91aa',
+    sha256: 'c5cb88603a0c5eb73f3b9a9c2de5cdaa204d6a9935fabbaa45aa9805ec8f8b13',
+  },
+  {
+    tag: 'payload-2026.11.15-crag-3.0.7',
+    size: 169204324,
+    manifestSha256: 'c3e56d9e31e446963501e8ed5a9dde09a93879907c8914e6f6c0a84e4f4967be',
+    sha256: '609de350d1f60f53d9b5505766cdea60e6059d8cc2bb0693cde8baac18deccb5',
+  },
+  {
+    tag: 'payload-2026.11.15-crag-3.0.7-legacy',
+    size: 169150379,
+    manifestSha256: '0c2e6f6e7033386da8896ae0e46c78ff2001b3cc0a24da8001f9de3043b6a18c',
+    sha256: '6836caf31d718b838419c126605bbc53e8761cd26922f1278b0eafdd8fb3fb53',
+  },
+  {
+    tag: 'payload-2026.11.15-crag-3.0.6',
+    size: 168091665,
+    manifestSha256: '6caedda497d59914ca1c341854c94bde8c53991f81a8ad5e12903b891cb59a4e',
+    sha256: '9ea3a73c38ad72ef15c702990131ca8aa4907616f8bfbb349c537c0c7e5845c6',
+  },
+  {
+    tag: 'payload-2026.11.15-crag-3.0.6-legacy',
+    size: 167962811,
+    manifestSha256: 'a88e9315f05fe8315d107a070ffc0494b0fcf9e66adea09e29e35c8be50fb028',
+    sha256: 'ca21ae8863ba94c7e99226d369ab7ee92056a5c04a07d16aa0a551828b41a785',
+  },
+  {
+    tag: 'payload-2026.11.15-crag-3.0.5',
+    size: 168090914,
+    manifestSha256: 'ec9b706591e9e147059e1be5f689f6ae59ee1e630f97fef07169f53133fba917',
+    sha256: '428b07b65586480473b3f5ebf1fe0a6c3c1444d1a45c611faad40737d22b818a',
+  },
+  {
+    tag: 'payload-2026.11.15-crag-3.0.5-legacy',
+    size: 167961689,
+    manifestSha256: '3677550ac1a2f24ee44e52a004b2092a7ed36e22c2d0e41e38c326e304f4dd34',
+    sha256: '547347000e8597a05bb3917a966b4f4c5bfcc5a9cc0a408565ffccc6077d35f0',
+  },
+]
+
+export function reserveKernelInstallCache(projectRoot, kernel) {
+  const key = path.resolve(baseFor(projectRoot, kernel))
+  if (installingCaches.has(key)) return null
+  installingCaches.add(key)
+  return () => installingCaches.delete(key)
+}
+
+function ensureKernelCacheNotInstalling(base) {
+  if (installingCaches.has(path.resolve(base))) throw coded('kernel_pull_busy', '正在重装内核，安装包缓存未更改')
+}
+
+function acquireKernelCacheLock(projectRoot, kernel) {
+  const base = baseFor(projectRoot, kernel)
+  ensureKernelCacheNotInstalling(base)
+  const lock = path.join(base, '.pull-lock')
+  try {
+    fs.mkdirSync(base, { recursive: true })
+    fs.mkdirSync(lock, { mode: 0o700 })
+    return lock
+  } catch (error) {
+    throw coded(
+      error.code === 'EEXIST' ? 'kernel_pull_busy' : 'kernel_cache_unwritable',
+      '内核缓存忙或不可写，请稍后重试',
+    )
+  }
+}
 
 function jsonFile(file, max = 64 * 1024) {
   const st = fs.lstatSync(file)
@@ -99,7 +206,12 @@ function publicProduct(id, ready, meta = {}, code) {
     paid: id === 'crag',
     ready,
     version,
+    ...(isReleaseTag(meta.tag) ? { release_tag: meta.tag } : {}),
     updated_at: updated,
+    ...(id === 'crag'
+      ? { release_options: CRAG_PINNED_RELEASES.filter(({ label }) => label).map(({ tag, label }) => ({ tag, label })) }
+      : {}),
+    ...(isCragPayloadTag(meta.payload_tag) ? { payload_tag: meta.payload_tag } : {}),
     ...(!ready
       ? {
           code,
@@ -119,7 +231,12 @@ function selectedReleaseInfo(projectRoot, kernel, root) {
     const base = baseFor(projectRoot, kernel)
     const pointer = jsonFile(path.join(base, `current-${archFor(kernel)}.json`), 4096)
     if (path.join(base, pointer.package) !== root) return {}
-    return { version: pointer.release?.version, updated_at: pointer.updated_at }
+    return {
+      tag: pointer.release?.tag,
+      version: pointer.release?.version,
+      updated_at: pointer.updated_at,
+      payload_tag: pointer.release?.payload_tag,
+    }
   } catch {
     return {}
   }
@@ -153,12 +270,21 @@ export function describeKernelCatalog(projectRoot) {
   try {
     const root = cragV2PackageRoot(projectRoot)
     const verified = root ? verifiedPackage(root) : { ok: false, code: 'crag_v2_package_missing' }
+    const release = root ? selectedReleaseInfo(projectRoot, 'crag', root) : {}
+    if (verified.ok && !release.payload_tag) {
+      const manifestSha256 = crypto
+        .createHash('sha256')
+        .update(fs.readFileSync(path.join(root, 'manifest.json')))
+        .digest('hex')
+      const known = CRAG_PINNED_RELEASES.find((entry) => entry.manifestSha256 === manifestSha256)
+      if (known) Object.assign(release, { version: verified.manifest.software_version, payload_tag: known.tag })
+    }
     crag = publicProduct(
       'crag',
       verified.ok,
       {
         ...(verified.ok ? { version: verified.manifest.version } : {}),
-        ...(root ? selectedReleaseInfo(projectRoot, 'crag', root) : {}),
+        ...release,
       },
       verified.code,
     )
@@ -173,15 +299,20 @@ export function describeKernelCatalog(projectRoot) {
   return [cli, crag]
 }
 
-function limitBytes(max, code, expected = 0) {
+function limitBytes(max, code, expected = 0, sha256 = '') {
   let size = 0
+  const hash = sha256 && crypto.createHash('sha256')
   return new Transform({
     transform(chunk, encoding, done) {
       size += chunk.length
-      done(size > max ? coded(code, '内核下载或解压大小超限') : null, chunk)
+      if (size > max) return done(coded(code, '内核下载或解压大小超限'))
+      if (hash) hash.update(chunk)
+      done(null, chunk)
     },
     flush(done) {
-      done(expected && size !== expected ? coded('kernel_size_mismatch', '内核下载大小不匹配') : null)
+      if (expected && size !== expected) return done(coded('kernel_size_mismatch', '内核下载大小不匹配'))
+      if (hash && hash.digest('hex') !== sha256) return done(coded('crag_v2_digest_mismatch', 'CRAG 发行包摘要不匹配'))
+      done()
     },
   })
 }
@@ -282,6 +413,7 @@ class PackageTar extends Writable {
       'crag-v2.payload.enc',
       'crag-license-public.pem',
       'kernel.json.example',
+      'unpack-note.md',
       'LICENSES.txt',
       'LICENSE.txt',
       'claude-code-2.1.321/claude',
@@ -399,18 +531,27 @@ function prunePackages(base, arch, current, previous) {
 function pinnedAuthority(projectRoot) {
   const override = String(process.env.KIN_CRAG_V2_ROOT || '').trim()
   const factory = override || path.join(baseFor(projectRoot, 'crag'), cragV2Arch())
-  const verified = verifiedPackage(factory)
-  if (!verified.ok) throw coded('crag_v2_authority_missing', '缺少可信 CRAG 发行公钥，请先安装官方授权包')
-  return crypto
-    .createPublicKey(fs.readFileSync(path.join(factory, 'crag-license-public.pem')))
-    .export({ format: 'der', type: 'spki' })
+  if (verifiedPackage(factory).ok) {
+    const key = crypto
+      .createPublicKey(fs.readFileSync(path.join(factory, 'crag-license-public.pem')))
+      .export({ format: 'der', type: 'spki' })
+    return (pem) => key.equals(crypto.createPublicKey(pem).export({ format: 'der', type: 'spki' }))
+  }
+  const issuerPath = `share/crag/kernels/v2/${cragV2Arch()}/crag-license-public.pem`
+  const files = releasePayload(projectRoot)?.files
+  const pins = Array.isArray(files) ? files.filter((file) => file?.path === issuerPath) : []
+  const sha256 = pins[0]?.sha256
+  if (pins.length !== 1 || typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(sha256)) {
+    throw coded('crag_v2_authority_missing', '缺少可信 CRAG 发行公钥')
+  }
+  return (pem) => crypto.createHash('sha256').update(pem).digest('hex') === sha256
 }
 
-function cragReleaseTag(projectRoot) {
+function releasePayload(projectRoot) {
   try {
-    return jsonFile(path.join(projectRoot, 'deploy/payload.json')).crag_release || ''
+    return jsonFile(path.join(projectRoot, 'deploy/payload.json'))
   } catch (error) {
-    if (error.code === 'ENOENT') return ''
+    if (error.code === 'ENOENT') return null
     throw error
   }
 }
@@ -427,20 +568,11 @@ export async function pullKernelRelease(
     const payload = await fetchKernelReleaseMetadata({
       tag,
       kernel,
-      cragReleaseTag: kernel === 'crag' && !latest ? cragReleaseTag(projectRoot) : '',
+      cragReleaseTag: kernel === 'crag' && !latest ? releasePayload(projectRoot)?.crag_release || '' : '',
       fetchImpl,
     })
     const specs =
-      kernel === 'cli-node'
-        ? [selectKernelAsset(payload), selectCliNodeAsset(payload)]
-        : [
-            selectReleaseAsset(payload, {
-              name: CRAG_V2_RELEASE_ASSET,
-              maxBytes: MAX_ARCHIVE,
-              missingCode: 'crag_v2_asset_missing',
-              tooLargeCode: 'crag_v2_too_large',
-            }),
-          ]
+      kernel === 'cli-node' ? [selectKernelAsset(payload), selectCliNodeAsset(payload)] : [selectCragV2Asset(payload)]
     for (const spec of specs) {
       if (!spec.ok) return spec
       if (payload.assets.filter((asset) => asset?.name === spec.asset).length !== 1)
@@ -454,17 +586,7 @@ export async function pullKernelRelease(
       throw coded('kernel_override_active', '已配置显式内核路径，请先移除覆盖配置再拉取')
     const pinned = kernel === 'crag' ? pinnedAuthority(projectRoot) : null
     const base = baseFor(projectRoot, kernel)
-    fs.mkdirSync(base, { recursive: true })
-    lock = path.join(base, '.pull-lock')
-    try {
-      fs.mkdirSync(lock, { mode: 0o700 })
-    } catch (error) {
-      lock = null
-      throw coded(
-        error.code === 'EEXIST' ? 'kernel_pull_busy' : 'kernel_cache_unwritable',
-        '内核缓存忙或不可写，请稍后重试',
-      )
-    }
+    lock = acquireKernelCacheLock(projectRoot, kernel)
     const packages = path.join(base, 'packages')
     fs.mkdirSync(packages, { recursive: true })
     if (fs.lstatSync(packages).isSymbolicLink()) throw coded('kernel_cache_invalid', '内核缓存不能是链接')
@@ -473,6 +595,7 @@ export async function pullKernelRelease(
       tag: payload.tag_name,
       version: specs[0].version,
       asset: kernel === 'crag' ? CRAG_V2_RELEASE_ASSET : 'kin-kernel,cli-node',
+      ...(payload.payload_tag ? { payload_tag: payload.payload_tag } : {}),
     }
     const metadata = { ...release, updated_at: new Date().toISOString() }
     if (kernel === 'cli-node') {
@@ -481,21 +604,23 @@ export async function pullKernelRelease(
       fs.writeFileSync(path.join(stage, 'kin-kernel'), wrapKernelWrapperScript(), { mode: 0o755, flag: 'wx' })
       fs.writeFileSync(path.join(stage, 'RELEASE.json'), JSON.stringify(metadata), { flag: 'wx' })
     } else {
+      const pin = CRAG_PINNED_RELEASES.find((entry) => entry.tag === release.payload_tag)
+      if (pin && specs[0].size !== pin.size) throw coded('kernel_size_mismatch', 'CRAG 发行包大小不匹配')
       const response = await openKernelReleaseAsset(specs[0].url, fetchImpl, CRAG_V2_RELEASE_ASSET)
       await pipeline(
         responseBody(response, MAX_ARCHIVE, 'crag_v2_too_large'),
-        limitBytes(MAX_ARCHIVE, 'crag_v2_too_large', specs[0].size),
+        limitBytes(MAX_ARCHIVE, 'crag_v2_too_large', specs[0].size, pin?.sha256),
         createGunzip(),
         limitBytes(MAX_EXPANDED, 'crag_v2_archive_invalid'),
         new PackageTar(stage),
       )
       const verified = verifyCragV2Tree(stage)
       if (!verified.ok) throw coded(verified.code, 'CRAG 签名加密包校验失败')
-      const supplied = crypto
-        .createPublicKey(fs.readFileSync(path.join(stage, 'crag-license-public.pem')))
-        .export({ format: 'der', type: 'spki' })
-      if (!pinned.equals(supplied)) throw coded('crag_v2_authority_mismatch', 'CRAG 发行公钥与本机可信公钥不匹配')
+      if (!pinned(fs.readFileSync(path.join(stage, 'crag-license-public.pem')))) {
+        throw coded('crag_v2_authority_mismatch', 'CRAG 发行公钥与本机可信公钥不匹配')
+      }
     }
+    ensureKernelCacheNotInstalling(base)
     makeReadonly(stage)
     const relative = `packages/${archFor(kernel)}-${crypto.randomUUID()}`
     published = path.join(base, relative)
@@ -518,10 +643,26 @@ export async function pullKernelRelease(
     prunePackages(base, archFor(kernel), relative, previous)
     return { ok: true, kernel: product, release }
   } catch (error) {
+    const timeout = ['TimeoutError', 'AbortError'].includes(error.name)
+    const code = timeout
+      ? 'kernel_pull_timeout'
+      : typeof error.code === 'string' && /^[a-z][a-z0-9_]+$/.test(error.code)
+        ? error.code
+        : 'kernel_pull_failed'
+    let message = 'CRAG 拉取失败；需官方签名加密发行包'
+    if (code === 'crag_v2_authority_missing') message = '缺少可信 CRAG 发行公钥，请先更新到官方镜像或发行版'
+    if (code === 'crag_v2_authority_mismatch') message = 'CRAG 发行公钥与本机可信公钥不匹配'
+    if (code === 'github_http_404') message = '所选 CRAG 发行版本未发布或不可用'
+    if (code === 'crag_v2_digest_mismatch' || code === 'kernel_size_mismatch')
+      message = '下载内容与所选 CRAG 发行包不匹配'
+    if (timeout) message = 'CRAG 发行包拉取超时'
     return {
       ok: false,
-      code: typeof error.code === 'string' && /^[a-z][a-z0-9_]+$/.test(error.code) ? error.code : 'kernel_pull_failed',
-      error: kernel === 'crag' ? 'CRAG 拉取失败；需官方签名加密发行包，原包未更改' : 'cli-node 拉取失败，原包未更改',
+      code,
+      error:
+        code === 'kernel_pull_busy'
+          ? error.message
+          : `${kernel === 'crag' ? message : 'cli-node 拉取失败'}，原包未更改`,
     }
   } finally {
     for (const dir of [stage, published]) {

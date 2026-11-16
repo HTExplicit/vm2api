@@ -1,6 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { destroyVmRuntime, inspectContainerOutcome } from '../../src/lib/vm/vm-runtime.mjs'
+import {
+  destroyVmRuntime,
+  discardSlotContainer,
+  inspectContainerOutcome,
+  preflightSlotContainerDiscard,
+} from '../../src/lib/vm/vm-runtime.mjs'
 import { isDockerInspectNotFound } from '../../src/lib/vm/docker-container.mjs'
 
 test('isDockerInspectNotFound matches docker inspect stderr for absent names', () => {
@@ -84,4 +89,78 @@ test('destroyVmRuntime only succeeds when deletion or absence is confirmed', asy
       }
     })
   }
+})
+
+test('discardSlotContainer refuses an unavailable Docker inspect without removing the container', () => {
+  const commands = []
+  const outcome = discardSlotContainer('vm-01', {
+    run(argv) {
+      commands.push(argv)
+      return { ok: false, stderr: 'Cannot connect to the Docker daemon' }
+    },
+  })
+  assert.equal(outcome.ok, false)
+  assert.equal(outcome.code, 'container_inspect_failed')
+  assert.equal(commands.length, 1)
+  assert.equal(commands[0][1], 'inspect')
+})
+
+test('slot container discard preflight only inspects and admits absent or stopped containers', () => {
+  for (const scenario of [
+    { stdout: 'false|0|bridge||||||false', expected: { ok: true, exists: true } },
+    { stderr: 'Error: No such object: kin-01', expected: { ok: true, exists: false } },
+    { stdout: 'true|123|bridge||||||false', code: 'vm_running' },
+    { stdout: 'false|0|bridge||||||true', code: 'vm_running' },
+  ]) {
+    const commands = []
+    const outcome = preflightSlotContainerDiscard('vm-01', {
+      run(argv) {
+        commands.push(argv)
+        return { ok: !!scenario.stdout, stdout: scenario.stdout || '', stderr: scenario.stderr || '' }
+      },
+    })
+    if (scenario.expected) assert.deepEqual(outcome, scenario.expected)
+    else assert.equal(outcome.code, scenario.code)
+    assert.equal(commands.length, 1)
+    assert.equal(commands[0][1], 'inspect')
+  }
+})
+
+const containerId = 'a'.repeat(64)
+const found = { ok: true, stdout: containerId }
+const removed = { ok: true, stdout: containerId }
+const missing = { ok: false, code: 1, stderr: 'Error: No such container: kin-01' }
+const unavailable = { ok: false, code: 1, stderr: 'Cannot connect to the Docker daemon' }
+
+test('reclaim teardown removes the inspected container ID and confirms absence by name', () => {
+  const replies = [found, removed, missing]
+  const calls = []
+  const outcome = destroyVmRuntime(
+    { id: 'vm-01' },
+    {
+      requireConfirmation: true,
+      run(argv) {
+        calls.push(argv)
+        return replies.shift()
+      },
+    },
+  )
+  assert.equal(outcome.teardownConfirmed, true)
+  assert.equal(outcome.action, 'removed')
+  assert.deepEqual(calls, [
+    ['docker', 'container', 'inspect', '--format', '{{.Id}}', 'kin-01'],
+    ['docker', 'rm', '-f', containerId],
+    ['docker', 'container', 'inspect', '--format', '{{.Id}}', 'kin-01'],
+  ])
+})
+
+test('no verified teardown on daemon failure, failed removal, or a replaced container', () => {
+  for (const replies of [[unavailable], [found, unavailable], [found, removed, unavailable], [found, removed, found]]) {
+    const outcome = destroyVmRuntime({ id: 'vm-01' }, { requireConfirmation: true, run: () => replies.shift() })
+    assert.equal(outcome.ok, false)
+    assert.equal(outcome.teardownConfirmed, undefined)
+  }
+  const absent = destroyVmRuntime({ id: 'vm-01' }, { requireConfirmation: true, run: () => missing })
+  assert.equal(absent.teardownConfirmed, true)
+  assert.equal(absent.action, 'absent')
 })

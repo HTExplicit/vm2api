@@ -40,7 +40,7 @@ import {
 import { isLocalEgressProxy } from '../vm/egress.mjs'
 import { vmNodeId } from '../cluster/placement.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
-import { readCodexAccounts, upsertCodexAccount } from '../vm/codex-slot.mjs'
+import { openaiUsageAccountId, readCodexAccounts, upsertCodexAccount } from '../vm/codex-slot.mjs'
 import {
   captureOpenaiAuth,
   isOpenaiAuthCurrent,
@@ -851,6 +851,7 @@ export async function handleCodexProtocol({
         hops += 1
         logBag.vm_id = vm.id
         logBag.attempt_count = hops
+        logBag.usage_account_id = openaiUsageAccountId(searchCredentials(projectRoot, vm).accountId)
         const chunks = []
         const nameSseEvent = createResponsesSseEventNamer()
         let responseServiceTier = null
@@ -1346,7 +1347,13 @@ async function postCodexJson({
       if (status >= 200 && status < 300 && payload && typeof payload === 'object') {
         recordOpenaiAuthResult(auth, { status, source, authenticated: true })
       }
-      return { status, text, headers: plainHeaders(res?.headers), auth: auth && { ...auth } }
+      return {
+        status,
+        text,
+        headers: plainHeaders(res?.headers),
+        auth: auth && { ...auth },
+        accountId: creds.accountId,
+      }
     } catch (e) {
       return { status: 0, error: /abort/i.test(`${e?.name} ${e?.message}`) ? 'upstream_timeout' : 'upstream_transport' }
     }
@@ -1478,6 +1485,7 @@ export async function handleCodexSearch({
         })
         const responsePayload = parseJson(last.text)
         logBag.upstream_response_model = reportedModel(responsePayload)
+        logBag.usage_account_id = openaiUsageAccountId(last.accountId)
         logBag.upstream_status = last.status || null
         ingestCodexHop(
           projectRoot,
@@ -1664,6 +1672,7 @@ export async function handleCodexImages({
         })
         const responsePayload = parseJson(last.text)
         logBag.upstream_response_model = reportedModel(responsePayload)
+        logBag.usage_account_id = openaiUsageAccountId(last.accountId)
         logBag.upstream_status = last.status || null
         ingestCodexHop(
           projectRoot,

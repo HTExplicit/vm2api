@@ -28,6 +28,63 @@ test('an empty pool is a 503 "no available account", never a load message', () =
   assert.equal(mapped.body.error.details, undefined)
 })
 
+test('CRAG host quota rejections stay distinct permission errors', () => {
+  for (const code of ['license_crag_host_over_quota', 'license_crag_host_usage_unverified']) {
+    const error = { type: 'permission_error', code, message: 'CRAG host capacity check failed' }
+    const result = rewritePoolErrorForClient(mapUpstreamError(403, { error }))
+    assert.equal(result.status, 403)
+    assert.deepEqual(result.body.error, error)
+  }
+})
+
+test('native V2 completion follows provider facts independently of usage completeness', () => {
+  const result = {
+    ok: true,
+    nativeHandoff: true,
+    body: {
+      type: 'message',
+      id: 'msg_native_v2',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'done' }],
+      stop_reason: 'end_turn',
+    },
+    providerResult: {
+      schema_version: 2,
+      provider_complete: true,
+      usage_complete: false,
+      message_id: 'msg_native_v2',
+      stop_reason: 'end_turn',
+    },
+  }
+  assert.equal(isCompleteAssistantMessage(result), true)
+  for (const patch of [
+    { provider_complete: false },
+    { response_valid: false },
+    { delivery_error: { status: 502 } },
+    { error: { type: 'api_error', message: 'provider failed' } },
+    { message_id: 'msg_other' },
+  ]) {
+    assert.equal(
+      isCompleteAssistantMessage({ ...result, providerResult: { ...result.providerResult, ...patch } }),
+      false,
+    )
+  }
+  const tool = {
+    ...result,
+    body: {
+      ...result.body,
+      stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', id: 'tool_1', name: 'lookup', input: {} }],
+    },
+    providerResult: { ...result.providerResult, stop_reason: 'tool_use' },
+  }
+  assert.equal(isCompleteAssistantMessage(tool), false)
+  assert.equal(
+    isCompleteAssistantMessage({ ...tool, providerResult: { ...tool.providerResult, handoff_complete: true } }),
+    true,
+  )
+})
+
 test('real capacity exhaustion and queue timeout are a 529 overloaded_error with retry-after', () => {
   for (const code of ['pool_overloaded', 'pool_wait_queue_full', 'pool_queue_timeout']) {
     const mapped = mapUpstreamError(529, { error: { type: 'overloaded_error', code, message: 'busy' } })

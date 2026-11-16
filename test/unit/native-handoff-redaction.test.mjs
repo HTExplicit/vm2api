@@ -37,8 +37,8 @@ const start = () =>
       usage: { input_tokens: 7, output_tokens: 0 },
     },
   })
-const terminal = (stop = 'end_turn') =>
-  frame(summary(stop)) +
+const terminal = (stop = 'end_turn', facts = {}) =>
+  frame({ ...summary(stop), ...facts }) +
   frame({ type: 'message_delta', delta: { stop_reason: stop, stop_sequence: null }, usage: USAGE }) +
   frame({ type: 'message_stop' })
 const text = (value) =>
@@ -118,48 +118,61 @@ function redactionFixture(t) {
   }
 }
 
-for (const [field, block, deltaType] of [
-  ['text', { type: 'text', text: '' }, 'text_delta'],
-  ['thinking', { type: 'thinking', thinking: '' }, 'thinking_delta'],
-  ['partial_json', { type: 'tool_use', id: 'tool_native', name: 'lookup', input: {} }, 'input_json_delta'],
-]) {
-  test(`native SSE restores a split ${field} placeholder before terminal validation`, async (t) => {
-    const stop = field === 'partial_json' ? 'tool_use' : 'end_turn'
-    const pieces = [TAG.slice(0, 1), TAG.slice(1, -1), TAG.slice(-1)]
-    if (field === 'partial_json') {
-      pieces[0] = `{"query":"${pieces[0]}`
-      pieces[2] += '"}'
-    }
-    const wire =
-      start() +
-      frame({ type: 'content_block_start', index: 2, content_block: block }) +
-      pieces
-        .map((value) => frame({ type: 'content_block_delta', index: 2, delta: { type: deltaType, [field]: value } }))
-        .join('') +
-      frame({ type: 'content_block_stop', index: 2 }) +
-      terminal(stop)
-    const args = await fixture(t, (res) => {
-      res.setHeader('content-type', 'text/event-stream')
-      res.end(wire)
+for (const schema of [1, 2]) {
+  for (const [field, block, deltaType] of [
+    ['text', { type: 'text', text: '' }, 'text_delta'],
+    ['thinking', { type: 'thinking', thinking: '' }, 'thinking_delta'],
+    ['partial_json', { type: 'tool_use', id: 'tool_native', name: 'lookup', input: {} }, 'input_json_delta'],
+  ]) {
+    test(`native v${schema} SSE restores a split ${field} placeholder before terminal validation`, async (t) => {
+      const stop = field === 'partial_json' ? 'tool_use' : 'end_turn'
+      const pieces = [TAG.slice(0, 1), TAG.slice(1, -1), TAG.slice(-1)]
+      if (field === 'partial_json') {
+        pieces[0] = `{"query":"${pieces[0]}`
+        pieces[2] += '"}'
+      }
+      const wire =
+        start() +
+        frame({ type: 'content_block_start', index: 2, content_block: block }) +
+        pieces
+          .map((value) => frame({ type: 'content_block_delta', index: 2, delta: { type: deltaType, [field]: value } }))
+          .join('') +
+        frame({ type: 'content_block_stop', index: 2 }) +
+        terminal(
+          stop,
+          schema === 2
+            ? {
+                schema_version: 2,
+                provider_complete: true,
+                handoff_complete: true,
+                delivery_complete: true,
+                response_valid: true,
+              }
+            : {},
+        )
+      const args = await fixture(t, (res) => {
+        res.setHeader('content-type', 'text/event-stream')
+        res.end(wire)
+      })
+      if (schema === 2) args.exec.workerStatus.capabilities.push('provider_result_v2')
+      const redaction = redactionFixture(t)
+      const lines = []
+      const received = await streamGoWorker({ ...args, ...redaction, onEvent: (line) => lines.push(line) })
+      assert.equal(received.ok, true)
+      assert.equal(received.upstreamResponseModel, MODEL)
+      const blockValue = received.body.content.find((value) => value?.type === block.type)
+      assert.equal(field === 'partial_json' ? blockValue.input.query : blockValue[field], SECRET)
+      const restoredDeltas = eventsFrom(lines).filter((event) => event.type === 'content_block_delta')
+      const value = restoredDeltas.map((event) => event.delta[field]).join('')
+      assert.equal(field === 'partial_json' ? JSON.parse(value).query : value, SECRET)
+      assert.equal(
+        redaction.restored.some((event) => event.type === 'kin_provider_result'),
+        false,
+      )
+      assert.doesNotMatch(lines.join('\n'), /kin_provider_result|\{\{R_API_KEY_/)
     })
-    const redaction = redactionFixture(t)
-    const lines = []
-    const received = await streamGoWorker({ ...args, ...redaction, onEvent: (line) => lines.push(line) })
-    assert.equal(received.ok, true)
-    assert.equal(received.upstreamResponseModel, MODEL)
-    const blockValue = received.body.content.find((value) => value?.type === block.type)
-    assert.equal(field === 'partial_json' ? blockValue.input.query : blockValue[field], SECRET)
-    const restoredDeltas = eventsFrom(lines).filter((event) => event.type === 'content_block_delta')
-    const value = restoredDeltas.map((event) => event.delta[field]).join('')
-    assert.equal(field === 'partial_json' ? JSON.parse(value).query : value, SECRET)
-    assert.equal(
-      redaction.restored.some((event) => event.type === 'kin_provider_result'),
-      false,
-    )
-    assert.doesNotMatch(lines.join('\n'), /kin_provider_result|\{\{R_API_KEY_/)
-  })
+  }
 }
-
 test('native SSE emits a literal redaction tail before its block stop', async (t) => {
   const args = await fixture(t, (res) => {
     res.setHeader('content-type', 'text/event-stream')

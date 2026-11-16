@@ -4,6 +4,13 @@ import http from 'node:http'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { Readable } from 'node:stream'
+import {
+  createNativeHandoffState,
+  consumeNativeHandoffStream,
+  negotiateNativeHandoff,
+  negotiateProviderResult,
+} from '../../src/lib/protocol/native-handoff.mjs'
 import { callGoWorker, streamGoWorker } from '../../src/lib/transport/go-worker-client.mjs'
 import {
   finalizeAssembledAssistantHop,
@@ -1072,3 +1079,141 @@ for (const stream of [false, true]) {
     )
   }
 }
+
+const v2Summary = (overrides = {}) =>
+  summary({
+    schema_version: 2,
+    provider_complete: true,
+    handoff_complete: true,
+    delivery_complete: true,
+    response_valid: true,
+    run_id: 'run_native_fixture',
+    turn_id: 'turn_native_fixture',
+    attempt_id: 0,
+    source: 'provider_http',
+    http_status: 200,
+    ...overrides,
+  })
+
+test('provider facts capability is negotiated separately from native handoff', () => {
+  const options = { managedCrag: true, requestPath: '/internal/v1/messages' }
+  const exec = { workerStatus: { capabilities: ['provider_result_v2'] } }
+  assert.equal(negotiateProviderResult(exec, options), true)
+  assert.equal(negotiateNativeHandoff(exec, options), false)
+  exec.workerStatus.capabilities.push('native_handoff_v1')
+  assert.equal(negotiateNativeHandoff(exec, { ...options, requestContext: { purpose: 'auto_mode_classifier' } }), false)
+  assert.equal(negotiateProviderResult(exec, { ...options, requestPath: '/internal/health' }), false)
+})
+
+test('v2 JSON facts are stripped and provider completion does not invent complete usage', () => {
+  const state = createNativeHandoffState()
+  const facts = v2Summary({ usage_complete: false, usage: { input_tokens: 47 } })
+  state.observeHeaders({ 'x-kin-provider-result': JSON.stringify({ schema_version: 2, summary_truncated: true }) })
+  const result = state.finish({ ...message(facts), _kin_provider_result: facts })
+  assert.equal(result.stop_reason, 'max_tokens')
+  assert.equal(Object.hasOwn(result, '_kin_provider_result'), false)
+  assert.deepEqual(result.usage, { input_tokens: 47 })
+  assert.equal(Object.hasOwn(result.usage, 'output_tokens'), false)
+  assert.equal(state.metadata.providerResult.usage_complete, false)
+  assert.equal(state.metadata.providerResult.provider_complete, true)
+})
+
+test('v2 header index never substitutes for full facts and conflicts remain failures', () => {
+  const facts = v2Summary()
+  const missing = createNativeHandoffState()
+  missing.observeHeaders({ 'x-kin-provider-result': JSON.stringify(facts) })
+  assert.throws(() => missing.finish(message(facts)), { code: 'native_handoff_missing' })
+  const conflict = createNativeHandoffState()
+  conflict.observeHeaders({ 'x-kin-provider-result': JSON.stringify({ schema_version: 2, message_id: 'msg_other' }) })
+  conflict.observeResult(facts)
+  assert.throws(() => conflict.finish(message(facts)), { code: 'native_handoff_conflict' })
+})
+
+test('v2 facts advance explicitly from partial observations to a complete provider result', () => {
+  const state = createNativeHandoffState()
+  const partial = v2Summary({
+    provider_complete: false,
+    usage_complete: false,
+    handoff_complete: false,
+    delivery_complete: false,
+    usage: { input_tokens: 47 },
+    stop_reason: null,
+  })
+  state.observeResult(partial)
+  state.observeResult(v2Summary())
+  assert.deepEqual(state.finish(message()).usage, USAGE)
+  assert.equal(state.metadata.providerResult.provider_complete, true)
+  const conflict = createNativeHandoffState()
+  conflict.observeResult(v2Summary())
+  conflict.observeResult(v2Summary({ model: 'claude-other' }))
+  assert.throws(() => conflict.finish(message()), { code: 'native_handoff_conflict' })
+})
+
+test('agent facts accept only the later attempt in the same run and turn', () => {
+  const state = createNativeHandoffState({ nativeHandoff: false })
+  state.observeResult(v2Summary({ attempt_id: 0, message_id: 'msg_attempt_0' }))
+  state.observeResult(v2Summary({ attempt_id: 1, message_id: 'msg_attempt_1' }))
+  const publicMessage = message(v2Summary({ message_id: 'msg_agent_aggregate' }))
+  assert.equal(state.finish(publicMessage), publicMessage)
+  assert.equal(state.providerResult.attempt_id, 1)
+  const conflict = createNativeHandoffState({ nativeHandoff: false })
+  conflict.observeResult(v2Summary({ attempt_id: 0 }))
+  conflict.observeResult(v2Summary({ attempt_id: 1, run_id: 'different_run' }))
+  assert.throws(() => conflict.finish(publicMessage), { code: 'native_handoff_conflict' })
+})
+
+test('v2 provider errors stay private while the public error projection remains authoritative', () => {
+  const facts = v2Summary({
+    provider_complete: false,
+    usage_complete: false,
+    stop_reason: null,
+    error: { type: 'provider_private', message: 'private upstream diagnostic', raw_body: 'private-body' },
+  })
+  const state = createNativeHandoffState()
+  const publicError = {
+    type: 'error',
+    error: { type: 'api_error', code: 'upstream_failed', message: 'Public failure' },
+  }
+  assert.deepEqual(state.finish({ ...publicError, _kin_provider_result: facts }), publicError)
+  assert.equal(state.providerResult.error.raw_body, 'private-body')
+  assert.doesNotMatch(JSON.stringify(state.errorBody), /private upstream|private-body/)
+  const unprojected = createNativeHandoffState()
+  unprojected.observeResult(facts)
+  const result = unprojected.finish(message())
+  assert.equal(result.error.code, 'native_handoff_incomplete')
+  assert.doesNotMatch(JSON.stringify(result), /private upstream|private-body/)
+})
+
+for (const failure of [
+  { response_valid: false },
+  { delivery_error: { status: 502, message: 'delivery interrupted' } },
+]) {
+  test(`v2 native ${Object.keys(failure)[0]} cannot become a successful result`, () => {
+    const state = createNativeHandoffState()
+    state.observeResult(v2Summary(failure))
+    assert.equal(state.finish(message()).error.code, 'native_handoff_incomplete')
+  })
+}
+
+test('v2 native tools remain buffered until callback reconciliation is complete', async () => {
+  for (const handoffComplete of [false, true]) {
+    const facts = v2Summary({ stop_reason: 'tool_use', handoff_complete: handoffComplete })
+    const lines = []
+    const response = Readable.from([start(facts) + toolFrames() + resultFrame(facts) + terminalFrames(facts)])
+    response.headers = {}
+    response.trailers = {}
+    const pending = consumeNativeHandoffStream(response, {
+      state: createNativeHandoffState(),
+      onEvent: (line) => lines.push(line),
+      isCommitEvent: (event) => event.type === 'content_block_start' && event.content_block?.type === 'tool_use',
+    })
+    if (handoffComplete) {
+      const result = await pending
+      assert.equal(result.body.stop_reason, 'tool_use')
+      assert.equal(eventsFrom(lines).at(-1).type, 'message_stop')
+    } else {
+      await assert.rejects(pending, { code: 'native_handoff_incomplete' })
+      assert.deepEqual(lines, [])
+    }
+  }
+})

@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -30,7 +31,7 @@ test('image factory publishes signed bytes without replacing selected caches or 
   fs.mkdirSync(slot, { recursive: true })
   fs.writeFileSync(path.join(slot, 'kin-kernel'), 'original wrapper')
   assert.deepEqual(publishCragFactory(destinationRoot, source), { ok: true, changed: false })
-  seedEncryptedPackage(imageRoot, { revision: 'two' })
+  seedEncryptedPackage(imageRoot, { revision: 'two', payloadKey: crypto.randomBytes(32) })
   assert.deepEqual(publishCragFactory(destinationRoot, source), { ok: true, changed: true })
   assert.equal(verifyCragV2Tree(factory).ok, true)
   assert.equal(fs.readFileSync(pointer, 'utf8'), pointerBytes)
@@ -38,6 +39,10 @@ test('image factory publishes signed bytes without replacing selected caches or 
   assert.notDeepEqual(
     fs.readFileSync(path.join(factory, 'manifest.json')),
     fs.readFileSync(path.join(selected, 'manifest.json')),
+  )
+  assert.notEqual(
+    JSON.parse(fs.readFileSync(path.join(factory, 'manifest.json'))).payload.key_id,
+    JSON.parse(fs.readFileSync(path.join(selected, 'manifest.json'))).payload.key_id,
   )
   const before = fs.readFileSync(path.join(factory, 'manifest.json'))
   const other = seedEncryptedPackage(path.join(root, 'other'))

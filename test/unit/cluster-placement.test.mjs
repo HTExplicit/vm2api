@@ -34,6 +34,7 @@ import {
   pushSlotFiles,
   reconcileSlotCredentials,
   remoteSlotPath,
+  stageFreshClaudeKernels,
 } from '../../src/lib/cluster/remote-slot-files.mjs'
 import { cragSlotPayload, slotImageAction, slotImageSpec } from '../../src/lib/cluster/slot-image.mjs'
 import { tarStream } from '../../src/lib/cluster/tar.mjs'
@@ -63,6 +64,11 @@ function fakeNode(files = new Map()) {
   const links = new Map()
   const handles = new Map()
   const published = []
+  const symlinksCreated = []
+  sftp.lstat = (p, cb) => {
+    if (!files.has(p) && !links.has(p)) return setImmediate(() => cb(Object.assign(new Error('missing'), { code: 2 })))
+    return ok(cb, { isFile: () => files.has(p), isSymbolicLink: () => links.has(p) })
+  }
   sftp.open = (p, flags, attrs, cb) => {
     if (flags !== 'wx') return fail(cb, `unexpected flags ${flags}`)
     if (files.has(p) || links.has(p)) return fail(cb, 'EEXIST')
@@ -93,13 +99,21 @@ function fakeNode(files = new Map()) {
   }
   sftp.ext_openssh_rename = (from, to, cb) => {
     published.push(to)
+    if (links.has(from)) {
+      links.set(to, links.get(from))
+      links.delete(from)
+      files.delete(to)
+      return ok(cb)
+    }
     links.delete(to)
     files.set(to, files.get(from))
     modes.set(to, modes.get(from))
     files.delete(from)
     ok(cb)
   }
+  sftp.readlink = (p, cb) => (links.has(p) ? ok(cb, links.get(p)) : fail(cb, 'not a symbolic link'))
   sftp.symlink = (target, link, cb) => {
+    symlinksCreated.push(link)
     links.set(link, target)
     ok(cb)
   }
@@ -141,6 +155,7 @@ function fakeNode(files = new Map()) {
     modes,
     links,
     published,
+    symlinksCreated,
     session: { nodeId: 'node-t', client, host },
     remoteCred: `${host.root}/vms/vm-07/claude/credentials.json`,
   }
@@ -159,6 +174,52 @@ function localSlot(cred) {
 }
 
 const vm = { id: 'vm-07', node_id: 'node-t' }
+
+test('fresh node staging requires both kernels without publishing guest selection or credentials', async (t) => {
+  if (process.arch !== 'x64') return t.skip('requires an amd64 CRAG fixture')
+  const node = fakeNode()
+  const root = tmpDir('kin-slot-fresh-kernels-')
+  const wrap = path.join(root, 'share/wrap-cli')
+  const saved = ['KIN_WRAP_CLI_ROOT', 'KIN_KERNEL_BIN', 'KIN_CRAG_V2_ROOT'].map((key) => [key, process.env[key]])
+  for (const [key] of saved) delete process.env[key]
+  bindPlacement({
+    projectRoot: root,
+    manager: { client: () => node.session.client, remoteHost: async () => node.session.host },
+  })
+  t.after(() => {
+    unbindPlacement()
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+  const target = { ...vm, runtime: { type: 'kvm' }, dataplane: 'crag' }
+  const remote = `${node.session.host.root}/vms/${vm.id}`
+  const selector = `${remote}/cli-home/.kin/kin-kernel`
+  node.files.set(selector, Buffer.from('existing-selector'))
+  node.files.set(node.remoteCred, Buffer.from('rotated-credential'))
+
+  await assert.rejects(stageFreshClaudeKernels(target, root), { code: 'kernel_package_missing' })
+  fs.mkdirSync(wrap, { recursive: true })
+  for (const name of ['cli-node', 'kin-kernel.bin']) fs.writeFileSync(path.join(wrap, name), name)
+  await assert.rejects(stageFreshClaudeKernels(target, root), { code: 'slot_payload_missing' })
+  seedEncryptedPackage(root)
+
+  const staged = await stageFreshClaudeKernels(target, root)
+  assert.equal(staged.ok, true)
+  assert.equal(node.files.get(`${remote}/slot-bin/cli-node`)?.toString(), 'cli-node')
+  assert.equal(node.files.get(`${remote}/slot-bin/kin-kernel.bin`)?.toString(), 'kin-kernel.bin')
+  assert.match(node.files.get(`${remote}/slot-bin/kin-kernel`)?.toString(), /kin-kernel\.bin/)
+  for (const file of cragSlotPayload(root).files) {
+    const dest = `${remote}/slot-bin/${file.name.slice('opt/kin/'.length)}`
+    assert.deepEqual(node.files.get(dest), file.body || fs.readFileSync(file.src))
+  }
+  assert.equal(node.files.get(selector)?.toString(), 'existing-selector')
+  assert.equal(node.files.get(node.remoteCred)?.toString(), 'rotated-credential')
+  assert.equal(node.files.has(`${remote}/run/kernel.json`), false)
+  assert.equal(node.published.includes(selector), false)
+})
 
 test('KVM binary publication requires a complete CRAG preinstall even while cli-node is selected', async (t) => {
   const node = fakeNode()
@@ -332,14 +393,58 @@ test('login prepare reconcile keeps a live remote credential when local is stale
   const node = fakeNode()
   node.files.set(node.remoteCred, Buffer.from('{"rt":"rotated-live"}'))
   const slotDir = localSlot('{"rt":"stale-local"}')
+  const official = `${node.session.host.root}/vms/vm-07/claude/.credentials.json`
+  node.files.set(official, Buffer.from('{"claudeAiOauth":{"accessToken":"","refreshToken":""}}'))
   const r = await reconcileSlotCredentials(vm, slotDir, node.session)
   assert.equal(r.pulled, true)
   assert.equal(node.files.get(node.remoteCred).toString(), '{"rt":"rotated-live"}')
   const local = path.join(slotDir, 'cli-home', '.claude', 'credentials.json')
   assert.equal(fs.readFileSync(local, 'utf8'), '{"rt":"rotated-live"}')
-  const link = await ensureRemoteOfficialCredentialLink(vm, slotDir, node.session)
-  assert.equal(link.linked, true)
-  assert.equal(node.links.get(`${node.session.host.root}/vms/vm-07/claude/.credentials.json`), 'credentials.json')
+  assert.equal(node.links.get(official), 'credentials.json')
+  assert.equal(node.files.has(official), false)
+  node.files.set(node.remoteCred, Buffer.from('{"rt":"next-rotation"}'))
+  assert.equal(
+    node.files.get(path.posix.join(path.posix.dirname(official), node.links.get(official))).toString(),
+    '{"rt":"next-rotation"}',
+  )
+  assert.equal((await ensureRemoteOfficialCredentialLink(vm, slotDir, node.session)).linked, true)
+  assert.equal(node.symlinksCreated.length, 1)
+  assert.deepEqual(node.published, [official])
+})
+
+test('periodic link repair only inspects metadata and refuses a missing or symlinked authority', async () => {
+  const node = fakeNode()
+  node.session.client.exec = () => assert.fail('maintenance must not pull credential bytes')
+  const check = () => ensureRemoteOfficialCredentialLink(vm, null, node.session)
+  assert.deepEqual(await check(), { linked: false, reason: 'remote_missing' })
+  node.links.set(node.remoteCred, '../other-slot/credentials.json')
+  assert.deepEqual(await check(), { linked: false, reason: 'remote_not_regular' })
+  assert.deepEqual(node.symlinksCreated, [])
+  node.links.delete(node.remoteCred)
+  node.files.set(node.remoteCred, Buffer.from('current'))
+  const official = path.posix.join(path.posix.dirname(node.remoteCred), '.credentials.json')
+  node.links.set(official, '/obsolete/credentials.json')
+  const results = await Promise.all([check(), check()])
+  assert.ok(results.every((result) => result.linked))
+  assert.deepEqual([...node.links], [[official, 'credentials.json']])
+  assert.equal(node.files.get(node.remoteCred).toString(), 'current')
+})
+
+test('failed atomic link publication leaves the old name intact and can retry', async () => {
+  const node = fakeNode()
+  const official = path.posix.join(path.posix.dirname(node.remoteCred), '.credentials.json')
+  node.files.set(official, Buffer.from('old'))
+  node.files.set(node.remoteCred, Buffer.from('current'))
+  const sftp = await new Promise((resolve) => node.session.client.sftp((_, value) => resolve(value)))
+  const rename = sftp.ext_openssh_rename
+  sftp.ext_openssh_rename = (_from, _to, cb) => cb(new Error('rename failed'))
+  const check = () => ensureRemoteOfficialCredentialLink(vm, null, node.session)
+  await assert.rejects(check(), { code: 'sftp_failed' })
+  assert.equal(node.files.get(official).toString(), 'old')
+  assert.deepEqual([...node.links], [])
+  sftp.ext_openssh_rename = rename
+  assert.equal((await check()).linked, true)
+  assert.equal(node.links.get(official), 'credentials.json')
 })
 
 test('start reconcile never overwrites a remote credential the slot already rotated', async () => {

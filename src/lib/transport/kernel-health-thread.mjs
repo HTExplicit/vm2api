@@ -29,7 +29,7 @@ function healthWorker() {
 }
 
 // Keep health I/O and its deadline independent of synchronous panel queries.
-export function kernelHealthInWorker(exec, { timeoutMs = 3000, signal } = {}) {
+export function kernelHealthInWorker(exec, { timeoutMs = 3000, signal, requireInternalToken = false } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(Object.assign(new Error('The operation was aborted'), { code: 'ABORT_ERR' }))
@@ -58,7 +58,7 @@ export function kernelHealthInWorker(exec, { timeoutMs = 3000, signal } = {}) {
     signal?.addEventListener('abort', onAbort, { once: true })
     state.worker.ref()
     try {
-      state.worker.postMessage({ type: 'health', id, exec, timeoutMs })
+      state.worker.postMessage({ type: 'health', id, exec, timeoutMs, requireInternalToken })
     } catch (error) {
       request.reject(error)
     }

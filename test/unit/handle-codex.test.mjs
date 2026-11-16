@@ -885,6 +885,7 @@ for (const stream of [false, true]) {
       assert.equal(logBag.upstream_model, 'gpt-5.5')
       assert.equal(logBag.sent_model, 'gpt-5.5')
       assert.equal(logBag.upstream_response_model, declared.at(-1) || null)
+      assert.equal(logBag.usage_account_id, 'openai:vm-gpt-a')
       assert.equal(logBag.input_tokens, 11)
       assert.equal(logBag.output_tokens, 2)
       if (stream) {
