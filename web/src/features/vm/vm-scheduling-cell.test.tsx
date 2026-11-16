@@ -34,6 +34,11 @@ describe('list scheduling controls', () => {
       ),
     ]
     expect(blocks).toHaveLength(10)
+    expect([
+      ...html.matchAll(
+        /<button[^>]*aria-label="slot-a (?:自动调度优先级|调度优先级 \d+)"/g
+      ),
+    ]).toHaveLength(11)
     expect(
       blocks.filter(([block]) => block.includes('bg-sky-600'))
     ).toHaveLength(6)
@@ -44,6 +49,11 @@ describe('list scheduling controls', () => {
     expect(html).toContain(
       'aria-label="slot-a 自动调度优先级" aria-pressed="false"'
     )
+    expect(html).toContain('data-slot="priority-auto-segment"')
+    expect(html.indexOf('aria-label="slot-a 自动调度优先级"')).toBeLessThan(
+      html.indexOf('aria-label="slot-a 调度优先级 1"')
+    )
+    expect(html).not.toMatch(/>自动</)
     expect(html).not.toMatch(/重置|周窗口|倒计时/)
   })
 
@@ -58,7 +68,7 @@ describe('list scheduling controls', () => {
     expect(html).not.toMatch(
       /aria-label="slot-a 调度优先级 \d+" aria-pressed="true"/
     )
-    expect(html.match(/--status-ok-solid/g)).toHaveLength(4)
+    expect(html.match(/--status-ok-solid/g)).toHaveLength(5)
   })
 
   it('keeps priority editable when scheduling is manually off', () => {
@@ -77,6 +87,7 @@ describe('list scheduling controls', () => {
     expect(html).toContain('aria-label="slot-a 调度优先级"')
     expect(html).not.toContain('aria-label="slot-a 调度优先级 1"')
     expect(html).not.toContain('aria-label="slot-a 自动调度优先级"')
+    expect(html).toContain('data-slot="priority-auto-segment"')
     expect(html).toContain('title="手动调度优先级，当前等级 6"')
     role.admin = true
   })

@@ -4,7 +4,6 @@ import type { Vm } from '@/types/panel-vm'
 import { toast } from 'sonner'
 import { patchVm } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { Button } from '@/components/ui/button'
 import {
   Tooltip,
   TooltipContent,
@@ -20,7 +19,7 @@ import { useVmPerms } from '@/features/vm/vm-perms'
 
 const LEVELS = Array.from({ length: 10 }, (_, index) => index + 1)
 const BLOCK_CLASS =
-  'group/priority relative flex min-h-6 min-w-6 flex-1 items-start border-0 bg-transparent p-0 focus-visible:z-10 focus-visible:outline-2 focus-visible:outline-solid focus-visible:-outline-offset-2 focus-visible:outline-ring [@media(pointer:coarse)]:min-h-10'
+  'group/priority relative flex min-h-6 min-w-6 flex-1 items-center border-0 bg-transparent p-0 focus-visible:z-10 focus-visible:outline-2 focus-visible:outline-solid focus-visible:-outline-offset-2 focus-visible:outline-ring [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11'
 
 /** The switch preserves scheduling intent; the buttons only change priority. */
 export function VmSchedulingCell({ vm }: { vm: Vm }) {
@@ -54,96 +53,131 @@ export function VmSchedulingCell({ vm }: { vm: Vm }) {
     mutation.mutate(next)
   }
 
+  const automaticSegment = (
+    <span
+      aria-hidden
+      className='pointer-events-none flex h-4 w-full items-center'
+    >
+      <span
+        data-slot='priority-auto-segment'
+        className={cn(
+          'h-1.5 w-full rounded-full transition-colors',
+          automatic
+            ? 'bg-[color:var(--status-ok-solid)] group-hover/priority:bg-[color:var(--status-ok)]'
+            : 'track-recessed group-hover/priority:bg-accent'
+        )}
+      />
+    </span>
+  )
+  const automaticClass = cn(
+    BLOCK_CLASS,
+    'w-6 flex-none [@media(pointer:coarse)]:w-11'
+  )
+
   return (
     <div
-      className='w-60 shrink-0'
+      className='flex w-full items-center gap-2'
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
     >
-      <div className='flex h-6 items-center gap-2'>
-        <SchedulableSwitch {...vmSchedulableProps(vm)} />
-        {perms.admin ? (
-          <Button
-            type='button'
-            size='sm'
-            variant='ghost'
-            className={cn(
-              'h-6 cursor-pointer rounded-sm px-1 text-xs shadow-none',
-              automatic
-                ? 'text-[color:var(--status-ok)]'
-                : 'text-muted-foreground'
-            )}
-            aria-label={`${vm.id} 自动调度优先级`}
-            aria-pressed={automatic}
-            disabled={mutation.isPending}
-            onClick={() => select('auto')}
-          >
-            自动
-          </Button>
-        ) : null}
-      </div>
+      <SchedulableSwitch
+        {...vmSchedulableProps(vm)}
+        className='flex shrink-0'
+      />
       <div
         role='group'
         aria-label={`${vm.id} 调度优先级`}
         aria-description={priorityDescription}
         aria-busy={mutation.isPending || undefined}
-        className='flex w-60'
+        className='flex min-w-0 flex-1 items-center gap-1'
       >
-        {LEVELS.map((value) => {
-          const filled = levelOk && value <= level
-          const segment = (
-            <span
-              aria-hidden
-              className='pointer-events-none flex h-4 w-full items-center'
-            >
-              <span
-                data-slot='priority-segment'
+        {perms.admin ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type='button'
                 className={cn(
-                  'h-1.5 w-full border-r border-r-background/70 transition-colors group-first/priority:rounded-l-full group-last/priority:rounded-r-full group-last/priority:border-r-0',
-                  filled
-                    ? automatic
-                      ? 'bg-[color:var(--status-ok-solid)] group-hover/priority:bg-[color:var(--status-ok)]'
-                      : 'bg-sky-600 group-hover/priority:bg-sky-700 dark:bg-sky-400 dark:group-hover/priority:bg-sky-300'
-                    : 'track-recessed group-hover/priority:bg-accent'
+                  automaticClass,
+                  'cursor-pointer disabled:opacity-50'
                 )}
-              />
-            </span>
-          )
-          if (!perms.admin) {
-            return (
-              <span
-                key={value}
-                aria-hidden
-                title={priorityDescription}
-                className={BLOCK_CLASS}
+                aria-label={`${vm.id} 自动调度优先级`}
+                aria-pressed={automatic}
+                disabled={mutation.isPending}
+                onClick={() => select('auto')}
               >
-                {segment}
+                {automaticSegment}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {priorityDescription}；{automatic ? '当前为自动' : '切换为自动'}
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <span
+            aria-hidden
+            title={priorityDescription}
+            className={automaticClass}
+          >
+            {automaticSegment}
+          </span>
+        )}
+        <div className='flex min-w-60 flex-1 [@media(pointer:coarse)]:min-w-[440px]'>
+          {LEVELS.map((value) => {
+            const filled = levelOk && value <= level
+            const segment = (
+              <span
+                aria-hidden
+                className='pointer-events-none flex h-4 w-full items-center'
+              >
+                <span
+                  data-slot='priority-segment'
+                  className={cn(
+                    'h-1.5 w-full border-r border-r-background/70 transition-colors group-first/priority:rounded-l-full group-last/priority:rounded-r-full group-last/priority:border-r-0',
+                    filled
+                      ? automatic
+                        ? 'bg-[color:var(--status-ok-solid)] group-hover/priority:bg-[color:var(--status-ok)]'
+                        : 'bg-sky-600 group-hover/priority:bg-sky-700 dark:bg-sky-400 dark:group-hover/priority:bg-sky-300'
+                      : 'track-recessed group-hover/priority:bg-accent'
+                  )}
+                />
               </span>
             )
-          }
-          return (
-            <Tooltip key={value}>
-              <TooltipTrigger asChild>
-                <button
-                  type='button'
-                  className={cn(
-                    BLOCK_CLASS,
-                    'cursor-pointer disabled:opacity-50'
-                  )}
-                  aria-label={`${vm.id} 调度优先级 ${value}`}
-                  aria-pressed={!automatic && level === value}
-                  disabled={mutation.isPending}
-                  onClick={() => select(value)}
+            if (!perms.admin) {
+              return (
+                <span
+                  key={value}
+                  aria-hidden
+                  title={priorityDescription}
+                  className={BLOCK_CLASS}
                 >
                   {segment}
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>
-                {priorityDescription}；设为手动 {value}
-              </TooltipContent>
-            </Tooltip>
-          )
-        })}
+                </span>
+              )
+            }
+            return (
+              <Tooltip key={value}>
+                <TooltipTrigger asChild>
+                  <button
+                    type='button'
+                    className={cn(
+                      BLOCK_CLASS,
+                      'cursor-pointer disabled:opacity-50'
+                    )}
+                    aria-label={`${vm.id} 调度优先级 ${value}`}
+                    aria-pressed={!automatic && level === value}
+                    disabled={mutation.isPending}
+                    onClick={() => select(value)}
+                  >
+                    {segment}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {priorityDescription}；设为手动 {value}
+                </TooltipContent>
+              </Tooltip>
+            )
+          })}
+        </div>
       </div>
     </div>
   )

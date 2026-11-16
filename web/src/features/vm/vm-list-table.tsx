@@ -64,9 +64,8 @@ const ROW_INTERACTIVE =
 const COL_CLS: Record<VmColumnKey | 'actions' | 'open', string> = {
   open: 'w-[36px] shrink-0 pl-1',
   vm: 'min-w-[170px] flex-[1.1]',
-  sched: 'w-64 shrink-0',
   status: 'min-w-[190px] flex-[1.05]',
-  usage: 'min-w-[250px] flex-[1.4]',
+  usage: 'min-w-80 flex-[1.4] [@media(pointer:coarse)]:min-w-[560px]',
   cost: 'min-w-[170px] flex-[0.9]',
   actions: 'w-[64px] shrink-0 pr-2',
 }
@@ -225,17 +224,18 @@ const COLUMNS: Record<
   { label: string; cell: (ctx: CellCtx) => ReactNode }
 > = {
   vm: { label: '账号', cell: ({ vm }) => <SlotCell vm={vm} /> },
-  sched: {
-    label: '调度',
-    cell: ({ vm }) => <VmSchedulingCell vm={vm} />,
-  },
   status: {
     label: '健康 · 24h 请求',
     cell: ({ vm, statusShow }) => <StatusCell vm={vm} show={statusShow} />,
   },
   usage: {
     label: '用量窗口',
-    cell: ({ vm, now }) => <VmUsageWindowsInline vm={vm} now={now} />,
+    cell: ({ vm, now }) => (
+      <div data-slot='vm-usage-cell' className='space-y-2'>
+        <VmUsageWindowsInline vm={vm} now={now} />
+        <VmSchedulingCell vm={vm} />
+      </div>
+    ),
   },
   cost: {
     label: '成本 · 7D',
@@ -312,7 +312,7 @@ export function VmTable({
   }
   return (
     <div className='overflow-x-auto rounded-lg border border-border/60'>
-      <div className='min-w-[1180px]'>
+      <div className='min-w-[1180px] [@media(pointer:coarse)]:min-w-[1200px]'>
         <div className='sticky top-0 z-10 flex h-8 items-center border-b bg-muted/30 text-xs font-medium tracking-wide text-muted-foreground'>
           <div className={COL_CLS.open} aria-hidden />
           {columns.order.map((key) => {
