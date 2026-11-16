@@ -1,0 +1,76 @@
+{
+  "application_release": "v1.4.121",
+  "application_commit": "aa4203336c6b1aa8e7d6a7eb582690cc7f821ef3",
+  "recorded_by": "HTExplicit/vm2api",
+  "record_type": "supplier_release_observation",
+  "artifact_source": "https://github.com/dofastted/vm2api/releases/tag/payload-2026.11.16-crag-3.1.3",
+  "source_publication": {
+    "repository": "dofastted/crag",
+    "visibility": "private",
+    "commit": "fc2f61b2e0eaaa070eb563988ec846f450398d39",
+    "record": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.16-crag-3.1.3/SOURCES.json",
+    "record_sha256": "63491b898272160ed2cbce6762c7b4388392f3373c53277ecfa5be3d820e9265",
+    "statement": "The supplier publishes the original standard 3.1.3 signed encrypted package and SOURCES.json through its public vm2api payload Release. This fork consumes those bytes without rebuilding or resigning the private CRAG source; no reproducible-build attestation is claimed."
+  },
+  "supplier_sources": {
+    "schema": 1,
+    "component": "crag-native",
+    "version": "3.1.3",
+    "variant": "standard",
+    "source_repository": "dofastted/crag",
+    "source_commit": "fc2f61b2e0eaaa070eb563988ec846f450398d39",
+    "payload_release": "payload-2026.11.16-crag-3.1.3",
+    "baseline_payload_release": "payload-2026.11.16-crag-3.1.2",
+    "core_sha256": "812fc327b2fc05920999ab8a684c8177888693f916676f2d9ced9bfae22035e1",
+    "manifest_sha256": "6c9273c7629d3f017c361df1000766b89e10eabd3e18db41aae66060bd3316d2",
+    "archive": {
+      "path": "dist/crag-v2-licensed-amd64.tar.gz",
+      "asset": "crag-v2-licensed-amd64.tar.gz",
+      "size": 170914192,
+      "sha256": "2643dd84b8dd641645aff692983f2825d043264590844d520aefe293150c08b9"
+    },
+    "build_environment": {
+      "mode": "container",
+      "image": "rust:1-bookworm@sha256:c9155318d07341301a78b45ecdd81af2e43b8b297d64e8fd4c5e80d7735607c3"
+    },
+    "official_claude": {
+      "version": "2.1.321",
+      "sha256": "426c33815ca6645a772f722fbff10dbf2cbdb124a8aeab733c1365dbf8bbf61f"
+    },
+    "non_crag_payload_pins_unchanged": true,
+    "authorization_migration": {
+      "payload_key_rotated": false,
+      "offline_activation": "Standard CRAGK1 only. Legacy authorization packages are not part of this release."
+    },
+    "capabilities": {
+      "host_subscription": 1,
+      "host_subscription_reclaim": 1
+    }
+  },
+  "signed_manifest": "crag-v2-amd64-v3.1.3-manifest.json",
+  "signed_manifest_sha256": "6c9273c7629d3f017c361df1000766b89e10eabd3e18db41aae66060bd3316d2",
+  "core_plaintext_sha256": "812fc327b2fc05920999ab8a684c8177888693f916676f2d9ced9bfae22035e1",
+  "official_claude_version": "2.1.321",
+  "authorization_public_key_id": "9dbb4bc2109f1637e64174d80d659168910843b34dbe4870f70a14af49ccb902",
+  "product_key_id": "835451e266145220a2e75b1f39ff22a0d7b17be48395553a24666b1946e0333a",
+  "authorization_migration": {
+    "previous_application_release": "v1.4.117",
+    "previous_package_version": "3.1.2",
+    "authority_pem_unchanged": true,
+    "previous_product_key_id": "835451e266145220a2e75b1f39ff22a0d7b17be48395553a24666b1946e0333a",
+    "product_key_changed_from_previous_package": false,
+    "statement": "The standard 3.1.3 package retains the issuer and payload key used by 3.1.2. Legacy authorization packages remain separate and are not combined with the standard factory."
+  },
+  "assets": {
+    "crag-v2-amd64-LICENSES.txt": "80ee2b207aa7a45ad09360dd874d62b3be2e079bfa84de368092940889e84784",
+    "crag-v2-amd64-claude-code-2.1.321-LICENSE.md": "8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a",
+    "crag-v2-amd64-claude-code-2.1.321-claude": "426c33815ca6645a772f722fbff10dbf2cbdb124a8aeab733c1365dbf8bbf61f",
+    "crag-v2-amd64-crag-license-public.pem": "a38372fb87af66678f7823538f2cf8b9fa7e0f3cbefcd612a4d5c47ebef10126",
+    "crag-v2-amd64-kernel.json.example": "78f7efce48658da76d996c2c99b50127265d7c6cf6ce13947162f057cf6d2f42",
+    "crag-v2-amd64-unpack-note.md": "1f5cce1c9491f03ceeeffcafa80db4bcbff8f5042fa86ef344c97bcf3b62062d",
+    "crag-v2-amd64-v3.1.3-crag-v2": "07341a84fb980bb206c5b041debf401da440d6c99051c3b21ed00ac910415d18",
+    "crag-v2-amd64-v3.1.3-crag-v2.payload.enc": "f66df388f26ee2fd2aa5bcfe67fdb9cf9143ed3f6d8ef7c53a21c2409247917b",
+    "crag-v2-amd64-v3.1.3-manifest.json": "6c9273c7629d3f017c361df1000766b89e10eabd3e18db41aae66060bd3316d2",
+    "crag-v2-licensed-amd64.tar.gz": "2643dd84b8dd641645aff692983f2825d043264590844d520aefe293150c08b9"
+  }
+}

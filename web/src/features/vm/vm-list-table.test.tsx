@@ -2,31 +2,14 @@ import { type ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { STATUS_BAR_ITEMS } from './status-bar-options'
-import { VmAccountIdentity } from './vm-account-identity'
+import { describe, expect, it, vi } from 'vitest'
 import { VmTable } from './vm-list-table'
 import { VmSchedulingBlock, VmSchedulingEditor } from './vm-scheduling'
-
-const visibility = vi.hoisted(() => ({ label: true, bar: true, proxy: true }))
-vi.mock('./status-bar-options', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./status-bar-options')>()),
-  useStatusBarShow: () => ({ show: visibility, toggle: vi.fn() }),
-}))
-afterEach(() =>
-  Object.assign(visibility, { label: true, bar: true, proxy: true })
-)
 
 vi.mock('./vm-actions-context', () => ({ useVmActions: () => ({}) }))
 vi.mock('./vm-action-menu', () => ({ VmActionMenu: () => null }))
 vi.mock('./vm-owner-line', () => ({ VmRentedMark: () => null }))
 vi.mock('./vm-perms', () => ({ useVmPerms: () => ({ admin: false }) }))
-vi.mock('./use-vm-column-order', () => ({
-  useVmColumnOrder: () => ({
-    order: ['vm', 'status', 'usage'],
-    isDefault: true,
-  }),
-}))
 vi.mock('@/components/ui/dialog', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/ui/dialog')>()),
   DialogContent: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -52,13 +35,11 @@ describe('VM scheduling priority', () => {
         weight: 42,
       }
       const list = render(vm)
-      expect(list).not.toContain('>调度</span>')
-      expect(list).toContain('>用量窗口</span>')
-      expect(list).toContain('data-slot="vm-usage-cell"')
-      expect(list).toContain('aria-label="vm-01 调度优先级"')
-      expect(list).toContain('aria-description="手动调度优先级，当前等级 8"')
-      expect(list).not.toMatch(/background-color:[^";]+[^>]*>调度优先级/)
-      expect(list.replace(/<[^>]*>/g, '')).not.toMatch(/等级|权重/)
+      expect(list).toContain('>调度 · 优先级</div>')
+      expect(list).toMatch(
+        /text-blue-800[^"]*shadow-\[inset_0_0_0_1px_currentColor\][^"]*"[^>]*>P8</
+      )
+      expect(list).not.toMatch(/等级|权重/)
 
       const detail = renderToStaticMarkup(<VmSchedulingBlock vm={vm} />)
       expect(detail).toContain('>调度优先级</span>')
@@ -75,14 +56,12 @@ describe('VM scheduling priority', () => {
   )
 
   it('does not substitute legacy weight when priority is missing', () => {
-    expect(render({ weight: 4 })).toContain(
-      'aria-description="自动调度优先级，当前等级 未知"'
-    )
+    expect(render({ weight: 4 })).toMatch(/>P—</)
   })
 })
 
-describe('VM row interaction and request health', () => {
-  it('keeps full details separate from the row expansion control', () => {
+describe('VM row interaction and health', () => {
+  it('opens detail from a left button and exposes a separate expand control', () => {
     const html = render()
     expect(html).toContain('aria-label="打开 vm-01 详情页"')
     expect(html).toContain('aria-expanded="false"')
@@ -90,131 +69,17 @@ describe('VM row interaction and request health', () => {
     expect(html).not.toContain('role="button"')
   })
 
-  it('distinguishes known request SLA, no requests and unknown data', () => {
-    const buckets: [number, number][] = Array.from({ length: 48 }, (_, i) =>
+  it('shows request success rate and never infers health without requests', () => {
+    const buckets = Array.from({ length: 48 }, (_, i): [number, number] =>
       i === 47 ? [99, 1] : [0, 0]
     )
-    const html = render({
-      health_24h: buckets,
-      inflight: 3,
-      seats_max: 5,
-      seats_used: 2,
-    })
-    expect(html).toContain('>99.0%</span>')
-    expect(html).toContain('99/100 成功')
-    expect(
-      render({ health_24h: Array.from({ length: 48 }, () => [0, 0]) })
-    ).toContain('24h 无请求')
+    const html = render({ health_24h: buckets })
+    expect(html).toContain('>99.0%</b>')
+    expect(html).toContain('>99/100</span>')
     expect(render({ health_24h: null })).toContain('24h 无请求')
     expect(render()).toContain('24h 未知')
     expect(render()).not.toContain('24h 无请求')
-  })
-})
-
-describe('official status header and independent display options', () => {
-  const active: Partial<Vm> = {
-    has_token: true,
-    schedule_state: 'on',
-    availability: { key: 'ok', usable: true, text: '池内可用' },
-    inflight: 3,
-    seats_max: 5,
-    seats_used: 2,
-    queue_depth: 1,
-    health_24h: [[99, 1]],
-  }
-
-  it('restores the official menu keys and labels without changing their storage names', () => {
-    expect(STATUS_BAR_ITEMS).toEqual([
-      ['label', '状态'],
-      ['bar', '健康'],
-      ['proxy', '代理'],
-    ])
-  })
-
-  it('shows the actual status, positive in-flight count and occupied or queued seats', () => {
-    const html = render(active)
-    expect(html).toContain('>池内可用</span>')
-    expect(html).toContain('title="在飞 3"')
-    expect(html).toContain('席位 2/5 · 排队 1')
-    expect(render({ ...active, seats_used: 0, queue_depth: 1 })).toContain(
-      '席位 0/5 · 排队 1'
-    )
-    expect(render({ ...active, seats_used: 2, queue_depth: 0 })).toContain(
-      '席位 2/5'
-    )
-  })
-
-  it.each([
-    { name: 'no in-flight requests', over: { inflight: 0 } },
-    {
-      name: 'bad account',
-      over: { availability: { key: 'bad', usable: false, text: '无效凭证' } },
-    },
-    {
-      name: 'no credential',
-      over: {
-        has_token: false,
-        availability: { key: 'none', usable: false, text: '无凭证' },
-      },
-    },
-    { name: 'manually off', over: { schedule_state: 'off' } },
-  ] satisfies Array<{ name: string; over: Partial<Vm> }>)(
-    'hides the in-flight marker for $name',
-    ({ over }) => {
-      expect(render({ ...active, ...over })).not.toContain('title="在飞 ')
-    }
-  )
-
-  it.each(['cool', 'quota'] as const)(
-    'keeps positive in-flight requests visible for %s status',
-    (key) => {
-      expect(
-        render({
-          ...active,
-          availability: { key, usable: false, text: '仍有在途请求' },
-        })
-      ).toContain('title="在飞 3"')
-    }
-  )
-
-  it.each([
-    { seats_max: null, seats_used: 2, queue_depth: 1 },
-    { seats_max: undefined, seats_used: 2, queue_depth: 1 },
-    { seats_max: 5, seats_used: 0, queue_depth: 0 },
-  ])(
-    'hides the seat marker without a seat limit or active occupancy',
-    (over) => {
-      expect(render({ ...active, ...over })).not.toContain('席位 ')
-    }
-  )
-
-  it('hides only the entire status header when 状态 is disabled', () => {
-    Object.assign(visibility, { label: false, bar: true, proxy: false })
-    const html = render(active)
-    expect(html).not.toMatch(/池内可用|title="在飞 |席位 /)
-    expect(html).toContain(
-      'role="img" aria-label="近 24h 请求健康：99/100 成功"'
-    )
-    expect(html).toContain('>99.0%</span>')
-    expect(html).toContain('99/100 成功')
-  })
-
-  it('hides the health bar, percentage and summary together when 健康 is disabled', () => {
-    Object.assign(visibility, { label: true, bar: false, proxy: false })
-    const html = render(active)
-    expect(html).toContain('>池内可用</span>')
-    expect(html).toContain('title="在飞 3"')
-    expect(html).toContain('席位 2/5 · 排队 1')
-    expect(html).not.toMatch(/近 24h 请求健康|99\.0%|99\/100 成功/)
-  })
-
-  it('keeps the proxy display independent of both status and health', () => {
-    Object.assign(visibility, { label: false, bar: false, proxy: true })
-    const html = render(active)
-    expect(html).toContain('title="缺代理"')
-    expect(html).not.toMatch(/池内可用|title="在飞 |席位 |近 24h 请求健康/)
-    visibility.proxy = false
-    expect(render(active)).not.toContain('title="缺代理"')
+    expect(render({ health_24h: null })).not.toContain('主机内存紧张')
   })
 })
 
@@ -298,26 +163,61 @@ describe('VM account column kernel label', () => {
       '>local</span>'
     )
   })
+})
 
-  it('keeps the measured OpenAI plan and pending quota marker in the shared identity', () => {
-    const vm: Vm = {
-      id: 'vm-01',
+describe('VM list summary and toggles', () => {
+  it('renders the fleet summary and both list toggles', () => {
+    const buckets = Array.from({ length: 48 }, (_, i): [number, number] =>
+      i === 47 ? [9, 1] : [0, 0]
+    )
+    const html = render({ health_24h: buckets, seats_used: 1, seats_max: 4 })
+    expect(html).toContain('aria-label="全局汇总"')
+    expect(html).toContain('>在池</div>')
+    expect(html).toContain('>90.0%</b>')
+    expect(html).toContain('失败 1')
+    expect(html).toMatch(/aria-pressed="false"[^>]*>.*按状态分组/)
+    expect(html).toMatch(/aria-pressed="false"[^>]*>.*次要信息常显/)
+    expect(html).toContain('data-pin="false"')
+  })
+})
+
+describe('retained quota and plan accuracy', () => {
+  it.each([
+    [undefined, '已满'],
+    ['2000-01-01T00:00:00Z', '已过重置'],
+  ])(
+    'never promises recovery from a missing or stale reset (%s)',
+    (reset, label) => {
+      const html = render({
+        platform: 'openai',
+        has_token: true,
+        utilization_5h: 1,
+        reset_5h: reset,
+      })
+      expect(html).toContain(label)
+      expect(html).not.toContain('已过重置恢复')
+    }
+  )
+  it.each([
+    ['prolite', 'Pro 100'],
+    ['pro', 'Pro 200'],
+    ['promax', 'Pro 500'],
+  ])('keeps the true %s plan in the official compact badge', (plan, label) => {
+    expect(
+      render({ platform: 'openai', has_token: true, plan_type: plan })
+    ).toContain(`>${label}</span>`)
+  })
+  it('uses the last successful Codex window without adding a dense-row status block', () => {
+    const html = render({
       platform: 'openai',
       has_token: true,
-      plan_type: 'team',
-      chatgpt_plan_type: 'plus',
       codex_usage: {
         pending_refresh: true,
-        last_success_at: '2026-11-15T01:00:00Z',
+        last_success: { windows: [{ id: '5h', used_percent: 73 }] },
       },
-    }
-    const html = render(vm)
-    expect(html).toContain('>Business</span>')
-    expect(html).not.toContain('>Plus</span>')
-    expect(html).not.toContain('aria-label="额度待刷新，最近测量：')
-    expect(renderToStaticMarkup(<VmAccountIdentity vm={vm} />)).toContain(
-      'aria-label="额度待刷新，最近测量：'
-    )
-    expect(html).not.toContain('订阅 未知')
+    })
+    expect(html).toContain('73%')
+    expect(html).not.toContain('额度待刷新')
+    expect(html).not.toContain('priority-segment')
   })
 })

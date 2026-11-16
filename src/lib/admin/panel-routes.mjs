@@ -128,6 +128,7 @@ import { publicEndpointView, fetchUpstreamModels, API_ENDPOINT_PRESETS } from '.
 import { runAnthropicConsole, resolveConsoleProxyUrl, savedEndpointKey } from './anthropic-console.mjs'
 import { publicUserView } from './panel-users.mjs'
 import { authorizePanelRoute, mePayload, panelIdentity } from './panel-acl.mjs'
+import { createGeminiPanelHandler, isGeminiPanelPath } from '../gemini/routes.mjs'
 import {
   denyIfUserCannotDeleteVm,
   denyIfUserMissesKey,
@@ -301,7 +302,13 @@ import {
 import { inspectClusterPayloadChanges, refreshClusterSlotPayloads } from '../cluster/remote-slot.mjs'
 import { readRawBody as defaultReadRawBody } from '../http/respond.mjs'
 import { corsHeadersForRequest } from '../http/cors.mjs'
-import { createCragShopHandler, cragShopRoute, isCragShopPath, sameOriginPost } from './crag-shop.mjs'
+import {
+  createCragShopHandler,
+  cragShopRoute,
+  isCragDeviceShopPath,
+  isCragShopPath,
+  sameOriginPost,
+} from './crag-shop.mjs'
 import { createCragSubscriptionHandler, cragSubscriptionRoute } from './crag-subscription-routes.mjs'
 import { restartRustKernel, syncClaudeKernelConfigs, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
 
@@ -696,6 +703,11 @@ function slotProxyHint(px = {}, label = null) {
 }
 
 export function createPanelHandler(ctx) {
+  const geminiPanel = createGeminiPanelHandler({
+    json: ctx.json,
+    readBody: ctx.readBody,
+    proxyPool: () => ctx.proxyPool,
+  })
   // A checkout can change under a live Node process; report its boot version.
   const runningVersion = readLocalVersion(ctx.cfg?.paths?.project)
   const json = (...args) => ctx.json(...args)
@@ -1726,6 +1738,7 @@ export function createPanelHandler(ctx) {
     if (isCragShopPath(p)) {
       res.setHeader('Cache-Control', 'no-store')
       const route = cragShopRoute(req.method, p)
+      if (isCragDeviceShopPath(p)) return handleCragShop(req, res, url, route)
       if (route === 'plans') {
         // A valid buyer session gets the pilot catalogue; everyone else gets the public view.
         requireAuth(req, res, { buyer: true, optionalBuyer: true })
@@ -1775,6 +1788,7 @@ export function createPanelHandler(ctx) {
           }).body,
         )
       }
+      if (isGeminiPanelPath(p)) return geminiPanel(req, res, p)
       const subscriptionRoute = cragSubscriptionRoute(req.method, p)
       if (subscriptionRoute) return handleCragSubscription(req, res, subscriptionRoute)
 

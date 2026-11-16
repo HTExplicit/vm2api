@@ -15,7 +15,7 @@ vm2api 内置的是**商城代理和授权消费端**，不是收款服务。面
 
 ## 调用顺序
 
-下面路径都在 `/api/panel` 下。除公开套餐外，商城接口必须用真实面板买家会话；写操作同源，以 `Content-Type: application/json` 提交 JSON。以 [面板 API](PANEL_API.md#crag-订阅订单) 为完整字段参考。
+下面路径都在 `/api/panel` 下。这里复跑的是登录后手动领码的购买流程，除公开套餐外，须用真实面板买家会话。当前的免登录设备购买另走 `/crag-shop/device`，只应用已交付订单到本机，不返回兑换码。写操作同源，以 `Content-Type: application/json` 提交 JSON。以 [面板 API](PANEL_API.md#crag-订阅订单) 为完整字段参考。
 
 | 顺序 | 请求 | 预期 |
 | --- | --- | --- |
@@ -30,6 +30,8 @@ vm2api 内置的是**商城代理和授权消费端**，不是收款服务。面
 | 9 | `GET /vms/:id/crag-license`、`GET /crag-subscription` | 分别检查 `license.valid: true`、`license.scope: host`、期限，以及宿主已用/可用槽位；`enabled_slots` 是已运行且授权有效的槽数，不等同于已绑定额度。 |
 
 `v1.4.104` 官方镜像中，`POST /vms/:id/crag-license` 的在线路径只核销**设备码**；试填商城宿主码返回 `403 license_redeem_unavailable`，本次未消耗原码。上述第 7–8 步是该版本正确路径。设备码才向槽接口发送 `{"registration_code":"<设备 CRAGR1>"}`，回读 `license.kind: online` 和 `license.valid: true`。两类码前缀相同，不靠前缀辨别。支持 Authority `/v1/device-activation/resolve` 的构建可按类型分流；验收以实际发布镜像为准，不以当前源码替代。若只做无扣费冒烟，停在第 2 步。
+
+统一订阅回归使用隔离宿主上的两槽额度，分别绑定 Docker 与 KVM（可用不同受信 CRAG 发行包）。确认 `available_seats` 依次为 `2 → 1 → 0`，第三槽返回 `slot_limit_reached`；重签已有槽不再扣额度。启动 KVM 后检查来宾健康、`license_valid: true`，以及一次实际推理；仅看到面板绑定成功不算来宾验收通过。
 
 ## 本次真实验收（2026-11-15）
 

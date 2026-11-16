@@ -11,6 +11,7 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadConfig, reloadActiveVm, routingConfigFile } from './lib/core/config.mjs'
+import { geminiBillingUnavailable, isGeminiPublicPath } from './lib/gemini/routes.mjs'
 import {
   extractApiKey,
   timingSafeEqualStr,
@@ -105,7 +106,7 @@ import { nodeEgressProxyUrl, startNodeEgressSocks } from './lib/cluster/node-egr
 import { createSlotShell } from './lib/vm/slot-shell.mjs'
 import { vmLockBusy } from './lib/vm/vm-file.mjs'
 import { isKvmRuntime } from './lib/vm/runtime-kind.mjs'
-import { resolveCragKernelVersion, resolveKernelDataplane } from './lib/vm/slot-engine.mjs'
+import { resolveKernelDataplane } from './lib/vm/slot-engine.mjs'
 import {
   assertCragSubscriptionTarget,
   isCragSubscriptionSlotEnabled,
@@ -1114,11 +1115,7 @@ const listCragTargets = () =>
     .map(({ id }) => getVm(cfg.paths.project, id))
     .filter(Boolean)
 
-const isCragV2Slot = (vm) =>
-  !isNativeNodeVm(vm) &&
-  !isCodexVm(vm) &&
-  resolveKernelDataplane(vm, routingConfig) === 'crag' &&
-  resolveCragKernelVersion(vm, routingConfig) === 'v2'
+const isCragSlot = (vm) => !isNativeNodeVm(vm) && !isCodexVm(vm) && resolveKernelDataplane(vm, routingConfig) === 'crag'
 
 const cragSubscription = createCragSubscription({
   projectRoot: cfg.paths.project,
@@ -1133,7 +1130,7 @@ const cragSubscription = createCragSubscription({
     !isNativeNodeVm(vm) &&
     !isCodexVm(vm) &&
     (vm.node_id || isKvmRuntime(vm) || Boolean(installedCragV2Root(cfg.paths.project, vm))),
-  isSubscriptionSlot: (vm) => isCragV2Slot(vm) && !isKvmRuntime(vm),
+  isSubscriptionSlot: isCragSlot,
   assertReady: (vm, opts) => assertCragSubscriptionTarget(cfg.paths.project, vm, routingConfig, opts),
   isSlotEnabled: (vm, opts) => isCragSubscriptionSlotEnabled(cfg.paths.project, vm, routingConfig, opts),
 })
@@ -1162,6 +1159,7 @@ const handleCragShop = createCragShopHandler({
   subscription: cragSubscription,
   isCurrentAdmin: (req) => isCragShopAdmin(req.panelBuyerOwner),
   isActivationAdmin: isCragShopAdmin,
+  allowDeviceRequest: () => allowRate('crag-shop:device'),
   activationEnabled: cragShopActivationEnabled,
 })
 
@@ -1457,6 +1455,11 @@ const server = http.createServer(async (req, res) => {
       return json(res, 404, { error: { message: 'not found: ' + p } })
     }
 
+    if (isGeminiPublicPath(p)) {
+      if (!requireAuth(req, res)) return
+      return geminiBillingUnavailable(json, res)
+    }
+
     if (req.method === 'POST' && (p === '/v1/chat/completions' || p === '/chat/completions')) {
       return await handleProtocol(req, res, 'openai.chat', p)
     }
@@ -1579,6 +1582,13 @@ server.listen(cfg.port, cfg.host, () => {
     void cragSubscription.recover().catch(() => {
       console.warn('[crag-subscription] startup recovery failed; use the administrator panel to retry')
     })
+    const refresh = () =>
+      void cragSubscription.refreshExpiredEntitlement().catch(() => {
+        console.warn('[crag-subscription] expired quota refresh deferred')
+      })
+    const timer = setInterval(refresh, 1_000).unref()
+    server.once('close', () => clearInterval(timer))
+    refresh()
   }
   if (cragShopActivationEnabled) {
     const poll = () =>

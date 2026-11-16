@@ -703,30 +703,43 @@ for (const running of [true, false]) {
 }
 
 for (const patch of [{ runtime: { type: 'kvm' } }, { node_id: 'remote-node' }]) {
-  test(`subscription installation never binds unsupported placement ${JSON.stringify(patch)}`, async (t) => {
-    const { root, vm, home } = fixture(t, patch)
-    const before = fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`))
-    const result = await installKernelTargets({
-      projectRoot: root,
-      targets: [{ ...target()[0], expected_tag: 'v1.4.113', reissue: true }],
-      cragSubscription: {
-        authorizeInstall() {
-          assert.fail('KVM and cluster require a matching offline grant')
+  for (const valid of [true, false]) {
+    test(`subscription installation verifies a shared-pool grant before stopping ${JSON.stringify(patch)} (${valid})`, async (t) => {
+      const { root, vm, home } = fixture(t, patch)
+      const events = []
+      let authorized = false
+      const result = await installKernelTargets({
+        projectRoot: root,
+        targets: [{ ...target()[0], expected_tag: 'v1.4.121', reissue: true }],
+        cragSubscription: {
+          authorizeInstall(candidate) {
+            events.push('bind')
+            assert.equal(candidate.id, vm.id)
+            if (!valid) throw Object.assign(new Error('mock inactive subscription'), { code: 'host_subscription_inactive' })
+            authorized = true
+          },
         },
-      },
-      ops: {
-        describeKernelCatalog: () => [{ id: 'crag', ready: true, release_tag: 'v1.4.113' }],
-        checkCragLicense: () => ({ ok: false, code: 'license_required' }),
-        stopSlot() {
-          assert.fail('failed licensing must not stop the slot')
+        ops: {
+          describeKernelCatalog: () => [{ id: 'crag', ready: true, release_tag: 'v1.4.121' }],
+          checkCragLicense() {
+            events.push('verify')
+            return authorized ? { ok: true } : { ok: false, code: 'license_required' }
+          },
+          stopSlot() {
+            assert.equal(authorized, true, 'failed authorization must not stop the slot')
+            events.push('stop')
+            return { ok: false, code: 'fixture_stop_boundary' }
+          },
         },
-      },
+      })
+      assert.deepEqual(events, valid ? ['verify', 'bind', 'verify', 'stop'] : ['verify', 'bind'])
+      assert.equal(result.items[0].code, valid ? 'fixture_stop_boundary' : 'host_subscription_inactive')
+      assert.equal(result.items[0].stopped, false)
+      const saved = getVm(root, vm.id)
+      for (const key of ['status', 'runtime', 'dataplane', 'fingerprint', 'claude']) assert.deepEqual(saved[key], vm[key])
+      assert.equal(fs.readFileSync(path.join(home, '.kin', 'kin-kernel.bin'), 'utf8'), 'previous-kernel')
     })
-    assert.equal(result.items[0].code, 'license_required')
-    assert.equal(result.items[0].stopped, false)
-    assert.deepEqual(fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`)), before)
-    assert.equal(fs.readFileSync(path.join(home, '.kin', 'kin-kernel.bin'), 'utf8'), 'previous-kernel')
-  })
+  }
 }
 
 for (const [patch, kernel, code] of [

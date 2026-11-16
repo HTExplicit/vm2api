@@ -9,11 +9,11 @@ import type * as JsxDevRuntime from 'react/jsx-dev-runtime'
 import type * as JsxRuntime from 'react/jsx-runtime'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, activateVmCragLicense, api } from '@/lib/api'
+import { ApiError, activateVmCragLicense, api, cragDeviceApi } from '@/lib/api'
 import type * as CragLicenseEditorModule from '@/features/vm/crag-license-editor'
 import type { CragHostStatus } from '@/features/vm/queries'
 import type { CragCommerce } from './crag-commerce'
-import { CragSubscriptionPage } from './crag-shop'
+import { CragDevicePurchasePage, CragSubscriptionPage } from './crag-shop'
 
 type ActivationFormProps = Parameters<
   typeof CragLicenseEditorModule.CragActivationForm
@@ -194,6 +194,7 @@ vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   activateVmCragLicense: vi.fn(),
   api: vi.fn(),
+  cragDeviceApi: vi.fn(),
 }))
 vi.mock('./crag-commerce', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./crag-commerce')>()),
@@ -227,7 +228,7 @@ const order = {
   status: 'fulfilled',
 }
 
-function render() {
+function render(device = false) {
   state.cursor = 0
   state.refCursor = 0
   state.buttons = []
@@ -236,7 +237,9 @@ function render() {
   state.commerce = undefined
   state.hostForm = undefined
   state.hostInput = undefined
-  return renderToStaticMarkup(<CragSubscriptionPage />)
+  return renderToStaticMarkup(
+    device ? <CragDevicePurchasePage /> : <CragSubscriptionPage />
+  )
 }
 
 function click(label: string) {
@@ -342,6 +345,28 @@ describe('CRAG buyer presentation and activation wire', () => {
     }
   })
 
+  it('shows device orders and applies the paid entitlement without a panel login or a voucher', async () => {
+    state.authenticated = false
+    state.values[3] = [{ ...order, activation: { state: 'ready_to_apply' } }]
+    vi.mocked(cragDeviceApi).mockResolvedValue({
+      ...order,
+      activation: { state: 'active' },
+    })
+    const page = render(true)
+    expect(page).toContain('免登录购买')
+    expect(page).toContain('查看订单')
+    expect(page).not.toContain('领取兑换码')
+    expect(page).not.toContain('手动激活')
+    click('应用到本机')
+    await settle()
+    expect(cragDeviceApi).toHaveBeenCalledExactlyOnceWith(
+      '/orders/order-1/apply',
+      { method: 'POST', body: '{}' }
+    )
+    expect(api).not.toHaveBeenCalled()
+    expect(render(true)).toContain('订阅额度已加入本机')
+  })
+
   it('prefills the claimed code but requires a separate explicit manual target', () => {
     const code = `CRAGR1.${'a'.repeat(43)}`
     state.values[3] = [order]
@@ -413,20 +438,19 @@ describe('CRAG buyer presentation and activation wire', () => {
     }
   })
 
-  it('lists activated slots with their license scope and expiry separately from runtime usage', () => {
+  it('shows only the shared remaining capacity, not separate per-license counts', () => {
     state.hostStatus = {
-      state: 'unredeemed',
+      state: 'active',
       ready: false,
+      available_seats: 1,
       activated_slots: [
         { vm_id: 'vm-licensed', scope: 'device', expires_at: 1_900_000_000 },
       ],
     }
     const html = render()
-    expect(html).toContain('已激活且授权有效的 CRAG 槽位')
-    expect(html).toContain('vm-licensed')
-    expect(html).toContain('设备授权')
-    expect(html).toContain('dateTime="2030-03-17T17:46:40.000Z"')
-    expect(html).toContain('不表示槽位已启动')
+    expect(html).toMatch(/剩余可用槽位：(?:<!-- -->)?1/)
+    expect(html).not.toContain('vm-licensed')
+    expect(html).not.toContain('已绑定 / 可绑定应用锁')
   })
 
   it('redeems a trimmed host code without a ready slot or checkout target', async () => {
@@ -438,13 +462,16 @@ describe('CRAG buyer presentation and activation wire', () => {
       slot_limit: 2,
       used_slots: 0,
       available_slots: 2,
+      available_seats: 2,
     }
     vi.mocked(api).mockResolvedValueOnce(active)
 
     const html = render()
     expect(html).toContain('当前没有可绑定的 CRAG 槽位')
     expect(html).toContain('宿主机兑换码')
-    expect(html).toContain('兑换后以新套餐额度为准；不绑定、不启动 VM。')
+    expect(html).toContain(
+      '每张码从兑换时独立计时，未到期额度相加；不绑定、不启动 VM。'
+    )
     expect(state.hostInput?.type).toBe('password')
     fillHostCode('   ')
     expect(
@@ -472,7 +499,7 @@ describe('CRAG buyer presentation and activation wire', () => {
     const updated = render()
     expect(updated).toContain('订阅有效')
     expect(updated).toContain('宿主机额度已更新，未自动绑定 VM')
-    expect(updated).toMatch(/已兑换槽位<\/dt><dd[^>]*>2<\/dd>/)
+    expect(updated).toMatch(/剩余可用槽位：(?:<!-- -->)?2/)
     expect(updated).not.toContain(code)
     expect(state.hostInput?.value).toBe('')
     expect(state.setQueryData).toHaveBeenCalledExactlyOnceWith(
