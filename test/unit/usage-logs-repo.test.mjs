@@ -699,3 +699,76 @@ test('billing health shares the 10-second base across account-window scopes', ()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('health aggregation preserves millisecond boundaries relative to a non-aligned now', () => {
+  for (const [slots, slotMin] of [
+    [48, 30],
+    [84, 120],
+  ]) {
+    const { dir, db, repo } = freshDb()
+    try {
+      const now = Date.parse('2026-11-16T12:17:42.437Z')
+      const slotMs = slotMin * 60_000
+      const start = now - slots * slotMs
+      const samples = [
+        [start - 1, 500],
+        [start, 200],
+        [start + 1, 500],
+        [start + slotMs - 1, 200],
+        [start + slotMs, 500],
+        [start + slotMs + 1, 200],
+        [now - 1, 500],
+        [now, 200],
+        [now + 1, 500],
+      ]
+      seed(
+        repo,
+        samples.map(([at, status]) => ({
+          created_at: new Date(at).toISOString(),
+          status,
+          vm_id: 'vm-a',
+          account_id: 'acc-a',
+        })),
+      )
+      seed(repo, [{ created_at: '2026-11-16T12:17:41.invalidZ', vm_id: 'vm-a', account_id: 'acc-a' }])
+      const expected = Array.from({ length: slots }, () => [0, 0])
+      expected[0] = [2, 1]
+      expected[1] = [1, 1]
+      expected[slots - 1] = [1, 1]
+      assert.deepEqual(repo.healthBuckets({ now, slots, slotMin }).get('acc-a\0vm-a'), expected)
+      assert.deepEqual(repo.healthBuckets({ now, slots, slotMin, vmId: 'vm-a' }).get('vm-a'), expected)
+    } finally {
+      db.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('health aggregation merges empty VM identities and accumulates accounts for one VM', () => {
+  const { dir, db, repo } = freshDb()
+  try {
+    const now = Date.parse('2026-11-16T12:17:42.437Z')
+    const created_at = new Date(now - 1).toISOString()
+    seed(
+      repo,
+      [
+        { account_id: 'selected-a', final_account_id: 'served', vm_id: null, status: 200 },
+        { account_id: 'selected-b', final_account_id: 'served', vm_id: '', status: 500 },
+        { account_id: 'acc-a', vm_id: 'vm-a', status: 200 },
+        { account_id: 'acc-b', vm_id: 'vm-a', status: 500 },
+        { account_id: 'idle', vm_id: 'vm-b', status: null, final_state: 'cancelled' },
+      ].map((row) => ({ ...row, created_at })),
+    )
+    const all = repo.healthBuckets({ now })
+    assert.deepEqual(all.get('served\0')[47], [1, 1])
+    assert.deepEqual(all.get('acc-a\0vm-a')[47], [1, 0])
+    assert.deepEqual(all.get('acc-b\0vm-a')[47], [0, 1])
+    assert.equal(all.has('idle\0vm-b'), false, 'unclassified requests do not create an inferred health bucket')
+    const one = repo.healthBuckets({ now, vmId: 'vm-a' })
+    assert.equal(one.size, 1)
+    assert.deepEqual(one.get('vm-a')[47], [1, 1])
+  } finally {
+    db.close()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
