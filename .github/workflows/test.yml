@@ -377,7 +377,7 @@ jobs:
           pnpm exec vitest run src/features/cluster/model.test.ts src/features/cluster/connection-rows.test.ts
           pnpm exec vitest run src/features/billing/crag-commerce.test.tsx src/features/billing/crag-plan-picker.test.tsx src/features/billing/crag-shop.test.tsx src/features/vm/vm-type-visual.test.ts src/features/vm/vm-owner.test.ts src/features/vm/vm-list-table.test.tsx src/lib/login-terminal.test.ts src/lib/cred-type.test.ts src/lib/vm-usage.test.ts
           pnpm exec vitest run src/features/billing/crag-plan-content.test.tsx src/features/billing/crag-preview-channel.test.tsx src/features/billing/crag-preview-field.test.tsx src/features/billing/crag-preview.test.tsx src/lib/release-check.test.ts
-          pnpm exec vitest run src/features/vm/vm-scheduling-cell.test.tsx src/features/vm/use-vm-column-order.test.tsx
+          pnpm exec vitest run src/features/vm/vm-scheduling-cell.test.tsx src/features/vm/use-vm-column-order.test.tsx src/lib/vm-health.test.ts src/features/vm/vm-row-detail.test.tsx
           pnpm build
       - name: Platform configuration retry UI
         run: node scripts/smoke-platform-retry-ui.mjs
@@ -391,7 +391,7 @@ jobs:
         env:
           UI_BROWSER_EXE: /usr/bin/google-chrome
         run: node --test test/browser/proxy-kvm.test.mjs
-      - name: Direct scheduling priority controls
+      - name: VM list scheduling and request health
         env:
           UI_BROWSER_EXE: /usr/bin/google-chrome
         run: node --test test/browser/scheduling.test.mjs

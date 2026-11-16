@@ -153,3 +153,43 @@ test('async statistics keep independent databases separate and reject a replaced
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('request health reads use the read-only worker without main-thread fallback', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-health-worker-'))
+  const db = openDatabase({ dataDir: dir, pooled: true })
+  try {
+    const store = new RequestLogStore({ db, dataDir: dir })
+    const now = Date.now()
+    store.repo.insertSummary({
+      id: 'health-incomplete',
+      request_id: 'health-incomplete',
+      created_at: new Date(now - 1000).toISOString(),
+      status: 200,
+      vm_id: 'vm-a',
+      account_id: 'account-a',
+      final_state: 'incomplete',
+    })
+    const opts = { now, vmId: 'vm-a' }
+    const errors = { vmId: 'vm-a', since: new Date(now - 60_000).toISOString() }
+    const expectedBuckets = store.healthBuckets(opts)
+    const expectedErrors = store.topErrors(errors)
+    const synchronousHealth = t.mock.method(store.repo, 'healthBuckets', () => assert.fail('must not read on writer'))
+    const synchronousErrors = t.mock.method(store.repo, 'topErrors', () => assert.fail('must not read on writer'))
+    const [buckets, top] = await Promise.all([store.healthBucketsAsync(opts), store.topErrorsAsync(errors)])
+    assert.ok(buckets instanceof Map, 'worker structured clone preserves the health Map')
+    assert.deepEqual(buckets, expectedBuckets)
+    assert.deepEqual(buckets.get('vm-a')[47], [0, 1])
+    assert.deepEqual(top, expectedErrors)
+    assert.equal(top[0].code, '200')
+    assert.equal(synchronousHealth.mock.callCount(), 0)
+    assert.equal(synchronousErrors.mock.callCount(), 0)
+    db.exec('DROP TABLE usage_logs')
+    await assert.rejects(store.healthBucketsAsync(opts), /usage_logs/)
+    await assert.rejects(store.topErrorsAsync(errors), /usage_logs/)
+    assert.equal(synchronousHealth.mock.callCount(), 0, 'worker errors must not retry on the writer')
+    assert.equal(synchronousErrors.mock.callCount(), 0)
+  } finally {
+    closeDatabase()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

@@ -30,6 +30,8 @@ const REPO_METHODS = new Set([
   'keyUsagePeriods',
   'keyRecentRequests',
   'billingStatsReadOnly',
+  'healthBuckets',
+  'topErrors',
   'ownerBilling',
   'costBetween',
   'costByModel',

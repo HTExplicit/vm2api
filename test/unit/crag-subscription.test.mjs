@@ -8,6 +8,7 @@ import { createCragSubscription } from '../../src/lib/vm/crag-subscription.mjs'
 import { createCragRuntimeInventory } from '../../src/lib/vm/crag-runtime-inventory.mjs'
 import { checkCragLicense, cragLicenseDirectory, cragTargetIds } from '../../src/lib/vm/crag-license.mjs'
 import { cragSubscriptionPublicDirectory } from '../../src/lib/vm/crag-subscription-paths.mjs'
+import { assertCragSubscriptionTarget } from '../../src/lib/vm/vm-runtime.mjs'
 import { materializeCragV2 } from '../../src/lib/vm/wrap-cli-runtime.mjs'
 import {
   activateFixture,
@@ -83,6 +84,107 @@ test('startup recovery without an intent performs no Authority calls or storage 
   })
   await subscription.recover()
   assert.deepEqual(fs.readdirSync(root), [])
+})
+
+test('a legacy cluster slot can bind while stopped and reissue an old package permit on the same seat', async (t) => {
+  const vm = { id: 'legacy_cluster-52', node_id: 'node-a', dataplane: 'wrap', status: 'stopped' }
+  const requests = []
+  let entitlement
+  let inactive = true
+  let projected = false
+  const { root, connect } = standaloneHost(t, async (url, { body }) => {
+    const request = JSON.parse(body)
+    if (url.endsWith('/redeem')) entitlement = issueHostEntitlement(root, request.host_id, { slot_limit: 1 })
+    const data = { entitlement: entitlement.code, ...entitlement.claims, used_slots: Number(requests.length > 0) }
+    if (!url.endsWith('/bind')) return Response.json({ ok: true, data })
+    if (inactive) return Response.json({ ok: false, error: { code: 'host_subscription_inactive' } }, { status: 403 })
+    requests.push(request)
+    if (!request.reissue) {
+      return Response.json({ ok: false, error: { code: 'payload_key_conflict' } }, { status: 409 })
+    }
+    const permit = issueSlotPermit(root, request.machine_code, request.host_id, { seat: 1 })
+    return Response.json({ ok: true, data: { ...data, seat: 1, slot_permit: permit.code } })
+  })
+  seedEncryptedPackage(root)
+  fs.mkdirSync(path.join(root, 'vms', vm.id), { recursive: true })
+  fs.writeFileSync(path.join(root, 'vms', vm.id, 'machine-id'), crypto.randomBytes(16).toString('hex'))
+  const service = connect({
+    listTargets: () => [vm],
+    assertReady: (target, options) => assertCragSubscriptionTarget(root, target, {}, options),
+    runtimeInventory: { snapshot: async () => ({}) },
+    publishClusterBinding: async (projectRoot, target) => {
+      assert.equal(projectRoot, root)
+      assert.equal(target, vm)
+      projected = true
+    },
+  })
+  await service.redeem(voucher())
+  for (const id of ['active', '../legacy_cluster-52']) {
+    await assert.rejects(service.bind({ ...vm, id }), { code: 'crag_subscription_target_unready', status: 409 })
+  }
+  assert.deepEqual(await service.listOrderTargets(), [vm.id])
+  await assert.rejects(service.bind(vm), { code: 'host_subscription_inactive', status: 403 })
+  inactive = false
+  assert.deepEqual(await service.bind(vm), { seat: 1 })
+  assert.equal(projected, false)
+  assert.equal(requests.length, 2)
+  assert.deepEqual(requests[1], { ...requests[0], reissue: true })
+  assert.equal((await service.status()).used_slots, 1)
+  assert.equal(vm.dataplane, 'wrap')
+  vm.dataplane = 'crag'
+  assert.equal(checkCragLicense(root, vm).license.scope, 'host')
+  assert.equal(await service.admitInference({ vm }), null)
+  assert.equal(projected, false)
+  vm.status = 'running'
+  assert.equal(await service.admitInference({ vm }), null)
+  assert.equal(projected, true)
+})
+
+test('cluster binding retries only one explicit payload-key conflict and preserves stopped intent', async (t) => {
+  for (const [code, status, attempts] of [
+    ['payload_key_conflict', 409, 2],
+    ['payload_key_unknown', 400, 1],
+    ['auth_forbidden', 403, 1],
+    ['crag_subscription_authority_unavailable', 502, 1],
+  ]) {
+    await t.test(code, async (t) => {
+      const vm = {
+        id: 'legacy_cluster-53',
+        node_id: 'node-a',
+        dataplane: 'wrap',
+        status: 'stopped',
+        schedulable: false,
+        runtime: { type: 'docker', stopped: true },
+      }
+      const before = structuredClone(vm)
+      const requests = []
+      let entitlement
+      const { root, connect } = standaloneHost(t, async (url, { body }) => {
+        const request = JSON.parse(body)
+        if (url.endsWith('/redeem')) entitlement = issueHostEntitlement(root, request.host_id)
+        if (!url.endsWith('/bind'))
+          return Response.json({ ok: true, data: { entitlement: entitlement.code, ...entitlement.claims } })
+        requests.push(request)
+        if (status === 502) throw Error('local fixture interrupted')
+        return Response.json({ ok: false, error: { code } }, { status })
+      })
+      seedEncryptedPackage(root)
+      fs.mkdirSync(path.join(root, 'vms', vm.id), { recursive: true })
+      fs.writeFileSync(path.join(root, 'vms', vm.id, 'machine-id'), crypto.randomBytes(16).toString('hex'))
+      const service = connect({
+        listTargets: () => [vm],
+        assertReady: (target, options) => assertCragSubscriptionTarget(root, target, {}, options),
+        publishClusterBinding: () => assert.fail('a stopped binding must not publish to its node'),
+      })
+      await service.redeem(voucher())
+      await assert.rejects(service.bind(vm), { code, status })
+      assert.equal(requests.length, attempts)
+      assert.equal(requests[0].reissue, undefined)
+      if (attempts === 2) assert.deepEqual(requests[1], { ...requests[0], reissue: true })
+      assert.deepEqual(vm, before)
+      assert.equal(checkCragLicense(root, { ...vm, dataplane: 'crag' }).ok, false)
+    })
+  }
 })
 
 test('an admin can redeem without VMs and a second voucher replaces the signed capacity', async (t) => {
@@ -918,115 +1020,122 @@ test('an active host subscription can authorize a new download when the old devi
   assert.equal(next.license.seat, 1)
 })
 
-test('H2 release requires confirmed teardown and recovers an interrupted cloud response', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crag-roster-contract-'))
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  const source = path.join(root, 'machine-id')
-  fs.writeFileSync(source, crypto.randomBytes(16).toString('hex'), { mode: 0o600 })
-  const publicDir = cragSubscriptionPublicDirectory(root)
-  fs.mkdirSync(path.dirname(path.dirname(publicDir)), { recursive: true })
-  seedEncryptedPackage(root)
-  const slots = ['vm-41', 'vm-42'].map((id) => ({ id, dataplane: 'crag', crag_kernel_version: 'v2' }))
-  for (const vm of slots) {
-    const dir = path.join(root, 'vms', vm.id)
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, 'machine-id'), crypto.randomBytes(16).toString('hex'))
-  }
-  let rights,
-    permitDigest,
-    releases = 0,
-    revision = 0,
-    version = 1
-  let roster = []
-  let authorityAvailable = true
-  let reportedAvailable
-  const connect = () =>
-    createCragSubscription({
-      projectRoot: root,
-      machineIdFile: source,
-      listTargets: () => slots,
-      assertReady: () => true,
-      fetchImpl: async (url, init) => {
-        const action = url.split('/').at(-1)
-        if (action === 'status' && !authorityAvailable) return new Response(null, { status: 503 })
-        const { host_id, machine_code, permit_sha256, vm_id } = JSON.parse(init.body)
-        let extra = {}
-        if (action === 'upgrade') version = 2
-        if (action === 'bind') {
-          const { code } = issueSlotPermit(root, machine_code, host_id, { seat: 1 })
-          permitDigest = crypto.createHash('sha256').update(code).digest('hex')
-          roster = [{ seat: 1, permit_sha256: permitDigest }]
-          extra = { seat: 1, slot_permit: code }
-        }
-        if (action === 'release') {
-          assert.equal(vm_id, slots[0].id)
-          assert.equal(permit_sha256, permitDigest)
-          if (++releases === 1) roster = []
-        }
-        if (action !== 'status' && (action !== 'release' || releases === 1)) {
-          const base = issueHostEntitlement(root, host_id, { revision: ++revision, slot_limit: 1 })
-          const entitlement =
-            version === 1
-              ? base.code
-              : signSubscriptionBytes(root, 'CRAGH2', JSON.stringify({ ...base.claims, version, roster }))
-          rights = { entitlement, revision, slot_limit: 1, expires_at: base.claims.expires_at }
-        }
-        if (action === 'release' && releases === 1) throw Error('reply lost')
-        return Response.json({
-          ok: true,
-          data: {
-            ...rights,
-            used_slots: roster.length,
-            available_slots: reportedAvailable ?? 1 - roster.length,
-            ...extra,
-          },
-        })
-      },
-    })
-  const service = connect()
-  await service.redeem(voucher())
-  authorityAvailable = false
-  const upgraded = await service.upgrade()
-  assert.equal(upgraded.used_slots, 0)
-  assert.equal(upgraded.available_slots, 1, 'upgrade keeps freshly confirmed slots despite a failing status read')
-  authorityAvailable = true
-  await service.bind(slots[0])
-  assert.equal(checkCragLicense(root, slots[0]).ok, true)
-  await assert.rejects(
-    service.teardown(slots[0], async () => ({ ok: true })),
-    { code: 'crag_subscription_teardown_unconfirmed' },
-  )
-  assert.equal(releases, 0)
-  await assert.rejects(
-    service.teardown(slots[0], async () => ({ ok: true, teardownConfirmed: true })),
-    { code: 'crag_subscription_authority_unavailable' },
-  )
-  assert.equal(checkCragLicense(root, slots[0]).ok, false)
-  const recovered = connect()
-  const pending = await recovered.status()
-  assert.equal(pending.state, 'sync_pending')
-  assert.equal(Object.hasOwn(pending, 'used_slots'), false)
-  assert.equal(Object.hasOwn(pending, 'available_slots'), false)
-  assert.equal(await recovered.recover(), undefined)
-  assert.equal((await recovered.status()).available_slots, 1)
-  reportedAvailable = 0
-  assert.equal(
-    (await recovered.status()).available_slots,
-    0,
-    'the Authority can report no capacity despite a free seat',
-  )
-  authorityAvailable = false
-  assert.equal(
-    (await recovered.status()).available_slots,
-    undefined,
-    'the signed roster does not substitute for live quota',
-  )
-  authorityAvailable = true
-  reportedAvailable = undefined
-  await recovered.bind(slots[1])
-  assert.equal(checkCragLicense(root, slots[0]).ok, false)
-  assert.equal(checkCragLicense(root, slots[1]).ok, true)
-})
+for (const cluster of [false, true]) {
+  test(`H2 ${cluster ? 'cluster' : 'local'} release requires confirmed teardown and recovers an interrupted cloud response`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crag-roster-contract-'))
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    const source = path.join(root, 'machine-id')
+    fs.writeFileSync(source, crypto.randomBytes(16).toString('hex'), { mode: 0o600 })
+    const publicDir = cragSubscriptionPublicDirectory(root)
+    fs.mkdirSync(path.dirname(path.dirname(publicDir)), { recursive: true })
+    seedEncryptedPackage(root)
+    const slots = ['vm-41', 'vm-42'].map((id) => ({
+      id,
+      dataplane: 'crag',
+      crag_kernel_version: 'v2',
+      ...(cluster && { node_id: 'node-a' }),
+    }))
+    for (const vm of slots) {
+      const dir = path.join(root, 'vms', vm.id)
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, 'machine-id'), crypto.randomBytes(16).toString('hex'))
+    }
+    let rights,
+      permitDigest,
+      releases = 0,
+      revision = 0,
+      version = 1
+    let roster = []
+    let authorityAvailable = true
+    let reportedAvailable
+    const connect = () =>
+      createCragSubscription({
+        projectRoot: root,
+        machineIdFile: source,
+        listTargets: () => slots,
+        assertReady: () => true,
+        fetchImpl: async (url, init) => {
+          const action = url.split('/').at(-1)
+          if (action === 'status' && !authorityAvailable) return new Response(null, { status: 503 })
+          const { host_id, machine_code, permit_sha256, vm_id } = JSON.parse(init.body)
+          let extra = {}
+          if (action === 'upgrade') version = 2
+          if (action === 'bind') {
+            const { code } = issueSlotPermit(root, machine_code, host_id, { seat: 1 })
+            permitDigest = crypto.createHash('sha256').update(code).digest('hex')
+            roster = [{ seat: 1, permit_sha256: permitDigest }]
+            extra = { seat: 1, slot_permit: code }
+          }
+          if (action === 'release') {
+            assert.equal(vm_id, slots[0].id)
+            assert.equal(permit_sha256, permitDigest)
+            if (++releases === 1) roster = []
+          }
+          if (action !== 'status' && (action !== 'release' || releases === 1)) {
+            const base = issueHostEntitlement(root, host_id, { revision: ++revision, slot_limit: 1 })
+            const entitlement =
+              version === 1
+                ? base.code
+                : signSubscriptionBytes(root, 'CRAGH2', JSON.stringify({ ...base.claims, version, roster }))
+            rights = { entitlement, revision, slot_limit: 1, expires_at: base.claims.expires_at }
+          }
+          if (action === 'release' && releases === 1) throw Error('reply lost')
+          return Response.json({
+            ok: true,
+            data: {
+              ...rights,
+              used_slots: roster.length,
+              available_slots: reportedAvailable ?? 1 - roster.length,
+              ...extra,
+            },
+          })
+        },
+      })
+    const service = connect()
+    await service.redeem(voucher())
+    authorityAvailable = false
+    const upgraded = await service.upgrade()
+    assert.equal(upgraded.used_slots, 0)
+    assert.equal(upgraded.available_slots, 1, 'upgrade keeps freshly confirmed slots despite a failing status read')
+    authorityAvailable = true
+    await service.bind(slots[0])
+    assert.equal(checkCragLicense(root, slots[0]).ok, true)
+    await assert.rejects(
+      service.teardown(slots[0], async () => ({ ok: true })),
+      { code: 'crag_subscription_teardown_unconfirmed' },
+    )
+    assert.equal(releases, 0)
+    await assert.rejects(
+      service.teardown(slots[0], async () => ({ ok: true, teardownConfirmed: true })),
+      { code: 'crag_subscription_authority_unavailable' },
+    )
+    assert.equal(checkCragLicense(root, slots[0]).ok, false)
+    const recovered = connect()
+    const pending = await recovered.status()
+    assert.equal(pending.state, 'sync_pending')
+    assert.equal(Object.hasOwn(pending, 'used_slots'), false)
+    assert.equal(Object.hasOwn(pending, 'available_slots'), false)
+    assert.equal(await recovered.recover(), undefined)
+    assert.equal((await recovered.status()).available_slots, 1)
+    reportedAvailable = 0
+    assert.equal(
+      (await recovered.status()).available_slots,
+      0,
+      'the Authority can report no capacity despite a free seat',
+    )
+    authorityAvailable = false
+    assert.equal(
+      (await recovered.status()).available_slots,
+      undefined,
+      'the signed roster does not substitute for live quota',
+    )
+    authorityAvailable = true
+    reportedAvailable = undefined
+    await recovered.bind(slots[1])
+    assert.equal(checkCragLicense(root, slots[0]).ok, false)
+    assert.equal(checkCragLicense(root, slots[1]).ok, true)
+  })
+}
 
 test('only an authenticated same-origin admin session can redeem without revealing a failed voucher', async () => {
   const code = voucher()
