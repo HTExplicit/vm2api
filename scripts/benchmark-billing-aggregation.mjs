@@ -40,6 +40,7 @@ const windows = Array.from({ length: SLOTS }, (_, slot) => ({
   reset_7d: iso(NOW + (1 + (slot % 5)) * DAY),
   reset_7d_oi: iso(NOW + (1 + (slot % 3)) * DAY),
 }))
+const expectedHealth = new Map()
 
 // Today is deliberately wall-clock based, independently of opts.now.
 const NativeDate = Date
@@ -82,6 +83,10 @@ function expectedBillingStats(original) {
   // Keep every original field in the complete result comparison below.
   return {
     ...original,
+    accounts: original.accounts.map((account) => ({
+      ...account,
+      health_24h: expectedHealth.get(account.account_id + '\0' + account.vm_id) || null,
+    })),
     lifetime_accounts: original.accounts.map((account) => ({
       account_id: account.account_id,
       total_cost: account.total_cost,
@@ -112,6 +117,17 @@ try {
     const age = i % 10 < 8 ? (i * 15_485_863) % (7 * DAY) : 7 * DAY + ((i * 32_452_843) % (14 * DAY))
     const fable = i % 3 === 0
     const status = i % 19 === 0 ? 500 : i % 17 === 0 ? 429 : 200
+    if (age <= DAY) {
+      const key = accountId(slot) + '\0' + vmId(slot)
+      if (!expectedHealth.has(key))
+        expectedHealth.set(
+          key,
+          Array.from({ length: 48 }, () => [0, 0]),
+        )
+      const bucket = Math.min(47, Math.floor((DAY - age) / (HOUR / 2)))
+      // The synthetic fixture has only 200, 429 and 500: only 500 is an SLA failure.
+      expectedHealth.get(key)[bucket][status === 500 ? 1 : 0]++
+    }
     insert.run(
       `row-${i}`,
       `request-${i}`,
