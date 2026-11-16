@@ -1484,35 +1484,42 @@ export class UsageLogsRepo {
   healthBuckets({ now = Date.now(), slots = 48, slotMin = 30, vmId = null } = {}) {
     const slotMs = slotMin * 60_000
     const start = now - slots * slotMs
-    const sinceIso = new Date(start).toISOString()
+    // Aggregate before crossing into JS; round parsed seconds to integer ms
+    // before subtraction so exact bucket edges do not drift from floating point.
     const rows = this.db
       .prepare(
         `
       SELECT
         COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, ''), vm_id, '—') AS account_id,
-        vm_id,
-        created_at,
-        CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END AS success,
-        CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END AS errors
+        COALESCE(vm_id, '') AS vm_id,
+        MIN(?, CAST((ROUND(unixepoch(created_at, 'subsec') * 1000) - ?) / ? AS INTEGER)) AS bucket,
+        SUM(CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END) AS success,
+        SUM(CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END) AS errors
       FROM usage_logs
-      WHERE created_at >= ?${vmId ? ' AND vm_id = ?' : ''}
+      WHERE created_at >= ? AND created_at <= ?${vmId ? ' AND vm_id = ?' : ''}
+      GROUP BY 1, 2, 3
+      HAVING success > 0 OR errors > 0
     `,
       )
-      .all(...(vmId ? [sinceIso, String(vmId)] : [sinceIso]))
+      .all(
+        slots - 1,
+        start,
+        slotMs,
+        new Date(start).toISOString(),
+        new Date(now).toISOString(),
+        ...(vmId ? [String(vmId)] : []),
+      )
     const out = new Map()
     for (const row of rows) {
-      if (!row.success && !row.errors) continue
-      const at = Date.parse(row.created_at)
-      if (!Number.isFinite(at) || at < start || at > now) continue
-      const i = Math.min(slots - 1, Math.floor((at - start) / slotMs))
-      const key = vmId ? String(vmId) : row.account_id + '\0' + (row.vm_id || '')
+      if (row.bucket == null) continue
+      const key = vmId ? String(vmId) : row.account_id + '\0' + row.vm_id
       let buckets = out.get(key)
       if (!buckets) {
         buckets = Array.from({ length: slots }, () => [0, 0])
         out.set(key, buckets)
       }
-      buckets[i][0] += row.success ? 1 : 0
-      buckets[i][1] += row.errors ? 1 : 0
+      buckets[row.bucket][0] += Number(row.success)
+      buckets[row.bucket][1] += Number(row.errors)
     }
     return out
   }
