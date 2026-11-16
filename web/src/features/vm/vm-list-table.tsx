@@ -47,7 +47,7 @@ import { VmSchedulingCell } from '@/features/vm/vm-scheduling-cell'
 /** 列的宽度与弹性；顺序由 `useVmColumnOrder` 决定，不写死在这里。 */
 const COL_CLS: Record<VmColumnKey | 'actions', string> = {
   vm: 'min-w-[170px] flex-[1.15]',
-  sched: 'min-w-[260px] flex-[1.15]',
+  sched: 'w-64 shrink-0',
   status: 'min-w-[140px] flex-[1.1]',
   req: 'min-w-[124px] flex-[0.7]',
   usage: 'min-w-[208px] flex-[1.3]',
@@ -156,9 +156,9 @@ function StatusCell({ vm, show }: { vm: Vm; show: StatusBarShow }) {
     tone.cls !== 'none' &&
     tone.cls !== 'off'
   return (
-    <div className='min-w-0 space-y-1'>
+    <div className='min-w-0'>
       {show.label ? (
-        <div className='flex items-center gap-1.5'>
+        <div className='flex h-6 items-center gap-1.5'>
           <StatusReason vm={vm} tone={tone} />
           {showInflight ? (
             <span
@@ -195,7 +195,11 @@ function StatusCell({ vm, show }: { vm: Vm; show: StatusBarShow }) {
           </span>
         </div>
       ) : null}
-      {show.proxy ? <ProxyChip vm={vm} compact /> : null}
+      {show.proxy ? (
+        <div className='mt-1 first:mt-0'>
+          <ProxyChip vm={vm} compact />
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -362,7 +366,7 @@ export function VmTable({
                 tabIndex={0}
                 title='拖动调整列顺序（Alt+←/→）'
                 className={cn(
-                  'group/col flex cursor-grab items-center gap-0.5 px-1.5 py-1 select-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring active:cursor-grabbing',
+                  'group/col relative flex cursor-grab items-center gap-0.5 px-1.5 py-1 select-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring active:cursor-grabbing',
                   COL_CLS[key],
                   dragging && 'opacity-40',
                   target &&
@@ -390,7 +394,11 @@ export function VmTable({
                 onKeyDown={(e) => onHeaderKey(e, key)}
               >
                 <GripVertical
-                  className='size-3 shrink-0 opacity-0 transition-opacity group-hover/col:opacity-60'
+                  className={cn(
+                    'size-3 shrink-0 opacity-0 transition-opacity group-hover/col:opacity-60',
+                    (key === 'sched' || key === 'status') &&
+                      'absolute left-0 -translate-x-1/2'
+                  )}
                   aria-hidden
                 />
                 <span className='truncate'>{COLUMNS[key].label}</span>

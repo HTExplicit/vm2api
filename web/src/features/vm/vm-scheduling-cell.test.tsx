@@ -23,11 +23,11 @@ function render(over: Partial<Vm> = {}) {
 }
 
 describe('list scheduling controls', () => {
-  it('shows a contiguous cumulative bar and keeps digits outside the blocks', () => {
+  it('shows a cumulative manual bar with mode and level in its description', () => {
     role.admin = true
     const html = render()
-    expect(html).toContain('手动 <span')
-    expect(html).toMatch(/tabular-nums[^>]*>6<\/span>/)
+    expect(html).toContain('aria-description="手动调度优先级，当前等级 6"')
+    expect(html).not.toMatch(/>手动[^<]*<|>\d+</)
     const blocks = [
       ...html.matchAll(
         /<button[^>]*aria-label="slot-a 调度优先级 \d+"[^>]*>.*?<\/button>/g
@@ -35,7 +35,7 @@ describe('list scheduling controls', () => {
     ]
     expect(blocks).toHaveLength(10)
     expect(
-      blocks.filter(([block]) => /class="[^"]*bg-primary /.test(block))
+      blocks.filter(([block]) => block.includes('bg-sky-600'))
     ).toHaveLength(6)
     expect(
       blocks.filter(([block]) => block.includes('aria-pressed="true"'))
@@ -50,16 +50,15 @@ describe('list scheduling controls', () => {
   it('shows the automatic effective level without selecting a manual block', () => {
     role.admin = true
     const html = render({ schedule_level_mode: 'auto', schedule_level: 4 })
-    expect(html).toContain('自动 <span')
+    expect(html).toContain('aria-description="自动调度优先级，当前等级 4"')
+    expect(html).not.toMatch(/>自动[^<]*\d|>\d+</)
     expect(html).toContain(
       'aria-label="slot-a 自动调度优先级" aria-pressed="true"'
     )
     expect(html).not.toMatch(
       /aria-label="slot-a 调度优先级 \d+" aria-pressed="true"/
     )
-    expect(
-      html.match(/class="[^"]*bg-primary text-primary-foreground/g)
-    ).toHaveLength(4)
+    expect(html.match(/--status-ok-solid/g)).toHaveLength(4)
   })
 
   it('keeps priority editable when scheduling is manually off', () => {
@@ -78,6 +77,7 @@ describe('list scheduling controls', () => {
     expect(html).toContain('aria-label="slot-a 调度优先级"')
     expect(html).not.toContain('aria-label="slot-a 调度优先级 1"')
     expect(html).not.toContain('aria-label="slot-a 自动调度优先级"')
+    expect(html).toContain('title="手动调度优先级，当前等级 6"')
     role.admin = true
   })
 
