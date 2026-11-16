@@ -8,6 +8,7 @@ import { isDbOpen, getDb, withTransaction } from '../db/database.mjs'
 import { atomicWriteJson, invalidateReadCache, invalidateVmSlotReadCache, isValidVmId } from './vm-file.mjs'
 import { removeVmFromDb } from './vm-db-sync.mjs'
 import { encodeBoundVmIds, parseBoundVmIds } from './proxy-pool.mjs'
+import { cragLicenseDirectory } from './crag-license.mjs'
 
 const ID_MAX = 64
 
@@ -122,6 +123,24 @@ export function preflightVmRename(projectRoot, fromId, toId, { proxyPool } = {})
   if (fs.existsSync(toFile) || fs.existsSync(toHome)) {
     return { ok: false, status: 409, code: 'vm_id_taken', message: '这个编号已经有槽' }
   }
+  const licenseDir = cragLicenseDirectory(projectRoot, vm)
+  const deviceBound = fs.existsSync(path.join(licenseDir, 'device.json'))
+  let registration = ''
+  if (!deviceBound) {
+    try {
+      registration = fs.readFileSync(path.join(licenseDir, 'registration.code'), 'utf8').trim()
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+  }
+  if (deviceBound || /^(CRAGL1|CRAGS1)(?:\.|$)/.test(registration)) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'vm_rename_crag_bound',
+      message: '该槽已有绑定编号的 CRAG 设备或订阅授权，不能改编号',
+    }
+  }
   const db = proxyPool?.db || (isDbOpen() ? getDb() : null)
   if (db) {
     const tables = tableNames(db)
@@ -163,6 +182,25 @@ export function renameVmId(projectRoot, fromId, toId, { discardContainer, proxyP
   let previousActive = null
   const activeFile = path.join(dir, 'active.json')
   const next = { ...vm, id: nextId, updated_at: new Date().toISOString() }
+  if (vm.runtime) {
+    next.runtime = { ...vm.runtime }
+    // The stopped container has been discarded. Rebuild its id-derived addresses on the next start.
+    for (const key of [
+      'container',
+      'hostname',
+      'pid',
+      'ip',
+      'started_at',
+      'user',
+      'worker_run_dir',
+      'worker_socket',
+      'worker_token_file',
+      'kernel_socket',
+      'codex_kernel_socket',
+    ]) {
+      delete next.runtime[key]
+    }
+  }
   try {
     if (fs.existsSync(fromHome)) {
       fs.renameSync(fromHome, toHome)

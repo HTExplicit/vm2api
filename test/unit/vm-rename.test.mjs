@@ -3,11 +3,34 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { preflightVmRename, renameVmId, retargetVmId } from '../../src/lib/vm/vm-rename.mjs'
 import { createDatabase } from '../../src/lib/db/database.mjs'
 import { SlotBrowserRepo } from '../../src/lib/db/repos/slot-browser-repo.mjs'
 import { encryptString } from '../../src/lib/db/secure.mjs'
 import { ProxyPool } from '../../src/lib/vm/proxy-pool.mjs'
+import { workerPaths } from '../../src/lib/transport/go-worker-client.mjs'
+import { codexKernelPaths } from '../../src/lib/transport/codex-kernel-client.mjs'
+import { rustKernelPaths } from '../../src/lib/transport/rust-kernel-client.mjs'
+import { slotExecContainer } from '../../src/lib/vm/slot-exec.mjs'
+import { slotContainerName } from '../../src/lib/transport/rust-kernel-supervisor.mjs'
+import { runtimePatch } from '../../src/lib/vm/vm-runtime.mjs'
+import {
+  activateCragLicense,
+  activateCragSubscriptionBinding,
+  cragLicenseDirectory,
+  cragUniversalDirectory,
+  getCragLicense,
+  prepareCragSubscriptionBinding,
+} from '../../src/lib/vm/crag-license.mjs'
+import { cragSubscriptionPublicDirectory } from '../../src/lib/vm/crag-subscription-paths.mjs'
+import {
+  activateFixture,
+  issueHostEntitlement,
+  issueSlotPermit,
+  issueUniversalCode,
+  seedEncryptedPackage,
+} from '../fixtures/crag-license.mjs'
 
 function seed(root, id, extra = {}) {
   const dir = path.join(root, 'vms', id)
@@ -246,4 +269,156 @@ test('a reference transaction failure rolls back persisted bindings before chang
   assert.equal(db.prepare('SELECT vm_id FROM slot_browser_profiles').get().vm_id, 'slot-a')
   assert.equal(db.prepare('SELECT bound_vm_id FROM proxies WHERE id = ?').get(single.id).bound_vm_id, 'slot-a')
   assert.deepEqual(single.bound_vm_ids, ['slot-a'])
+})
+
+test('rename clears only discarded runtime addresses so local and external run roots derive the new id', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-vm-rename-runtime-'))
+  t.after(() => fs.rmSync(root, { recursive: true }))
+  for (const [fromId, toId, runRoot] of [
+    ['vm-local', 'vm-local-next', ''],
+    ['vm-external', 'vm-external-next', path.join(root, 'external-run')],
+  ]) {
+    const vm = seed(root, fromId, { platform: 'openai', family: 'codex' })
+    const oldRun = runRoot ? path.join(runRoot, fromId) : path.join(root, 'vms', fromId, 'run')
+    runtimePatch(
+      vm,
+      { name: `kin-${fromId.slice(3)}`, running: false, hostname: fromId.slice(3) },
+      {
+        worker_run_dir: oldRun,
+        worker_socket: path.join(oldRun, 'worker.sock'),
+        worker_token_file: path.join(oldRun, 'internal.token'),
+        kernel_socket: path.join(oldRun, 'kernel.sock'),
+        codex_kernel_socket: path.join(oldRun, 'codex-kernel.sock'),
+      },
+    )
+    vm.runtime.identity_collected_at = '2026-11-16T00:00:00Z'
+    vm.runtime.guest_machine_id = 'preserved-guest-identity'
+    fs.writeFileSync(path.join(root, 'vms', `${fromId}.json`), JSON.stringify(vm))
+    const renamed = renameVmId(root, fromId, toId, { discardContainer: () => ({ ok: true }) })
+    assert.equal(renamed.ok, true)
+    const saved = JSON.parse(fs.readFileSync(path.join(root, 'vms', `${toId}.json`)))
+    assert.equal(saved.runtime.stopped, true)
+    assert.equal(saved.runtime.type, vm.runtime.type)
+    assert.equal(saved.runtime.guest_machine_id, vm.runtime.guest_machine_id)
+    assert.equal(saved.runtime.identity_collected_at, vm.runtime.identity_collected_at)
+    const exec = { vmId: toId, vm: saved, homeDir: path.join(root, 'vms', toId, 'cli-home'), runRoot }
+    const expectedRun = runRoot ? path.join(runRoot, toId) : path.join(root, 'vms', toId, 'run')
+    assert.deepEqual(workerPaths(exec), {
+      runDir: expectedRun,
+      socketPath: path.join(expectedRun, 'worker.sock'),
+      tokenPath: path.join(expectedRun, 'internal.token'),
+    })
+    assert.equal(codexKernelPaths(exec).configPath, path.join(expectedRun, 'codex-kernel.json'))
+    assert.equal(codexKernelPaths(exec).socketPath, path.join(expectedRun, 'codex-kernel.sock'))
+    assert.equal(rustKernelPaths(exec).socketPath, path.join(expectedRun, 'kernel.sock'))
+    assert.equal(slotExecContainer(saved), `kin-${toId.slice(3)}`)
+    assert.equal(slotContainerName(exec), `kin-${toId.slice(3)}`)
+    for (const key of [
+      'container',
+      'hostname',
+      'pid',
+      'ip',
+      'started_at',
+      'user',
+      'worker_run_dir',
+      'worker_socket',
+      'worker_token_file',
+      'kernel_socket',
+      'codex_kernel_socket',
+    ]) {
+      assert.equal(Object.hasOwn(saved.runtime, key), false, key)
+    }
+  }
+})
+
+function cragRenameFixture(t, { externalRunRoot = false } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-vm-rename-crag-'))
+  const previous = Object.fromEntries(
+    ['KIN_SLOT_RUN_ROOT', 'KIN_CRAG_V2_ROOT', 'KIN_DATA_DIR'].map((key) => [key, process.env[key]]),
+  )
+  for (const key of Object.keys(previous)) delete process.env[key]
+  if (externalRunRoot) process.env.KIN_SLOT_RUN_ROOT = path.join(root, 'external-run')
+  process.env.KIN_DATA_DIR = path.join(root, 'data')
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    fs.rmSync(root, { recursive: true })
+  })
+  const vm = seed(root, 'vm-license', { dataplane: 'crag', runtime: { type: 'docker', stopped: true } })
+  seedEncryptedPackage(root)
+  return { root, vm }
+}
+
+for (const kind of ['device', 'subscription']) {
+  test(`rename refuses an existing signed CRAG ${kind} binding before any mutation`, {
+    skip: process.platform !== 'linux',
+  }, (t) => {
+    const { root, vm } = cragRenameFixture(t, { externalRunRoot: kind === 'subscription' })
+    if (kind === 'device') {
+      assert.equal(activateFixture(root, vm).license.valid, true)
+    } else {
+      fs.writeFileSync(path.join(root, 'vms', vm.id, 'machine-id'), crypto.randomBytes(16).toString('hex') + '\n')
+      const machineCode = prepareCragSubscriptionBinding(root, vm)
+      const hostId = crypto.randomBytes(32).toString('hex')
+      const publicDir = cragSubscriptionPublicDirectory(root)
+      fs.mkdirSync(publicDir, { recursive: true, mode: 0o755 })
+      fs.writeFileSync(path.join(publicDir, 'host_id'), `${hostId}\n`, { mode: 0o644 })
+      fs.writeFileSync(path.join(publicDir, 'entitlement.code'), `${issueHostEntitlement(root, hostId).code}\n`, {
+        mode: 0o644,
+      })
+      const permit = issueSlotPermit(root, machineCode, hostId)
+      assert.equal(activateCragSubscriptionBinding(root, vm, permit.code).license.valid, true)
+    }
+    const licenseDir = cragLicenseDirectory(root, vm)
+    const files = [
+      path.join(root, 'vms', `${vm.id}.json`),
+      path.join(licenseDir, 'device.json'),
+      path.join(licenseDir, 'registration.code'),
+    ]
+    const before = files.map((file) => fs.readFileSync(file))
+    assert.match(before[2].toString(), kind === 'device' ? /^CRAGL1\./ : /^CRAGS1\./)
+    assert.equal(preflightVmRename(root, vm.id, 'vm-next').code, 'vm_rename_crag_bound')
+    const result = renameVmId(root, vm.id, 'vm-next', {
+      discardContainer: () => assert.fail('a bound license must be rejected before container removal'),
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 409)
+    assert.equal(result.code, 'vm_rename_crag_bound')
+    files.forEach((file, index) => assert.deepEqual(fs.readFileSync(file), before[index]))
+    // Either bound artifact is enough: a missing peer file must not turn rename into an implicit rebind.
+    for (const file of files.slice(1)) {
+      const retained = `${file}.retained-fixture`
+      fs.renameSync(file, retained)
+      try {
+        assert.equal(preflightVmRename(root, vm.id, 'vm-next').code, 'vm_rename_crag_bound')
+      } finally {
+        fs.renameSync(retained, file)
+      }
+    }
+    files.forEach((file, index) => assert.deepEqual(fs.readFileSync(file), before[index]))
+    assert.equal(fs.existsSync(path.join(root, 'vms/vm-next.json')), false)
+    assert.equal(fs.existsSync(path.join(root, 'vms/vm-next')), false)
+  })
+}
+
+test('rename permits a CRAGU1 installation grant and its slot projection without a device binding', {
+  skip: process.platform !== 'linux',
+}, (t) => {
+  const { root, vm } = cragRenameFixture(t)
+  const universal = issueUniversalCode(root).code
+  assert.equal(activateCragLicense(root, vm, universal).license.valid, true)
+  const oldDir = cragLicenseDirectory(root, vm)
+  assert.equal(fs.existsSync(path.join(oldDir, 'device.json')), false)
+  const grant = fs.readFileSync(path.join(cragUniversalDirectory(root), 'registration.code'))
+  const projection = fs.readFileSync(path.join(oldDir, 'registration.code'))
+  assert.match(projection.toString(), /^CRAGU1\./)
+  assert.equal(preflightVmRename(root, vm.id, 'vm-next').ok, true)
+  const result = renameVmId(root, vm.id, 'vm-next', { discardContainer: () => ({ ok: true }) })
+  assert.equal(result.ok, true)
+  assert.equal(getCragLicense(root, result.vm).license.valid, true)
+  assert.deepEqual(fs.readFileSync(path.join(cragUniversalDirectory(root), 'registration.code')), grant)
+  assert.deepEqual(fs.readFileSync(path.join(cragLicenseDirectory(root, result.vm), 'registration.code')), projection)
+  assert.equal(fs.existsSync(path.join(cragLicenseDirectory(root, result.vm), 'device.json')), false)
 })

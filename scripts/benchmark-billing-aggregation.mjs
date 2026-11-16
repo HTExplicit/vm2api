@@ -76,6 +76,21 @@ function countAccountQueries(repo) {
   return counts
 }
 
+function expectedBillingStats(original) {
+  // This fixture has one account per slot, no identity overrides and no archive.
+  // The added lifetime totals therefore equal the baseline's all-time buckets.
+  // Keep every original field in the complete result comparison below.
+  return {
+    ...original,
+    lifetime_accounts: original.accounts.map((account) => ({
+      account_id: account.account_id,
+      total_cost: account.total_cost,
+      total_tokens:
+        account.input_tokens + account.output_tokens + account.cache_read_tokens + account.cache_creation_tokens,
+    })),
+  }
+}
+
 const median = (values) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)]
 const ms = (value) => Math.round(value * 100) / 100
 
@@ -139,7 +154,11 @@ try {
       candidate = measured(Candidate)
       original = measured(Original)
     }
-    assert.deepStrictEqual(candidate.value, original.value, `complete billingStats result, trial ${trial + 1}`)
+    assert.deepStrictEqual(
+      candidate.value,
+      expectedBillingStats(original.value),
+      `complete billingStats result, trial ${trial + 1}`,
+    )
     timings.original_ms.push(original.elapsed_ms)
     timings.candidate_ms.push(candidate.elapsed_ms)
     lastCandidate = candidate.repo
@@ -177,7 +196,11 @@ try {
   for (let i = 0; i < scopes.length; i++) {
     const opts = { accountWindows: scopes[i] }
     const actual = candidate.billingStats(opts)
-    assert.deepStrictEqual(actual, original.billingStats(opts), `cross-scope complete result ${i + 1}`)
+    assert.deepStrictEqual(
+      actual,
+      expectedBillingStats(original.billingStats(opts)),
+      `cross-scope complete result ${i + 1}`,
+    )
     if (i === 0) firstCandidate = actual
   }
   assert.strictEqual(candidate.billingStats({ accountWindows: scopes[0] }), firstCandidate)

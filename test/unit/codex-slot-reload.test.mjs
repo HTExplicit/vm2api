@@ -13,7 +13,16 @@ import {
   stopCodexKernelAndWait,
   writeCodexKernelConfig,
 } from '../../src/lib/transport/codex-kernel-supervisor.mjs'
-import { reloadSlotReady, restoreCodexSlotReady } from '../../src/lib/vm/slot-runtime.mjs'
+import {
+  ensureSlotInferenceRuntime,
+  reloadSlotReady,
+  restoreCodexSlotReady,
+  slotExec,
+} from '../../src/lib/vm/slot-runtime.mjs'
+import { renameVmId } from '../../src/lib/vm/vm-rename.mjs'
+import { runtimePatch } from '../../src/lib/vm/vm-runtime.mjs'
+import { codexKernelPaths } from '../../src/lib/transport/codex-kernel-client.mjs'
+import { slotExecContainer } from '../../src/lib/vm/slot-exec.mjs'
 import { slotNetworkForVm } from '../../src/lib/vm/egress.mjs'
 
 async function fixture(t) {
@@ -328,4 +337,73 @@ test('GPT reload reports a failed stop without starting another kernel', async (
   assert.equal(result.code, 'codex_kernel_reload_failed')
   assert.equal(starts, 0)
   assert.equal((await codexKernelHealth(first.exec)).pid, first.health.pid)
+})
+
+test('a stopped Codex slot starts after rename using rebuilt paths and the same credentials and identity', async (t) => {
+  const f = await fixture(t)
+  const first = await f.slot('vm-before')
+  assert.equal((await stopCodexKernelAndWait(first.exec)).ok, true)
+  const oldRun = path.join(f.root, 'vms', first.vm.id, 'run')
+  const vm = {
+    ...first.vm,
+    status: 'stopped',
+    schedule_off: true,
+    schedulable: false,
+    schedule_manual: true,
+    schedule_disabled_reason: 'operator',
+    fingerprint: { guest_machine_id: 'same-machine', device_id: 'same-device' },
+  }
+  runtimePatch(
+    vm,
+    { name: 'kin-before', running: false, hostname: 'before' },
+    {
+      worker_run_dir: oldRun,
+      worker_socket: path.join(oldRun, 'worker.sock'),
+      worker_token_file: path.join(oldRun, 'internal.token'),
+      kernel_socket: path.join(oldRun, 'kernel.sock'),
+      codex_kernel_socket: path.join(oldRun, 'codex-kernel.sock'),
+    },
+  )
+  vm.runtime.identity_collected_at = '2026-11-16T00:00:00Z'
+  vm.runtime.guest_platform = 'linux'
+  vm.runtime.guest_os_version = '24.04'
+  vm.runtime.guest_arch = 'x64'
+  const credentials = Buffer.from('{"accounts":[{"access_token":"mock-account-token","refresh_token":"mock-refresh"}]}')
+  fs.writeFileSync(path.join(f.root, 'vms', vm.id, 'codex-credentials.json'), credentials)
+  fs.writeFileSync(path.join(f.root, 'vms', `${vm.id}.json`), JSON.stringify(vm))
+  const installation = fs.readFileSync(path.join(oldRun, 'codex-installation-id'))
+  const token = fs.readFileSync(path.join(oldRun, 'internal.token'))
+  const renamed = renameVmId(f.root, vm.id, 'vm-after', { discardContainer: () => ({ ok: true }) })
+  assert.equal(renamed.ok, true)
+  const saved = JSON.parse(fs.readFileSync(path.join(f.root, 'vms/vm-after.json')))
+  const exec = slotExec(f.root, saved)
+  const paths = codexKernelPaths(exec)
+  assert.equal(paths.runDir, path.join(f.root, 'vms/vm-after/run'))
+  assert.equal(paths.socketPath, path.join(paths.runDir, 'codex-kernel.sock'))
+  assert.equal(paths.tokenPath, path.join(paths.runDir, 'internal.token'))
+  assert.equal(paths.configPath, path.join(paths.runDir, 'codex-kernel.json'))
+  assert.equal(paths.credentialPath, path.join(f.root, 'vms/vm-after/codex-credentials.json'))
+  assert.equal(slotExecContainer(saved), 'kin-after')
+  try {
+    const started = await ensureSlotInferenceRuntime(saved, f.root)
+    assert.equal(started.ok, true, JSON.stringify(started))
+    assert.equal((await codexKernelHealth(exec)).ok, true)
+    const config = JSON.parse(fs.readFileSync(paths.configPath))
+    assert.equal(config.vm_id, saved.id)
+    assert.equal(config.socket_path, paths.socketPath)
+    assert.equal(config.credential_path, paths.credentialPath)
+    assert.equal(config.device_id, installation.toString().trim())
+    assert.equal(config.internal_token, token.toString().trim())
+    assert.deepEqual(fs.readFileSync(paths.credentialPath), credentials)
+    assert.deepEqual(saved.proxy, vm.proxy)
+    assert.deepEqual(saved.fingerprint, vm.fingerprint)
+    for (const key of ['schedule_off', 'schedulable', 'schedule_manual', 'schedule_disabled_reason']) {
+      assert.equal(saved[key], vm[key])
+    }
+    assert.equal(saved.runtime.stopped, true)
+    assert.equal(saved.runtime.identity_collected_at, vm.runtime.identity_collected_at)
+    assert.equal(config.telemetry_runtime.runtime_os, 'linux')
+  } finally {
+    assert.equal((await stopCodexKernelAndWait(exec)).ok, true)
+  }
 })
