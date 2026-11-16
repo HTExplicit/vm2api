@@ -22,7 +22,7 @@ const fixture = fileURLToPath(
 ).replaceAll("\\", "/");
 
 test(
-  "list scheduling sits below usage and saves exact independent changes",
+  "official compact list preserves sorting, live counts, API access and detail permissions",
   { timeout: 90_000 },
   async (t) => {
     assert.ok(
@@ -86,9 +86,6 @@ test(
     const healthRequests = [];
     let rejectHealth = false;
     let role = "admin";
-    let releasePending;
-    let delayNext = false;
-    let rejectNext = false;
     const vm = {
       id: "offline-slot",
       name: "测试槽",
@@ -246,29 +243,7 @@ test(
         vm.schedule_state = body.schedulable ? "on" : "off";
         return route.fulfill({ json: { ok: true, data: { vm } } });
       }
-      assert.equal(url.pathname, "/api/panel/vms/offline-slot");
-      assert.equal(request.method(), "PATCH");
-      const body = request.postDataJSON();
-      writes.push(body);
-      if (delayNext) {
-        delayNext = false;
-        await new Promise((resolve) => {
-          releasePending = resolve;
-        });
-      }
-      if (rejectNext) {
-        rejectNext = false;
-        return route.fulfill({
-          status: 409,
-          json: { ok: false, error: { message: "离线测试拒绝" } },
-        });
-      }
-      assert.deepEqual(Object.keys(body), ["schedule_level"]);
-      vm.schedule_level_mode =
-        body.schedule_level === "auto" ? "auto" : "manual";
-      vm.schedule_level =
-        body.schedule_level === "auto" ? 4 : body.schedule_level;
-      return route.fulfill({ json: { ok: true, data: { vm } } });
+      assert.fail(`unexpected fixture API request: ${request.method()} ${url.pathname}`);
     });
     await context.addInitScript(() => {
       localStorage.setItem("kin_console_token", "offline-scheduling-token");
@@ -288,320 +263,60 @@ test(
     const page = await context.newPage();
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`${origin}/offline-ui`);
-    const bar = page.getByRole("group", {
-      name: "offline-slot 调度优先级",
-      exact: true,
-    });
-    const block = (n) =>
-      bar.getByRole("button", {
-        name: `offline-slot 调度优先级 ${n}`,
-        exact: true,
-      });
-    const auto = page.getByRole("button", {
-      name: "offline-slot 自动调度优先级",
-      exact: true,
-    });
-    await block(6).waitFor();
+    const rowOf = (id) => page.locator(`[data-vm-row][aria-label^="${id}，"]`);
+    const row = rowOf("offline-slot");
+    const table = page.getByRole("table", { name: "槽位列表", exact: true });
+    await row.waitFor();
+    assert.equal(await row.evaluate((el) => el.getBoundingClientRect().height), 38);
+    assert.equal(await table.getByRole("columnheader").count(), 16);
+    assert.equal(await page.locator('[data-slot="priority-segment"]').count(), 0);
+    assert.equal(await row.getByRole("cell").nth(2).getByRole("switch").count(), 1);
+    assert.equal(await row.getByRole("cell").nth(2).getByText("P6", { exact: true }).count(), 1);
+    assert.equal(await rowOf("offline-available-codex").getByRole("cell").nth(10).innerText(), "3");
+    assert.equal(await row.getByRole("cell").nth(10).innerText(), "3");
+    assert.equal(await rowOf("offline-claude-seats").getByRole("cell").nth(8).innerText(), "2/5");
+    assert.equal(await rowOf("offline-claude-seats").getByRole("cell").nth(9).innerText(), "1");
+    assert.equal(await rowOf("offline-manual6").getByText("24h 无请求", { exact: true }).count(), 1);
+    assert.equal(await rowOf("offline-manual10").getByText("24h 未知", { exact: true }).count(), 1);
     assert.equal(await page.getByLabel(/额度待刷新/).count(), 0);
-    assert.equal(await bar.getByRole("button").count(), 11);
-    assert.equal(await auto.innerText(), "");
-    assert.equal(await page.getByText("调度", { exact: true }).count(), 0);
-    assert.equal(await page.getByText("用量窗口", { exact: true }).count(), 1);
-    for (let n = 1; n <= 10; n++) assert.equal(await block(n).innerText(), "");
-    const manualButtons = bar.getByRole("button", {
-      name: /^offline-slot 调度优先级 \d+$/,
-    });
-    const boxes = await manualButtons.evaluateAll((buttons) =>
-      buttons.map((el) => {
-        const r = el.getBoundingClientRect();
-        return { x: r.x, width: r.width, height: r.height };
-      }),
-    );
-    assert.ok(boxes.every((b) => b.width >= 24 && b.height >= 24));
-    for (let n = 1; n < boxes.length; n++)
-      assert.ok(Math.abs(boxes[n].x - boxes[n - 1].x - boxes[n - 1].width) < 1);
-    const geometry = await bar.evaluate((el) => {
-      const buttons = [...el.querySelectorAll("button")].filter((button) =>
-        button.querySelector('[data-slot="priority-segment"]'),
-      );
-      const segments = buttons.map((button) =>
-        button.querySelector('[data-slot="priority-segment"]'),
-      );
-      const rect = el.getBoundingClientRect();
-      const controls = el.parentElement;
-      const cell = controls.closest('[data-slot="vm-usage-cell"]');
-      const windows = cell.firstElementChild.getBoundingClientRect();
-      const toggle = controls.querySelector('[role="switch"]').getBoundingClientRect();
-      const automatic = el.querySelector('button').getBoundingClientRect();
-      const automaticSegment = el.querySelector('[data-slot="priority-auto-segment"]').getBoundingClientRect();
-      const firstManual = buttons[0].getBoundingClientRect();
-      return {
-        width: rect.width,
-        cellWidth: cell.getBoundingClientRect().width,
-        belowWindows: controls.getBoundingClientRect().top >= windows.bottom,
-        switchCenter: toggle.top + toggle.height / 2,
-        barCenter: rect.top + rect.height / 2,
-        switchBeforeBar: toggle.right < rect.left,
-        automaticGap: firstManual.left - automatic.right,
-        automaticHeight: automaticSegment.height,
-        automaticTop: automaticSegment.top,
-        manualTop: buttons[0].querySelector('[data-slot="priority-segment"]').getBoundingClientRect().top,
-        segments: segments.map((segment, index) => ({
-          width: segment.getBoundingClientRect().width,
-          height: segment.getBoundingClientRect().height,
-          top:
-            segment.getBoundingClientRect().top -
-            buttons[index].getBoundingClientRect().top,
-          divider: getComputedStyle(segment).borderRightWidth,
-        })),
-        backgrounds: buttons.map(
-          (button) => getComputedStyle(button).backgroundColor,
-        ),
-      };
-    });
-    assert.equal(geometry.width, 268);
-    assert.ok(geometry.cellWidth >= 308);
-    assert.equal(geometry.belowWindows, true);
-    assert.equal(geometry.switchBeforeBar, true);
-    assert.ok(Math.abs(geometry.switchCenter - geometry.barCenter) < 1);
-    assert.equal(geometry.automaticGap, 4);
-    assert.equal(geometry.automaticHeight, 6);
-    assert.equal(geometry.automaticTop, geometry.manualTop);
-    assert.ok(
-      geometry.segments.every(
-        (segment) =>
-          segment.width === 24 && segment.height === 6 && segment.top === 9,
-      ),
-    );
-    assert.deepEqual(
-      geometry.segments.map((segment) => segment.divider),
-      Array(9).fill("1px").concat("0px"),
-    );
-    assert.ok(
-      geometry.backgrounds.every((color) => color === "rgba(0, 0, 0, 0)"),
-    );
-    await block(6).hover();
-    assert.equal(
-      await block(6).evaluate((el) => getComputedStyle(el).backgroundColor),
-      "rgba(0, 0, 0, 0)",
-    );
-
-    const visualRow = page.locator("[data-vm-row]").filter({
-      has: page.getByRole("group", {
-        name: "offline-auto1 调度优先级",
-        exact: true,
-      }),
-    });
-    const visualBar = visualRow.getByRole("group", {
-      name: "offline-auto1 调度优先级",
-      exact: true,
-    });
-    const sla = visualRow.getByRole("img", { name: /近 24h 请求健康/ });
-    const slaGeometry = await sla.evaluate((el) => ({
-      width: el.getBoundingClientRect().width,
-      height: el.getBoundingClientRect().height,
-      slots: el.children.length,
-    }));
-    assert.deepEqual(slaGeometry, { width: 104, height: 12, slots: 48 });
-    const automaticColor = await visualBar
-      .locator('[data-slot="priority-segment"]')
-      .first()
-      .evaluate((el) => getComputedStyle(el).backgroundColor);
-    const manualColor = await page
-      .getByRole("group", { name: "offline-manual6 调度优先级", exact: true })
-      .locator('[data-slot="priority-segment"]')
-      .first()
-      .evaluate((el) => getComputedStyle(el).backgroundColor);
-    assert.notEqual(manualColor, automaticColor);
-    for (const id of ["offline-auto1", "offline-manual6", "offline-manual10"]) {
-      const priority = page.getByRole("group", {
-        name: `${id} 调度优先级`,
-        exact: true,
-      });
-      assert.equal(await priority.locator("..").innerText(), "");
-    }
-    const availableRow = page.locator("[data-vm-row]").filter({
-      has: page.getByRole("group", {
-        name: "offline-available-codex 调度优先级",
-        exact: true,
-      }),
-    });
-    const claudeRow = page.locator("[data-vm-row]").filter({
-      has: page.getByRole("group", {
-        name: "offline-claude-seats 调度优先级",
-        exact: true,
-      }),
-    });
-    const available = availableRow.getByText("可用", { exact: true });
-    const inflight = availableRow.locator('[title="在飞 3"]');
-    const seats = claudeRow.getByText("席位 2/5 · 排队 1", { exact: true });
-    const liveHealth = availableRow.getByRole("img", {
-      name: "近 24h 请求健康：99/100 成功",
-      exact: true,
-    });
-    const livePercentage = availableRow.getByText("99.0%", { exact: true });
-    const liveSummary = availableRow.getByText("99/100 成功", { exact: true });
-    const liveProxy = availableRow.locator('[title*="点击探测出口"]');
-    await available.waitFor();
-    assert.equal(await inflight.innerText(), "3");
-    assert.equal(await seats.count(), 1);
-    assert.equal(
-      await bar.locator("xpath=ancestor::*[@data-vm-row]")
-        .locator('[title="在飞 3"]').count(),
-      0,
-      "a manually disabled row keeps its inflight badge hidden",
-    );
-    await page.getByRole("button", { name: "配置状态栏显示", exact: true }).click();
-    const statusOption = page.getByRole("menuitemcheckbox", {
-      name: "状态", exact: true,
-    });
-    const healthOption = page.getByRole("menuitemcheckbox", {
-      name: "健康", exact: true,
-    });
-    const proxyOption = page.getByRole("menuitemcheckbox", {
-      name: "代理", exact: true,
-    });
-    for (const option of [statusOption, healthOption, proxyOption])
-      assert.equal(await option.getAttribute("aria-checked"), "true");
-    await statusOption.click();
-    await available.waitFor({ state: "hidden" });
-    assert.equal(await inflight.count(), 0);
-    assert.equal(await seats.count(), 0);
-    assert.equal(await liveHealth.count(), 1);
-    assert.equal(await livePercentage.count(), 1);
-    assert.equal(await liveSummary.count(), 1);
-    assert.equal(await liveProxy.count(), 1);
-    await statusOption.click();
-    await available.waitFor();
-    await healthOption.click();
-    await liveHealth.waitFor({ state: "hidden" });
-    assert.equal(await livePercentage.count(), 0);
-    assert.equal(await liveSummary.count(), 0);
-    assert.equal(await inflight.count(), 1);
-    assert.equal(await seats.count(), 1);
-    assert.equal(await liveProxy.count(), 1);
-    await healthOption.click();
-    await liveHealth.waitFor();
-    await proxyOption.click();
-    await liveProxy.waitFor({ state: "hidden" });
-    assert.equal(await available.count(), 1);
-    assert.equal(await inflight.count(), 1);
-    assert.equal(await seats.count(), 1);
-    assert.equal(await liveHealth.count(), 1);
-    await proxyOption.click();
-    await liveProxy.waitFor();
+    await page.getByLabel("全局汇总", { exact: true }).waitFor();
+    const order = () => page.locator("[data-vm-row]").evaluateAll((els) => els.map((el) => el.getAttribute("aria-label")));
+    const initialOrder = await order();
+    const healthSort = table.getByRole("button", { name: "健康 · 24h", exact: true });
+    await healthSort.focus(); await page.keyboard.press("Enter");
+    assert.equal(await healthSort.evaluate((el) => el === document.activeElement), true);
+    assert.equal(await healthSort.locator("..").getAttribute("aria-sort"), "ascending");
+    await healthSort.click();
+    assert.equal(await healthSort.locator("..").getAttribute("aria-sort"), "descending");
+    await healthSort.click(); assert.deepEqual(await order(), initialOrder);
+    const seatsSort = table.getByRole("button", { name: "席位", exact: true });
+    await seatsSort.click(); assert.match((await order())[0], /^offline-claude-seats，/);
+    await seatsSort.click(); await seatsSort.click();
+    const grouping = page.getByRole("button", { name: "按状态分组", exact: true });
+    const secondary = page.getByRole("button", { name: "次要信息常显", exact: true });
+    assert.equal(await grouping.getAttribute("aria-pressed"), "false");
+    assert.equal(await secondary.getAttribute("aria-pressed"), "false");
+    await grouping.click(); await row.waitFor({ state: "hidden" });
+    await page.getByRole("button", { name: /关闭调用.*1 台/ }).click(); await row.waitFor();
+    await grouping.click();
+    await secondary.click(); assert.equal(await page.locator("[data-vm-table]").getAttribute("data-pin"), "true");
+    await secondary.click(); assert.equal(await page.locator("[data-vm-table]").getAttribute("data-pin"), "false");
+    const scroll = page.locator("[data-vm-table]");
+    const leftBefore = await row.getByRole("cell").nth(1).boundingBox();
+    await scroll.evaluate((el) => { el.scrollLeft = el.scrollWidth; });
+    assert.equal(leftBefore.x, (await row.getByRole("cell").nth(1).boundingBox()).x);
+    await row.getByRole("button", { name: "更多操作 offline-slot", exact: true }).click();
+    await page.getByRole("menuitem", { name: "API 赠额与调用", exact: true }).waitFor();
     await page.keyboard.press("Escape");
-    assert.deepEqual(writes, [], "display options never modify a slot");
-    assert.deepEqual(healthRequests, [], "display options never query a kernel");
-    const screenshots = path.join(root, ".tmp/11705-ui");
-    fs.mkdirSync(screenshots, { recursive: true });
-    await availableRow.scrollIntoViewIfNeeded();
-    await claudeRow.scrollIntoViewIfNeeded();
-    const availableBounds = await availableRow.boundingBox();
-    const claudeBounds = await claudeRow.boundingBox();
-    await page.screenshot({
-      path: path.join(screenshots, "usage-scheduling-rows.png"),
-      clip: {
-        x: availableBounds.x,
-        y: availableBounds.y,
-        width: Math.min(availableBounds.width, 1440 - availableBounds.x),
-        height: claudeBounds.y + claudeBounds.height - availableBounds.y,
-      },
-    });
-    await block(6).focus();
-    await page
-      .getByRole("tooltip", {
-        name: "自动调度优先级，当前等级 6；设为手动 6",
-        exact: true,
-      })
-      .waitFor();
-    const focused = await block(6).evaluate((el) => ({
-      active: el === document.activeElement,
-      outline: getComputedStyle(el).outlineStyle,
-    }));
-    assert.deepEqual(focused, { active: true, outline: "solid" });
-    await page.keyboard.press("Enter");
-    await page.waitForFunction(
-      () =>
-        document
-          .querySelector('[aria-label="offline-slot 调度优先级 6"]')
-          ?.getAttribute("aria-pressed") === "true",
-    );
-    assert.deepEqual(writes, [{ schedule_level: 6 }]);
-    assert.equal(vm.schedulable, false);
-    await block(6).click();
-    assert.equal(writes.length, 1);
-    await auto.focus();
-    await page.keyboard.press("Space");
-    await page.waitForFunction(
-      () =>
-        document
-          .querySelector('[aria-label="offline-slot 自动调度优先级"]')
-          ?.getAttribute("aria-pressed") === "true",
-    );
-    assert.deepEqual(writes.at(-1), { schedule_level: "auto" });
-    await auto.click();
-    assert.equal(writes.length, 2);
-    delayNext = true;
-    await block(8).evaluate((el) => {
-      el.click();
-      el.click();
-    });
-    await page.waitForFunction(
-      () =>
-        document.querySelector('[aria-label="offline-slot 调度优先级 8"]')
-          ?.disabled,
-    );
-    assert.equal(writes.length, 3);
-    assert.deepEqual(writes.at(-1), { schedule_level: 8 });
-    assert.equal(await auto.isDisabled(), true);
-    await auto.evaluate((el) => el.click());
-    assert.equal(writes.length, 3);
-    await block(10).evaluate((el) => el.click());
-    assert.equal(writes.length, 3);
-    releasePending();
-    await page.waitForFunction(
-      () =>
-        document
-          .querySelector('[aria-label="offline-slot 调度优先级 8"]')
-          ?.getAttribute("aria-pressed") === "true",
-    );
-    rejectNext = true;
-    await block(9).click();
-    await page.getByText("离线测试拒绝", { exact: true }).waitFor();
-    assert.equal(await block(8).getAttribute("aria-pressed"), "true");
-    assert.equal(await block(9).getAttribute("aria-pressed"), "false");
-    assert.equal(writes.length, 4);
-    assert.equal(
-      await page.getByRole("status", { name: "详情打开次数" }).innerText(),
-      "0",
-    );
-    assert.equal(
-      await page.getByText("周窗口重置", { exact: true }).count(),
-      0,
-    );
-    assert.equal(
-      await page
-        .getByRole("region", { name: "offline-slot 明细", exact: true })
-        .count(),
-      0,
-    );
+    assert.deepEqual(writes, []);
     assert.deepEqual(healthRequests, []);
-    const scheduleSwitch = bar.locator("..").getByRole("switch");
+    await scroll.evaluate((el) => { el.scrollLeft = 0; });
+    const scheduleSwitch = row.getByRole("switch");
     await scheduleSwitch.click();
-    await page.waitForFunction(() =>
-      document.querySelector('[aria-label="offline-slot 调度优先级"]')
-        ?.parentElement.querySelector('[role="switch"]')?.getAttribute("aria-checked") === "true",
-    );
+    await page.waitForFunction(() => document.querySelector('[data-vm-row][aria-label^="offline-slot，"] [role="switch"]')?.getAttribute("aria-checked") === "true");
     await scheduleSwitch.click();
-    await page.waitForFunction(() =>
-      document.querySelector('[aria-label="offline-slot 调度优先级"]')
-        ?.parentElement.querySelector('[role="switch"]')?.getAttribute("aria-checked") === "false",
-    );
+    await page.waitForFunction(() => document.querySelector('[data-vm-row][aria-label^="offline-slot，"] [role="switch"]')?.getAttribute("aria-checked") === "false");
     assert.deepEqual(switchWrites, [{ schedulable: true }, { schedulable: false }]);
-    assert.equal(writes.length, 4);
-    assert.equal(await block(8).getAttribute("aria-pressed"), "true");
-    const row = bar.locator("xpath=ancestor::*[@data-vm-row]");
     const expand = row.getByRole("button", {
       name: "展开 offline-slot 明细",
       exact: true,
@@ -657,7 +372,7 @@ test(
       "2",
     );
     await row
-      .getByText("offline@example.test", { exact: true })
+      .getByText("offline-slot", { exact: true })
       .evaluate((el) => {
         const selection = window.getSelection();
         const range = document.createRange();
@@ -668,7 +383,7 @@ test(
     await row.dispatchEvent("click");
     assert.equal(await detail.count(), 0);
     await page.evaluate(() => window.getSelection().removeAllRanges());
-    await row.getByText("offline@example.test", { exact: true }).click();
+    await row.getByText("offline-slot", { exact: true }).click();
     await detail.waitFor();
     await row.focus();
     await page.keyboard.press("Escape");
@@ -684,131 +399,40 @@ test(
     await page
       .getByRole("button", { name: "收起 offline-manual6 明细", exact: true })
       .click();
+    const screenshots = path.join(root, ".tmp/121-ui");
+    fs.mkdirSync(screenshots, { recursive: true });
     const capture = async (name) => {
-      await page.screenshot({
-        path: path.join(screenshots, `${name}-rows.png`),
-        fullPage: true,
-      });
-      await expand.click();
-      await detail.getByText("99.0%", { exact: true }).waitFor();
-      await page.locator("div.overflow-x-auto").evaluate((el) => {
-        el.scrollLeft = 0;
-      });
-      await page.evaluate(() => window.scrollTo(0, 0));
-      await page.screenshot({
-        path: path.join(screenshots, `${name}-expanded.png`),
-        fullPage: true,
-      });
-      await row
-        .getByRole("button", { name: "收起 offline-slot 明细", exact: true })
-        .click();
-      await visualBar.scrollIntoViewIfNeeded();
-      await page.evaluate(() => window.scrollTo(0, 0));
-      const cell = await visualBar.locator('xpath=ancestor::*[@data-slot="vm-usage-cell"]').boundingBox();
-      const last = await page
-        .locator("[data-vm-row]")
-        .filter({
-          has: page.getByRole("group", {
-            name: "offline-manual10 调度优先级",
-            exact: true,
-          }),
-        })
-        .boundingBox();
-      await page.screenshot({
-        path: path.join(screenshots, `${name}-column.png`),
-        clip: {
-          x: Math.max(0, cell.x - 4),
-          y: cell.y - 4,
-          width: Math.min(cell.width + 8, page.viewportSize().width - Math.max(0, cell.x - 4)),
-          height: last.y + last.height - cell.y + 8,
-        },
-      });
+      await scroll.evaluate((el) => { el.scrollLeft = 0; });
+      await page.mouse.move(0, 0); await page.evaluate(() => document.activeElement?.blur());
+      await page.screenshot({ path: path.join(screenshots, `${name}-rows.png`), fullPage: true });
+      await expand.click(); await detail.getByText("99.0%", { exact: true }).waitFor();
+      await scroll.evaluate((el) => { el.scrollLeft = 0; });
+      await page.screenshot({ path: path.join(screenshots, `${name}-expanded.png`), fullPage: true });
+      await row.getByRole("button", { name: "收起 offline-slot 明细", exact: true }).click();
     };
-    await page.mouse.move(0, 0);
-    await page.evaluate(() => document.activeElement?.blur());
-    await capture("light-wide");
+    await page.setViewportSize({ width: 1920, height: 900 }); await capture("light-wide");
     await page.emulateMedia({ colorScheme: "dark" });
-    await page.evaluate(() => document.documentElement.classList.add("dark"));
-    await capture("dark-wide");
-    await page.evaluate(() => {
-      document.documentElement.style.zoom = "1.5";
-    });
-    const zoomGeometry = await visualBar.evaluate((el) => ({
-      layoutWidth: el.clientWidth,
-      renderedWidth: el.getBoundingClientRect().width,
-    }));
-    assert.deepEqual(zoomGeometry, { layoutWidth: 268, renderedWidth: 402 });
-    await capture("dark-150pct");
-    await page.evaluate(() => {
-      document.documentElement.style.zoom = "";
-    });
-    await page.setViewportSize({ width: 390, height: 844 });
-    await visualBar.scrollIntoViewIfNeeded();
-    await capture("dark-narrow");
+    await page.evaluate(() => document.documentElement.classList.add("dark")); await capture("dark-wide");
+    await page.evaluate(() => { document.documentElement.style.zoom = "1.5"; });
+    assert.equal(await row.evaluate((el) => el.getBoundingClientRect().height), 57); await capture("dark-150pct");
+    await page.evaluate(() => { document.documentElement.style.zoom = ""; });
+    await page.setViewportSize({ width: 390, height: 844 }); await capture("dark-narrow");
     await page.emulateMedia({ colorScheme: "light" });
-    await page.evaluate(() =>
-      document.documentElement.classList.remove("dark"),
-    );
-    await capture("light-narrow");
+    await page.evaluate(() => document.documentElement.classList.remove("dark")); await capture("light-narrow");
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.evaluate(() => {
-      document.documentElement.style.zoom = "1.5";
-    });
-    await capture("light-150pct");
-    await page.evaluate(() => {
-      document.documentElement.style.zoom = "";
-    });
-    const coarseContext = await browser.newContext({
-      viewport: { width: 800, height: 600 },
-      hasTouch: true,
-    });
-    await coarseContext.route("**/*", (route) => {
-      const url = new URL(route.request().url());
-      if (url.origin !== origin) return route.abort();
-      if (url.pathname === "/api/panel/me")
-        return route.fulfill({
-          json: { ok: true, data: { user: "offline", role: "admin" } },
-        });
-      if (url.pathname === "/api/panel/vms")
-        return route.fulfill({
-          json: { ok: true, data: { items: visualRows } },
-        });
-      return route.continue();
-    });
-    await coarseContext.addInitScript(() =>
-      localStorage.setItem("kin_console_token", "offline-scheduling-token"),
-    );
-    const coarsePage = await coarseContext.newPage();
-    await coarsePage.goto(`${origin}/offline-ui`);
-    const coarseBlock = coarsePage.getByRole("button", {
-      name: "offline-auto1 调度优先级 1",
-      exact: true,
-    });
-    await coarseBlock.waitFor();
-    const coarseGeometry = await coarseBlock.evaluate((el) => ({
-      target: el.getBoundingClientRect().height,
-      width: el.getBoundingClientRect().width,
-      visible: el
-        .querySelector('[data-slot="priority-segment"]')
-        .getBoundingClientRect().height,
-    }));
-    assert.equal(coarseGeometry.target, 44);
-    assert.equal(coarseGeometry.width, 44);
-    assert.equal(coarseGeometry.visible, 6);
-    await coarseContext.close();
+    await page.evaluate(() => { document.documentElement.style.zoom = "1.5"; }); await capture("light-150pct");
+    await page.evaluate(() => { document.documentElement.style.zoom = ""; });
     for (role of ["user", "super"]) {
       await page.reload();
-      await bar.waitFor();
+      await row.waitFor();
       const beforeHealth = healthRequests.length;
-      assert.equal(await bar.getByRole("button").count(), 0);
-      assert.equal(await auto.count(), 0);
       await expand.click();
       await detail
         .getByText("健康明细仅管理员可查看", { exact: true })
         .waitFor();
       assert.equal(healthRequests.length, beforeHealth);
     }
-    assert.equal(writes.length, 4);
+    assert.deepEqual(writes, []);
     assert.deepEqual(rejectedOrigins, []);
     assert.deepEqual(errors, []);
   },

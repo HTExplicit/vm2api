@@ -111,7 +111,7 @@ test('a legacy cluster slot can bind while stopped and reissue an old package pe
   const service = connect({
     listTargets: () => [vm],
     assertReady: (target, options) => assertCragSubscriptionTarget(root, target, {}, options),
-    runtimeInventory: { snapshot: async () => ({}) },
+    runtimeInventory: { snapshot: async () => ({ host_over_limit: false }) },
     publishClusterBinding: async (projectRoot, target) => {
       assert.equal(projectRoot, root)
       assert.equal(target, vm)
@@ -187,7 +187,58 @@ test('cluster binding retries only one explicit payload-key conflict and preserv
   }
 })
 
-test('an admin can redeem without VMs and a second voucher replaces the signed capacity', async (t) => {
+test('Docker and KVM bind against the same redeemed pool without a version-specific redemption', async (t) => {
+  const targets = [
+    { id: 'docker-seat', dataplane: 'crag' },
+    { id: 'kvm-seat', dataplane: 'crag', runtime_type: 'kvm' },
+    { id: 'extra-seat', dataplane: 'crag', runtime_type: 'kvm', node_id: 'node-a' },
+  ]
+  const seats = new Map()
+  let entitlement
+  const projected = []
+  const { root, connect } = standaloneHost(t, async (url, { body }) => {
+    const request = JSON.parse(body)
+    if (url.endsWith('/redeem')) {
+      assert.deepEqual(Object.keys(request).sort(), ['host_id', 'redemption_code'])
+      entitlement = issueHostEntitlement(root, request.host_id, { slot_limit: 2 })
+    }
+    let binding = {}
+    if (url.endsWith('/bind')) {
+      let seat = seats.get(request.machine_code)
+      if (!seat && seats.size === 2) {
+        return Response.json({ ok: false, error: { code: 'slot_limit_reached' } }, { status: 409 })
+      }
+      seat ??= seats.size + 1
+      seats.set(request.machine_code, seat)
+      binding = { seat, slot_permit: issueSlotPermit(root, request.machine_code, request.host_id, { seat }).code }
+    }
+    return Response.json({
+      ok: true,
+      data: { entitlement: entitlement.code, ...entitlement.claims, used_slots: seats.size, ...binding },
+    })
+  })
+  seedEncryptedPackage(root)
+  for (const vm of targets) {
+    vm.fingerprint = { guest_machine_id: crypto.randomBytes(16).toString('hex') }
+  }
+  const service = connect({
+    listTargets: () => targets,
+    assertReady: (vm, options) => assertCragSubscriptionTarget(root, vm, {}, options),
+    runtimeInventory: { snapshot: async () => ({ host_over_limit: false }) },
+    publishKvmBinding: async (_, vm) => projected.push(vm.id),
+  })
+  assert.equal((await service.redeem(voucher())).available_seats, 2)
+  assert.deepEqual(await service.bind(targets[0]), { seat: 1 })
+  assert.deepEqual(await service.bind(targets[1]), { seat: 2 })
+  assert.equal(checkCragLicense(root, targets[1]).license.scope, 'host')
+  assert.equal((await service.status()).available_seats, 0)
+  await assert.rejects(service.bind(targets[2]), { code: 'slot_limit_reached' })
+  targets[1].status = 'running'
+  assert.equal(await service.admitInference({ vm: targets[1] }), null)
+  assert.deepEqual(projected, [targets[1].id])
+})
+
+test('an admin can redeem without VMs and use the cumulative capacity signed by Authority', async (t) => {
   const first = voucher()
   const second = voucher()
   const device = voucher()
@@ -200,7 +251,7 @@ test('an admin can redeem without VMs and a second voucher replaces the signed c
     }
     const { code, claims } = issueHostEntitlement(root, request.host_id, {
       revision: request.redemption_code === first ? 1 : 2,
-      slot_limit: request.redemption_code === first ? 2 : 3,
+      slot_limit: request.redemption_code === first ? 5 : 15,
     })
     return Response.json({ ok: true, data: { entitlement: code, ...claims, used_slots: 0 } })
   })
@@ -209,16 +260,17 @@ test('an admin can redeem without VMs and a second voucher replaces the signed c
   const initial = await post('redeem', { redemption_code: ` ${first}\n` })
   assert.equal(initial.status, 200)
   assert.equal(initial.data.state, 'active')
-  assert.equal(initial.data.slot_limit, 2)
+  assert.equal(initial.data.slot_limit, 5)
   assert.equal(initial.data.ready, false)
   assert.equal(initial.data.total_slots, 0)
   assert.equal(initial.data.enabled_slots, 0)
   assert.equal(initial.data.used_slots, 0)
 
-  const replacement = await post('redeem', { redemption_code: second })
-  assert.equal(replacement.status, 200)
-  assert.equal(replacement.data.slot_limit, 3)
-  assert.equal(replacement.data.revision, 2)
+  const stacked = await post('redeem', { redemption_code: second })
+  assert.equal(stacked.status, 200)
+  assert.equal(stacked.data.slot_limit, 15)
+  assert.equal(stacked.data.available_seats, 15)
+  assert.equal(stacked.data.revision, 2)
   const saved = fs.readFileSync(path.join(publicDir, 'entitlement.code'), 'utf8')
   const rejected = await post('redeem', { redemption_code: device })
   assert.equal(rejected.status, 404)
@@ -233,6 +285,51 @@ test('an admin can redeem without VMs and a second voucher replaces the signed c
     [first, second, device].map((redemption_code) => ['/v1/host-subscriptions/redeem', { host_id, redemption_code }]),
   )
   assert.equal(fs.existsSync(path.join(root, 'vms')), false)
+})
+
+test('an expired aggregate refreshes once and only a newer signed quota can restore availability', async (t) => {
+  for (const result of ['remaining', 'offline', 'older', 'same revision']) {
+    await t.test(result, async (subtest) => {
+      let issued
+      let next
+      let statusCalls = 0
+      const { root, publicDir, connect } = standaloneHost(subtest, async (url, { body }) => {
+        const { host_id } = JSON.parse(body)
+        if (url.endsWith('/redeem')) {
+          const now = Math.floor(Date.now() / 1000)
+          issued = issueHostEntitlement(root, host_id, {
+            revision: 2,
+            slot_limit: 15,
+            issued_at: now - 300,
+            expires_at: now - 120,
+          })
+        } else {
+          statusCalls++
+          await new Promise((resolve) => setImmediate(resolve))
+          if (result === 'offline') return new Response(null, { status: 503 })
+          next = issueHostEntitlement(root, host_id, {
+            revision: result === 'older' ? 1 : result === 'same revision' ? 2 : 3,
+            slot_limit: 10,
+          })
+        }
+        const { code, claims } = next ?? issued
+        return Response.json({ ok: true, data: { entitlement: code, ...claims, used_slots: 6 } })
+      })
+      seedEncryptedPackage(root)
+      const service = connect()
+      assert.equal((await service.redeem(voucher())).available_seats, 0)
+      const [background, panel] = await Promise.allSettled([service.refreshExpiredEntitlement(), service.status()])
+      assert.equal(background.status, result === 'remaining' ? 'fulfilled' : 'rejected')
+      assert.equal(panel.status, 'fulfilled')
+      const status = panel.value
+      const file = path.join(publicDir, 'entitlement.code')
+      const updated = result === 'remaining'
+      assert.equal(statusCalls, 1)
+      assert.equal(status.state, updated ? 'active' : 'expired')
+      assert.equal(status.available_seats, updated ? 4 : 0)
+      assert.equal(fs.readFileSync(file, 'utf8'), updated ? next.code : issued.code)
+    })
+  }
 })
 
 test('standalone redeem with a missing or corrupt host package does not start a transaction', async (t) => {
@@ -260,6 +357,40 @@ test('standalone redeem with a missing or corrupt host package does not start a 
   ]) {
     assert.equal(fs.existsSync(file), false)
   }
+})
+
+test('a device purchase applies signed rights only to its verified host and replays the same voucher after loss', async (t) => {
+  const redemptionCode = voucher()
+  const requests = []
+  let issued
+  const { root, publicDir, connect } = standaloneHost(t, async (url, { body, headers }) => {
+    const request = JSON.parse(body)
+    if (url.endsWith('/redeem')) {
+      requests.push({ request, authorization: headers.authorization })
+      if (!issued) {
+        issued = issueHostEntitlement(root, request.host_id, { slot_limit: 10 })
+        throw new Error('committed response interrupted')
+      }
+    }
+    return Response.json({ ok: true, data: { entitlement: issued.code, ...issued.claims, used_slots: 0 } })
+  })
+  const service = connect()
+  const hostId = service.purchaseDeviceId()
+  assert.match(hostId, /^[a-f0-9]{64}$/)
+  assert.equal(fs.existsSync(path.join(publicDir, 'host_id')), false, 'checkout does not create a subscription')
+  seedEncryptedPackage(root)
+  const wrongHost = `${hostId[0] === 'a' ? 'b' : 'a'}${hostId.slice(1)}`
+  await assert.rejects(service.redeemDeviceOrder(wrongHost, redemptionCode))
+  assert.equal(requests.length, 0)
+  await assert.rejects(service.redeemDeviceOrder(hostId, redemptionCode), {
+    code: 'crag_subscription_authority_unavailable',
+  })
+  await assert.rejects(connect().redeemDeviceOrder(hostId, voucher()), { code: 'crag_subscription_sync_pending' })
+  await connect().redeemDeviceOrder(hostId, redemptionCode)
+  assert.equal(requests.length, 2)
+  assert.deepEqual(requests[1], requests[0])
+  assert.deepEqual(requests[0].request, { host_id: hostId, redemption_code: redemptionCode })
+  assert.equal((await service.status()).available_seats, 10)
 })
 
 test('standalone recovery waits for the original verified host package before replaying a lost response', async (t) => {
@@ -597,7 +728,7 @@ test('admission retries local rights once within the original quota deadline', a
   }
 })
 
-test('H1 and H2 status never derive displayed capacity from local rights or runtime observations', async (testContext) => {
+test('remaining capacity requires confirmed usage or a signed roster, never runtime observations', async (testContext) => {
   for (const version of [1, 2]) {
     for (const expired of [false, true]) {
       await testContext.test(`H${version} ${expired ? 'expired' : 'active'}`, async (subtest) => {
@@ -623,15 +754,18 @@ test('H1 and H2 status never derive displayed capacity from local rights or runt
         for (const status of [redeemed, await service.status()]) {
           assert.equal(Object.hasOwn(status, 'used_slots'), false)
           assert.equal(Object.hasOwn(status, 'available_slots'), false)
+          assert.equal(status.available_seats, expired ? 0 : version === 2 ? 2 : null)
         }
         offline = true
         const unavailable = await service.status()
         assert.equal(unavailable.state, expired ? 'expired' : 'active')
+        assert.equal(unavailable.available_seats, expired ? 0 : version === 2 ? 2 : null)
         assert.equal(Object.hasOwn(unavailable, 'used_slots'), false)
         assert.equal(Object.hasOwn(unavailable, 'available_slots'), false)
         fs.writeFileSync(path.join(publicDir, 'sync-pending'), 'pending\n', { mode: 0o644 })
         const pending = await service.status()
         assert.equal(pending.state, 'sync_pending')
+        assert.equal(pending.available_seats, null)
         assert.equal(Object.hasOwn(pending, 'used_slots'), false)
         assert.equal(Object.hasOwn(pending, 'available_slots'), false)
       })
@@ -710,7 +844,13 @@ test('a lost renewal response suspends real control admission until restart repl
       },
     })
   const service = connect()
-  assert.deepEqual(await service.status(), { ready: true, state: 'unredeemed', total_slots: 2, enabled_slots: 0 })
+  assert.deepEqual(await service.status(), {
+    ready: true,
+    state: 'unredeemed',
+    available_seats: 0,
+    total_slots: 2,
+    enabled_slots: 0,
+  })
   await service.redeem(voucher())
   assert.deepEqual(await service.bind(slots[0]), { seat: 1 })
   assert.deepEqual(await service.bind(slots[1]), { seat: 2 })
@@ -882,7 +1022,7 @@ test('runtime quota follows a signed downgrade, unknown observations, and Author
   assert.equal((await recovered.admitInference({ vm: slots[0] })).body.error.code, 'license_crag_host_over_quota')
 })
 
-test('H2 reissue verifies the new permit before updating the same seat in the local roster', async (t) => {
+test('H2 reissues the same KVM seat when changing payload keys and recovers a lost response', async (t) => {
   const payload = crypto.randomBytes(32)
   let confirmed
   let invalidPermit = true
@@ -933,10 +1073,16 @@ test('H2 reissue verifies the new permit before updating the same seat in the lo
     return Response.json({ ok: true, data })
   })
   seedEncryptedPackage(root)
-  const vm = { id: 'vm-51', dataplane: 'crag', crag_kernel_version: 'v2' }
+  const vm = {
+    id: 'vm-51',
+    dataplane: 'crag',
+    crag_kernel_version: 'v2',
+    runtime: { type: 'kvm' },
+    fingerprint: { guest_machine_id: crypto.randomBytes(16).toString('hex') },
+  }
   const directory = path.join(root, 'vms', vm.id)
   fs.mkdirSync(directory, { recursive: true })
-  fs.writeFileSync(path.join(directory, 'machine-id'), crypto.randomBytes(16).toString('hex'))
+  fs.writeFileSync(path.join(directory, 'machine-id'), vm.fingerprint.guest_machine_id)
   assert.equal(materializeCragV2(root, vm, { select: false }).ok, true)
   const service = connect({ listTargets: () => [vm], assertReady: () => true })
   await service.redeem(voucher())
