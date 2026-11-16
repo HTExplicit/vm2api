@@ -6,6 +6,7 @@ import {
 } from 'react'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import type { StatusTone } from '@/types/status'
 import {
   ChevronDown,
   ExternalLink,
@@ -21,10 +22,23 @@ import {
   healthSummary,
   SLOT_BG,
 } from '@/lib/vm-health'
-import { fleetGroup } from '@/lib/vm-status'
+import {
+  fleetGroup,
+  poolStatus,
+  seatTitle,
+  vmCircuitTitle,
+  vmCooldown,
+  vmCooldownTitle,
+} from '@/lib/vm-status'
 import { vmCostLedger, vmWeekOutcome } from '@/lib/vm-usage'
 import { useNow } from '@/hooks/use-now'
 import { Button } from '@/components/ui/button'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import { StatusMark } from '@/components/status-mark'
 import { ProxyChip } from '@/features/proxies/proxy-chip'
 import {
   StatusBarOptions,
@@ -57,7 +71,48 @@ const COL_CLS: Record<VmColumnKey | 'actions' | 'open', string> = {
   actions: 'w-[64px] shrink-0 pr-2',
 }
 
+function StatusReason({ vm, tone }: { vm: Vm; tone: StatusTone }) {
+  const mark = <StatusMark tone={tone} variant='pill' className='text-xs' />
+  const title =
+    tone.key === 'circuit'
+      ? vmCircuitTitle(vm)
+      : vmCooldown(vm)
+        ? vmCooldownTitle(vm)
+        : null
+  if (!title) return mark
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span>{mark}</span>
+      </TooltipTrigger>
+      <TooltipContent>{title}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+/** 实时席位占用（预调度席位簿）；Codex 行没有席位。 */
+function SeatTag({ vm }: { vm: Vm }) {
+  if (vm.seats_max == null) return null
+  const used = Number(vm.seats_used) || 0
+  const queued = Number(vm.queue_depth) || 0
+  if (!used && !queued) return null
+  return (
+    <span
+      className={cn(
+        'shrink-0 text-[11px] text-muted-foreground tabular-nums',
+        queued > 0 && 'text-[color:var(--status-warn)]'
+      )}
+      title={seatTitle(vm)}
+    >
+      席位 {used}/{vm.seats_max}
+      {queued ? ` · 排队 ${queued}` : ''}
+    </span>
+  )
+}
+
 function StatusCell({ vm, show }: { vm: Vm; show: StatusBarShow }) {
+  const tone = poolStatus(vm)
+  const inflight = Number(vm.inflight) || 0
   const known = vm.health_24h !== undefined
   const health = healthSummary(vm.health_24h)
   const summary = !known
@@ -65,43 +120,56 @@ function StatusCell({ vm, show }: { vm: Vm; show: StatusBarShow }) {
     : health.req
       ? `${fmtNum(health.ok)}/${fmtNum(health.req)} 成功`
       : '24h 无请求'
+  const showInflight =
+    inflight > 0 &&
+    tone.cls !== 'bad' &&
+    tone.cls !== 'none' &&
+    tone.cls !== 'off'
   return (
     <div className='min-w-0 space-y-1'>
-      {show.bar || show.label ? (
-        <div className='min-w-0'>
-          <div className='flex h-6 items-center gap-2'>
-            {show.bar ? (
-              <div
-                role='img'
-                aria-label={`近 24h 请求健康：${summary}`}
-                className='flex h-3 w-[104px] shrink-0 gap-px'
-              >
-                {health.slots.map((slot, i) => (
-                  <span
-                    key={i}
-                    className='h-full flex-1 rounded-[1px]'
-                    style={{ backgroundColor: SLOT_BG[slot] }}
-                  />
-                ))}
-              </div>
-            ) : null}
-            {show.label ? (
-              <span
-                className={cn(
-                  'font-mono text-xs font-bold tabular-nums',
-                  HEALTH_FG[health.tone]
-                )}
-                title='近 24h 成功请求 ÷ 总请求'
-              >
-                {fmtHealthPct(health.pct)}
-              </span>
-            ) : null}
-          </div>
-          {show.label ? (
-            <div className='mt-0.5 font-mono text-[11px] text-muted-foreground tabular-nums'>
-              {summary}
-            </div>
+      {show.label ? (
+        <div className='flex items-center gap-1.5'>
+          <StatusReason vm={vm} tone={tone} />
+          {showInflight ? (
+            <span
+              className='inline-flex size-5 items-center justify-center rounded-full bg-[color:var(--tier-pro-solid)] text-[11px] font-semibold text-[color:var(--tier-pro-solid-fg)] tabular-nums'
+              title={`在飞 ${inflight}`}
+            >
+              {inflight}
+            </span>
           ) : null}
+          <SeatTag vm={vm} />
+        </div>
+      ) : null}
+      {show.bar ? (
+        <div className='min-w-0'>
+          <div className='flex items-center gap-2'>
+            <div
+              role='img'
+              aria-label={`近 24h 请求健康：${summary}`}
+              className='flex h-3 w-[104px] shrink-0 gap-px'
+            >
+              {health.slots.map((slot, i) => (
+                <span
+                  key={i}
+                  className='h-full flex-1 rounded-[1px]'
+                  style={{ backgroundColor: SLOT_BG[slot] }}
+                />
+              ))}
+            </div>
+            <span
+              className={cn(
+                'font-mono text-xs font-bold tabular-nums',
+                HEALTH_FG[health.tone]
+              )}
+              title='近 24h 成功请求 ÷ 总请求'
+            >
+              {fmtHealthPct(health.pct)}
+            </span>
+          </div>
+          <div className='mt-0.5 font-mono text-[11px] text-muted-foreground tabular-nums'>
+            {summary}
+          </div>
         </div>
       ) : null}
       {show.proxy ? <ProxyChip vm={vm} compact /> : null}

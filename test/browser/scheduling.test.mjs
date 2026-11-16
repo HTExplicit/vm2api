@@ -96,6 +96,7 @@ test(
       status: "running",
       schedulable: false,
       schedule_state: "off",
+      inflight: 3,
       schedule_level: 6,
       schedule_level_mode: "auto",
       has_token: true,
@@ -149,6 +150,38 @@ test(
             ? undefined
             : vm.health_24h,
     }));
+    const liveRows = [
+      {
+        ...vm,
+        id: "offline-available-codex",
+        name: "可用 Codex",
+        schedulable: true,
+        schedule_state: "on",
+        availability: { key: "ok", text: "可用", usable: true },
+        proxy: {
+          id: "offline-proxy",
+          host: "192.0.2.1",
+          port: 1080,
+          status: "ok",
+          latency_ms: 12,
+        },
+      },
+      {
+        ...vm,
+        id: "offline-claude-seats",
+        name: "Claude 席位",
+        platform: "anthropic",
+        family: "claude",
+        schedulable: true,
+        schedule_state: "on",
+        availability: { key: "ok", text: "可用", usable: true },
+        inflight: 0,
+        seats_max: 5,
+        seats_used: 2,
+        queue_depth: 1,
+      },
+    ];
+    const allRows = [vm, ...visualRows, ...liveRows];
     await context.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
@@ -163,7 +196,7 @@ test(
         });
       if (url.pathname === "/api/panel/vms" && request.method() === "GET") {
         return route.fulfill({
-          json: { ok: true, data: { items: [vm, ...visualRows] } },
+          json: { ok: true, data: { items: allRows } },
         });
       }
       if (url.pathname.endsWith("/health")) {
@@ -178,7 +211,7 @@ test(
             json: { ok: false, error: { message: "离线健康查询失败" } },
           });
         }
-        const sample = [vm, ...visualRows].find(
+        const sample = allRows.find(
           (item) => url.pathname === `/api/panel/vms/${item.id}/health`,
         );
         return route.fulfill({
@@ -354,6 +387,94 @@ test(
       });
       assert.equal(await priority.locator("..").innerText(), "自动");
     }
+    const availableRow = page.locator("[data-vm-row]").filter({
+      has: page.getByRole("group", {
+        name: "offline-available-codex 调度优先级",
+        exact: true,
+      }),
+    });
+    const claudeRow = page.locator("[data-vm-row]").filter({
+      has: page.getByRole("group", {
+        name: "offline-claude-seats 调度优先级",
+        exact: true,
+      }),
+    });
+    const available = availableRow.getByText("可用", { exact: true });
+    const inflight = availableRow.locator('[title="在飞 3"]');
+    const seats = claudeRow.getByText("席位 2/5 · 排队 1", { exact: true });
+    const liveHealth = availableRow.getByRole("img", {
+      name: "近 24h 请求健康：99/100 成功",
+      exact: true,
+    });
+    const livePercentage = availableRow.getByText("99.0%", { exact: true });
+    const liveSummary = availableRow.getByText("99/100 成功", { exact: true });
+    const liveProxy = availableRow.locator('[title*="点击探测出口"]');
+    await available.waitFor();
+    assert.equal(await inflight.innerText(), "3");
+    assert.equal(await seats.count(), 1);
+    assert.equal(
+      await bar.locator("xpath=ancestor::*[@data-vm-row]")
+        .locator('[title="在飞 3"]').count(),
+      0,
+      "a manually disabled row keeps its inflight badge hidden",
+    );
+    await page.getByRole("button", { name: "配置状态栏显示", exact: true }).click();
+    const statusOption = page.getByRole("menuitemcheckbox", {
+      name: "状态", exact: true,
+    });
+    const healthOption = page.getByRole("menuitemcheckbox", {
+      name: "健康", exact: true,
+    });
+    const proxyOption = page.getByRole("menuitemcheckbox", {
+      name: "代理", exact: true,
+    });
+    for (const option of [statusOption, healthOption, proxyOption])
+      assert.equal(await option.getAttribute("aria-checked"), "true");
+    await statusOption.click();
+    await available.waitFor({ state: "hidden" });
+    assert.equal(await inflight.count(), 0);
+    assert.equal(await seats.count(), 0);
+    assert.equal(await liveHealth.count(), 1);
+    assert.equal(await livePercentage.count(), 1);
+    assert.equal(await liveSummary.count(), 1);
+    assert.equal(await liveProxy.count(), 1);
+    await statusOption.click();
+    await available.waitFor();
+    await healthOption.click();
+    await liveHealth.waitFor({ state: "hidden" });
+    assert.equal(await livePercentage.count(), 0);
+    assert.equal(await liveSummary.count(), 0);
+    assert.equal(await inflight.count(), 1);
+    assert.equal(await seats.count(), 1);
+    assert.equal(await liveProxy.count(), 1);
+    await healthOption.click();
+    await liveHealth.waitFor();
+    await proxyOption.click();
+    await liveProxy.waitFor({ state: "hidden" });
+    assert.equal(await available.count(), 1);
+    assert.equal(await inflight.count(), 1);
+    assert.equal(await seats.count(), 1);
+    assert.equal(await liveHealth.count(), 1);
+    await proxyOption.click();
+    await liveProxy.waitFor();
+    await page.keyboard.press("Escape");
+    assert.deepEqual(writes, [], "display options never modify a slot");
+    assert.deepEqual(healthRequests, [], "display options never query a kernel");
+    const screenshots = path.join(root, ".tmp/11703-ui");
+    fs.mkdirSync(screenshots, { recursive: true });
+    await availableRow.scrollIntoViewIfNeeded();
+    await claudeRow.scrollIntoViewIfNeeded();
+    const availableBounds = await availableRow.boundingBox();
+    const claudeBounds = await claudeRow.boundingBox();
+    await page.screenshot({
+      path: path.join(screenshots, "restored-status-rows.png"),
+      clip: {
+        x: availableBounds.x,
+        y: availableBounds.y,
+        width: Math.min(availableBounds.width, 1440 - availableBounds.x),
+        height: claudeBounds.y + claudeBounds.height - availableBounds.y,
+      },
+    });
     await block(6).focus();
     await page
       .getByRole("tooltip", {
@@ -513,8 +634,6 @@ test(
     await page
       .getByRole("button", { name: "收起 offline-manual6 明细", exact: true })
       .click();
-    const screenshots = path.join(root, ".tmp/117-ui");
-    fs.mkdirSync(screenshots, { recursive: true });
     const capture = async (name) => {
       await page.screenshot({
         path: path.join(screenshots, `${name}-rows.png`),
