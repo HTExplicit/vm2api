@@ -40,11 +40,9 @@ describe('VM scheduling priority', () => {
       const list = render(vm)
       expect(list).toContain('>调度</span>')
       expect(list).toContain('aria-label="vm-01 调度优先级"')
-      expect(list).toContain(
-        '手动 <span class="font-semibold tabular-nums text-blue-800 dark:text-blue-200">8</span>'
-      )
+      expect(list).toContain('aria-description="手动调度优先级，当前等级 8"')
       expect(list).not.toMatch(/background-color:[^";]+[^>]*>调度优先级/)
-      expect(list).not.toMatch(/等级|权重/)
+      expect(list.replace(/<[^>]*>/g, '')).not.toMatch(/等级|权重/)
 
       const detail = renderToStaticMarkup(<VmSchedulingBlock vm={vm} />)
       expect(detail).toContain('>调度优先级</span>')
@@ -62,7 +60,7 @@ describe('VM scheduling priority', () => {
 
   it('does not substitute legacy weight when priority is missing', () => {
     expect(render({ weight: 4 })).toContain(
-      '自动 <span class="font-semibold tabular-nums text-muted-foreground">—</span>'
+      'aria-description="自动调度优先级，当前等级 未知"'
     )
   })
 })

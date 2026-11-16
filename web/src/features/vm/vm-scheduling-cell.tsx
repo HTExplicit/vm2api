@@ -17,11 +17,10 @@ import {
   vmSchedulableProps,
 } from '@/features/vm/schedulable-switch'
 import { useVmPerms } from '@/features/vm/vm-perms'
-import { schedulingPriorityTextClass } from '@/features/vm/vm-type-visual'
 
 const LEVELS = Array.from({ length: 10 }, (_, index) => index + 1)
 const BLOCK_CLASS =
-  'h-6 min-w-6 flex-1 rounded-none border-0 border-r border-r-background/60 p-0 last:border-r-0 focus-visible:z-10 focus-visible:outline-2 focus-visible:outline-solid focus-visible:-outline-offset-2 focus-visible:outline-ring focus-visible:ring-0 [@media(pointer:coarse)]:h-10'
+  'group/priority relative flex min-h-6 min-w-6 flex-1 items-start border-0 bg-transparent p-0 focus-visible:z-10 focus-visible:outline-2 focus-visible:outline-solid focus-visible:-outline-offset-2 focus-visible:outline-ring [@media(pointer:coarse)]:min-h-10'
 
 /** The switch preserves scheduling intent; the buttons only change priority. */
 export function VmSchedulingCell({ vm }: { vm: Vm }) {
@@ -31,6 +30,7 @@ export function VmSchedulingCell({ vm }: { vm: Vm }) {
   const level = Number(vm.schedule_level)
   const levelOk = Number.isInteger(level) && level >= 1 && level <= 10
   const automatic = vm.schedule_level_mode !== 'manual'
+  const priorityDescription = `${automatic ? '自动' : '手动'}调度优先级，当前等级 ${levelOk ? level : '未知'}`
   const mutation = useMutation({
     mutationFn: (next: number | 'auto') =>
       patchVm(vm.id, { schedule_level: next }),
@@ -56,31 +56,23 @@ export function VmSchedulingCell({ vm }: { vm: Vm }) {
 
   return (
     <div
-      className='min-w-0 space-y-1.5'
+      className='w-60 shrink-0'
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
     >
-      <div className='flex min-h-6 items-center justify-between gap-2'>
-        <div className='flex min-w-0 items-center gap-2'>
-          <SchedulableSwitch {...vmSchedulableProps(vm)} />
-          <span className='text-xs whitespace-nowrap text-muted-foreground'>
-            {automatic ? '自动' : '手动'}{' '}
-            <span
-              className={cn(
-                'font-semibold tabular-nums',
-                schedulingPriorityTextClass(level)
-              )}
-            >
-              {levelOk ? level : '—'}
-            </span>
-          </span>
-        </div>
+      <div className='flex h-6 items-center gap-2'>
+        <SchedulableSwitch {...vmSchedulableProps(vm)} />
         {perms.admin ? (
           <Button
             type='button'
             size='sm'
-            variant={automatic ? 'secondary' : 'ghost'}
-            className='h-6 cursor-pointer px-2 text-xs'
+            variant='ghost'
+            className={cn(
+              'h-6 cursor-pointer rounded-sm px-1 text-xs shadow-none',
+              automatic
+                ? 'text-[color:var(--status-ok)]'
+                : 'text-muted-foreground'
+            )}
             aria-label={`${vm.id} 自动调度优先级`}
             aria-pressed={automatic}
             disabled={mutation.isPending}
@@ -93,35 +85,62 @@ export function VmSchedulingCell({ vm }: { vm: Vm }) {
       <div
         role='group'
         aria-label={`${vm.id} 调度优先级`}
+        aria-description={priorityDescription}
         aria-busy={mutation.isPending || undefined}
-        className='flex overflow-hidden rounded-sm border border-border'
+        className='flex w-60'
       >
         {LEVELS.map((value) => {
           const filled = levelOk && value <= level
-          const className = cn(
-            BLOCK_CLASS,
-            filled
-              ? 'bg-primary text-primary-foreground hover:bg-primary/80'
-              : 'bg-muted hover:bg-accent'
+          const segment = (
+            <span
+              aria-hidden
+              className='pointer-events-none flex h-4 w-full items-center'
+            >
+              <span
+                data-slot='priority-segment'
+                className={cn(
+                  'h-1.5 w-full border-r border-r-background/70 transition-colors group-first/priority:rounded-l-full group-last/priority:rounded-r-full group-last/priority:border-r-0',
+                  filled
+                    ? automatic
+                      ? 'bg-[color:var(--status-ok-solid)] group-hover/priority:bg-[color:var(--status-ok)]'
+                      : 'bg-sky-600 group-hover/priority:bg-sky-700 dark:bg-sky-400 dark:group-hover/priority:bg-sky-300'
+                    : 'track-recessed group-hover/priority:bg-accent'
+                )}
+              />
+            </span>
           )
           if (!perms.admin) {
-            return <span key={value} aria-hidden className={className} />
+            return (
+              <span
+                key={value}
+                aria-hidden
+                title={priorityDescription}
+                className={BLOCK_CLASS}
+              >
+                {segment}
+              </span>
+            )
           }
           return (
             <Tooltip key={value}>
               <TooltipTrigger asChild>
-                <Button
+                <button
                   type='button'
-                  variant='ghost'
-                  size='sm'
-                  className={cn(className, 'cursor-pointer')}
+                  className={cn(
+                    BLOCK_CLASS,
+                    'cursor-pointer disabled:opacity-50'
+                  )}
                   aria-label={`${vm.id} 调度优先级 ${value}`}
                   aria-pressed={!automatic && level === value}
                   disabled={mutation.isPending}
                   onClick={() => select(value)}
-                />
+                >
+                  {segment}
+                </button>
               </TooltipTrigger>
-              <TooltipContent>调度优先级 {value}</TooltipContent>
+              <TooltipContent>
+                {priorityDescription}；设为手动 {value}
+              </TooltipContent>
             </Tooltip>
           )
         })}

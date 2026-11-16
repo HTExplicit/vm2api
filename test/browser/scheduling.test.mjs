@@ -100,6 +100,32 @@ test(
       email: "offline@example.test",
       reset_7d: "2026-11-21T01:00:00Z",
     };
+    const visualRows = [
+      {
+        id: "offline-auto1",
+        name: "自动 1",
+        schedule_level: 1,
+        schedule_level_mode: "auto",
+      },
+      {
+        id: "offline-manual6",
+        name: "手动 6",
+        schedule_level: 6,
+        schedule_level_mode: "manual",
+      },
+      {
+        id: "offline-manual10",
+        name: "手动 10",
+        schedule_level: 10,
+        schedule_level_mode: "manual",
+      },
+    ].map((row) => ({
+      ...vm,
+      ...row,
+      email: `${row.id}@example.test`,
+      schedulable: true,
+      schedule_state: "on",
+    }));
     await context.route("**/*", async (route) => {
       const request = route.request();
       const url = new URL(request.url());
@@ -113,7 +139,9 @@ test(
           json: { ok: true, data: { user: "offline", role } },
         });
       if (url.pathname === "/api/panel/vms" && request.method() === "GET") {
-        return route.fulfill({ json: { ok: true, data: { items: [vm] } } });
+        return route.fulfill({
+          json: { ok: true, data: { items: [vm, ...visualRows] } },
+        });
       }
       assert.equal(url.pathname, "/api/panel/vms/offline-slot");
       assert.equal(request.method(), "PATCH");
@@ -182,9 +210,96 @@ test(
     assert.ok(boxes.every((b) => b.width >= 24 && b.height >= 24));
     for (let n = 1; n < boxes.length; n++)
       assert.ok(Math.abs(boxes[n].x - boxes[n - 1].x - boxes[n - 1].width) < 1);
+    const geometry = await bar.evaluate((el) => {
+      const buttons = [...el.querySelectorAll("button")];
+      const segments = buttons.map((button) =>
+        button.querySelector('[data-slot="priority-segment"]'),
+      );
+      const rect = el.getBoundingClientRect();
+      const cell = el.parentElement;
+      const firstRow = cell.firstElementChild;
+      return {
+        width: rect.width,
+        columnWidth: cell.parentElement.getBoundingClientRect().width,
+        firstRowHeight: firstRow.getBoundingClientRect().height,
+        firstRowGap: getComputedStyle(firstRow).columnGap,
+        segments: segments.map((segment, index) => ({
+          width: segment.getBoundingClientRect().width,
+          height: segment.getBoundingClientRect().height,
+          top:
+            segment.getBoundingClientRect().top -
+            buttons[index].getBoundingClientRect().top,
+          divider: getComputedStyle(segment).borderRightWidth,
+        })),
+        backgrounds: buttons.map(
+          (button) => getComputedStyle(button).backgroundColor,
+        ),
+      };
+    });
+    assert.equal(geometry.width, 240);
+    assert.equal(geometry.columnWidth, 256);
+    assert.equal(geometry.firstRowHeight, 24);
+    assert.equal(geometry.firstRowGap, "8px");
+    assert.ok(
+      geometry.segments.every(
+        (segment) =>
+          segment.width === 24 && segment.height === 6 && segment.top === 5,
+      ),
+    );
+    assert.deepEqual(
+      geometry.segments.map((segment) => segment.divider),
+      Array(9).fill("1px").concat("0px"),
+    );
+    assert.ok(
+      geometry.backgrounds.every((color) => color === "rgba(0, 0, 0, 0)"),
+    );
+    await block(6).hover();
+    assert.equal(
+      await block(6).evaluate((el) => getComputedStyle(el).backgroundColor),
+      "rgba(0, 0, 0, 0)",
+    );
+
+    const visualRow = page.getByRole("button", {
+      name: "查看 offline-auto1 详情",
+      exact: true,
+    });
+    const visualBar = visualRow.getByRole("group", {
+      name: "offline-auto1 调度优先级",
+      exact: true,
+    });
+    const alignment = await visualBar.evaluate((el) => {
+      const segment = el.querySelector('[data-slot="priority-segment"]');
+      const row = el.closest('[role="button"]');
+      const statusDot = row.querySelector("div.track-recessed > span");
+      return {
+        difference:
+          segment.getBoundingClientRect().top -
+          statusDot.getBoundingClientRect().top,
+        priority: getComputedStyle(segment).backgroundColor,
+        status: getComputedStyle(statusDot).backgroundColor,
+      };
+    });
+    assert.equal(alignment.difference, 0);
+    assert.equal(alignment.priority, alignment.status);
+    const manualColor = await page
+      .getByRole("group", { name: "offline-manual6 调度优先级", exact: true })
+      .locator('[data-slot="priority-segment"]')
+      .first()
+      .evaluate((el) => getComputedStyle(el).backgroundColor);
+    assert.notEqual(manualColor, alignment.priority);
+    for (const id of ["offline-auto1", "offline-manual6", "offline-manual10"]) {
+      const priority = page.getByRole("group", {
+        name: `${id} 调度优先级`,
+        exact: true,
+      });
+      assert.equal(await priority.locator("..").innerText(), "自动");
+    }
     await block(6).focus();
     await page
-      .getByRole("tooltip", { name: "调度优先级 6", exact: true })
+      .getByRole("tooltip", {
+        name: "自动调度优先级，当前等级 6；设为手动 6",
+        exact: true,
+      })
       .waitFor();
     const focused = await block(6).evaluate((el) => ({
       active: el === document.activeElement,
@@ -248,26 +363,100 @@ test(
       await page.getByText("周窗口重置", { exact: true }).count(),
       0,
     );
-    const screenshots = path.join(root, ".tmp/113-scheduling");
+    const screenshots = path.join(root, ".tmp/11302-scheduling");
     fs.mkdirSync(screenshots, { recursive: true });
-    await page.screenshot({
-      path: path.join(screenshots, "desktop.png"),
-      fullPage: true,
-    });
-    await bar
-      .locator("..")
-      .screenshot({ path: path.join(screenshots, "column.png") });
+    const capture = async (name) => {
+      await page.screenshot({
+        path: path.join(screenshots, `${name}-rows.png`),
+        fullPage: true,
+      });
+      const first = await visualBar.boundingBox();
+      const cell = await visualBar.locator("..").boundingBox();
+      const last = await page
+        .getByRole("button", {
+          name: "查看 offline-manual10 详情",
+          exact: true,
+        })
+        .boundingBox();
+      await page.screenshot({
+        path: path.join(screenshots, `${name}-column.png`),
+        clip: {
+          x: first.x - 4,
+          y: cell.y - 4,
+          width: Math.min(430, page.viewportSize().width - first.x + 4),
+          height: last.y + last.height - cell.y + 8,
+        },
+      });
+    };
+    await page.mouse.move(0, 0);
+    await page.evaluate(() => document.activeElement?.blur());
+    await capture("light-wide");
     await page.emulateMedia({ colorScheme: "dark" });
     await page.evaluate(() => document.documentElement.classList.add("dark"));
-    await page.screenshot({
-      path: path.join(screenshots, "dark.png"),
-      fullPage: true,
+    await capture("dark-wide");
+    await page.evaluate(() => {
+      document.documentElement.style.zoom = "1.5";
+    });
+    const zoomGeometry = await visualBar.evaluate((el) => ({
+      layoutWidth: el.clientWidth,
+      renderedWidth: el.getBoundingClientRect().width,
+    }));
+    assert.deepEqual(zoomGeometry, { layoutWidth: 240, renderedWidth: 360 });
+    await capture("dark-150pct");
+    await page.evaluate(() => {
+      document.documentElement.style.zoom = "";
     });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.screenshot({
-      path: path.join(screenshots, "mobile.png"),
-      fullPage: true,
+    await visualBar.scrollIntoViewIfNeeded();
+    await capture("dark-narrow");
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.evaluate(() =>
+      document.documentElement.classList.remove("dark"),
+    );
+    await capture("light-narrow");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => {
+      document.documentElement.style.zoom = "1.5";
     });
+    await capture("light-150pct");
+    await page.evaluate(() => {
+      document.documentElement.style.zoom = "";
+    });
+    const coarseContext = await browser.newContext({
+      viewport: { width: 800, height: 600 },
+      hasTouch: true,
+    });
+    await coarseContext.route("**/*", (route) => {
+      const url = new URL(route.request().url());
+      if (url.origin !== origin) return route.abort();
+      if (url.pathname === "/api/panel/me")
+        return route.fulfill({
+          json: { ok: true, data: { user: "offline", role: "admin" } },
+        });
+      if (url.pathname === "/api/panel/vms")
+        return route.fulfill({
+          json: { ok: true, data: { items: visualRows } },
+        });
+      return route.continue();
+    });
+    await coarseContext.addInitScript(() =>
+      localStorage.setItem("kin_console_token", "offline-scheduling-token"),
+    );
+    const coarsePage = await coarseContext.newPage();
+    await coarsePage.goto(`${origin}/offline-ui`);
+    const coarseBlock = coarsePage.getByRole("button", {
+      name: "offline-auto1 调度优先级 1",
+      exact: true,
+    });
+    await coarseBlock.waitFor();
+    const coarseGeometry = await coarseBlock.evaluate((el) => ({
+      target: el.getBoundingClientRect().height,
+      visible: el
+        .querySelector('[data-slot="priority-segment"]')
+        .getBoundingClientRect().height,
+    }));
+    assert.deepEqual(coarseGeometry, { target: 40, visible: 6 });
+    await coarseContext.close();
     role = "user";
     await page.reload();
     await bar.waitFor();
