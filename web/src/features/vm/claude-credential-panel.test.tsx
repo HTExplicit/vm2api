@@ -2,6 +2,7 @@ import type {
   ButtonHTMLAttributes,
   ComponentProps,
   PropsWithChildren,
+  ReactElement,
 } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -129,12 +130,31 @@ vi.mock('@/components/ui/tooltip', () => {
   const Part = ({ children }: PropsWithChildren) => <span>{children}</span>
   return { Tooltip: Part, TooltipContent: Part, TooltipTrigger: Part }
 })
-vi.mock('@/components/ui/dialog', () => {
+vi.mock('@/components/ui/dialog', async () => {
+  const { cloneElement, createContext, useContext } = await import('react')
   const Part = ({ children }: PropsWithChildren) => <div>{children}</div>
+  const DialogState = createContext({
+    open: false,
+    onOpenChange: (_open: boolean) => {},
+  })
   return {
-    Dialog: ({ open, children }: PropsWithChildren<{ open: boolean }>) =>
-      open ? <div>{children}</div> : null,
-    DialogContent: Part,
+    Dialog: ({
+      children,
+      ...state
+    }: PropsWithChildren<{
+      open: boolean
+      onOpenChange: (open: boolean) => void
+    }>) => (
+      <DialogState.Provider value={state}>{children}</DialogState.Provider>
+    ),
+    DialogTrigger: ({ children }: PropsWithChildren) => {
+      const state = useContext(DialogState)
+      return cloneElement(children as ReactElement<{ onClick: () => void }>, {
+        onClick: () => state.onOpenChange(true),
+      })
+    },
+    DialogContent: ({ children }: PropsWithChildren) =>
+      useContext(DialogState).open ? <div>{children}</div> : null,
     DialogDescription: Part,
     DialogHeader: Part,
     DialogTitle: Part,
@@ -183,7 +203,9 @@ function render(surface: Surface) {
 
 function click(label: string) {
   const props = controls.buttons.find(
-    (button) => renderToStaticMarkup(<>{button.children}</>) === label
+    (button) =>
+      renderToStaticMarkup(<>{button.children}</>).replace(/<[^>]*>/g, '') ===
+      label
   )
   expect(props, label).toBeDefined()
   props!.onClick!({} as never)
@@ -206,9 +228,9 @@ afterEach(() => {
   client.clear()
 })
 
-describe('Claude manual credential entry after browser login removal', () => {
+describe('Claude credential entry surfaces', () => {
   it.each(['import', 'detail', 'reauth'] as const)(
-    'keeps Cookie and panel-owned OAuth links without a browser or login terminal on %s',
+    'keeps Cookie, panel-owned OAuth links and explicit native CC login on %s',
     async (surface) => {
       render(surface)
       if (surface === 'import') {
@@ -217,6 +239,10 @@ describe('Claude manual credential entry after browser login removal', () => {
       }
       click('OAuth')
       let html = render(surface)
+      expect(html).toContain('使用随 CRAG 发布的原生 Claude Code 授权')
+      expect(controls.terminal).not.toHaveBeenCalled()
+      click('Cookie')
+      html = render(surface)
       expect(html).toContain('sessionKey / access token')
       expect(html).not.toContain('浏览器登录')
       click('授权链接')
@@ -240,18 +266,15 @@ describe('Claude manual credential entry after browser login removal', () => {
       expect(html).toContain('生成授权链接')
       expect(html).not.toContain('浏览器登录')
       expect(html).not.toContain('打开官方登录终端')
+      expect(controls.terminal).not.toHaveBeenCalled()
+      const manualCalls = controls.api.mock.calls.length
       click('生成授权链接')
       await new Promise((resolve) => setTimeout(resolve, 0))
       html = render(surface)
-      expect(controls.api).toHaveBeenLastCalledWith(
-        `/api/panel/vms/${vm.id}/oauth/generate-auth-url`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ flavor: 'claude_code', force: false }),
-        }
-      )
-      expect(controls.terminal).not.toHaveBeenCalled()
-      expect(html).toContain('完整授权码，含 # 后半段')
+      expect(controls.terminal).toHaveBeenCalledExactlyOnceWith(vm)
+      expect(controls.api).toHaveBeenCalledTimes(manualCalls)
+      expect(html).toContain('等待原生 CC 输出链接…')
+      expect(html).toContain('授权码或回调链接')
       expect(html).not.toContain('浏览器登录')
       expect(
         controls.api.mock.calls.some(([path]) => /\/browser(?:\/|$)/.test(path))
