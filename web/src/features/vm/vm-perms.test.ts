@@ -15,6 +15,7 @@ describe('vmPermsFor follows panel-acl roles', () => {
       power: true,
       test: true,
       testModels: true,
+      usageQuery: true,
       credential: true,
       proxy: true,
       remove: true,
@@ -30,6 +31,7 @@ describe('vmPermsFor follows panel-acl roles', () => {
     expect(p.test).toBe(true)
     // Tenants may read their slot's models; live refresh remains admin-only.
     expect(p.testModels).toBe(true)
+    expect(p.usageQuery).toBe(true)
     expect(p.credential).toBe(false)
     expect(p.proxy).toBe(false)
     expect(p.remove).toBe(false)
@@ -43,6 +45,7 @@ describe('vmPermsFor follows panel-acl roles', () => {
       dashboard: true,
       power: false,
       test: false,
+      usageQuery: false,
       credential: false,
       proxy: true,
       remove: false,

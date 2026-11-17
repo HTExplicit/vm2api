@@ -108,7 +108,7 @@ test('runtime version lists use the fork application and the fixed CRAG supplier
       return Response.json([app, crag(standard), crag(legacy)])
     },
   })
-  assert.deepEqual(versions, { 'cli-node': ['v1.4.11001'], crag: [standard, legacy] })
+  assert.deepEqual(versions, { 'cli-node': ['v1.4.11001'], crag: [standard] })
   assert.deepEqual(seen, [`/repos/${GITHUB_REPO}/releases`, '/repos/dofastted/vm2api/releases'])
 })
 

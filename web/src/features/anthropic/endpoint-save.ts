@@ -18,6 +18,7 @@ export type StoredSnapshot = {
   baseUrl: string
   authScheme: AuthScheme
   proxyId: string
+  headers?: Record<string, string>
 }
 
 export type EndpointDraft = {
@@ -25,6 +26,7 @@ export type EndpointDraft = {
   riskReviewEnabled?: boolean
   existingModels?: string[]
   fetchedModels?: string[]
+  savedModels?: string[]
   id: string
   storedId?: string
   keyId?: string
@@ -41,11 +43,14 @@ type StoredItem = {
   risk_review_enabled?: boolean
   base_url?: string
   auth_scheme?: string
-  api_key_entries?: { id?: string; proxy_id?: string }[]
+  headers?: Record<string, string>
+  api_key_entries?: { id?: string; proxy_id?: string; disabled?: boolean }[]
   models?: { id?: string; name?: string; alias?: string }[]
 }
 export function draftFromStored(item: StoredItem): EndpointDraft {
-  const key = item.api_key_entries?.[0]
+  const key =
+    item.api_key_entries?.find((entry) => !entry.disabled) ||
+    item.api_key_entries?.[0]
   const stored: StoredSnapshot = {
     protocol: item.protocol || 'anthropic',
     riskReviewEnabled: item.risk_review_enabled === true,
@@ -56,6 +61,7 @@ export function draftFromStored(item: StoredItem): EndpointDraft {
         ? 'authorization_bearer'
         : 'x_api_key',
     proxyId: key?.proxy_id || DIRECT,
+    headers: item.headers,
   }
   const existingModels = (item.models || [])
     .map((m) => (m.name || m.id || m.alias || '').trim())
@@ -66,6 +72,7 @@ export function draftFromStored(item: StoredItem): EndpointDraft {
     keyId: key?.id || '',
     apiKey: '',
     existingModels: existingModels.length ? existingModels : undefined,
+    savedModels: existingModels,
     ...stored,
     stored,
   }
@@ -76,6 +83,43 @@ function kindOf(baseUrl: string, protocol: ApiProtocol) {
   if (protocol === 'openai' && baseUrl === API_DEFAULTS.openai.baseUrl)
     return 'openai'
   return 'custom'
+}
+
+export function endpointModelRequest(item: EndpointDraft) {
+  const protocol = item.protocol || 'anthropic'
+  const baseUrl = item.baseUrl.trim() || API_DEFAULTS[protocol].baseUrl
+  const saved = item.stored
+  const apiKey = item.apiKey.trim()
+  const proxyChanged = item.proxyId !== saved?.proxyId
+  const apply =
+    !!item.storedId &&
+    !!saved &&
+    !apiKey &&
+    !proxyChanged &&
+    baseUrl === saved.baseUrl &&
+    protocol === saved.protocol &&
+    item.authScheme === saved.authScheme
+  const path = '/api/panel/api-endpoints'
+  return {
+    apply,
+    path: apply
+      ? `${path}/${encodeURIComponent(item.storedId!)}/fetch-models`
+      : `${path}/fetch-models`,
+    body: apply
+      ? { key_id: item.keyId }
+      : {
+          kind: kindOf(baseUrl, protocol),
+          protocol,
+          base_url: baseUrl,
+          api_key: apiKey,
+          key_id: item.keyId,
+          auth_scheme: item.authScheme,
+          headers: saved?.headers,
+          ...(proxyChanged
+            ? { proxy_id: item.proxyId === DIRECT ? '' : item.proxyId }
+            : {}),
+        },
+  }
 }
 
 /**

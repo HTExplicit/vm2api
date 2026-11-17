@@ -4,7 +4,7 @@ git 里只有源码。`bin/`、`web/dist`、`share/crag` 与 `share/wrap-cli` �
 
 - `web/dist`、`kin-api-kernel`、`kin-redact` 与 `kin-egress` 在最终控制面镜像内从 fork 源码构建。`kin-egress` 保留 fork 的出口逻辑并包含 HTTP CONNECT 支持。
 - 其余 linux amd64 kernel / helper、Claude CLI、完整签名加密 CRAG native v2 包与 glibc shim 由 [`deploy/payload.json`](../deploy/payload.json) 按大小和 SHA-256 固定。清单的 `release` 指向已公开、不可变的 payload Release，可独立于应用版本；`npm run fetch:payload` 与镜像构建使用同一清单，校验失败即停止。
-- 当前载荷来源为官方 `payload-2026.11.16-crag-3.1.3`，使用 CRAG `3.1.3` standard 原签名包；CLI `2.1.321` 缓存 TTL 修复字节与其余固定资产保持。CRAG 在私有仓库 `dofastted/crag` 构建，公开资产及原始 `SOURCES.json` 由供应方的 vm2api payload Release 分发。应用、发行工作流及资产来源见 [121 供应来源记录](releases/v1.4.121-binaries.json)，签名包及来源声明见 [CRAG 3.1.3 来源](releases/v1.4.121-crag.json)。这些记录由 fork 根据供应方公开发行整理，不声明独立重建或重签；来源与完整性校验不等于生产运行验收。
+- 当前载荷来源为官方 `payload-2026.11.17-kernel-1091-968-crag-3.1.4`，使用 CRAG `3.1.4` standard 原签名包；两个 kernel 更新至供应方构建 1091/968，CLI `2.1.321` 缓存 TTL 修复字节和其余固定资产保持。CRAG 在私有仓库 `dofastted/crag` 构建，公开资产及原始 `SOURCES.json` 由供应方的 vm2api payload Release 分发。应用、发行工作流及资产来源见 [130 供应来源记录](releases/v1.4.130-binaries.json)，签名包及来源声明见 [CRAG 3.1.4 来源](releases/v1.4.130-crag.json)。这些记录由 fork 根据供应方公开发行整理，不声明独立重建或重签；来源与完整性校验不等于生产运行验收。
 
 ## 完整应用交付
 
@@ -12,7 +12,7 @@ git 里只有源码。`bin/`、`web/dist`、`share/crag` 与 `share/wrap-cli` �
 
 1. 下载并校验目标正式版清单引用的完整资产集，只更新来源可核验的成员，不从未提交的本地 `bin/` 取出厂文件。`--pin` 会重算全部本地文件，仅用于已完整核验的隔离 staging；再以 `--check` 校验、`--stage <目录>` 导出同名资产。
 2. 保持载荷下载源与应用版本分离。清单只引用已经公开下载的不可变发行；CRAG 的 `crag_release` 指定独立安装包版本，完整归档由 `share/crag/crag-v2-licensed-amd64.tar.gz` 清单项交付，并与同包九个出厂成员核验签名和字节一致。
-3. 镜像出厂包固定为 3.1.3 standard；宿主首次缺少工厂时预装，已有工厂、自定义来源及下载选择保留。内核目录提供 3.1.2 legacy 独立下载，旧 3.0.9 legacy 保留显式历史标签；它们不进入默认载荷、standard 工厂或 24 个发行附件。迁移保持原授权材料和现有槽选择；预装不激活授权或切换内核。提交清单、构建来源、应用 `VERSION` 与 `CHANGELOG.md`，通过 PR CI 后合并。tag 落在包含这些改动的云端合并结果，不能重打历史 tag。
+3. 镜像出厂包固定为 3.1.4 standard；宿主首次缺少工厂时预装，已有工厂、自定义来源及下载选择保留。常规版本列表只展示标准包，历史 legacy 包保留显式完整标签下载；它们不进入默认载荷、standard 工厂或 24 个发行附件。迁移保持原授权材料和现有槽选择；预装不激活授权或切换内核。提交清单、构建来源、应用 `VERSION` 与 `CHANGELOG.md`，通过 PR CI 后合并。tag 落在包含这些改动的云端合并结果，不能重打历史 tag。
 4. 推送 tag 后先建草稿 Release，再构建并推送 linux/amd64 控制面版本镜像。`scripts/release-assets.mjs` 从该最终镜像的精确 digest 提取 22 个上游固定资产和 fork 自编 `kin-egress`，核验来源后生成 `build-provenance.json`，共 24 个附件。
 5. 核对附件与镜像，并确认 GHCR 匿名可读取后，工作流才移动 `latest` 并公开 Release。当前不构建 ARM64 helper、ARM64 控制面镜像或多架构 manifest；不另附 `payload.json` 或 `SHA256SUMS`。
 6. 发布后按目标版本部署并核验控制面与运行中进程。包下载和出厂文件更新不代表槽内进程已更新；安装、升级与恢复保持现有启停、人工调度及内核选择。CRAG 原生交接只按运行中内核声明的能力启用。

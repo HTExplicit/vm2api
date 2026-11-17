@@ -37,6 +37,15 @@ export function resolveInferenceBackend(req) {
     : 'oauth'
 }
 
+export function apiScheduleScope(req, scope = keyScopeFromRequest(req)) {
+  const endpointId = req?.apiKeyRecord?.api_endpoint_id || null
+  return {
+    ...scope,
+    endpointId,
+    group_type: endpointId && scope.group_type !== 'openai_apikey' ? 'all' : scope.group_type,
+  }
+}
+
 export { messagesUrl, responsesUrl } from './api-presets.mjs'
 
 const STATELESS_RESPONSES_FIELDS = new Set([
@@ -298,6 +307,7 @@ function mappedOpenAIResponsesFailure(resultBase, event, committed, extras = {})
   return {
     ...resultBase,
     ...mapped,
+    upstreamError: event.error,
     ok: false,
     terminalState: committed ? 'incomplete' : 'rejected',
     committed,
@@ -366,7 +376,7 @@ function accountRetryLimits(routing = {}) {
 
 /** Account API retries are only for explicit HTTP rejections before any output. */
 export async function runApiInference(options = {}) {
-  const scope = keyScopeFromRequest(options.req)
+  const scope = options.scope || apiScheduleScope(options.req)
   if (scope.group_type !== 'openai_apikey') return runApiAttempt(options)
   const model = (options.nativeResponsesBody || options.convertedBody)?.model
   const routing = options.getRouting?.() || options.cfg?.routing || {}
@@ -458,7 +468,9 @@ export async function runApiInference(options = {}) {
           ? null
           : result.via === 'redaction'
             ? 'request'
-            : result.status === 401 ? 'credential' : 'account',
+            : result.status === 401
+              ? 'credential'
+              : 'account',
         action: maySwitch ? 'next_unit' : 'return',
         downstreamCommitted: !!options.res?.headersSent || !!result.committed,
         terminalState: result.terminalState,
@@ -541,9 +553,9 @@ async function runApiAttemptBody({
   routing = null,
   redactionPrincipal = '',
   redactionSession = '',
+  scope = apiScheduleScope(req),
 } = {}) {
   const model = (nativeResponsesBody || convertedBody)?.model
-  const scope = keyScopeFromRequest(req)
   const picked = selected || scheduler.pick(model, Date.now(), scope)
   if (!picked.ok) {
     return {
@@ -692,6 +704,7 @@ async function runApiAttemptBody({
   const resultBase = {
     ok: status >= 200 && status < 300,
     status,
+    upstreamStatus: status,
     via: 'api-kernel',
     ...apiResultIdentity(picked, dispatchedKey),
     sentModel: body.model,
@@ -729,6 +742,7 @@ async function runApiAttemptBody({
           message: String(message).slice(0, 300),
         },
       },
+      upstreamError: { code: upstreamCode || null, type: payload?.error?.type || null, message: String(message) },
       terminalState: 'rejected',
       retryableAccountRejection:
         !!picked.key.source_account_id &&
@@ -773,29 +787,37 @@ async function runApiAttemptBody({
   const classifierSseState = { dataBuf: '' }
   let classifierError = null
   let classifierStopped = false
+  let streamError = null
+  let streamStopReason = null
   let streamedUsage = null
   const readUpstreamLines = async (onLine) => {
     try {
-      await readLines(upstream, async (line, receivedAt) => {
-        line = restoreToolNamesInSSELine(line, toolNames)
-        const event = consumeClaudeSSEData(line, classifierSseState)
-        if (typeof event?.message?.model === 'string' && event.message.model.trim()) {
-          resultBase.upstreamResponseModel = event.message.model
-          onModels?.({ sentModel: resultBase.sentModel, upstreamResponseModel: resultBase.upstreamResponseModel })
-        }
-        timing.observe(event, receivedAt)
-        streamedUsage = mergeUsage(streamedUsage, event?.message?.usage || event?.usage)
-        if (requestContext) {
-          // The same decoded event drives classifier validation and performance timing.
-          if (event?.type === 'error')
-            classifierError = {
-              ...event,
-              error: { ...event.error, ...(event.error?.code ? { upstream_code: event.error.code } : {}) },
-            }
-          if (event?.type === 'message_stop') classifierStopped = true
-        }
-        await onLine(line)
-      }, redaction ? createSseRestorer(redaction) : null)
+      await readLines(
+        upstream,
+        async (line, receivedAt) => {
+          line = restoreToolNamesInSSELine(line, toolNames)
+          const event = consumeClaudeSSEData(line, classifierSseState)
+          if (typeof event?.message?.model === 'string' && event.message.model.trim()) {
+            resultBase.upstreamResponseModel = event.message.model
+            onModels?.({ sentModel: resultBase.sentModel, upstreamResponseModel: resultBase.upstreamResponseModel })
+          }
+          timing.observe(event, receivedAt)
+          streamedUsage = mergeUsage(streamedUsage, event?.message?.usage || event?.usage)
+          if (event?.type === 'error') streamError = event
+          if (event?.type === 'message_delta') streamStopReason = event.delta?.stop_reason || streamStopReason
+          if (requestContext) {
+            // The same decoded event drives classifier validation and performance timing.
+            if (event?.type === 'error')
+              classifierError = {
+                ...event,
+                error: { ...event.error, ...(event.error?.code ? { upstream_code: event.error.code } : {}) },
+              }
+            if (event?.type === 'message_stop') classifierStopped = true
+          }
+          await onLine(line)
+        },
+        redaction ? createSseRestorer(redaction) : null,
+      )
     } catch (error) {
       if (String(error?.code || '').startsWith('redaction_') || error?.code === 'invalid_redaction_config') throw error
       if (!requestContext) throw error
@@ -937,10 +959,24 @@ async function runApiAttemptBody({
   const failure = classifierFailure()
   if (failure) return { ...failure, ...timing.snapshot(), committed }
 
+  if (streamError) {
+    return {
+      ...resultBase,
+      ...timing.snapshot(),
+      body: streamError,
+      status: mapUpstreamError(200, streamError).status,
+      ok: false,
+      committed,
+      usage: streamedUsage,
+      terminalState: 'rejected',
+    }
+  }
+
   return {
     ...resultBase,
     ...timing.snapshot(),
     usage: streamedUsage,
+    stopReason: streamStopReason,
     ok: resultBase.ok && (deliveryMode !== 'verified' || sawStop),
     terminalState: sawStop ? 'verified' : committed ? 'incomplete' : 'rejected',
     committed,
@@ -1023,38 +1059,42 @@ async function runOpenAIResponsesUpstream({
   }
 
   try {
-    await readLines(upstream, async (line, receivedAt) => {
-      if (conversionError) return
-      const raw = String(line || '')
-      const event = openAIResponsesSseEvent(raw)
-      if (typeof event?.response?.model === 'string' && event.response.model.trim()) {
-        resultBase.upstreamResponseModel = event.response.model
-        onModels?.({ sentModel: resultBase.sentModel, upstreamResponseModel: resultBase.upstreamResponseModel })
-      }
-      timing.observe(event, receivedAt)
-      const failure = openAIResponsesFailure(event)
-      if (failure) terminalFailure = failure
-      const seen = usageFromSseLine(raw)
-      if (seen) streamedUsage = mergeUsage(streamedUsage, seen)
-      const startsOutput = isOpenAIResponsesCommitEvent(event)
-      const completes = event?.type === 'response.completed' || event?.type === 'response.done'
-      if (completes || event?.type === 'response.incomplete')
-        nativeCompleted = completes && event.response?.status === 'completed'
-      const wasCommitted = committed
-      if (!committed && (startsOutput || completes)) committed = true
-      if (!clientStream) {
-        chunks.push(raw)
-        if (/response\.(completed|done)/.test(raw) || raw.trim() === 'data: [DONE]') sawTerminal = true
-        return
-      }
-      if (!wasCommitted) {
-        pendingLines.push(raw)
-        if (!committed) return
-        for (const pending of pendingLines.splice(0)) writeStreamLine(pending)
-        return
-      }
-      writeStreamLine(raw)
-    }, redaction ? createSseRestorer(redaction) : null)
+    await readLines(
+      upstream,
+      async (line, receivedAt) => {
+        if (conversionError) return
+        const raw = String(line || '')
+        const event = openAIResponsesSseEvent(raw)
+        if (typeof event?.response?.model === 'string' && event.response.model.trim()) {
+          resultBase.upstreamResponseModel = event.response.model
+          onModels?.({ sentModel: resultBase.sentModel, upstreamResponseModel: resultBase.upstreamResponseModel })
+        }
+        timing.observe(event, receivedAt)
+        const failure = openAIResponsesFailure(event)
+        if (failure) terminalFailure = failure
+        const seen = usageFromSseLine(raw)
+        if (seen) streamedUsage = mergeUsage(streamedUsage, seen)
+        const startsOutput = isOpenAIResponsesCommitEvent(event)
+        const completes = event?.type === 'response.completed' || event?.type === 'response.done'
+        if (completes || event?.type === 'response.incomplete')
+          nativeCompleted = completes && event.response?.status === 'completed'
+        const wasCommitted = committed
+        if (!committed && (startsOutput || completes)) committed = true
+        if (!clientStream) {
+          chunks.push(raw)
+          if (/response\.(completed|done)/.test(raw) || raw.trim() === 'data: [DONE]') sawTerminal = true
+          return
+        }
+        if (!wasCommitted) {
+          pendingLines.push(raw)
+          if (!committed) return
+          for (const pending of pendingLines.splice(0)) writeStreamLine(pending)
+          return
+        }
+        writeStreamLine(raw)
+      },
+      redaction ? createSseRestorer(redaction) : null,
+    )
   } catch (error) {
     if (String(error?.code || '').startsWith('redaction_') || error?.code === 'invalid_redaction_config') throw error
     if (!nativeResponses) throw error

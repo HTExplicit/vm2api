@@ -14,11 +14,7 @@ import {
 } from '../../src/lib/protocol/request-body-context.mjs'
 import { computeMessageIdentity } from '../../src/lib/protocol/cache-prefix.mjs'
 import { refusalUserDocument } from '../../src/lib/core/refusal-similarity.mjs'
-import {
-  jevDocument,
-  jevInterceptSessionCache,
-  jevModelDocument,
-} from '../../src/lib/protocol/jev-intercept.mjs'
+import { jevDocument, jevInterceptSessionCache, jevModelDocument } from '../../src/lib/protocol/jev-intercept.mjs'
 
 test('shallowCopyBody keeps message object references', () => {
   const msg = { role: 'user', content: [{ type: 'text', text: 'hi' }] }
@@ -74,7 +70,7 @@ test('incremental intercept document matches full scan on growing conversation',
   assert.equal(incJev, fullJev)
 })
 
-test('incremental model document rebuilds when the caller system prompt changes', () => {
+test('incremental model document keeps caller system text out of the model review after changes', () => {
   clearCachePrefixSessions()
   const message = { role: 'user', content: [{ type: 'text', text: 'hello' }] }
   const base = { system: 'first system', messages: [message] }
@@ -90,5 +86,6 @@ test('incremental model document rebuilds when the caller system prompt changes'
     ctx: createRequestBodyContext(changed),
   })
   assert.equal(inc, full)
-  assert.match(inc, /changed system/)
+  assert.match(inc, /hello/)
+  assert.doesNotMatch(inc, /first system|changed system/)
 })

@@ -55,6 +55,7 @@ import { mergeUsage } from '../protocol/openai-usage.mjs'
 import { ensureRedaction, maskJson, restoreJsonValue, createSseRestorer } from '../redaction/runtime.mjs'
 import { inferenceCodec } from './inference-codec.mjs'
 import { parseWorkerJson as parseJson } from './inference-codec-json.mjs'
+import { vmNodeId } from '../cluster/placement.mjs'
 import {
   createNativeHandoffState,
   consumeNativeHandoffStream,
@@ -809,7 +810,39 @@ function mockScenario(exec) {
   }
 }
 
-export async function callGoWorker({
+function restoreCragPolicyBlock(result) {
+  if (!result || result.ok || result.committed || isClientCancelledResult(result)) return result
+  const facts = result.providerResult
+  if (
+    facts?.schema_version !== 2 ||
+    facts.source !== 'crag' ||
+    facts.provider_complete !== false ||
+    facts.observation?.policy_blocked !== true ||
+    facts.observation?.exception?.code !== 'CRAG_CACHE_CONTROL'
+  )
+    return result
+  return {
+    ...result,
+    status: 502,
+    terminalState: 'rejected',
+    cragPolicyBlock: true,
+    body: {
+      type: 'error',
+      error: {
+        type: 'api_error',
+        code: 'crag_policy_blocked',
+        message: 'Gateway kernel rejected the request cache controls before dispatch (CRAG_CACHE_CONTROL)',
+        details: { retryable: false },
+      },
+    },
+  }
+}
+
+export async function callGoWorker(options) {
+  return restoreCragPolicyBlock(await callGoWorkerRaw(options))
+}
+
+async function callGoWorkerRaw({
   requestContext = null,
   exec,
   body,
@@ -866,6 +899,8 @@ export async function callGoWorker({
   }
   const requestId = randomUUID()
   let stopCancel = () => {}
+  const clusterSlot = requestPath === '/internal/v1/messages' && !!vmNodeId(exec?.vm)
+  let requestStarted = false
   let nativeHandoff = false
   let handoff = null
   let observedHeaders = {}
@@ -927,6 +962,7 @@ export async function callGoWorker({
       inference: true,
       beforeInferencePost,
       onRequestStarted: () => {
+        requestStarted = true
         nativeHandoff = useNativeHandoff
         stopCancel = cancelOnAbort(exec, signal, requestId)
       },
@@ -959,6 +995,7 @@ export async function callGoWorker({
         nativeHandoff && parsed?.type === 'error' && response.statusCode < 400
           ? nativeErrorStatus(handoff, parsed)
           : response.statusCode || 0,
+      upstreamStatus: response.statusCode ?? null,
       via: 'go-worker',
       body: parsed,
       headers,
@@ -966,6 +1003,7 @@ export async function callGoWorker({
       model: parsed?.model || null,
       stopReason: parsed?.stop_reason || null,
       terminalState: headers['x-terminal-state'] || null,
+      clusterDeliveryUnconfirmed: clusterSlot && !handoff && ok && !isCompleteAssistantMessage({ body: parsed }),
       transportError: false,
       threadBetas: prepared.thread,
       ...nativeMetadata(),
@@ -998,6 +1036,7 @@ export async function callGoWorker({
         },
       },
       headers: observedHeaders,
+      clusterDeliveryUnconfirmed: clusterSlot && requestStarted,
       ...nativeMetadata(),
       terminalState:
         nativeHandoff && String(error.code).startsWith('native_handoff_')
@@ -1012,7 +1051,11 @@ export async function callGoWorker({
   }
 }
 
-export async function streamGoWorker({
+export async function streamGoWorker(options) {
+  return restoreCragPolicyBlock(await streamGoWorkerRaw(options))
+}
+
+async function streamGoWorkerRaw({
   requestContext = null,
   exec,
   body,
@@ -1143,6 +1186,8 @@ export async function streamGoWorker({
   let lastError = null
   let successfulTerminal = null
   let stopCancel = () => {}
+  const clusterSlot = requestPath === '/internal/v1/messages' && !!vmNodeId(exec?.vm)
+  let requestStarted = false
   let nativeHandoff = false
   let handoff = null
   let observedHeaders = {}
@@ -1206,6 +1251,7 @@ export async function streamGoWorker({
       inference: true,
       beforeInferencePost,
       onRequestStarted: () => {
+        requestStarted = true
         nativeHandoff = useNativeHandoff
         stopCancel = cancelOnAbort(exec, signal, requestId)
       },
@@ -1229,6 +1275,7 @@ export async function streamGoWorker({
       const result = restoreKernelErrorStatus({
         ok: false,
         status: response.statusCode || 0,
+        upstreamStatus: response.statusCode ?? null,
         via: 'go-worker-stream',
         body: parsedBody,
         headers,
@@ -1293,6 +1340,7 @@ export async function streamGoWorker({
       return {
         ok: !failed,
         status: failed ? nativeErrorStatus(handoff, body) : response.statusCode,
+        upstreamStatus: response.statusCode ?? null,
         via: 'go-worker-stream',
         body,
         headers: mergeRateLimitHeaders(publicHeaders({ ...received.headers, ...headers, ...trailers })),
@@ -1546,6 +1594,7 @@ export async function streamGoWorker({
             : nativeTimeout && !committed
               ? 504
               : response.statusCode || 0,
+        upstreamStatus: response.statusCode ?? null,
         via: 'go-worker-stream',
 
         body: handoff
@@ -1571,6 +1620,7 @@ export async function streamGoWorker({
           : complete
             ? null
             : diagnostics.snapshot(committed),
+        clusterDeliveryUnconfirmed: clusterSlot && !complete && !sawMessageStop && !lastError,
         transportError: false,
         threadBetas: prepared.thread,
         ...nativeMetadata(),
@@ -1624,6 +1674,7 @@ export async function streamGoWorker({
         },
       headers: observedHeaders,
       usage: sseUsage,
+      clusterDeliveryUnconfirmed: clusterSlot && requestStarted,
       ...nativeMetadata(),
       ...timing.snapshot(),
       committed,

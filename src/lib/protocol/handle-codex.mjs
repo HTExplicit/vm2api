@@ -3,6 +3,8 @@
  */
 import path from 'node:path'
 import { resolveStreamIdleTimeoutMs } from '../core/config.mjs'
+import { upstreamRiskClientError } from './intercept-gate.mjs'
+import { buildAnthropicSseError } from './stream-truncation.mjs'
 import { isClientStream, fromClaudeToOpenAIChat, fromClaudeToOpenAICompletions } from './convert.mjs'
 import { getVm, listVms, persistCodexUsage, summarizeVm, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isValidVmId, listVmRecordFiles, readJsonCached } from '../vm/vm-file.mjs'
@@ -236,13 +238,21 @@ function pinnedVmId(req) {
 export function pickCodexCandidates(
   projectRoot,
   req,
-  { stickyRouter = null, sessions = null, body = null, excluded = null, routing = {}, ownerScope = null } = {},
+  {
+    stickyRouter = null,
+    sessions = null,
+    body = null,
+    excluded = null,
+    routing = {},
+    ownerScope = null,
+    keyScope = null,
+  } = {},
 ) {
   const pin = pinnedVmId(req)
   const owner = ownerScope || ownerScopeFromRequest(req)
   const model = body?.model || null
   const routingPolicy = normalizeCodexRouting(routing.codex || routing).quota
-  const scope = keyScopeFromRequest(req)
+  const scope = keyScope || keyScopeFromRequest(req)
   const poolDenial = vmPoolDenial(scope)
   if (poolDenial) return { error: 'vm_pool_unavailable', message: poolDenial.message, ids: [], candidates: [] }
   if (scope.group_type === 'anthropic') return { error: 'key_group_mismatch', ids: [], candidates: [] }
@@ -637,6 +647,8 @@ export async function handleCodexProtocol({
   captureOutbound = false,
   requestStartedAt = Date.now(),
   accountGate = null,
+  keyScope = null,
+  afterHop = null,
   ownerScope = null,
   cfg = null,
 }) {
@@ -724,6 +736,7 @@ export async function handleCodexProtocol({
     stickyRouter,
     sessions,
     body: body || converted.body || inbound,
+    keyScope,
     excluded: new Set(),
     routing,
     ownerScope,
@@ -987,11 +1000,13 @@ export async function handleCodexProtocol({
             },
           })
         let result = await runHop()
+        let policyRefusal = afterHop?.(result)
         // A transient seat-local failure gets the same account up to N retries
         // before the request spends a switch. 401/403/429 are never retried here:
         // they are credential/account state and must move to another seat.
         let sameAccountRetries = result?.transport_retried || result?.reasoning_history_retried ? 1 : 0
         while (
+          !policyRefusal &&
           sameAccountRetries < failoverBudget.maxSameAccountRetries &&
           attempts < failoverBudget.maxAttempts &&
           isRetryableSameCodexAccount(result, {
@@ -1008,6 +1023,11 @@ export async function handleCodexProtocol({
           await new Promise((resolve) => setTimeout(resolve, sameRetryDelayMs))
           hopEmitted = false
           result = await runHop()
+          policyRefusal = afterHop?.(result)
+        }
+        if (policyRefusal && policyRefusal !== 'upstream:billing_refusal') {
+          const failure = upstreamRiskClientError(policyRefusal, res._kinRequestId)
+          result = { ...result, ok: false, status: failure.status, body: failure.body }
         }
         // The log and total duration share ingress time; pool scoring keeps hop TTFT.
         logBag.first_token_ms = Number.isFinite(result?.firstTokenAt)
@@ -1045,7 +1065,7 @@ export async function handleCodexProtocol({
         logBag.output_tokens = logged?.output_tokens ?? null
         logBag.cache_read_tokens = logged?.cache_read_input_tokens ?? logged?.cache_read_tokens ?? null
         logBag.cache_creation_tokens = logged?.cache_creation_input_tokens ?? logged?.cache_creation_tokens ?? null
-        const delivered = !conversionError && result?.ok
+        const delivered = !policyRefusal && !conversionError && result?.ok
         if (delivered) {
           attemptKind = 'succeeded'
           bindSticky(outboundSessionId)
@@ -1083,6 +1103,7 @@ export async function handleCodexProtocol({
         }
         if (isOpenaiCredentialCurrent(hopAuth)) reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
         if (
+          !policyRefusal &&
           isOpenaiCredentialCurrent(hopAuth) &&
           !readOpenaiAuthBlock(projectRoot, vm.id) &&
           codexQuotaFailure(result) !== 'rate_limited'
@@ -1111,7 +1132,7 @@ export async function handleCodexProtocol({
           }
           return res.end()
         }
-        if (result?.admissionBlocked || isCodexFailoverError(result)) {
+        if (!policyRefusal && (result?.admissionBlocked || isCodexFailoverError(result))) {
           pickOpts.excluded.add(vm.id)
           leaveSticky()
           switches += 1
@@ -1133,7 +1154,7 @@ export async function handleCodexProtocol({
   }
   stats.errors++
   logBag.error_code = last?.body?.error?.code || 'codex_upstream'
-  logBag.error_message = last?.body?.error?.message || ''
+  logBag.error_message ||= last?.body?.error?.message || ''
   logBag.final_state = last?.terminalState || 'error'
   logBag.upstream_status = last?.status || 0
   return json(res, last?.status || 502, last?.body || { error: { type: 'api_error', code: 'codex_upstream' } })

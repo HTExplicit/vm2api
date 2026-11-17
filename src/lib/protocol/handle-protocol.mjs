@@ -8,21 +8,13 @@ import { hashKey } from '../core/security.mjs'
 import { applyEagerToolStreaming } from './eager-tool-streaming.mjs'
 import { validateBetweenToolsThinking, validateToolChoice, getCapabilities } from './model-policy.mjs'
 import { ToolResultPruneCache, dshPruneScope } from './tool-result-prune-cache.mjs'
-import {
-  inboundRefusalDeviceId,
-  isRefusalGuardEnabled,
-  isUpstreamRefusal,
-  refusalFingerprint,
-  refusalGuardPolicy,
-  refusalPreview,
-  refusalPromptSignature,
-} from '../core/refusal-guard.mjs'
+import { refusalAuditIdentity, refusalGuardPolicy, riskPrincipal } from '../core/refusal-guard.mjs'
 import { RefusalGuardsRepo } from '../db/repos/refusal-guards-repo.mjs'
 import { RefusalDeviceBlocksRepo } from '../db/repos/refusal-device-blocks-repo.mjs'
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { findAccount } from '../admin/panel-api.mjs'
-import { jevScopeWaits, readJevConfig, scopeAccountFromVm } from './jev-intercept.mjs'
-import { runProtocolIntercept } from './intercept-gate.mjs'
+import { readJevConfig, scopeAccountFromVm } from './jev-intercept.mjs'
+import { observeUpstreamRisk, runProtocolIntercept, upstreamRiskClientError } from './intercept-gate.mjs'
 import {
   toClaudeMessages,
   isClientStream,
@@ -61,6 +53,7 @@ import {
   healthUnavailableError,
 } from '../admin/health-probe.mjs'
 import {
+  apiScheduleScope,
   resolveInferenceBackend,
   runApiInference,
   normalizeApiOpenAIRequestBody,
@@ -71,8 +64,8 @@ import { agentSummarySession } from './agent-summary.mjs'
 import { summarizeBody, redactHeaders, presentedApiKeyForLog } from '../admin/request-log.mjs'
 import { loggedReasoningEffort } from './thinking.mjs'
 import { reasoningEffortOf, sessionIdForLog } from './log-fields.mjs'
-import { ownerScopeFromRequest } from '../admin/resource-owner.mjs'
-import { keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
+import { ownerScopeFromRequest, vmMatchesOwnerScope } from '../admin/resource-owner.mjs'
+import { applyVmPool, keyAllowsVm, keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
 import { keyModelError } from '../admin/key-models.mjs'
 import {
   resolveInferenceEngine,
@@ -345,11 +338,15 @@ export function createHandleProtocol(deps) {
   }
 
   function mapProtocolClientError(result, logBag, fallbackCode) {
-    const originalCode = result?.body?.error?.code || fallbackCode
+    const opaqueCrag429 = result?.policy?.reason === 'crag_opaque_429'
+    const originalCode = opaqueCrag429 ? result.policy.reason : result?.body?.error?.code || fallbackCode
     const originalMessage = result?.body?.error?.message || null
     const details = result?.body?.error?.details || {}
-    const mapped =
-      result?.via === 'redaction'
+    const policyRefusal =
+      !opaqueCrag429 && logBag.risk_upstream_reason && logBag.risk_upstream_reason !== 'upstream:billing_refusal'
+    const mapped = policyRefusal
+      ? upstreamRiskClientError(logBag.risk_upstream_reason, logBag.risk_request_id)
+      : result?.via === 'redaction'
         ? makeError({
             type: result.status === 413 ? ErrorType.INVALID_REQUEST : ErrorType.API,
             code: originalCode,
@@ -370,6 +367,7 @@ export function createHandleProtocol(deps) {
     ) {
       mapped.body.error.code = originalCode
     }
+    if (opaqueCrag429) mapped.body.error.message = originalMessage
     const summary = formatPoolSelectionSummary(details)
     const mappedCode = mapped.body?.error?.code
     if (mappedCode === ErrorCode.REFUSAL_GUARD) {
@@ -377,7 +375,7 @@ export function createHandleProtocol(deps) {
       // the refusal code so the audit feed can see it, and the upstream sentence
       // so the row still shows what was refused.
       logBag.error_code = mappedCode
-      logBag.error_message = originalMessage || mapped.body?.error?.message || null
+      logBag.error_message = logBag.error_message || originalMessage || mapped.body?.error?.message || null
     } else {
       logBag.error_code = originalCode || mappedCode
       logBag.error_message = summary || originalMessage || mapped.body?.error?.message || null
@@ -394,7 +392,7 @@ export function createHandleProtocol(deps) {
     }
     // Pool 529 / pool-wide 429 always carry Retry-After: the runner's wake estimate, floored at 1s.
     // A 503 carries one only when the runner knows a wake (all-rest pool).
-    if (Number(result?.retryAfterSec) > 0) {
+    if (!policyRefusal && Number(result?.retryAfterSec) > 0) {
       mapped.retryAfterSec = Math.max(1, Math.ceil(Number(result.retryAfterSec)))
     }
     return mapped
@@ -409,15 +407,13 @@ export function createHandleProtocol(deps) {
     return finalizeAssembledAssistantHop(result)
   }
 
-  function claudeScopePending() {
-    let jev
+  function readRuntimeJev() {
     try {
       const settings = deps.settings || new SettingsRepo()
-      jev = readJevConfig((key, fallback) => settings.get(key, fallback))
+      return readJevConfig((key, fallback) => settings.get(key, fallback))
     } catch {
-      jev = readJevConfig()
+      return readJevConfig()
     }
-    return jevScopeWaits(jev, 'claude')
   }
 
   async function applyProtocolIntercept({
@@ -432,38 +428,44 @@ export function createHandleProtocol(deps) {
     scopeMatched = false,
     bodyCtx = null,
     interceptSessionKey = null,
+    identity,
+    mandatoryOnly = false,
+    skipMandatory = false,
+    backend,
+    apiPlatform,
+    riskState,
   }) {
     const official =
       isOfficialClaudeCodeTraffic(req.headers, inbound) ||
       isOfficialClaudeClient(fp.client_class) ||
       (detectProxiedOfficialCcFromRoutingFile(routingConfigPath) && isProxiedOfficialClaudeCode(inbound, req.headers))
-    let jev
-    try {
-      const settings = deps.settings || new SettingsRepo()
-      jev = readJevConfig((key, fallback) => settings.get(key, fallback))
-    } catch {
-      jev = readJevConfig()
-    }
     const interceptSession = interceptSessionKey ? peekInterceptSession(interceptSessionKey) : null
     const decision = await runProtocolIntercept({
       inbound,
       body,
       headers: req.headers,
+      identity,
       official,
       zeroInject: isZeroInjectMode(),
       distillRules: cfg.distill,
-      policy: refusalPolicy(),
-      jev,
-      repo: refusalRepo(),
-      devices: deviceRepo(),
+      policy: riskState.policy,
+      jev: mandatoryOnly ? null : readRuntimeJev(),
+      repo: riskState.repo,
+      devices: riskState.devices,
       requestId,
       account,
       scopeMatched,
       bodyCtx,
       interceptSession,
+      mandatoryOnly,
+      skipMandatory,
+      backend,
+      openaiPlatform: apiPlatform,
     })
     if (!decision || decision.action !== 'block') {
-      if (decision?.intercept) logBag.intercept = decision.intercept
+      if (!mandatoryOnly && decision?.intercept) logBag.intercept = decision.intercept
+      if (decision?.route) logBag.risk_route = decision.route
+      if (!mandatoryOnly) logBag.risk_wait = decision.wait === true
       return false
     }
     stats.errors++
@@ -474,7 +476,12 @@ export function createHandleProtocol(deps) {
     logBag.error_message = decision.errorMessage || decision.error?.body?.error?.message || null
     logBag.intercept = decision.intercept || null
     logBag.jev_state = decision.jevState || null
-    json(res, decision.error.status, decision.error.body)
+    if (res.headersSent && logBag.protocol === 'anthropic.messages') {
+      res.write(buildAnthropicSseError(decision.error.body.error))
+      res.end()
+    } else {
+      json(res, decision.error.status, decision.error.body)
+    }
     return true
   }
 
@@ -498,30 +505,12 @@ export function createHandleProtocol(deps) {
     }
   }
 
-  function refusalEnabled() {
-    try {
-      const settings = deps.settings || new SettingsRepo()
-      return isRefusalGuardEnabled((key, fallback) => settings.get(key, fallback))
-    } catch {
-      return isRefusalGuardEnabled()
-    }
-  }
-
   function deviceRepo() {
     if (deps.refusalDevices) return deps.refusalDevices
     try {
       return new RefusalDeviceBlocksRepo()
     } catch {
       return null
-    }
-  }
-
-  function banRefusalDevice(deviceId, { requestId, fingerprint, reason }) {
-    if (!deviceId) return
-    try {
-      deviceRepo()?.block?.({ deviceId, requestId, fingerprint, reason })
-    } catch {
-      /* the prompt block still stands */
     }
   }
 
@@ -532,36 +521,6 @@ export function createHandleProtocol(deps) {
     } catch {
       return refusalGuardPolicy()
     }
-  }
-
-  function rememberRefusal({ inbound, body, headers, result, logBag, requestId }) {
-    if (!refusalEnabled()) return
-    const contentRefusal = isUpstreamRefusal(result, logBag)
-    const timed = result?.policy?.rememberRefusal === true
-    if (!contentRefusal && !timed) return
-    const repo = refusalRepo()
-    if (!repo) return
-    const fingerprint = refusalFingerprint(body, inbound)
-    try {
-      const ttl = Number(result?.policy?.refusalTtlMs) || 0
-      repo.remember({
-        fingerprint,
-        model: body?.model || inbound?.model || '',
-        requestId,
-        errorMessage: logBag.error_message || result?.body?.error?.message || null,
-        preview: refusalPreview(body, inbound),
-        expiresAt: contentRefusal || ttl <= 0 ? null : new Date(Date.now() + ttl).toISOString(),
-        signature: refusalPromptSignature(inbound, body),
-      })
-    } catch {
-      return
-    }
-    if (!contentRefusal || !refusalPolicy().device_block_enabled) return
-    banRefusalDevice(inboundRefusalDeviceId({ inbound, body, headers }), {
-      requestId,
-      fingerprint,
-      reason: 'refusal_guard',
-    })
   }
 
   async function streamAndAssembleClaudeMessage({
@@ -646,6 +605,8 @@ export function createHandleProtocol(deps) {
     requestContext = null,
     passthrough = false,
     toolNames = {},
+    afterHop = null,
+    scope = apiScheduleScope(req),
   }) {
     // API endpoints use managed-key admission without entering OAuth scheduling.
     const managedKey = req.apiKeyRecord || null
@@ -675,6 +636,7 @@ export function createHandleProtocol(deps) {
         res,
         cfg,
         scheduler: apiScheduler,
+        scope,
         picked,
         store: apiEndpointStore,
         protocol,
@@ -743,6 +705,7 @@ export function createHandleProtocol(deps) {
       : (result?.firstByteMs ?? null)
     logBag.generation_ms = result?.generationMs ?? null
     logBag.final_state = result?.terminalState || null
+    if (result?.upstreamStatus != null) afterHop?.(result)
     attachPricing(logBag, {
       managedKey,
       rateMultiplier: deps.groupsRepo.rateMultiplier(managedKey?.group_id ?? 1),
@@ -755,11 +718,22 @@ export function createHandleProtocol(deps) {
         if (!isClientCancelledResult(result)) stats.errors++
         return sendMapped(res, mapped)
       }
+      if (
+        logBag.risk_upstream_reason &&
+        !result.downstreamDone &&
+        picked?.endpoint?.protocol !== 'openai' &&
+        protocol !== 'anthropic.messages' &&
+        protocol !== 'openai.responses'
+      ) {
+        const mapped = mapProtocolClientError(result, logBag, 'upstream_error')
+        res.write(`data: ${JSON.stringify(mapped.body)}\n\ndata: [DONE]\n\n`)
+        return res.end()
+      }
       if (result?.ok && !result.downstreamDone && protocol !== 'anthropic.messages') res.write('data: [DONE]\n\n')
       return res.end()
     }
     const nativeResponse = protocol === 'openai.responses' ? result?.nativeResponse : null
-    if (!result?.ok || (!nativeResponse && isIncompleteAssistantMessage(result))) {
+    if (!result?.ok || logBag.risk_upstream_reason || (!nativeResponse && isIncompleteAssistantMessage(result))) {
       if (isClientCancelledResult(result)) return finishClientCancel(res, result, logBag)
       const failed = isIncompleteAssistantMessage(result) ? incompleteAssistantClientError(result) : result
       const mapped = mapProtocolClientError(failed, logBag, failed?.body?.error?.code || 'upstream_error')
@@ -885,7 +859,11 @@ export function createHandleProtocol(deps) {
         inbound.input.some(
           (item) => item?.type === 'additional_tools' && Array.isArray(item.tools) && item.tools.length > 0,
         ))
-    logBag.session_id = sessionIdForLog(extractCallerSession({ inbound, headers: req.headers }))
+    const auditIdentity = refusalAuditIdentity({ inbound, headers: req.headers, principal: riskPrincipal(req) })
+    logBag.session_id = sessionIdForLog(
+      auditIdentity.sessionId || extractCallerSession({ inbound, headers: req.headers }),
+    )
+    logBag.inbound_device_id = sessionIdForLog(auditIdentity.deviceId)
     logBag.reasoning_effort = reasoningEffortOf(inbound)
 
     const fp = fingerprintRequest(req, inbound)
@@ -924,6 +902,9 @@ export function createHandleProtocol(deps) {
     }
     // After the Desktop sign-in probe, which runs no model.
     if (rejectKeyModel(req, res, protocol, inbound?.model, logBag)) return
+    const riskState = { policy: refusalPolicy(), repo: refusalRepo(), devices: deviceRepo() }
+    const gateArgs = { req, inbound, fp, logBag, requestId: logCtx.request_id, res, identity: auditIdentity, riskState }
+    if (await applyProtocolIntercept({ ...gateArgs, body: inbound, mandatoryOnly: true })) return
     if (
       claudeCodeOnlyFromRouting(routingNow) &&
       !panelDiagnostics &&
@@ -1011,7 +992,7 @@ export function createHandleProtocol(deps) {
       return json(res, errorResult.status, errorResult.body)
     }
     const inferenceBackend = resolveInferenceBackend(req)
-    const keyScope = keyScopeFromRequest(req)
+    let keyScope = keyScopeFromRequest(req)
     const accountApiBackend = inferenceBackend === 'api' && keyScope.group_type === 'openai_apikey'
     const poolDenial = vmPoolDenial(keyScope)
     if (inferenceBackend === 'api' && ownerScopeFromRequest(req, apiKeyStore?.users).type !== 'platform') {
@@ -1049,8 +1030,8 @@ export function createHandleProtocol(deps) {
     // Pick through the caller's catalog before validating protocol-specific fields.
     // Account retries reuse this first choice and reselect within the same scope.
     if (inferenceBackend === 'api') ctx = applyIntercept(cfg.intercept.rules, 'before_upstream', ctx)
-    const apiPicked =
-      inferenceBackend === 'api' && !poolDenial ? apiScheduler.pick(ctx.body?.model, Date.now(), keyScope) : null
+    let apiScope = inferenceBackend === 'api' ? apiScheduleScope(req, keyScope) : null
+    let apiPicked = apiScope && !poolDenial ? apiScheduler.pick(ctx.body?.model, Date.now(), apiScope) : null
     if (apiPicked && !apiPicked.ok) {
       stats.errors++
       logBag.via = 'api-kernel'
@@ -1076,7 +1057,7 @@ export function createHandleProtocol(deps) {
     if (apiOpenAI && protocol === 'openai.responses') {
       ctx = { ...ctx, body: normalizeApiOpenAIRequestBody(ctx.body) }
     }
-    const apiInbound = inferenceBackend === 'api' ? ctx.body : null
+    let apiInbound = inferenceBackend === 'api' ? ctx.body : null
     const apiInputError = apiOpenAI ? validateApiOpenAIRequest(protocol, apiInbound) : null
     if (apiInputError) {
       stats.errors++
@@ -1084,8 +1065,13 @@ export function createHandleProtocol(deps) {
       logBag.error_message = apiInputError.message
       return json(res, 400, { type: 'error', error: { type: 'invalid_request_error', ...apiInputError } })
     }
-    const apiRiskReview = !!apiPicked && !apiOpenAI && apiPicked.endpoint.risk_review_enabled === true
-    const preReviewEnabled = !apiPicked || apiOpenAI || apiRiskReview
+    const apiRiskReview = apiPicked?.endpoint.risk_review_enabled === true
+    const preReviewEnabled =
+      !apiPicked ||
+      apiOpenAI ||
+      apiRiskReview ||
+      !!riskState.policy.risk_audit.downgrade_endpoint ||
+      !!riskState.policy.risk_audit.downgrade_model
     if (!platform.ok) {
       stats.errors++
       const errorResult = makeError({
@@ -1111,7 +1097,7 @@ export function createHandleProtocol(deps) {
       logBag.error_message = errorResult.body?.error?.message || null
       return json(res, 403, errorResult.body)
     }
-    const platformGroup = accountApiBackend ? 'openai' : keyScope.group_type
+    const platformGroup = accountApiBackend ? 'openai' : apiScope?.group_type || keyScope.group_type
     if (platformGroup !== 'all' && platformGroup !== platform.platform) {
       stats.errors++
       const errorResult = makeError({
@@ -1151,22 +1137,98 @@ export function createHandleProtocol(deps) {
         return json(res, 200, mock)
       }
     }
-    const earlyBodyCtx = createRequestBodyContext(ctx.body)
+    const auditBody = ctx.body
+    const earlyBodyCtx = createRequestBodyContext(auditBody)
     if (
       preReviewEnabled &&
       (await applyProtocolIntercept({
-        req,
-        inbound,
-        body: ctx.body,
-        fp,
-        logBag,
-        requestId: logCtx.request_id,
-        res,
+        ...gateArgs,
+        body: auditBody,
         scopeMatched: apiRiskReview,
         bodyCtx: earlyBodyCtx,
+        skipMandatory: true,
+        backend: inferenceBackend,
+        apiPlatform: apiPicked ? apiOpenAI : undefined,
       }))
     ) {
       return
+    }
+    let observedHop = false
+    const afterHop = (result) => {
+      observedHop = true
+      const reason = observeUpstreamRisk({
+        ...riskState,
+        inbound,
+        body: inbound,
+        identity: auditIdentity,
+        result,
+        logBag,
+        requestId: logCtx.request_id,
+      })
+      if (reason) {
+        logBag.risk_upstream_reason = reason
+        logBag.risk_request_id = logCtx.request_id
+      }
+      return reason
+    }
+    const scopedRiskGate = logBag.risk_wait === true
+    const route = logBag.risk_route
+    if (route) {
+      const unavailable = () => {
+        stats.errors++
+        logBag.error_code = 'risk_route_unavailable'
+        logBag.error_message = '审核指定的降级路线不可用；未使用原路线。'
+        return json(
+          res,
+          503,
+          makeError({
+            type: ErrorType.OVERLOADED,
+            code: logBag.error_code,
+            message: logBag.error_message,
+            status: 503,
+          }).body,
+        )
+      }
+      if (route.kind === 'pool') {
+        const narrowed = applyVmPool({ ...keyScope, vm_pool_id: route.target })
+        const pin = panelDiagnostics ? req.headers['x-kin-vm'] : ''
+        const owner = pin ? { type: 'any' } : ownerScopeFromRequest(req, apiKeyStore?.users)
+        const eligible = narrowed.allowed_vms.filter((id) => {
+          const vm = getVm(cfg.paths.project, id)
+          return (
+            vm &&
+            vmMatchesOwnerScope(vm, owner) &&
+            keyAllowsVm({ ...narrowed, group_type: platform.platform }, vm) &&
+            keyAllowsVm(keyScope, vm)
+          )
+        })
+        if (narrowed.vm_pool_error || !eligible.length || (pin && !eligible.includes(pin))) return unavailable()
+        keyScope = { ...narrowed, allowed_vms: eligible }
+      }
+      if (route.kind === 'model') {
+        if (keyModelError(req, route.target, { anthropic: protocol === 'anthropic.messages' })) return unavailable()
+        if (inferenceBackend !== 'api') {
+          const target = detectInboundPlatform(route.target)
+          if (!target.ok || target.platform !== platform.platform || canonicalImageToolModel(route.target))
+            return unavailable()
+          want1m = hasClaudeCode1mSuffix(route.target)
+        }
+        ctx.body = { ...ctx.body, model: route.target }
+        logBag.upstream_model = route.target
+      }
+      if (inferenceBackend === 'api') {
+        if (apiScope.endpointId && route.kind === 'endpoint' && route.target !== apiScope.endpointId)
+          return unavailable()
+        apiInbound = ctx.body
+        apiScope = {
+          ...apiScheduleScope(req, keyScope),
+          group_type: accountApiBackend ? 'openai_apikey' : platform.platform,
+          endpointId: route.kind === 'endpoint' ? route.target : apiScope.endpointId,
+        }
+        apiPicked = apiScheduler.pick(ctx.body.model, Date.now(), apiScope)
+        if (!apiPicked.ok) return unavailable()
+        if (apiOpenAI && validateApiOpenAIRequest(protocol, apiInbound)) return unavailable()
+      }
     }
     if (platform.platform === 'openai' && inferenceBackend !== 'api') {
       const routing = getRouting() || {}
@@ -1177,20 +1239,20 @@ export function createHandleProtocol(deps) {
         sessions: accountQuota?.sessions || null,
         body: ctx.body,
         ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
+        keyScope,
+        afterHop,
       }
       // Account scope needs the slot, so the Codex hop runs the same gate again
       // once a candidate is claimed. Without a scope the pre-hop verdict stands.
-      const accountGate = (account) =>
-        applyProtocolIntercept({
-          req,
-          inbound,
-          body: ctx.body,
-          fp,
-          logBag,
-          requestId: logCtx.request_id,
-          res,
-          account,
-        })
+      const accountGate = !scopedRiskGate
+        ? null
+        : (account) =>
+            applyProtocolIntercept({
+              ...gateArgs,
+              body: auditBody,
+              account,
+              skipMandatory: true,
+            })
       if (protocol === 'anthropic.messages') {
         const codex = normalizeCodexRouting(routing.codex)
         return runWithCodexKey(req, res, logBag, () =>
@@ -1289,6 +1351,8 @@ export function createHandleProtocol(deps) {
         nativeResponsesBody: ctx.body,
         apiInbound,
         picked: apiPicked,
+        afterHop,
+        scope: apiScope,
       })
     }
 
@@ -1316,7 +1380,10 @@ export function createHandleProtocol(deps) {
     else stats.convert++
 
     ctx = { ...ctx, body: converted.claude }
-    if (inferenceBackend !== 'api') ctx = applyIntercept(cfg.intercept.rules, 'before_upstream', ctx)
+    if (inferenceBackend !== 'api') {
+      ctx = applyIntercept(cfg.intercept.rules, 'before_upstream', ctx)
+      if (route?.kind === 'model') ctx.body = { ...ctx.body, model: validateOfficialModel(route.target).model }
+    }
     if (apiOpenAI) {
       return runApiBackend({
         req,
@@ -1329,6 +1396,8 @@ export function createHandleProtocol(deps) {
         converted,
         apiInbound,
         picked: apiPicked,
+        afterHop,
+        scope: apiScope,
       })
     }
     const officialTraffic = officialInbound
@@ -1423,23 +1492,6 @@ export function createHandleProtocol(deps) {
       }
     }
     const bodyCtx = createRequestBodyContext(ctx.body)
-    // API endpoint opt-in is checked once before conversion, including when dedup is disabled.
-    if (
-      !apiRiskReview &&
-      preReviewEnabled &&
-      (await applyProtocolIntercept({
-        req,
-        inbound,
-        body: ctx.body,
-        fp,
-        logBag,
-        requestId: logCtx.request_id,
-        res,
-        bodyCtx,
-      }))
-    ) {
-      return
-    }
     const officialClient = isOfficialClaudeClient(fp.client_class)
     const callerSession = extractCallerSession({ inbound, body: ctx.body, headers: req.headers })
     const summarySession = agentSummarySession(inbound, { officialTraffic })
@@ -1465,7 +1517,6 @@ export function createHandleProtocol(deps) {
     // read before outbound cleaning. API key never scopes it.
     const inboundIdentity = resolveInboundIdentity({ inbound, body: ctx.body, headers: req.headers })
     const stickyDeviceId = inboundIdentity.deviceId
-    logBag.inbound_device_id = sessionIdForLog(stickyDeviceId)
     if (childDeclaredWithoutParent(inbound, req.headers)) {
       stats.errors++
       logBag.error_code = 'family_relation_required'
@@ -1602,6 +1653,8 @@ export function createHandleProtocol(deps) {
         converted,
         apiInbound,
         picked: apiPicked,
+        afterHop,
+        scope: apiScope,
         personaHideTokens,
         requestContext,
         passthrough: officialPassthrough,
@@ -1776,17 +1829,13 @@ export function createHandleProtocol(deps) {
               ? `slot:${selected.slotIndex ?? 'x'}:${attemptStartedAt}`
               : `${attemptStartedAt}:${selected.vmId || extra.attemptNo || ''}`,
           })
-          if (claudeScopePending()) {
+          if (scopedRiskGate) {
             const blocked = await applyProtocolIntercept({
-              req,
-              inbound,
-              body: ctx.body,
-              fp,
-              logBag,
-              requestId: logCtx.request_id,
-              res,
+              ...gateArgs,
+              body: auditBody,
               account: scopeAccountFromVm(selected?.vm, findAccount(accountQuota, selected?.vm)?.unified),
-              bodyCtx,
+              bodyCtx: earlyBodyCtx,
+              skipMandatory: true,
               interceptSessionKey: attemptSessionId ? `${selected.accountId}:${attemptSessionId}` : null,
             })
             if (blocked) {
@@ -1914,6 +1963,9 @@ export function createHandleProtocol(deps) {
                   sessionId: attemptSessionId,
                   cliHop: true,
                   cragPrint: true,
+                  // CRAG replays caller thinking unfiltered; signatures this pool never
+                  // issued make an "Invalid signature" 400 safe to strip and retry.
+                  foreignThinking: owned.converted + owned.dropped > 0,
                   callerCwd: callerEnvironment?.cwd,
                   preparedHop,
                   transportRouting,
@@ -2106,6 +2158,7 @@ export function createHandleProtocol(deps) {
             },
           }
         },
+        onUpstreamRisk: afterHop,
         callAttempt: async ({ candidate, body, attemptMeta, deliveryMode: attemptDelivery, signal, onCommit }) => {
           if (!clientStream) {
             return streamAndAssembleClaudeMessage({
@@ -2275,7 +2328,8 @@ export function createHandleProtocol(deps) {
     // Zero executions is a real 0, not unknown; the VM is the last one that ran.
     logBag.attempt_count = result?.attemptCount ?? 0
     logBag.final_state = result?.finalState || result?.terminalState || null
-    logBag.upstream_status = result?.status ?? null
+    logBag.upstream_status =
+      result?.providerResult?.http_status ?? result?.upstreamStatus ?? (result?.attemptCount > 0 ? result.status : null)
     logBag.usage = usageForLog(result?.usage || result?.body?.usage || null, {
       cacheTtl,
       requestedSpeed: wantsFastMode(ctx.body) ? 'fast' : null,
@@ -2296,9 +2350,10 @@ export function createHandleProtocol(deps) {
       logBag.error_code = logBag.error_code || 'content_filter_refusal'
       logBag.error_message = logBag.error_message || 'upstream stop_reason=refusal'
     }
-    rememberRefusal({ inbound, body: ctx.body, headers: req.headers, result, logBag, requestId: logCtx.request_id })
+    if (!observedHop && result?.attemptCount > 0) afterHop(result)
 
-    if (result?.accountId) {
+    // This request never reached generation and supplies no account quota evidence.
+    if (result?.accountId && result.policy?.reason !== 'crag_opaque_429') {
       try {
         const limitText = [
           logBag.error_message,
@@ -2343,6 +2398,11 @@ export function createHandleProtocol(deps) {
         if (!isClientCancelledResult(result) && mapped.body?.error?.code !== 'client_cancelled') stats.errors++
         return sendMapped(res, mapped)
       }
+      if (logBag.risk_upstream_reason && protocol !== 'anthropic.messages') {
+        const mapped = mapProtocolClientError(result, logBag, 'upstream_error')
+        res.write(`data: ${JSON.stringify(mapped.body)}\n\n`)
+        return res.end()
+      }
       if (result?.ok && protocol !== 'anthropic.messages') {
         res.write('data: [DONE]\n\n')
       }
@@ -2350,6 +2410,18 @@ export function createHandleProtocol(deps) {
         stats.errors++
         logBag.error_code = result?.body?.error?.code || 'stream_incomplete'
         logBag.error_message = result?.body?.error?.message || 'Stream did not reach a verified terminal state'
+        if (logBag.error_code === ErrorCode.CLUSTER_DELIVERY_UNCONFIRMED && !res.writableEnded) {
+          const { body } = mapProtocolClientError(result, logBag, logBag.error_code)
+          if (protocol === 'anthropic.messages') {
+            if (!streamTracker?.isFinished()) res.write(buildAnthropicSseError(body.error))
+          } else if (protocol === 'openai.responses') {
+            const { code, message } = body.error
+            res.write(`event: error\ndata: ${JSON.stringify({ type: 'error', code, message, param: null })}\n\n`)
+          } else {
+            res.write(`data: ${JSON.stringify(body)}\n\n`)
+          }
+          return res.end()
+        }
         const closing = isRecoverableTruncation(result) && !res.writableEnded ? streamTracker?.closingEvents() : null
         if (closing) res.write(closing)
         else if (
@@ -2371,11 +2443,10 @@ export function createHandleProtocol(deps) {
           res.write(`data: ${JSON.stringify({ error: mapped.body.error })}\n\ndata: [DONE]\n\n`)
         }
       }
-      rememberRefusal({ inbound, body: ctx.body, headers: req.headers, result, logBag, requestId: logCtx.request_id })
       return res.end()
     }
 
-    if (!result?.ok || isIncompleteAssistantMessage(result)) {
+    if (!result?.ok || logBag.risk_upstream_reason || isIncompleteAssistantMessage(result)) {
       if (isClientCancelledResult(result)) return finishClientCancel(res, result, logBag)
       const failed = isIncompleteAssistantMessage(result) ? incompleteAssistantClientError(result) : result
       const mapped = mapProtocolClientError(failed, logBag, failed?.body?.error?.code || 'upstream_error')

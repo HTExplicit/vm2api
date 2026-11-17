@@ -55,6 +55,7 @@ test('stopped VM publication does not spawn a process to retire telemetry', asyn
   let ran = false
   const result = await retireLegacyTelemetry({
     vm: { id: 'vm-03', status: 'stopped' },
+    inspect: async () => null,
     run: async () => {
       ran = true
       throw new Error('must not run')

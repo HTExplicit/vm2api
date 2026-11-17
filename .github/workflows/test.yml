@@ -57,13 +57,17 @@ jobs:
           sh -n scripts/panel-upgrade.sh
       - name: installer shared finalization
         working-directory: test/deploy
-        run: python3 -m unittest test_install_schedule
+        run: python3 -m unittest test_install_schedule test_docker_crag_apparmor test_entrypoint_x86_probe test_check_x86_deps
       - name: redaction helper unit checks
         working-directory: redact
         run: go test ./internal/server
       - name: egress timeout and DNS regressions
         working-directory: worker
         run: go test -race ./internal/egress ./internal/proxy
+      - name: prepare fixed OAuth helper
+        run: |
+          node --input-type=module -e "import fs from 'node:fs'; const p = JSON.parse(fs.readFileSync('deploy/payload.json')); p.files = p.files.filter(f => f.path === 'bin/kin-oauth-auth'); fs.writeFileSync('/tmp/oauth-payload.json', JSON.stringify(p));"
+          node scripts/fetch-payload.mjs --manifest /tmp/oauth-payload.json
       - name: focused backend regressions
         shell: bash
         run: |
@@ -318,6 +322,13 @@ jobs:
             test/unit/slot-shell-kvm.test.mjs \
             test/unit/health-probe.test.mjs \
             test/unit/slot-seed.test.mjs \
+            test/unit/active-usage-query.test.mjs \
+            test/unit/quota-exhaustion-guard.test.mjs \
+            test/unit/kvm-crag-subscription.test.mjs \
+            test/unit/kvm-crag-subscription-runtime.test.mjs \
+            test/unit/cluster-slot-image-warm.test.mjs \
+            test/unit/refusal-similarity.test.mjs \
+            test/unit/database-130-upgrade.test.mjs \
             test/unit/vm-package.test.mjs; do
             node --test "$file" || failed=$((failed + 1))
           done
@@ -357,6 +368,7 @@ jobs:
           pnpm exec vitest run src/features/pelican/pelican.test.ts src/features/pelican/preview-fit.test.ts
           pnpm exec vitest run src/config/repo.test.ts src/features/settings/about-pane.test.ts
           pnpm exec vitest run src/lib/vm-status.test.ts src/features/vm/vm-list-table.test.tsx
+          pnpm exec vitest run src/features/risk/model.test.ts src/features/risk/policy-options.test.ts src/features/anthropic/endpoint-save.test.ts src/features/wrap/index.test.tsx src/features/vm/vm-perms.test.ts
           pnpm exec vitest run src/features/vm/usage-windows.test.tsx src/features/vm/vm-rack-model.test.ts
           pnpm exec vitest run src/features/vm/claude-reset-actions.test.tsx src/features/vm/claude-reset-cards.test.ts
           pnpm exec vitest run src/lib/fable-status.test.ts src/lib/pool-quota.test.ts

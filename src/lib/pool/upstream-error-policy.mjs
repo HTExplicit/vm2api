@@ -342,6 +342,15 @@ function classifyUpstreamResultRaw(
       retrySameAccount: false,
     }
   }
+  if (result.cragPolicyBlock === true && !result.committed) {
+    return {
+      scope: 'request',
+      action: 'stop',
+      reason: 'crag_policy_blocked',
+      cooldownUntil: null,
+      retrySameAccount: false,
+    }
+  }
   const handoffCode = result?.body?.error?.code
   if (
     result.nativeHandoff === true &&
@@ -356,6 +365,12 @@ function classifyUpstreamResultRaw(
       cooldownUntil: null,
       retrySameAccount: false,
     }
+  }
+  if (result.clusterDeliveryUnconfirmed === true) {
+    return { scope: 'request', action: 'stop', reason: ErrorCode.CLUSTER_DELIVERY_UNCONFIRMED }
+  }
+  if (handoffCode === ErrorCode.CLUSTER_SLOT_RECONNECTING) {
+    return { scope: 'request', action: 'stop', reason: handoffCode }
   }
   if (isContentFilterRefusal(result) && !result.committed) {
     return cacheRefusal('content_filter_refusal')
@@ -628,6 +643,27 @@ function classifyUpstreamResultRaw(
     if (ENTITLEMENT_PATTERNS.some((pattern) => pattern.test(message))) {
       return { scope: 'request', action: 'stop', reason: 'entitlement_required', cooldownUntil: null }
     }
+    const facts = result.providerResult
+    const upstreamHeaders = facts?.response_headers
+    // #1139: CRAG reports this rejection before generation. Require the
+    // provider's own HTTP observation; a bare 429 alone proves no request error.
+    if (
+      facts?.schema_version === 2 &&
+      facts.source === 'provider_http' &&
+      facts.http_status === 429 &&
+      facts.error?.type === 'rate_limit_error' &&
+      facts.error.message === 'Error' &&
+      result.body?.error?.type === 'rate_limit_error' &&
+      message === 'Error' &&
+      upstreamHeaders &&
+      typeof upstreamHeaders === 'object' &&
+      !Array.isArray(upstreamHeaders) &&
+      ![upstreamHeaders, result.headers].some((headers) =>
+        Object.keys(headers || {}).some((name) => /^(anthropic-ratelimit-|retry-after$)/i.test(name)),
+      )
+    ) {
+      return { scope: 'request', action: 'stop', reason: 'crag_opaque_429', cooldownUntil: null }
+    }
     if (isUnifiedAccountLimit(result.headers)) {
       return {
         scope: 'account',
@@ -636,8 +672,9 @@ function classifyUpstreamResultRaw(
         cooldownUntil: accountLimitUntil(reset, usage, now, message),
       }
     }
-    if (isFableWindowLimit(result.headers) || isFableModel(model)) {
-      const fableReset = fableResetFromHeaders(result.headers, now) || reset
+    if (isFableWindowLimit(result.headers) || isFableWindowLimit(upstreamHeaders)) {
+      const fableReset =
+        fableResetFromHeaders(result.headers, now) || fableResetFromHeaders(upstreamHeaders, now) || reset
       return {
         scope: 'model',
         action: 'continue-and-cooldown',
@@ -672,9 +709,9 @@ function classifyUpstreamResultRaw(
     }
     return {
       scope: 'account',
-      action: 'continue-and-cooldown',
+      action: reset > now ? 'continue-and-cooldown' : 'continue',
       reason: 'rate_limited_unknown',
-      cooldownUntil: reset || now + 60_000,
+      cooldownUntil: reset > now ? reset : null,
       retrySameAccount: false,
     }
   }

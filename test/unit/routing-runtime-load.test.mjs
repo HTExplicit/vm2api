@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import http from 'node:http'
+import net from 'node:net'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { createRoutingRuntime } from '../../src/lib/admin/routing-runtime.mjs'
 import { OFFICIAL_CLI_VERSION } from '../../src/lib/identity/vm-identity.mjs'
@@ -94,6 +96,7 @@ test('a stopped CRAG seat edit publishes native policy without changing power or
   fs.mkdirSync(path.dirname(file), { recursive: true })
   const vm = {
     id,
+    machine: { memory: '2g', pids_limit: 1024 },
     status: 'stopped',
     dataplane: 'crag',
     crag_kernel_version: 'v2',
@@ -518,7 +521,20 @@ test('persistRoutingPatch merges a valid vm patch', async () => {
   }
 })
 
-test('native interval publication reports an unreachable remote VM as failed, not queued success', async () => {
+test('native interval publication reports an unreachable remote VM as failed, not queued success', async (t) => {
+  const engine = http.createServer((req, res) => {
+    assert.equal(req.url, '/containers/kin-claude/json')
+    res.writeHead(404).end(JSON.stringify({ message: 'No such container: kin-claude' }))
+  })
+  await new Promise((resolve) => engine.listen(0, '127.0.0.1', resolve))
+  t.after(async () => {
+    engine.closeAllConnections()
+    await new Promise((resolve) => engine.close(resolve))
+  })
+  const connect = net.connect
+  t.mock.method(net, 'connect', (...args) =>
+    args[0] === '/var/run/docker.sock' ? connect(engine.address().port, '127.0.0.1') : connect(...args),
+  )
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-routing-telemetry-'))
   const vms = path.join(root, 'vms')
   const routingFile = path.join(root, 'routing.json')

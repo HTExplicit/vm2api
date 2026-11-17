@@ -21,6 +21,10 @@ const start = source.slice(
   source.indexOf('export async function startRemoteSlot('),
   source.indexOf('/** Remote twin of reloadSlotWorker'),
 )
+const restartPolicy = source.slice(
+  source.indexOf('function remoteSlotRestartPolicy('),
+  source.indexOf('/** Reconcile an existing node slot'),
+)
 
 test('remote CRAG KVM preparation resolves guest and egress images instead of rejecting placement', async () => {
   const prepare = source.slice(source.indexOf('async function prepare('), source.indexOf('function runtimeLabelOf('))
@@ -100,6 +104,7 @@ function fixture({
   }
   const kvmEnv = kind === 'kvm' ? ['KIN_KVM_MAC=52:54:00:11:22:33', 'KIN_KVM_DISK_SERIAL=KINfixture01'] : undefined
   const base = {
+    Id: 'fixture-cid',
     Config: {
       Image: mismatch ? 'old-image' : 'image',
       Labels: { 'kin.vm.layout': '2' },
@@ -107,6 +112,7 @@ function fixture({
     },
     HostConfig: {
       NetworkMode: 'network',
+      RestartPolicy: { Name: 'unless-stopped' },
       ...(subscriptionMounted
         ? {
             Binds: [
@@ -126,6 +132,14 @@ function fixture({
         ? cragReadyContainer(base)
         : kernelContainer(base, cpuWrapped)
   const io = {
+    resolveSlotRouting: (_root, routing) => routing || {},
+    withCragRuntimeAdmission: (_vm, _root, _options, run) => run(),
+    dockerJson: async (_docker, request) => {
+      assert.equal(request.method, 'POST')
+      assert.equal(request.path, '/containers/fixture-cid/update')
+      assert.equal(request.body.RestartPolicy.Name, 'no')
+      calls.push('disable-autorestart')
+    },
     prepare: async () => ({
       nodeId: target.node_id,
       session: { docker: {}, client: {} },
@@ -184,7 +198,7 @@ function fixture({
     hasClusterSubscriptionBinds,
     publishClusterSubscription: async () => calls.push('publish-subscription'),
   }
-  const boot = vmContext.runInNewContext(`${start.replace('export ', '')}; startRemoteSlot`, io)
+  const boot = vmContext.runInNewContext(`${restartPolicy}; ${start.replace('export ', '')}; startRemoteSlot`, io)
   return { calls, target, boot: () => boot(target, '/fixture'), state: () => info?.State }
 }
 
@@ -212,8 +226,15 @@ test('a running subscribed cluster slot publishes refreshed permits without recr
   f.target.dataplane = 'crag'
   f.target.crag_kernel_version = 'v2'
   assert.equal((await f.boot()).action, 'already-running')
-  assert.deepEqual(f.calls, ['publish-subscription', 'runtime'])
+  assert.deepEqual(f.calls, ['disable-autorestart', 'publish-subscription', 'runtime'])
   assert.equal(f.state().Running, true)
+})
+
+test('an already running CRAG slot is not bounced to disable legacy Docker autorestart', async () => {
+  const f = fixture({ cragReady: true })
+  f.target.dataplane = 'crag'
+  assert.equal((await f.boot()).action, 'already-running')
+  assert.deepEqual(f.calls, ['disable-autorestart', 'runtime'])
 })
 
 for (const kind of ['docker', 'kvm']) {

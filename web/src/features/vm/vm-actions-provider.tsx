@@ -1,11 +1,19 @@
-import { useMemo, useState } from 'react'
+import { lazy, Suspense, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { meQueryOptions } from '@/features/auth/queries'
+import { GeminiEnvironments } from '@/features/import/gemini-environments'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { clearVmRestriction } from '@/features/vm/clear-restriction'
 import { vmQueryOptions, vmsListQueryOptions } from '@/features/vm/queries'
@@ -18,8 +26,14 @@ import { VmDetailCard } from '@/features/vm/vm-detail-card'
 import { canReclaimVm, patchVmOwner } from '@/features/vm/vm-owner'
 import { VmReauthDialog } from '@/features/vm/vm-reauth-dialog'
 import { VmRecoveryDialog } from '@/features/vm/vm-recovery-dialog'
-import { VmStatsDialog } from '@/features/vm/vm-stats-dialog'
 import { VmTestDialog } from '@/features/vm/vm-test-dialog'
+
+// 统计弹窗带 recharts（约 100 KB gzip），只在点开时加载，不拖慢虚拟机列表和密钥页首屏。
+const VmStatsDialog = lazy(() =>
+  import('@/features/vm/vm-stats-dialog').then((m) => ({
+    default: m.VmStatsDialog,
+  }))
+)
 
 /**
  * 持有详情卡与测试 / 统计 / 重新授权 / 恢复服务弹窗的开关，行与卡片只发「打开哪台」。
@@ -41,8 +55,12 @@ export function VmActionsProvider({
   const isAdmin = me.data?.role === 'admin'
   const list = useQuery(vmsListQueryOptions())
   const [detailId, setDetailId] = useState<string | null>(null)
+  const [geminiTarget, setGeminiTarget] = useState<Vm | null>(null)
   const [testId, setTestId] = useState<string | null>(null)
   const [statsId, setStatsId] = useState<string | null>(null)
+  // 首次打开后保持挂载，关闭动画照常播放。
+  const [statsOpened, setStatsOpened] = useState(false)
+  if (statsId != null && !statsOpened) setStatsOpened(true)
   const [reauthId, setReauthId] = useState<string | null>(null)
   const [recoveryId, setRecoveryId] = useState<string | null>(null)
   const [assignId, setAssignId] = useState<string | null>(null)
@@ -136,7 +154,10 @@ export function VmActionsProvider({
 
   const actions = useMemo<VmActions>(
     () => ({
-      openDetail: (vm) => setDetailId(vm.id),
+      openDetail: (vm) => {
+        if (vm.gemini) setGeminiTarget(vm)
+        else setDetailId(vm.id)
+      },
       openTest: (vm) => setTestId(vm.id),
       openStats: (vm) => setStatsId(vm.id),
       openReauth: (vm) => setReauthId(vm.id),
@@ -185,6 +206,22 @@ export function VmActionsProvider({
   return (
     <VmActionsContext.Provider value={actions}>
       {children}
+      {isAdmin && geminiTarget ? (
+        <Dialog open onOpenChange={(open) => !open && setGeminiTarget(null)}>
+          <DialogContent className='max-h-[85dvh] overflow-y-auto sm:max-w-2xl'>
+            <DialogHeader>
+              <DialogTitle>{geminiTarget.name || geminiTarget.id}</DialogTitle>
+              <DialogDescription>
+                Gemini 宿主机账号 · {geminiTarget.proxy_id}
+              </DialogDescription>
+            </DialogHeader>
+            <GeminiEnvironments
+              key={geminiTarget.id}
+              environmentId={geminiTarget.id}
+            />
+          </DialogContent>
+        </Dialog>
+      ) : null}
       <VmDetailCard
         vm={byId(detailId)}
         accounts={accounts}
@@ -194,11 +231,15 @@ export function VmActionsProvider({
         vm={byId(testId)}
         onOpenChange={(open) => !open && setTestId(null)}
       />
-      <VmStatsDialog
-        vm={byId(statsId)}
-        accounts={accounts}
-        onOpenChange={(open) => !open && setStatsId(null)}
-      />
+      {statsOpened ? (
+        <Suspense fallback={null}>
+          <VmStatsDialog
+            vm={byId(statsId)}
+            accounts={accounts}
+            onOpenChange={(open) => !open && setStatsId(null)}
+          />
+        </Suspense>
+      ) : null}
       <VmReauthDialog
         vm={byId(reauthId)}
         onOpenChange={(open) => !open && setReauthId(null)}

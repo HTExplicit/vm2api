@@ -56,6 +56,7 @@ import { riskFg, RISK_SOLID, riskLevel } from '@/features/vm/usage-meter'
 import { PlatformMark } from '@/features/vm/vm-account-identity'
 import { VmActionMenu } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
+import { GeminiSlotStatus } from '@/features/vm/vm-rack-blade'
 import {
   vmWindows,
   type WindowKey,
@@ -73,7 +74,7 @@ const ROW_INTERACTIVE =
   'button, a, input, select, textarea, label, [role="switch"], [role="menuitem"], [data-row-stop]'
 
 /**
- * 固定网格：一行 38px，主读数常显，次要信息（邮箱、代理、成功数、倒计时、
+ * 固定网格：一行 44px，主读数和用量倒计时常显，次要信息（邮箱、代理、成功数、
  * 菜单）悬停 / 聚焦 / 展开时才显示。槽位名和打开按钮横向滚动时固定在左边。
  */
 const GRID: CSSProperties = {
@@ -103,6 +104,7 @@ const STATE_ICON_FG: Partial<Record<ScheduleStateLabel, string>> = {
 }
 
 function SchedCell({ vm }: { vm: Vm }) {
+  if (vm.gemini) return <GeminiSlotStatus vm={vm} />
   const level = Number(vm.schedule_level)
   const levelOk = Number.isInteger(level) && level >= 1 && level <= 10
   const manual = vm.schedule_level_mode === 'manual'
@@ -244,13 +246,13 @@ function QuotaCell({
     )
   if (w.pct == null)
     return (
-      <div className='grid w-full grid-cols-[auto_1fr] gap-y-1 font-mono'>
+      <div className='grid w-full grid-rows-[14px_3px_13px] gap-y-[3px] font-mono'>
         <span className={TERT}>—</span>
-        <span className={cn('text-right text-[11px]', TERT)}>未探测</span>
         <span
-          className='col-span-2 h-1 rounded-full bg-[repeating-linear-gradient(135deg,var(--muted)_0_3px,transparent_3px_6px)]'
+          className='h-[3px] rounded-full bg-[repeating-linear-gradient(135deg,var(--muted)_0_3px,transparent_3px_6px)]'
           aria-hidden
         />
+        <span className={cn('text-[11px] leading-[13px]', TERT)}>未探测</span>
       </div>
     )
   const t = windowTiming(w, now)
@@ -264,7 +266,7 @@ function QuotaCell({
     : left || '未开窗'
   return (
     <div
-      className='grid w-full grid-cols-[auto_1fr] items-baseline gap-y-1 font-mono tabular-nums'
+      className='grid w-full grid-rows-[14px_3px_13px] gap-y-[3px] font-mono leading-[14px] tabular-nums'
       title={`${w.label} 用量 ${w.pct.toFixed(0)}%${
         t.elapsedPct != null
           ? ` · 时间已过 ${t.elapsedPct.toFixed(0)}% · ${fmtResetClock(w.reset)} 重置`
@@ -279,17 +281,7 @@ function QuotaCell({
       >
         {w.pct.toFixed(0)}%
       </span>
-      <span
-        className={cn(
-          'text-right text-[11px] whitespace-nowrap',
-          full
-            ? 'font-semibold text-[color:var(--status-bad)]'
-            : cn('text-muted-foreground', !hot && SEC)
-        )}
-      >
-        {eta}
-      </span>
-      <span className='relative col-span-2 h-1 rounded-full bg-muted'>
+      <span className='relative h-[3px] rounded-full bg-muted'>
         <i
           className='absolute inset-y-0 left-0 rounded-full'
           style={{
@@ -300,10 +292,20 @@ function QuotaCell({
         {t.elapsedPct != null ? (
           <b
             aria-hidden
-            className='absolute -top-[3px] -bottom-[3px] w-0.5 rounded-[1px] bg-foreground'
+            className='absolute -top-[2px] -bottom-[2px] w-0.5 rounded-[1px] bg-foreground'
             style={{ left: `calc(${t.elapsedPct}% - 1px)` }}
           />
         ) : null}
+      </span>
+      <span
+        className={cn(
+          'text-[11px] leading-[13px] whitespace-nowrap',
+          full
+            ? 'font-semibold text-[color:var(--status-bad)]'
+            : 'text-muted-foreground'
+        )}
+      >
+        {eta}
       </span>
     </div>
   )
@@ -491,66 +493,76 @@ const COLS: Col[] = [
 
 function ProdCell({ vm }: { vm: Vm }) {
   const tier = claudeTier(vm)
+  const plan = vm.gemini ? vm.gemini.account?.plan : tier.label
   const crag = (vm.resolved_dataplane ?? vm.dataplane) === 'crag'
   const registration = credentialRegistrationOf(vm)
   const node = vm.node_name || vm.node_id || 'local'
   return (
-    <>
-      <PlatformMark vm={vm} />
-      <span
-        className='shrink-0 font-mono font-semibold'
-        title={vm.name || vm.id}
-      >
-        {vm.id}
-      </span>
-      {tier.label && tier.label !== '—' ? (
+    <div className='grid w-full min-w-0 gap-0.5'>
+      <div className='flex min-w-0 items-center gap-1.5 leading-4'>
+        <PlatformMark vm={vm} />
+        <span
+          className='min-w-0 flex-1 truncate font-mono font-semibold'
+          title={vm.name || vm.id}
+        >
+          {vm.gemini ? vm.name : vm.id}
+        </span>
+        {plan && plan !== '—' ? (
+          <span
+            className={cn(
+              'shrink-0 rounded-[3px] px-1 font-mono text-[10px] leading-[1.5] font-semibold',
+              tierVisual(vm).badge
+            )}
+          >
+            {plan}
+          </span>
+        ) : null}
         <span
           className={cn(
             'shrink-0 rounded-[3px] px-1 font-mono text-[10px] leading-[1.5] font-semibold',
-            tierVisual(vm).badge
+            crag
+              ? 'bg-orange-200 text-orange-900 dark:bg-orange-400/20 dark:text-orange-300'
+              : 'bg-zinc-200 text-zinc-700 dark:bg-zinc-300/20 dark:text-zinc-300'
+          )}
+          title='当前内核'
+        >
+          {vm.gemini ? 'CRAGAnti' : crag ? 'crag' : '默认'}
+        </span>
+      </div>
+      <div
+        className={cn(
+          'flex min-w-0 items-center gap-1 overflow-hidden leading-[13px]',
+          SEC
+        )}
+      >
+        <span
+          className={cn(
+            'min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground'
+          )}
+          title={vm.email || ''}
+        >
+          {vm.email || '未绑定邮箱'}
+        </span>
+        <span
+          className={cn(
+            'flex min-w-0 shrink items-center gap-1 overflow-hidden text-[11px] text-muted-foreground'
           )}
         >
-          {tier.label}
+          <span>
+            {vm.gemini ? '宿主机' : vm.runtime_type === 'kvm' ? 'kvm' : 'vm'}
+          </span>
+          <span aria-hidden>·</span>
+          <span>{registration === 'none' ? '无凭证' : registration}</span>
+          <span aria-hidden>·</span>
+          <span className='max-w-[64px] truncate' title={node}>
+            {node}
+          </span>
         </span>
-      ) : null}
-      <span
-        className={cn(
-          'shrink-0 rounded-[3px] px-1 font-mono text-[10px] leading-[1.5] font-semibold',
-          crag
-            ? 'bg-orange-200 text-orange-900 dark:bg-orange-400/20 dark:text-orange-300'
-            : 'bg-zinc-200 text-zinc-700 dark:bg-zinc-300/20 dark:text-zinc-300'
-        )}
-        title='当前内核'
-      >
-        {crag ? 'crag' : '默认'}
-      </span>
-      <span
-        className={cn(
-          'min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground',
-          SEC
-        )}
-        title={vm.email || ''}
-      >
-        {vm.email || '未绑定邮箱'}
-      </span>
-      <span
-        className={cn(
-          'flex min-w-0 shrink items-center gap-1 overflow-hidden text-[11px] text-muted-foreground',
-          SEC
-        )}
-      >
-        <span>{vm.runtime_type === 'kvm' ? 'kvm' : 'vm'}</span>
-        <span aria-hidden>·</span>
-        <span>{registration === 'none' ? '无凭证' : registration}</span>
-        <span aria-hidden>·</span>
-        <span className='max-w-[96px] truncate' title={node}>
-          {node}
+        <span className={'max-w-[64px] min-w-0 shrink overflow-hidden'}>
+          <ProxyChip vm={vm} compact />
         </span>
-      </span>
-      <span className={cn('min-w-0 shrink overflow-hidden', SEC)}>
-        <ProxyChip vm={vm} compact />
-      </span>
-    </>
+      </div>
+    </div>
   )
 }
 
@@ -829,9 +841,12 @@ export function VmTable({
       <div
         data-vm-table
         data-pin={pinSec}
+        role='region'
+        aria-label='槽位列表横向滚动区域'
+        tabIndex={0}
         className='group/tbl overflow-x-auto rounded-lg border border-border/60 bg-card text-[12.5px]'
       >
-        <div className='min-w-[1408px]' role='table' aria-label='槽位列表'>
+        <div className='min-w-[1522px]' role='table' aria-label='槽位列表'>
           <div
             role='row'
             className='sticky top-0 z-[6] grid h-8 border-b bg-muted/40 text-[11.5px] text-muted-foreground [--row-bg:var(--card)]'
@@ -868,7 +883,7 @@ export function VmTable({
                   {c.sort ? (
                     <button
                       type='button'
-                      className='inline-flex items-center gap-0.5 rounded-sm hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring'
+                      className='inline-flex min-h-6 items-center gap-0.5 rounded-sm hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring'
                       title='点击排序'
                       onClick={() => onSort(c.sort!)}
                     >
@@ -966,7 +981,7 @@ export function VmTable({
                             aria-expanded={open}
                             aria-label={`${vm.id}，${label}。Enter 展开明细，Shift+Enter 打开详情`}
                             className={cn(
-                              'group relative grid h-[38px] cursor-pointer border-b border-[color:var(--hairline)] bg-[var(--row-bg)] outline-none [--row-bg:var(--card)] hover:[--row-bg:color-mix(in_oklab,var(--muted)_55%,var(--card))] focus-visible:after:pointer-events-none focus-visible:after:absolute focus-visible:after:inset-0 focus-visible:after:z-[4] focus-visible:after:border-2 focus-visible:after:border-ring',
+                              'group relative grid h-[44px] cursor-pointer border-b border-[color:var(--hairline)] bg-[var(--row-bg)] outline-none [--row-bg:var(--card)] hover:[--row-bg:color-mix(in_oklab,var(--muted)_55%,var(--card))] focus-visible:after:pointer-events-none focus-visible:after:absolute focus-visible:after:inset-0 focus-visible:after:z-[4] focus-visible:after:border-2 focus-visible:after:border-ring',
                               open &&
                                 '[--row-bg:color-mix(in_oklab,var(--muted)_75%,var(--card))]'
                             )}
@@ -1017,7 +1032,11 @@ export function VmTable({
                                   dim && i > 0 && 'opacity-50'
                                 )}
                               >
-                                {c.cell(r, now)}
+                                {vm.gemini && i > 0 ? (
+                                  <span className={TERT}>—</span>
+                                ) : (
+                                  c.cell(r, now)
+                                )}
                               </div>
                             ))}
                             <div
@@ -1047,7 +1066,26 @@ export function VmTable({
                               </span>
                             </div>
                           </div>
-                          {open ? (
+                          {open && vm.gemini ? (
+                            <div
+                              id={detailId}
+                              className='flex items-center gap-3 border-b px-4 py-2 text-xs text-muted-foreground'
+                            >
+                              <span>{vm.email || '未提供邮箱'}</span>
+                              <span>
+                                {vm.gemini.account?.plan || '未提供订阅'}
+                              </span>
+                              <ProxyChip vm={vm} compact />
+                              <Button
+                                type='button'
+                                size='sm'
+                                variant='ghost'
+                                onClick={() => actions.openDetail(vm)}
+                              >
+                                管理 Gemini 凭证
+                              </Button>
+                            </div>
+                          ) : open ? (
                             <VmRowDetail
                               id={detailId}
                               vm={vm}

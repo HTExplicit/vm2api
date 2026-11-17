@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -70,12 +71,14 @@ function health(overrides: Partial<VmHealthPayload> = {}): VmHealthPayload {
 
 function render(overrides: Partial<Vm> = {}) {
   return renderToStaticMarkup(
-    <VmRowDetail
-      vm={{ id: 'slot / one', ...overrides }}
-      now={NOW}
-      onOpenDetail={() => {}}
-      id='slot-detail'
-    />
+    <QueryClientProvider client={new QueryClient()}>
+      <VmRowDetail
+        vm={{ id: 'slot / one', ...overrides }}
+        now={NOW}
+        onOpenDetail={() => {}}
+        id='slot-detail'
+      />
+    </QueryClientProvider>
   )
 }
 
