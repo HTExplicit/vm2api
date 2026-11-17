@@ -45,7 +45,11 @@ function Fixture() {
           recoveringId: null,
         }}
       >
-        <VmTable vms={rows.data?.items || []} zoom={zoom} onZoomChange={setZoom} />
+        <VmTable
+          vms={rows.data?.items || []}
+          zoom={zoom}
+          onZoomChange={setZoom}
+        />
       </VmActionsContext.Provider>
       <output aria-label="详情打开次数">{details}</output>
       <Toaster />
