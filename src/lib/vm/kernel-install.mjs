@@ -39,9 +39,20 @@ import { rustKernelHealth, rustKernelProcessUp } from '../transport/rust-kernel-
 const PRODUCTS = new Set(['cli-node', 'crag'])
 const INTERRUPTED_COMMAND =
   /^(node_not_ready|ssh_timeout|ssh_connect_failed|ssh_closed|ssh_link_error|exec_timeout|docker_timeout|docker_io_failed|ECONNRESET|EPIPE)$/
-// Only exceptional installer holds may be cleared by a later explicit start.
+// Exceptional switch holds may be cleared by a later explicit start.
 // Key by record path so independent projects cannot release each other's slot.
 const safetyHolds = new Map()
+
+export function hasKernelInstallSafetyHold(projectRoot, id, watchdog) {
+  return !!watchdog && safetyHolds.get(path.join(projectRoot, 'vms', `${id}.json`)) === watchdog
+}
+
+/** Preserve an existing watchdog hold after a confirmed stop could not be persisted. */
+export function retainKernelInstallSafetyHold(projectRoot, id, watchdog) {
+  if (typeof watchdog?.hold !== 'function') return false
+  safetyHolds.set(path.join(projectRoot, 'vms', `${id}.json`), watchdog)
+  return true
+}
 
 function clearKernelOperation(record) {
   delete record.kernel_operation
@@ -66,6 +77,13 @@ const failure = (target, code, error, stopped = false) => ({
   error,
   stopped,
 })
+const ADMISSION_ERRORS = new Map([
+  ['crag_subscription_unavailable', 'CRAG 订阅状态暂时读不到。槽位和原服务未改动，请稍后重试。'],
+  ['crag_subscription_authority_unavailable', '授权服务暂时没有响应。槽位和原服务未改动，请稍后重试。'],
+  ['crag_subscription_busy', 'CRAG 启动操作繁忙。槽位和原服务未改动，请稍后重试。'],
+  ['license_crag_host_usage_unverified', '暂时对不上宿主机运行额度。槽位和原服务未改动，请稍后重试。'],
+  ['license_crag_host_over_quota', '宿主订阅的运行槽位已满。原服务未改动；释放其他运行槽或增加额度后再更新。'],
+])
 function installLicenseFailure(target, check) {
   if (check.code === 'license_payload_key_mismatch') {
     return failure(
@@ -74,7 +92,11 @@ function installLicenseFailure(target, check) {
       '下载包与已有许可使用不同的加密密钥。请选择兼容版本，或先完成授权迁移。',
     )
   }
-  return failure(target, check.code || 'license_required', check.error || '请先激活 CRAG 授权')
+  return failure(
+    target,
+    check.code || 'license_required',
+    ADMISSION_ERRORS.get(check.code) || check.error || '请先激活 CRAG 授权',
+  )
 }
 
 const healthy = (boot) =>
@@ -191,7 +213,8 @@ async function restoreCragRollback({ projectRoot, vm, rollback, routing, ops, bo
     // The rollback may have started a container before losing health or persistence.
   }
   const halt = await (ops.stopSlot || stopSlot)(prior)
-  if (halt?.ok) await (ops.suspendVmRuntimeRestart || suspendVmRuntimeRestart)(prior)
+  if (!halt?.ok) return null
+  await (ops.suspendVmRuntimeRestart || suspendVmRuntimeRestart)(prior)
   return null
 }
 
@@ -288,6 +311,7 @@ export async function installKernelTargets({
   watchdog,
   poolScheduler,
   cragSubscription,
+  releaseStoppedBinding = cragSubscription?.releaseStoppedBinding?.bind(cragSubscription),
   ops = {},
   resumeId = null,
 }) {
@@ -372,7 +396,7 @@ export async function installKernelTargets({
           const checkTargetLicense = () => licenseCheck(projectRoot, desired, routing, { preferInstalled: false })
           const grant = target.kernel === 'crag' ? checkTargetLicense() : null
           const canAuthorizeInstall = (check) =>
-            check?.code === 'license_required' &&
+            ['license_required', 'license_crag_host_over_quota', 'license_binding_mismatch'].includes(check?.code) &&
             !!(target.expected_tag || target.payload_tag) &&
             !resumeId &&
             typeof cragSubscription?.authorizeInstall === 'function'
@@ -504,6 +528,24 @@ export async function installKernelTargets({
             }
             const changedBeforeMaterialize = checkPin(installedProduct, true)
             if (changedBeforeMaterialize) return changedBeforeMaterialize
+            let bindingRelease
+            if (target.kernel !== 'crag' && typeof releaseStoppedBinding === 'function') {
+              phase = 'kernel_selection_persist_failed'
+              const selected = patchVmRecord(projectRoot, target.id, (record) => {
+                record.dataplane = candidate.dataplane
+                delete record.crag_kernel_version
+              })
+              if (!selected) return failure(target, 'vm_not_found', '虚拟机记录已移除', true)
+              // Replacing the preinstalled CRAG package can replace its trust key.
+              // Revoke the old permit while that verified package is still present.
+              phase = 'crag_subscription_release_failed'
+              try {
+                bindingRelease = await releaseStoppedBinding(selected)
+              } catch (error) {
+                return failure(target, error.code || phase, 'CRAG 订阅绑定未能完成释放，请同步订阅状态后重试。', true)
+              }
+            }
+            phase = 'kernel_materialize_failed'
             const baked = !!String(candidate.node_id || '').trim()
             const laid = baked
               ? await (ops.deployBakedKernel || deployBakedKernel)(projectRoot, candidate, target.kernel)
@@ -583,6 +625,7 @@ export async function installKernelTargets({
               status: running.status,
               version: installedProduct.version ?? null,
               ...(installedProduct.payload_tag ? { payload_tag: installedProduct.payload_tag } : {}),
+              ...(bindingRelease?.reclaim_pending && { reclaim_pending: true }),
             }
           }
           const run = async () => {
@@ -623,7 +666,7 @@ export async function installKernelTargets({
             : failure(
                 target,
                 result.code || 'crag_runtime_admission_failed',
-                result.error || 'CRAG 运行准入失败',
+                ADMISSION_ERRORS.get(result.code) || result.error || 'CRAG 运行准入失败',
                 stopped,
               )
         } catch (error) {
@@ -673,7 +716,14 @@ export async function installKernelTargets({
 }
 
 /** Resume only interrupted commands; the durable marker survives control-plane and SSH loss. */
-export async function resumePendingKernelInstalls({ projectRoot, routing = {}, watchdog, poolScheduler, ops = {} }) {
+export async function resumePendingKernelInstalls({
+  projectRoot,
+  routing = {},
+  watchdog,
+  poolScheduler,
+  releaseStoppedBinding,
+  ops = {},
+}) {
   const items = []
   for (const summary of listVms(projectRoot)) {
     const vm = getVm(projectRoot, summary.id)
@@ -709,6 +759,7 @@ export async function resumePendingKernelInstalls({ projectRoot, routing = {}, w
       routing,
       watchdog,
       poolScheduler,
+      releaseStoppedBinding,
       ops,
       resumeId: pending.id,
     })

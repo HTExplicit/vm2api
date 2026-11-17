@@ -27,6 +27,7 @@ const client = new QueryClient({
 function Fixture() {
   const rows = useQuery(vmsListQueryOptions());
   const [details, setDetails] = useState(0);
+  const [zoom, setZoom] = useState(100);
   const nothing = () => {};
   return (
     <main className="space-y-4 p-6">
@@ -44,7 +45,11 @@ function Fixture() {
           recoveringId: null,
         }}
       >
-        <VmTable vms={rows.data?.items || []} />
+        <VmTable
+          vms={rows.data?.items || []}
+          zoom={zoom}
+          onZoomChange={setZoom}
+        />
       </VmActionsContext.Provider>
       <output aria-label="详情打开次数">{details}</output>
       <Toaster />

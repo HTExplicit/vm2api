@@ -67,6 +67,10 @@ import {
 } from '@/features/vm/active-vm'
 import { ActiveVmBadge } from '@/features/vm/active-vm-badge'
 import { DeleteActiveVmHint } from '@/features/vm/delete-active-hint'
+import {
+  completeVmDeletion,
+  type VmDeleteResult,
+} from '@/features/vm/delete-vm'
 import { VmAccountTab } from '@/features/vm/detail-account-tab'
 import { VmOpsTab } from '@/features/vm/detail-ops-tab'
 import { VmOverviewTab } from '@/features/vm/detail-overview-tab'
@@ -152,9 +156,12 @@ function VmDetailBody({
     enabled: perms.admin && wantedTab === 'seed',
     refetchInterval: wantedTab === 'seed' ? 2000 : false,
   })
+  const cragTelemetry =
+    detail.data?.kernel?.telemetry?.state === 'launch_policy' ||
+    detail.data?.vm?.resolved_dataplane === 'crag'
   const seedUploadLog = useQuery({
     ...vmSeedUploadLogQueryOptions(id),
-    enabled: perms.admin && wantedTab === 'seed' && seedDebug,
+    enabled: perms.admin && wantedTab === 'seed' && seedDebug && !cragTelemetry,
     refetchInterval: seedDebug && wantedTab === 'seed' ? 2000 : false,
   })
   usePoolSeatStream()
@@ -329,17 +336,18 @@ function VmDetailBody({
           { method: 'POST' }
         )
       }
-      return api(`/api/panel/vms/${encodeURIComponent(id)}`, {
+      return api<VmDeleteResult>(`/api/panel/vms/${encodeURIComponent(id)}`, {
         method: 'DELETE',
       })
     },
-    onSuccess: async () => {
-      toast.success(
+    onSuccess: async (data) => {
+      await completeVmDeletion(
+        qc,
+        data,
         deletePlan.kind === 'switch'
           ? `已切换活跃到 ${deletePlan.replacement.id} 并删除 ${id}`
           : '已删除'
       )
-      await qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey })
       navigate({ to: '/vm' })
     },
     onError: (error: Error) => toast.error(error.message),
@@ -681,6 +689,7 @@ function VmDetailBody({
                     seed={seed.data}
                     slot={seedSlot}
                     telemetry={kernel?.telemetry}
+                    cragTelemetry={cragTelemetry}
                     saving={saveSeed.isPending}
                     readError={seed.isError ? seed.error.message : null}
                     debug={seedDebug}

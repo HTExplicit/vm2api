@@ -4,7 +4,7 @@ git 里只有源码。`bin/`、`web/dist`、`share/crag` 与 `share/wrap-cli` �
 
 - `web/dist`、`kin-api-kernel`、`kin-redact` 与 `kin-egress` 在最终控制面镜像内从 fork 源码构建。`kin-egress` 保留 fork 的出口逻辑并包含 HTTP CONNECT 支持。
 - 其余 linux amd64 kernel / helper、Claude CLI、完整签名加密 CRAG native v2 包与 glibc shim 由 [`deploy/payload.json`](../deploy/payload.json) 按大小和 SHA-256 固定。清单的 `release` 指向已公开、不可变的 payload Release，可独立于应用版本；`npm run fetch:payload` 与镜像构建使用同一清单，校验失败即停止。
-- 当前载荷来源为官方 `payload-2026.11.17-kernel-1091-968-crag-3.1.4`，使用 CRAG `3.1.4` standard 原签名包；两个 kernel 更新至供应方构建 1091/968，CLI `2.1.321` 缓存 TTL 修复字节和其余固定资产保持。CRAG 在私有仓库 `dofastted/crag` 构建，公开资产及原始 `SOURCES.json` 由供应方的 vm2api payload Release 分发。应用、发行工作流及资产来源见 [130 供应来源记录](releases/v1.4.130-binaries.json)，签名包及来源声明见 [CRAG 3.1.4 来源](releases/v1.4.130-crag.json)。这些记录由 fork 根据供应方公开发行整理，不声明独立重建或重签；来源与完整性校验不等于生产运行验收。
+- 当前载荷来源为官方 `payload-2026.11.17-cli-node-321`，CRAG 保持 `3.1.4` standard 原签名包；仅 CLI `2.1.321` 重打包字节变化（31,005,108 bytes，SHA256 `f6c3744dda01f756049360113607d2bd9a25911de0fdaf30fe9bb1a1918a6788`），两个 kernel、worker、OAuth helper 和其余资产保持。应用、成功 CI、amd64 构建与不可变载荷见 [136 供应来源记录](releases/v1.4.136-binaries.json)；官方总发行因 ARM64 smoke 检查失败，amd64 任务成功。CRAG 原始签名及 `SOURCES.json` 继续引用 [3.1.4 来源](releases/v1.4.130-crag.json)。这些是 fork 根据供应方公开发行整理的记录，不声明独立重建或重签；历史 cache-TTL 构建记录不作为本次重打包的新源码证明。
 
 ## 完整应用交付
 

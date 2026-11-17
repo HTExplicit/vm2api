@@ -84,7 +84,9 @@ function handler({ root, protocol, run }) {
     stream: true,
     ...(protocol === 'openai.completions'
       ? { prompt: 'one offline inference turn' }
-      : { messages: [{ role: 'user', content: 'one offline inference turn' }] }),
+      : protocol === 'openai.responses'
+        ? { input: 'one offline inference turn' }
+        : { messages: [{ role: 'user', content: 'one offline inference turn' }] }),
   }
   return createHandleProtocol({
     json(res, status, body) {
@@ -322,20 +324,38 @@ for (const protocol of ['openai.chat', 'openai.completions']) {
   })
 }
 
-test('Claude Responses remains rejected before native worker selection', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-native-responses-'))
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  let selected = 0
-  const instance = handler({
-    root,
-    protocol: 'openai.responses',
-    run: async () => {
-      selected++
-    },
+test('Claude Responses native success emits the Responses terminal after one execution', async (t) => {
+  const res = await fixture(t, 'openai.responses', (upstream) => {
+    upstream.writeHead(200, { 'content-type': 'text/event-stream' })
+    upstream.write(partial())
+    upstream.end(
+      [
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
+        summary(),
+        { type: 'message_stop' },
+      ]
+        .map(frame)
+        .join(''),
+    )
   })
-  const res = response()
-  await invoke(instance, res, 'openai.responses')
-  assert.equal(res.statusCode, 400)
-  assert.equal(res.body.error.code, 'protocol_not_allowed')
-  assert.equal(selected, 0)
+  const output = res.chunks.join('')
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.writableEnded, true)
+  assert.match(output, /partial output/)
+  assert.equal(output.split('event: response.completed').length - 1, 1)
+  assert.doesNotMatch(output, /response.failed|kin_provider_result/)
+})
+
+test('Claude Responses native partial failure never emits a completed response', async (t) => {
+  const res = await fixture(t, 'openai.responses', (upstream) => {
+    upstream.writeHead(200, { 'content-type': 'text/event-stream' })
+    upstream.end(partial())
+  })
+  const output = res.chunks.join('')
+  assert.match(output, /partial output/)
+  assert.equal(output.split('event: error').length - 1, 1)
+  assert.match(output, /native_handoff_missing/)
+  assert.doesNotMatch(output, /response.completed|kin_provider_result/)
+  assert.equal(res.writableEnded, true)
 })

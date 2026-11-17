@@ -3,7 +3,7 @@ import type { CragHostStatus, CragRuntimeVm } from './queries'
 const numberLabel = (value: number | 'unlimited' | null | undefined) =>
   value === 'unlimited' ? '不限' : (value ?? '待核对')
 
-const statusLabels: Record<CragHostStatus['state'], string> = {
+export const cragHostStatusLabels: Record<CragHostStatus['state'], string> = {
   unavailable: '暂不可用',
   unredeemed: '尚未兑换',
   active: '订阅有效',
@@ -15,12 +15,18 @@ export function CragRuntimeCounts({ status }: { status?: CragHostStatus }) {
   return (
     <p role='status' className='text-sm break-words tabular-nums'>
       {status?.runtime?.host_over_limit === true
-        ? '已暂停宿主机 CRAG 调用'
+        ? '宿主订阅超额，仅超额槽暂停调度'
         : status
-          ? statusLabels[status.state]
+          ? cragHostStatusLabels[status.state]
           : '状态待核对'}
-      {' · 剩余可用槽位：'}
+      {' · 剩余可绑定槽位：'}
       {numberLabel(status?.available_seats)}
+      {(status?.reclaim_pending_count ?? 0) > 0 && (
+        <>
+          {' · 待回收绑定：'}
+          {status?.reclaim_pending_count}
+        </>
+      )}
       {status?.runtime && (
         <>
           {' · 运行中的订阅槽：'}
@@ -48,7 +54,7 @@ export function CragRuntimeDetail({ detail }: { detail: CragRuntimeVm }) {
   ].filter(Boolean)
   return (
     <div className='mt-2 space-y-0.5 text-sm'>
-      <p>CRAG：{state}</p>
+      <p>CRAG：{detail.quota_blocked ? '超出订阅额度 / 暂停调度' : state}</p>
       {fields.length > 0 ? (
         <p className='text-xs wrap-anywhere text-muted-foreground tabular-nums'>
           {fields.join(' · ')}

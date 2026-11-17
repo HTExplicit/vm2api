@@ -38,7 +38,8 @@ describe('VM scheduling priority', () => {
         weight: 42,
       }
       const list = render(vm)
-      expect(list).toContain('>调度 · 优先级</div>')
+      expect(list).toContain('>调度</div>')
+      expect(list).toContain('>类型</div>')
       expect(list).toMatch(
         /text-blue-800[^"]*shadow-\[inset_0_0_0_1px_currentColor\][^"]*"[^>]*>P8</
       )
@@ -78,7 +79,7 @@ describe('VM row interaction and health', () => {
     )
     const html = render({ health_24h: buckets })
     expect(html).toContain('>99.0%</b>')
-    expect(html).toContain('>99/100</span>')
+    expect(html).toContain('aria-label="近 24 小时 48 格请求健康时间线"')
     expect(render({ health_24h: null })).toContain('24h 无请求')
     expect(render()).toContain('24h 未知')
     expect(render()).not.toContain('24h 无请求')
@@ -193,6 +194,7 @@ describe('VM account column kernel label', () => {
     ]) {
       expect(html).toMatch(new RegExp(`>${label}</(?:span|div)>`))
     }
+    expect(html).toContain('title="account@example.com"')
     expect(html).not.toContain('订阅 未知')
     expect(html).not.toContain('01·account')
     expect(
@@ -228,8 +230,7 @@ describe('VM list summary and toggles', () => {
     expect(html).toContain('>在池</div>')
     expect(html).toContain('>90.0%</b>')
     expect(html).toContain('失败 1')
-    expect(html).toMatch(/aria-pressed="false"[^>]*>.*按状态分组/)
-    expect(html).toMatch(/aria-pressed="false"[^>]*>.*次要信息常显/)
+    expect(html).toContain('>显示</')
     expect(html).toContain('data-pin="false"')
   })
 })
@@ -260,7 +261,7 @@ describe('retained quota and plan accuracy', () => {
       render({ platform: 'openai', has_token: true, plan_type: plan })
     ).toContain(`>${label}</span>`)
   })
-  it('uses the last successful Codex window without adding a dense-row status block', () => {
+  it('shows the last successful Codex window and its refresh status in the seven-column list', () => {
     const html = render({
       platform: 'openai',
       has_token: true,
@@ -270,7 +271,7 @@ describe('retained quota and plan accuracy', () => {
       },
     })
     expect(html).toContain('73%')
-    expect(html).not.toContain('额度待刷新')
+    expect(html).toContain('额度待刷新')
     expect(html).not.toContain('priority-segment')
   })
 })

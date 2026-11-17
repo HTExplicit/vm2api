@@ -29,7 +29,7 @@ export const METRIC_ROW = 'h-5'
 const MUTED_NUM = 'text-[color:var(--text-tertiary)]'
 
 const WINDOW_GRID =
-  'grid grid-cols-[2.25rem_minmax(2.5rem,1fr)_2.25rem_3.25rem] items-center gap-x-1'
+  'grid grid-cols-[2rem_minmax(2.5rem,1fr)_2.25rem_5rem] items-center gap-x-1'
 
 function WindowRow({
   w,
@@ -49,8 +49,11 @@ function WindowRow({
       ? `重置于 ${fmtResetClock(w.reset)}`
       : undefined
   const pct = w.pct
+  const full = pct != null && pct >= 100
+  const futureReset = expiresAtToMs(w.reset) > now
+  const eta = reset ?? (full ? '已满' : '')
   return (
-    <div className={cn(WINDOW_GRID, METRIC_ROW)}>
+    <div data-window-readout={w.key} className={cn(WINDOW_GRID, METRIC_ROW)}>
       <span className='text-xs font-medium text-muted-foreground'>
         {w.label}
       </span>
@@ -89,7 +92,8 @@ function WindowRow({
         className='truncate text-right font-mono text-[11px] text-muted-foreground tabular-nums'
         title={clock}
       >
-        {reset ?? ''}
+        {eta}
+        {full && futureReset && reset ? '恢复' : ''}
       </span>
     </div>
   )

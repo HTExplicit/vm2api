@@ -30,13 +30,14 @@ import { SlotIdentity } from '@/components/platform-chip'
 import { QueryGate } from '@/components/query-gate'
 import { meQueryOptions } from '@/features/auth/queries'
 import { geminiInventoryOptions } from '@/features/import/gemini-environments'
-import {
-  dashboardQueryOptions,
-  usageQueryOptions,
-} from '@/features/overview/queries'
+import { usageQueryOptions } from '@/features/overview/queries'
 import { planDeleteActiveVm } from '@/features/vm/active-vm'
 import { CreateVmDialog } from '@/features/vm/create-vm-dialog'
 import { DeleteActiveVmHint } from '@/features/vm/delete-active-hint'
+import {
+  completeVmDeletion,
+  type VmDeleteResult,
+} from '@/features/vm/delete-vm'
 import { FleetPulse } from '@/features/vm/fleet-pulse'
 import { geminiSlot } from '@/features/vm/gemini-slot'
 import { VmListSkeleton } from '@/features/vm/list-skeleton'
@@ -74,6 +75,19 @@ const SIZES: [RackSize, string, string][] = [
 
 const LS_VIEW = 'vm-list-view'
 const LS_SIZE = 'vm-rack-size'
+const LS_ZOOM = 'vm-list-zoom'
+const ZOOM_MIN = 100
+const ZOOM_MAX = 200
+
+function readZoom(): number {
+  try {
+    const n = Number(localStorage.getItem(LS_ZOOM))
+    if (Number.isInteger(n) && n >= ZOOM_MIN && n <= ZOOM_MAX) return n
+  } catch {
+    // 隐私模式读不到时用 100%。
+  }
+  return ZOOM_MIN
+}
 
 function readPref<T extends string>(
   key: string,
@@ -116,6 +130,7 @@ export function VmListPage() {
   const [size, setSizeState] = useState(() =>
     readPref(LS_SIZE, ['s', 'm', 'l'] as const, 'l')
   )
+  const [zoom, setZoomState] = useState(readZoom)
   const setView = (next: 'grid' | 'list') => {
     setViewState(next)
     writePref(LS_VIEW, next)
@@ -123,6 +138,15 @@ export function VmListPage() {
   const setSize = (next: RackSize) => {
     setSizeState(next)
     writePref(LS_SIZE, next)
+  }
+  const setZoom = (next: number) => {
+    const value = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(next)))
+    setZoomState(value)
+    try {
+      localStorage.setItem(LS_ZOOM, String(value))
+    } catch {
+      // 写不进去只影响下次打开。
+    }
   }
   const [sort, setSort] = useState<VmSortKey>('status')
   const [dir, setDir] = useState<'asc' | 'desc'>('asc')
@@ -153,20 +177,18 @@ export function VmListPage() {
           method: 'POST',
         })
       }
-      return api(`/api/panel/vms/${encodeURIComponent(id)}`, {
+      return api<VmDeleteResult>(`/api/panel/vms/${encodeURIComponent(id)}`, {
         method: 'DELETE',
       })
     },
-    onSuccess: async (_data, { id, switchTo }) => {
-      toast.success(
-        switchTo ? `已切换活跃到 ${switchTo} 并删除 ${id}` : '已删除'
-      )
+    onSuccess: async (data, { id, switchTo }) => {
       setDeleteTarget(null)
       setDeleteInput('')
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: vmsListQueryOptions().queryKey }),
-        qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey }),
-      ])
+      await completeVmDeletion(
+        qc,
+        data,
+        switchTo ? `已切换活跃到 ${switchTo} 并删除 ${id}` : '已删除'
+      )
     },
     onError: (error: Error) => toast.error(error.message),
   })
@@ -363,7 +385,12 @@ export function VmListPage() {
                 onCreate={canCreate ? () => setCreateOpen(true) : undefined}
               />
             ) : (
-              <VmTable vms={list} accounts={accounts} />
+              <VmTable
+                vms={list}
+                accounts={accounts}
+                zoom={zoom}
+                onZoomChange={setZoom}
+              />
             )
           ) : (
             <EmptyState

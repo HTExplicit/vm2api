@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events'
 import { effectiveSlotCount } from '../vm/slot-capacity.mjs'
 import { getVm, listVms, markUnschedulable, migrateVmSchedule } from '../vm/vm-registry.mjs'
 import { vmCliHomePath, vmJsonPath } from '../vm/execution-context.mjs'
+import { checkCragLicense } from '../vm/crag-license.mjs'
 import {
   expiresAtToMs,
   hasRefreshPresence,
@@ -30,7 +31,7 @@ import {
   isLeftoverQuotaScheduleOff,
   isQuotaWindowReason,
 } from './availability.mjs'
-import { listQuotaFromHeaders } from './quota-window.mjs'
+import { listQuotaFromHeaders, noResetRejectExpired } from './quota-window.mjs'
 import { hardBlockOf } from './rate-limit-service.mjs'
 import { unitCircuit } from './unit-circuit.mjs'
 import { isSlotProxyDesynced, readWorkerProxyEndpoint, readWorkerEgressMode } from '../vm/vm-runtime.mjs'
@@ -315,7 +316,9 @@ function guardWindowReading(window, now) {
 export function quotaGuardUsage(unified = {}, now = Date.now()) {
   let worst = null
   for (const key of ['5h', '7d']) {
-    for (const sample of [unified?.headers?.[key], unified?.official?.[key], unified?.[key]]) {
+    // A header reject with no reset lifts after its hold (see noResetRejectExpired).
+    const headerSample = noResetRejectExpired(unified, key, now) ? null : unified?.headers?.[key]
+    for (const sample of [headerSample, unified?.official?.[key], unified?.[key]]) {
       const reading = guardWindowReading(sample, now)
       if (!reading) continue
       const better =
@@ -483,6 +486,7 @@ export class PoolScheduler extends EventEmitter {
     accountQuota = null,
     runtimeRepo = null,
     workerHealth = null,
+    getRouting = () => ({}),
     config = {},
   } = {}) {
     super()
@@ -493,6 +497,7 @@ export class PoolScheduler extends EventEmitter {
     this.accountQuota = accountQuota
     this.runtimeRepo = runtimeRepo
     this.workerHealth = workerHealth
+    this.getRouting = getRouting
     this.config = normalizePoolConfig(config)
     this.lastStickyCleared = false
     this.inflight = new Map()
@@ -1682,6 +1687,8 @@ export class PoolScheduler extends EventEmitter {
         : knownHealth === undefined
           ? await this.getWorkerHealth(this.executionContext(vm, accountId), { signal, state, dataPath })
           : knownHealth
+    if (!pinned && this.cragSeatOverQuota(vm, workerStatus))
+      return { ok: false, reason: 'license_crag_host_over_quota' }
     // Health probing is asynchronous. Re-read time before applying cooldown
     // and credential gates, otherwise a cooldown that expired during the hop
     // can be re-enqueued with an already-past wakeup and lose its notification.
@@ -2132,6 +2139,13 @@ export class PoolScheduler extends EventEmitter {
     this.notifyCapacity()
   }
 
+  cragSeatOverQuota(vm, health) {
+    if (!this.projectRoot) return false
+    const liveCrag = health?.runtime_variant === 'crag-v2' || (!health?.runtime_variant && health?.dataplane === 'crag')
+    const target = liveCrag ? { ...vm, dataplane: 'crag' } : vm
+    return checkCragLicense(this.projectRoot, target, this.getRouting()).code === 'license_crag_host_over_quota'
+  }
+
   /** Revalidate the live account/VM state before a request claims execution capacity. */
   admissionSnapshot(candidate, { pinned = false } = {}) {
     if (candidate.signal?.aborted) throw makeAbortError()
@@ -2168,6 +2182,7 @@ export class PoolScheduler extends EventEmitter {
     )
       return null
     const health = cached?.value || candidate.workerStatus
+    if (!pinned && this.cragSeatOverQuota(vm, health)) return null
     if (dataPath === 'direct' && !directWorkerAnswered(health)) return null
     if (!evaluateCredentialEligibility({ vm, workerStatus: health, now }).ok) return null
     if (!rustKernelBusy(health) && rustKernelProcessUp(health) && !rustKernelReachable(health)) return null
