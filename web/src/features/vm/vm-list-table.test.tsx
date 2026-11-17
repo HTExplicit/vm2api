@@ -261,7 +261,7 @@ describe('retained quota and plan accuracy', () => {
       render({ platform: 'openai', has_token: true, plan_type: plan })
     ).toContain(`>${label}</span>`)
   })
-  it('shows the last successful Codex window and its refresh status in the seven-column list', () => {
+  it('keeps the last successful window while reserving refresh details for expansion', () => {
     const html = render({
       platform: 'openai',
       has_token: true,
@@ -271,7 +271,43 @@ describe('retained quota and plan accuracy', () => {
       },
     })
     expect(html).toContain('73%')
-    expect(html).toContain('额度待刷新')
+    expect(html).not.toContain('额度待刷新')
     expect(html).not.toContain('priority-segment')
+  })
+})
+
+describe('VM list request badges', () => {
+  it('shows a blue in-flight badge beside status, including while a slot drains', () => {
+    const html = render({
+      platform: 'openai',
+      inflight: 3,
+      session_active: 8,
+      schedulable: false,
+    })
+    expect(html).toContain('data-vm-requesting="3"')
+    expect(html).toContain('title="请求中 3"')
+    expect(html).toContain('bg-[color:var(--tier-pro-solid)]')
+    expect(html).not.toContain('data-vm-requesting="8"')
+  })
+
+  it('hides zero requests and never treats held Claude seats as running requests', () => {
+    expect(
+      render({ platform: 'openai', inflight: 0, session_active: 8 })
+    ).not.toContain('data-vm-requesting')
+    expect(
+      render({
+        inflight: 4,
+        seat_sessions: [
+          { index: 0, session_id: 'held', state: 'held', inflight: 0 },
+        ],
+      })
+    ).not.toContain('data-vm-requesting')
+    expect(
+      render({
+        seat_sessions: [
+          { index: 0, session_id: 'active', state: 'active', inflight: 2 },
+        ],
+      })
+    ).toContain('data-vm-requesting="2"')
   })
 })

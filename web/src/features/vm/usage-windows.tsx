@@ -127,6 +127,7 @@ export function VmUsageWindows({
   now,
   quiet = false,
   quotaActions = false,
+  summaryOnly = false,
   className,
 }: {
   vm: Vm
@@ -134,6 +135,8 @@ export function VmUsageWindows({
   now: number
   quiet?: boolean
   quotaActions?: boolean
+  /** 列表只保留窗口与入口；测量状态和余额在展开区展示。 */
+  summaryOnly?: boolean
   className?: string
 }) {
   const hasToken = Boolean(vm.has_token)
@@ -148,8 +151,12 @@ export function VmUsageWindows({
           quiet={quiet}
         />
       ))}
-      <CodexQuotaSampleStatus vm={vm} />
-      <CodexCreditSummary vm={vm} />
+      {summaryOnly ? null : (
+        <>
+          <CodexQuotaSampleStatus vm={vm} />
+          <CodexCreditSummary vm={vm} />
+        </>
+      )}
       {quotaActions ? <VmQuotaActions vm={vm} now={now} /> : null}
     </div>
   )

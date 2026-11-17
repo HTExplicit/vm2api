@@ -259,6 +259,25 @@ export function createSseJsonBridge() {
   let terminal = null
   let responseId = null
   let output = null
+  const completedItems = new Map()
+
+  function itemKey(item) {
+    return item?.id || (item?.call_id ? `${item.type}:${item.call_id}` : null)
+  }
+
+  function replayOutput() {
+    const merged = Array.isArray(output) ? [...output] : []
+    const known = new Set(merged.map(itemKey).filter(Boolean))
+    // Lite terminal frames may omit output items already delivered in the stream.
+    // Keep their original positions; terminal copies of the same item win.
+    for (const [index, item] of [...completedItems].sort(([a], [b]) => a - b)) {
+      const key = itemKey(item)
+      if (key && known.has(key)) continue
+      merged.splice(Math.min(index, merged.length), 0, item)
+      if (key) known.add(key)
+    }
+    return merged
+  }
 
   function takeData() {
     if (!dataLines.length) return null
@@ -273,6 +292,9 @@ export function createSseJsonBridge() {
     const id = parsed.response?.id
     if (typeof id === 'string' && id) responseId = id
     if (Array.isArray(parsed.response?.output)) output = parsed.response.output
+    if (type === 'response.output_item.done' && Number.isInteger(parsed.output_index) && parsed.item) {
+      completedItems.set(parsed.output_index, parsed.item)
+    }
     if (type === 'response.completed') terminal = 'completed'
     else if (type === 'response.failed') terminal = 'failed'
     else if (type === 'response.incomplete') terminal = 'incomplete'
@@ -325,7 +347,7 @@ export function createSseJsonBridge() {
     },
     snapshot() {
       if (!responseId) return null
-      return { id: responseId, output: Array.isArray(output) ? output : [] }
+      return { id: responseId, output: replayOutput() }
     },
   }
 }
@@ -563,6 +585,7 @@ export function createResponsesWsHandler({
           activeResponseId = null
           activeHopCompleted = false
           const req = createProtocolReq(upgradeReq, hopBody)
+          req._kinResponsesWs = { replayExpanded: !!previousId }
           currentReq = req
           let hopClientAborted = false
           const res = createProtocolRes()

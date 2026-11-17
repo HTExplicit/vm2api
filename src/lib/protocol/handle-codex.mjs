@@ -2,6 +2,7 @@
  * Codex hop from handle-protocol. Claude convert/pool/CRS never runs here.
  */
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { resolveStreamIdleTimeoutMs } from '../core/config.mjs'
 import { upstreamRiskClientError } from './intercept-gate.mjs'
 import { buildAnthropicSseError } from './stream-truncation.mjs'
@@ -147,6 +148,43 @@ function sessionFrom(req, body) {
       body?.session_id ||
       null,
     previous_response_id: body?.previous_response_id || null,
+  }
+}
+
+/** Structural failure evidence only: never retain tool inputs, outputs or raw call IDs. */
+export function codexToolHistorySummary(body, req = {}) {
+  const input = Array.isArray(body?.input) ? body.input : []
+  const calls = new Set()
+  const missing = new Set()
+  let toolCallCount = 0
+  let toolOutputCount = 0
+  let unmatchedOutputCount = 0
+  for (const item of input) {
+    if (item?.type === 'function_call' || item?.type === 'custom_tool_call') {
+      toolCallCount++
+      calls.add(`${item.type}:${item.call_id}`)
+    } else if (item?.type === 'function_call_output' || item?.type === 'custom_tool_call_output') {
+      toolOutputCount++
+      if (!calls.has(`${item.type.slice(0, -7)}:${item.call_id}`)) {
+        unmatchedOutputCount++
+        if (missing.size < 8)
+          missing.add(
+            createHash('sha256')
+              .update(String(item.call_id || ''))
+              .digest('hex')
+              .slice(0, 12),
+          )
+      }
+    }
+  }
+  return {
+    transport: req._kinResponsesWs ? 'websocket' : 'http',
+    replayExpanded: req._kinResponsesWs?.replayExpanded === true,
+    inputCount: input.length,
+    toolCallCount,
+    toolOutputCount,
+    unmatchedOutputCount,
+    unmatchedCallIdHashes: [...missing],
   }
 }
 
@@ -1038,6 +1076,13 @@ export async function handleCodexProtocol({
           : (result?.firstByteMs ?? null)
         logBag.generation_ms = result?.generationMs ?? null
         logBag.failure_diagnostics = result?.failureDiagnostics ? { ...result.failureDiagnostics, kernelRunId } : null
+        if (Number(result?.status) === 400 && protocol === 'openai.responses') {
+          logBag.failure_diagnostics = {
+            ...logBag.failure_diagnostics,
+            kernelRunId,
+            responsesHistory: codexToolHistorySummary(outboundBody, req),
+          }
+        }
         if (conversionError) {
           result.ok = false
           result.status = 502

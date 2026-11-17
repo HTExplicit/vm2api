@@ -289,6 +289,164 @@ test('SSE bridge emits JSON frames and never treats [DONE] as completed', () => 
   assert.equal(bridge.snapshot().id, 'resp_1')
 })
 
+const historyItems = [
+  { type: 'reasoning', id: 'rs_history', encrypted_content: 'opaque-reasoning', summary: [] },
+  { type: 'function_call', id: 'fc_history', call_id: 'call_function', name: 'lookup', arguments: '{"q":"sample"}' },
+  {
+    type: 'custom_tool_call',
+    id: 'ctc_history',
+    call_id: 'call_custom',
+    namespace: 'functions',
+    name: 'exec',
+    input: 'text("中文\\n结果")',
+    status: 'completed',
+  },
+  { type: 'message', id: 'msg_history', role: 'assistant', content: [{ type: 'output_text', text: '工具已就绪' }] },
+]
+
+for (const [label, terminalOutput] of [
+  ['omitted', undefined],
+  ['empty', []],
+  ['partial', [historyItems[3]]],
+  ['complete', historyItems.map((item) => ({ ...item, status: 'completed' }))],
+]) {
+  test(`SSE replay keeps completed output items when terminal output is ${label}`, () => {
+    const bridge = createSseJsonBridge()
+    const terminal = { type: 'response.completed', response: { id: 'resp_history', status: 'completed' } }
+    if (terminalOutput !== undefined) terminal.response.output = terminalOutput
+    const events = [
+      { type: 'response.created', response: { id: 'resp_history', output: [] } },
+      { type: 'response.output_item.added', output_index: 2, item: { ...historyItems[2], input: '' } },
+      ...[2, 0, 3, 1].map((index) => ({
+        type: 'response.output_item.done',
+        output_index: index,
+        item: historyItems[index],
+      })),
+      terminal,
+    ]
+    const wire = events.map((event) => `event: ${event.type}\r\ndata: ${JSON.stringify(event)}\r\n\r\n`).join('')
+    for (let i = 0; i < wire.length; i += 7) bridge.push(wire.slice(i, i + 7))
+    bridge.finish()
+    assert.equal(bridge.terminal, 'completed')
+    assert.deepEqual(bridge.snapshot().output, label === 'complete' ? terminalOutput : historyItems)
+    assert.deepEqual(bridge.frames, events, 'replay assembly must not rewrite the client-visible frames')
+  })
+}
+
+test('SSE replay never promotes an added-only tool item to a completed call', () => {
+  const bridge = createSseJsonBridge()
+  for (const event of [
+    { type: 'response.created', response: { id: 'resp_partial', output: [] } },
+    { type: 'response.output_item.added', output_index: 0, item: historyItems[2] },
+    { type: 'response.custom_tool_call_input.delta', output_index: 0, item_id: 'ctc_history', delta: 'unfinished' },
+    { type: 'response.incomplete', response: { id: 'resp_partial', status: 'incomplete' } },
+  ])
+    bridge.push(`data: ${JSON.stringify(event)}\n\n`)
+  bridge.finish()
+  assert.equal(bridge.terminal, 'incomplete')
+  assert.deepEqual(bridge.snapshot().output, [])
+})
+
+for (const terminalOutput of [undefined, [], [historyItems[3]]]) {
+  test(`WebSocket tool continuation retains streamed calls with ${terminalOutput === undefined ? 'omitted' : terminalOutput.length ? 'partial' : 'empty'} terminal output`, async () => {
+    const hops = []
+    const live = await listen({
+      routing: ENABLED,
+      requireAuth: allowAuth,
+      async handleProtocol(req, res) {
+        const body = await readJson(req)
+        hops.push(body)
+        assert.equal(req._kinResponsesWs.replayExpanded, hops.length > 1)
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        if (hops.length === 1) {
+          for (const index of [2, 0, 3, 1]) {
+            res.write(
+              `data: ${JSON.stringify({ type: 'response.output_item.done', output_index: index, item: historyItems[index] })}\n\n`,
+            )
+          }
+          const response = { id: 'resp_tools', status: 'completed' }
+          if (terminalOutput !== undefined) response.output = terminalOutput
+          res.end(`data: ${JSON.stringify({ type: 'response.completed', response })}\n\n`)
+        } else {
+          assert.equal(body.previous_response_id, undefined)
+          assert.deepEqual(body.input.slice(1, 5), historyItems)
+          for (const result of body.input.filter((item) => item.type?.endsWith('_call_output'))) {
+            assert.ok(
+              body.input.some((item) => item.call_id === result.call_id && item.type === result.type.slice(0, -7)),
+            )
+          }
+          res.end(
+            `data: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp_after_tools', status: 'completed', output: [] } })}\n\n`,
+          )
+        }
+      },
+    })
+    const { ws } = await openWs(live.url, { authorization: 'Bearer sk-test' })
+    try {
+      const first = nextFrame(ws, (frame) => frame.type === 'response.completed')
+      ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-6.1-sol', input: 'fixture' }))
+      assert.equal((await first).response.id, 'resp_tools')
+      const second = nextFrame(ws, (frame) => frame.type === 'response.completed' || frame.type === 'error')
+      ws.send(
+        JSON.stringify({
+          type: 'response.create',
+          model: 'gpt-6.1-sol',
+          previous_response_id: 'resp_tools',
+          input: [
+            { type: 'function_call_output', call_id: 'call_function', output: 'sample result' },
+            { type: 'custom_tool_call_output', call_id: 'call_custom', output: '中文结果' },
+          ],
+        }),
+      )
+      assert.equal((await second).type, 'response.completed')
+      assert.equal(hops.length, 2)
+    } finally {
+      ws.close()
+      await once(ws, 'close')
+      await live.close()
+    }
+  })
+}
+
+for (const type of ['response.failed', 'response.incomplete']) {
+  test(`${type} never registers completed items as a successful continuation`, async () => {
+    let hops = 0
+    const live = await listen({
+      routing: ENABLED,
+      requireAuth: allowAuth,
+      async handleProtocol(_req, res) {
+        hops++
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        res.write(
+          `data: ${JSON.stringify({ type: 'response.output_item.done', output_index: 0, item: historyItems[2] })}\n\n`,
+        )
+        res.end(`data: ${JSON.stringify({ type, response: { id: 'resp_unsuccessful', status: type.slice(9) } })}\n\n`)
+      },
+    })
+    const { ws } = await openWs(live.url, { authorization: 'Bearer sk-test' })
+    try {
+      const failed = nextFrame(ws, (frame) => frame.type === type)
+      ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-6.1-sol', input: 'fixture' }))
+      await failed
+      const missing = nextFrame(ws, (frame) => frame.type === 'error')
+      ws.send(
+        JSON.stringify({
+          type: 'response.create',
+          model: 'gpt-6.1-sol',
+          previous_response_id: 'resp_unsuccessful',
+          input: [],
+        }),
+      )
+      assert.equal((await missing).error.code, 'previous_response_not_found')
+      assert.equal(hops, 1)
+    } finally {
+      ws.close()
+      await once(ws, 'close')
+      await live.close()
+    }
+  })
+}
+
 test('disabled gates reject the handshake with zero upstream hops', async () => {
   const hops = []
   const live = await listen({

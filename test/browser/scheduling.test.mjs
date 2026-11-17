@@ -80,7 +80,17 @@ test('early seven-column list preserves sorting, live counts, API access and det
     schedule_level: 6,
     schedule_level_mode: 'auto',
     has_token: true,
+    credential_mode: 'oauth',
+    auth_scheme: 'authorization_bearer',
     email: 'offline@example.test',
+    today_requests: 12,
+    today_cost: 0.24,
+    today_tokens: 426200,
+    window_7d_requests: 550,
+    window_7d_success: 528,
+    window_7d_errors: 22,
+    window_7d_cost: 71.72,
+    total_cost: 71.72,
     reset_7d: '2026-11-21T01:00:00Z',
     utilization_5h: 0.42,
     utilization_7d: 0.18,
@@ -254,13 +264,26 @@ test('early seven-column list preserves sorting, live counts, API access and det
   assert.equal(await page.locator('[data-slot="priority-segment"]').count(), 0)
   assert.equal(await row.getByRole('cell').nth(2).getByRole('switch').count(), 1)
   assert.equal(await row.getByRole('cell').nth(3).getByText(/P6/).count(), 1)
-  assert.match(await rowOf('offline-available-codex').getByRole('cell').nth(5).innerText(), /请求中\s*3/)
-  assert.match(await row.getByRole('cell').nth(5).innerText(), /请求中\s*3/)
+  assert.equal(
+    await rowOf('offline-available-codex').getByRole('cell').nth(4).locator('[data-vm-requesting="3"]').count(),
+    1,
+  )
+  assert.equal(await row.getByRole('cell').nth(4).locator('[data-vm-requesting="3"]').count(), 1)
+  assert.doesNotMatch(await row.getByRole('cell').nth(5).innerText(), /请求中/)
   assert.match(await rowOf('offline-claude-seats').getByRole('cell').nth(5).textContent(), /席位 2\/5/)
-  assert.match(await rowOf('offline-claude-seats').getByRole('cell').nth(5).innerText(), /排队\s*1/)
+  assert.match(await rowOf('offline-claude-seats').getByRole('cell').nth(4).innerText(), /排队\s*1/)
   assert.equal(await rowOf('offline-manual6').getByText('24h 无请求', { exact: true }).count(), 1)
   assert.equal(await rowOf('offline-manual10').getByText('24h 未知', { exact: true }).count(), 1)
-  assert.ok((await page.getByLabel(/额度待刷新/).count()) > 0)
+  assert.equal(await page.getByLabel(/额度待刷新/).count(), 0)
+  assert.equal(await row.getByText('余额 12.5 点', { exact: true }).count(), 0)
+  assert.equal(await row.getByRole('button', { name: 'API配置', exact: true }).count(), 1)
+  const refresh = page.getByRole('button', { name: '刷新离线数据', exact: true })
+  for (const inflight of [0, 2, 3]) {
+    vm.inflight = inflight
+    await refresh.click()
+    if (inflight) await row.locator(`[data-vm-requesting="${inflight}"]`).waitFor()
+    else await row.locator('[data-vm-requesting]').waitFor({ state: 'detached' })
+  }
   await page.getByLabel('全局汇总', { exact: true }).waitFor()
   const order = () => page.locator('[data-vm-row]').evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')))
   const initialOrder = await order()
@@ -389,7 +412,7 @@ test('early seven-column list preserves sorting, live counts, API access and det
   })
   await emptyDetail.getByText('该时段无请求', { exact: true }).waitFor()
   await page.getByRole('button', { name: '收起 offline-manual6 明细', exact: true }).click()
-  const screenshots = path.join(root, '.tmp/136-ui')
+  const screenshots = path.join(root, '.tmp/13602-ui')
   fs.mkdirSync(screenshots, { recursive: true })
   const checkLayout = async () => {
     const cells = rowOf(longId).getByRole('cell')

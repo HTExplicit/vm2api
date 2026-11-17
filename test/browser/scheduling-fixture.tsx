@@ -31,7 +31,10 @@ function Fixture() {
   const nothing = () => {};
   return (
     <main className="space-y-4 p-6">
-      <h1 className="text-xl font-semibold">列表调度控制</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-semibold">列表调度控制</h1>
+        <button onClick={() => rows.refetch()}>刷新离线数据</button>
+      </div>
       <VmActionsContext.Provider
         value={{
           openDetail: () => setDetails((count) => count + 1),
