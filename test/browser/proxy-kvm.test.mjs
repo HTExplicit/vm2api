@@ -259,7 +259,7 @@ test('KVM CRAG reinstall confirms once and respects stopped slots and permission
   await dialog.waitFor()
   await page.waitForFunction(() => document.activeElement?.textContent === '取消')
   assert.match(await dialog.innerText(), /停止的槽保持停止/)
-  assert.match(await dialog.innerText(), /CRAG 当前缓存标签：crag-3\.1\.1（标准 3\.1\.1）/)
+  assert.match(await dialog.innerText(), /CRAG 安装版本：crag-3\.1\.1（标准 3\.1\.1）/)
   assert.equal(installs.length, 0, 'opening a reinstall dialog does not install')
   await dialog.getByRole('button', { name: '取消', exact: true }).click()
   await dialog.waitFor({ state: 'hidden' })
@@ -632,7 +632,7 @@ test(
 )
 
 test(
-  "confirmed Docker CRAG reinstall pins the target and requests subscription authorization",
+  "confirmed Docker CRAG reinstall pins the target for automatic subscription admission",
   {
     timeout: 60_000,
   },
@@ -715,7 +715,7 @@ test(
     const dialog = page.getByRole("alertdialog");
     await trigger.click();
     await dialog.waitFor();
-    assert.match(await dialog.innerText(), /否则使用一个剩余订阅名额/);
+    assert.match(await dialog.innerText(), /CRAG 会在停机前校验授权和运行名额/);
     assert.equal(installs.length, 0);
     await dialog.getByRole("button", { name: "取消", exact: true }).click();
     await dialog.waitFor({ state: "hidden" });
@@ -732,7 +732,7 @@ test(
     assert.deepEqual(installs, [
       {
         targets: [
-          { id: vm.id, kernel: "crag", payload_tag: payloadTag, reissue: true },
+          { id: vm.id, kernel: "crag", payload_tag: payloadTag },
         ],
       },
     ]);
