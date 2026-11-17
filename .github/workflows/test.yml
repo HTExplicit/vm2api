@@ -64,9 +64,9 @@ jobs:
       - name: egress timeout and DNS regressions
         working-directory: worker
         run: go test -race ./internal/egress ./internal/proxy
-      - name: prepare fixed OAuth helper
+      - name: prepare fixed OAuth and Responses helpers
         run: |
-          node --input-type=module -e "import fs from 'node:fs'; const p = JSON.parse(fs.readFileSync('deploy/payload.json')); p.files = p.files.filter(f => f.path === 'bin/kin-oauth-auth'); fs.writeFileSync('/tmp/oauth-payload.json', JSON.stringify(p));"
+          node --input-type=module -e "import fs from 'node:fs'; const p = JSON.parse(fs.readFileSync('deploy/payload.json')); p.files = p.files.filter(f => ['bin/kin-oauth-auth', 'bin/kin-kernel', 'share/wrap-cli/cli-node'].includes(f.path)); fs.writeFileSync('/tmp/oauth-payload.json', JSON.stringify(p));"
           node scripts/fetch-payload.mjs --manifest /tmp/oauth-payload.json
       - name: focused backend regressions
         shell: bash
@@ -75,6 +75,7 @@ jobs:
           failed=0
           for file in \
             test/unit/forced-tool-choice.test.mjs \
+            test/unit/egress-container-runtime.test.mjs \
             test/unit/haiku-55-policy.test.mjs \
             test/unit/opus-55-policy.test.mjs \
             test/unit/model-policy-fable51.test.mjs \
@@ -94,12 +95,15 @@ jobs:
             test/unit/slot-shell-rc.test.mjs \
             test/unit/crs-persona.test.mjs \
             test/unit/anthropic-policy.test.mjs \
+            test/unit/sanitize.test.mjs \
             test/unit/cache-ttl.test.mjs \
             test/unit/cache-breakpoints.test.mjs \
+            test/unit/system-message-cache.test.mjs \
             test/unit/claude-reset-credits.test.mjs \
             test/unit/claude-reset-routes.test.mjs \
             test/unit/cli-hop-body.test.mjs \
             test/unit/convert-cache-shape.test.mjs \
+            test/unit/convert-stream.test.mjs \
             test/unit/max-tokens-default.test.mjs \
             test/unit/outbound-parity.test.mjs \
             test/unit/routing-redaction-budget.test.mjs \
@@ -203,6 +207,7 @@ jobs:
             test/unit/api-scheduler.test.mjs \
             test/unit/failover-runner.test.mjs \
             test/unit/pool-scheduler.test.mjs \
+            test/unit/quota-window.test.mjs \
             test/unit/scheduler-fastpath.test.mjs \
             test/unit/seat-planner.test.mjs \
             test/unit/quota-critical-band.test.mjs \
@@ -270,6 +275,7 @@ jobs:
             test/unit/vm-test-chat-billing.test.mjs \
             test/unit/kernel-catalog.test.mjs \
             test/unit/kernel-install.test.mjs \
+            test/unit/kernel-seat-release.test.mjs \
             test/unit/kernel-switch-recovery.test.mjs \
             test/unit/crag-update.test.mjs \
             test/unit/crag-factory.test.mjs \
@@ -333,6 +339,11 @@ jobs:
             node --test "$file" || failed=$((failed + 1))
           done
           test "$failed" -eq 0
+      - name: Claude Responses with offline upstream
+        env:
+          KIN_RESPONSES_KERNEL: ${{ github.workspace }}/bin/kin-kernel
+          KIN_RESPONSES_CLI: ${{ github.workspace }}/share/wrap-cli/cli-node
+        run: node --test test/e2e/openai-responses.e2e.test.mjs
       - name: Model defaults fill missing output budgets
         run: node --test --test-name-pattern='^officialMessagesBody keeps a caller max_tokens and fills a missing one from the model$' test/unit/crs-clean.test.mjs
       - name: Inline tool beta reaches the final CLI hop

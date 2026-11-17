@@ -5,7 +5,7 @@ import OpenAI from '@lobehub/icons/es/OpenAI/components/Mono'
 import { credentialRegistrationOf } from '@/lib/cred-type'
 import { tierVisual } from '@/lib/tier-visual'
 import { cn } from '@/lib/utils'
-import { isCodexVm } from '@/lib/vm-kind'
+import { clipLabel, isCodexVm } from '@/lib/vm-kind'
 import { claudeTier } from '@/lib/vm-status'
 import { ActiveVmBadge } from '@/features/vm/active-vm-badge'
 import { CodexQuotaSampleStatus } from '@/features/vm/codex-quota-sample-status'
@@ -31,9 +31,13 @@ export function PlatformMark({ vm }: { vm: Vm }) {
 export function VmAccountIdentity({
   vm,
   showQuotaSample = true,
+  compactLabels = true,
+  showRegistration = true,
 }: {
   vm: Vm
   showQuotaSample?: boolean
+  compactLabels?: boolean
+  showRegistration?: boolean
 }) {
   const email = vm.email?.trim() || ''
   const registration = credentialRegistrationOf(vm)
@@ -41,18 +45,33 @@ export function VmAccountIdentity({
   const node = vm.node_name || vm.node_id || 'local'
   return (
     <div className='min-w-0 space-y-0.5'>
-      <div className='flex min-w-0 items-center gap-1.5 text-[11px]'>
+      <div
+        className={cn(
+          'flex min-w-0 items-center gap-1.5',
+          compactLabels ? 'text-[11px]' : 'text-xs'
+        )}
+      >
         <PlatformMark vm={vm} />
         <span
           className='truncate font-mono font-medium'
-          title={vm.name || vm.id}
+          title={compactLabels ? vm.name || vm.id : vm.id}
         >
-          {vm.gemini ? vm.name : vm.id}
+          {compactLabels
+            ? clipLabel(vm.gemini ? vm.name || vm.id : vm.id)
+            : vm.gemini
+              ? vm.name || vm.id
+              : vm.id}
         </span>
       </div>
       <div className='flex min-w-0 items-center gap-1.5'>
-        <div className='truncate text-xs font-semibold' title={email}>
-          {email || '未绑定邮箱'}
+        <div
+          className={cn(
+            'truncate font-semibold',
+            compactLabels ? 'text-xs' : 'text-sm'
+          )}
+          title={email || undefined}
+        >
+          {email ? (compactLabels ? clipLabel(email) : email) : '未绑定邮箱'}
         </div>
         <ActiveVmBadge vm={vm} />
         {showQuotaSample ? <CodexQuotaSampleStatus vm={vm} compact /> : null}
@@ -73,8 +92,12 @@ export function VmAccountIdentity({
         <span>
           {vm.gemini ? '宿主机' : vm.runtime_type === 'kvm' ? 'kvm' : 'vm'}
         </span>
-        <span aria-hidden='true'>|</span>
-        <span>{registration === 'none' ? '无凭证' : registration}</span>
+        {showRegistration ? (
+          <>
+            <span aria-hidden='true'>|</span>
+            <span>{registration === 'none' ? '无凭证' : registration}</span>
+          </>
+        ) : null}
         <VmRentedMark vm={vm} />
       </div>
       <div className='flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground'>

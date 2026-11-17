@@ -13,7 +13,7 @@ const { default: react } = await import(pathToFileURL(webRequire.resolve('@vitej
 const { default: tailwindcss } = await import(pathToFileURL(webRequire.resolve('@tailwindcss/vite')))
 const fixture = fileURLToPath(new URL('./scheduling-fixture.tsx', import.meta.url)).replaceAll('\\', '/')
 
-test('official compact list preserves sorting, live counts, API access and detail permissions', {
+test('early seven-column list preserves sorting, live counts, API access and detail permissions', {
   timeout: 90_000,
 }, async (t) => {
   assert.ok(process.env.UI_BROWSER_EXE, 'UI_BROWSER_EXE must point to an installed test Chromium')
@@ -249,22 +249,22 @@ test('official compact list preserves sorting, live counts, API access and detai
   const row = rowOf('offline-slot')
   const table = page.getByRole('table', { name: '槽位列表', exact: true })
   await row.waitFor()
-  assert.equal(await row.evaluate((el) => el.getBoundingClientRect().height), 44)
-  assert.equal(await table.getByRole('columnheader').count(), 16)
+  assert.ok(await row.evaluate((el) => el.getBoundingClientRect().height >= 76))
+  assert.equal(await table.getByRole('columnheader').count(), 9)
   assert.equal(await page.locator('[data-slot="priority-segment"]').count(), 0)
   assert.equal(await row.getByRole('cell').nth(2).getByRole('switch').count(), 1)
-  assert.equal(await row.getByRole('cell').nth(2).getByText('P6', { exact: true }).count(), 1)
-  assert.equal(await rowOf('offline-available-codex').getByRole('cell').nth(10).innerText(), '3')
-  assert.equal(await row.getByRole('cell').nth(10).innerText(), '3')
-  assert.equal(await rowOf('offline-claude-seats').getByRole('cell').nth(8).innerText(), '2/5')
-  assert.equal(await rowOf('offline-claude-seats').getByRole('cell').nth(9).innerText(), '1')
+  assert.equal(await row.getByRole('cell').nth(3).getByText(/P6/).count(), 1)
+  assert.match(await rowOf('offline-available-codex').getByRole('cell').nth(5).innerText(), /请求中\s*3/)
+  assert.match(await row.getByRole('cell').nth(5).innerText(), /请求中\s*3/)
+  assert.match(await rowOf('offline-claude-seats').getByRole('cell').nth(5).textContent(), /席位 2\/5/)
+  assert.match(await rowOf('offline-claude-seats').getByRole('cell').nth(5).innerText(), /排队\s*1/)
   assert.equal(await rowOf('offline-manual6').getByText('24h 无请求', { exact: true }).count(), 1)
   assert.equal(await rowOf('offline-manual10').getByText('24h 未知', { exact: true }).count(), 1)
-  assert.equal(await page.getByLabel(/额度待刷新/).count(), 0)
+  assert.ok((await page.getByLabel(/额度待刷新/).count()) > 0)
   await page.getByLabel('全局汇总', { exact: true }).waitFor()
   const order = () => page.locator('[data-vm-row]').evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')))
   const initialOrder = await order()
-  const healthSort = table.getByRole('button', { name: '健康 · 24h', exact: true })
+  const healthSort = table.getByRole('button', { name: '状态', exact: true })
   await healthSort.focus()
   await page.keyboard.press('Enter')
   assert.equal(await healthSort.evaluate((el) => el === document.activeElement), true)
@@ -273,24 +273,28 @@ test('official compact list preserves sorting, live counts, API access and detai
   assert.equal(await healthSort.locator('..').getAttribute('aria-sort'), 'descending')
   await healthSort.click()
   assert.deepEqual(await order(), initialOrder)
-  const seatsSort = table.getByRole('button', { name: '席位', exact: true })
-  await seatsSort.click()
-  assert.match((await order())[0], /^offline-claude-seats，/)
-  await seatsSort.click()
-  await seatsSort.click()
+  const quotaSort = table.getByRole('button', { name: '用量窗口', exact: true })
+  await quotaSort.click()
+  assert.ok((await order())[0].startsWith(`${longId}，`))
+  await quotaSort.click()
+  await quotaSort.click()
+  await page.getByRole('button', { name: '显示', exact: true }).click()
   const grouping = page.getByRole('button', { name: '按状态分组', exact: true })
   const secondary = page.getByRole('button', { name: '次要信息常显', exact: true })
   assert.equal(await grouping.getAttribute('aria-pressed'), 'false')
   assert.equal(await secondary.getAttribute('aria-pressed'), 'false')
   await grouping.click()
   await row.waitFor({ state: 'hidden' })
+  await page.keyboard.press('Escape')
   await page.getByRole('button', { name: /关闭调用.*1 台/ }).click()
   await row.waitFor()
+  await page.getByRole('button', { name: '显示', exact: true }).click()
   await grouping.click()
   await secondary.click()
   assert.equal(await page.locator('[data-vm-table]').getAttribute('data-pin'), 'true')
   await secondary.click()
   assert.equal(await page.locator('[data-vm-table]').getAttribute('data-pin'), 'false')
+  await page.keyboard.press('Escape')
   const scroll = page.locator('[data-vm-table]')
   const leftBefore = await row.getByRole('cell').nth(1).boundingBox()
   await scroll.evaluate((el) => {
@@ -385,38 +389,44 @@ test('official compact list preserves sorting, live counts, API access and detai
   })
   await emptyDetail.getByText('该时段无请求', { exact: true }).waitFor()
   await page.getByRole('button', { name: '收起 offline-manual6 明细', exact: true }).click()
-  const screenshots = path.join(root, '.tmp/130-ui')
+  const screenshots = path.join(root, '.tmp/136-ui')
   fs.mkdirSync(screenshots, { recursive: true })
   const checkLayout = async () => {
     const cells = rowOf(longId).getByRole('cell')
     const primary = cells.nth(1)
     const account = primary.getByText(longId, { exact: true })
-    assert.equal(await account.evaluate((el) => el.scrollWidth > el.clientWidth), true)
+    assert.equal(await account.getAttribute('title'), longId)
+    assert.ok(
+      await account.evaluate(
+        (el) => el.getBoundingClientRect().right <= el.parentElement.getBoundingClientRect().right + 1,
+      ),
+    )
     const kernel = primary.getByText('默认', { exact: true })
     const p = await primary.boundingBox(),
       k = await kernel.boundingBox()
     assert.ok(k.x >= p.x && k.x + k.width <= p.x + p.width)
-    for (const index of [4, 5]) {
-      const block = cells.nth(index).locator('div').first()
-      const children = await block.locator(':scope > span').evaluateAll((els) =>
+    const windows = cells.nth(6).locator('[data-window-readout]')
+    assert.ok((await windows.count()) >= 2)
+    for (const block of await windows.all()) {
+      const parts = await block.locator(':scope > *').evaluateAll((els) =>
         els.map((el) => {
-          const r = el.getBoundingClientRect()
+          const box = el.getBoundingClientRect()
           return {
-            y: r.y,
-            bottom: r.bottom,
-            width: r.width,
+            y: box.y,
+            bottom: box.bottom,
             scroll: el.scrollWidth,
             client: el.clientWidth,
             opacity: getComputedStyle(el).opacity,
           }
         }),
       )
-      assert.equal(children.length, 3)
-      assert.ok(children[0].bottom <= children[1].y && children[1].bottom <= children[2].y)
-      assert.ok(children[2].scroll <= children[2].client)
-      assert.equal(children[2].opacity, '1')
+      assert.equal(parts.length, 4)
+      assert.ok(parts.every((part) => Math.abs((part.y + part.bottom) / 2 - (parts[0].y + parts[0].bottom) / 2) < 2))
+      assert.ok(parts[3].scroll <= parts[3].client)
+      assert.equal(parts[3].opacity, '1')
     }
   }
+
   const capture = async (name) => {
     await checkLayout()
     await scroll.evaluate((el) => {
@@ -442,7 +452,7 @@ test('official compact list preserves sorting, live counts, API access and detai
   await page.evaluate(() => {
     document.documentElement.style.zoom = '1.5'
   })
-  assert.equal(await row.evaluate((el) => el.getBoundingClientRect().height), 66)
+  assert.ok(await row.evaluate((el) => el.getBoundingClientRect().height >= 114))
   await capture('dark-150pct')
   await page.evaluate(() => {
     document.documentElement.style.zoom = ''

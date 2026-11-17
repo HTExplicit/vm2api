@@ -407,6 +407,9 @@ function classifyUpstreamResultRaw(
       retrySameAccount: false,
     }
   }
+  if (code === 'license_crag_host_over_quota' && result.upstreamExecutions === 0 && !result.committed) {
+    return continueWithoutCooldown({ scope: 'worker', reason: code, retrySameAccount: false })
+  }
   if (/Claude native launch failed/i.test(message)) {
     return {
       scope: 'worker',

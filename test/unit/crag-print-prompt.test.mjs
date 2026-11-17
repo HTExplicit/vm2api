@@ -16,6 +16,7 @@ import {
   trackCallerSystemBlock,
 } from '../../src/lib/protocol/crag-print-prompt.mjs'
 import { sanitizeAnthropicBody } from '../../src/lib/protocol/sanitize.mjs'
+import { prepareCragRequest } from '../../src/lib/protocol/kernel-request.mjs'
 import { agentBody } from '../fixtures/agent-summary.mjs'
 
 const billing = 'x-anthropic-billing-header: cc_version=2.1.317'
@@ -25,6 +26,58 @@ const guidance = 'Bias toward working.'
 
 const cwdTag = (cwd) => `<cwd>\n${cwd}\n</cwd>`
 const callerCwdFromSystem = (system) => callerCwdDeclaration(system)?.cwd ?? null
+
+test('CRAG provider compatibility keeps the caller system and requires advertised tool support', () => {
+  const body = {
+    model: 'claude-sonnet-5-5',
+    system: [{ type: 'text', text: 'Policy', cache_control: { type: 'ephemeral' } }],
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'Sample' }] }],
+    tools: [
+      ...Array.from({ length: 47 }, (_, index) => ({ name: `client_${index}`, input_schema: { type: 'object' } })),
+      { type: 'web_search_20250305', name: 'web_search', max_uses: 2 },
+    ],
+  }
+  const legacy = ['generation_controls_v3', 'prompt_replace', 'prompt_append']
+  const capabilities = [...legacy, 'provider_managed_tools_v1']
+  for (const preset of ['zero', 'official_full']) {
+    const projected = prepareCragPrintBody(body, { preset, capabilities })
+    const request = prepareCragRequest(projected, { capabilities })
+    assert.deepEqual(request.system, body.system)
+    assert.deepEqual(request.tools, body.tools)
+    assert.equal(request.crag_prompt, undefined)
+  }
+  assert.throws(() => prepareCragRequest(body, { capabilities: legacy }), {
+    message: /^tools\[47\]\.type:/,
+    code: 'invalid_kernel_request',
+  })
+  assert.throws(() => prepareCragRequest(body, { capabilities: [] }), {
+    message: /^tools\[47\]\.type:/,
+  })
+  assert.throws(
+    () => prepareCragRequest({ ...body, crag_prompt: { mode: 'replace', text: 'Policy' } }, { capabilities }),
+    {
+      message: /^crag_prompt:/,
+    },
+  )
+  assert.throws(
+    () =>
+      prepareCragRequest({ ...body, tools: [{ type: 'web_search_20990101', name: 'web_search' }] }, { capabilities }),
+    { message: /^tools\[0\]\.type:/ },
+  )
+  const replay = {
+    ...body,
+    tools: body.tools.slice(0, 1),
+    messages: [
+      body.messages[0],
+      {
+        role: 'assistant',
+        content: [{ type: 'server_tool_use', id: 'srvtoolu_example', name: 'web_search', input: {} }],
+      },
+      { role: 'user', content: [{ type: 'text', text: 'Continue' }] },
+    ],
+  }
+  assert.deepEqual(prepareCragPrintBody(replay, { preset: 'zero', capabilities }), replay)
+})
 
 test('caller cwd accepts a single standalone absolute path from the raw system', () => {
   const posix = '/synthetic/work space/项目'
@@ -208,6 +261,58 @@ test('official passthrough does not append the caller system', () => {
   )
   assert.equal(out.system, undefined)
   assert.equal(out.crag_prompt, undefined)
+})
+
+test('native CRAG normalizes inline image aliases without moving content or tool results', () => {
+  const cache = { type: 'ephemeral' }
+  const alias = { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAB' }, cache_control: cache }
+  const image = {
+    type: 'image',
+    source: { type: 'base64', media_type: 'image/png', data: 'AAAB' },
+    cache_control: cache,
+  }
+  const before = { type: 'text', text: 'before' }
+  const after = { type: 'text', text: 'after' }
+  const result = { type: 'tool_result', tool_use_id: 'toolu_example', is_error: true, content: [before, alias, after] }
+  const remote = { type: 'image_url', image_url: 'https://example.invalid/image.png' }
+  const messages = [
+    { role: 'user', content: [before, alias, after, remote] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: result.tool_use_id, name: 'lookup', input: {} }] },
+    { role: 'user', content: [result, after] },
+  ]
+  const expected = [
+    { ...messages[0], content: [before, image, after, remote] },
+    messages[1],
+    { ...messages[2], content: [{ ...result, content: [before, image, after] }, after] },
+  ]
+  const body = { messages }
+  const original = structuredClone(body)
+  const options = { capabilities: ['prompt_append', 'generation_controls_v3'] }
+  assert.deepEqual(prepareCragPrintBody(body, options).messages, expected)
+  assert.deepEqual(prepareCragPrintBody({ messages: expected }, options).messages, expected)
+  assert.deepEqual(prepareCragPrintBody(body, { capabilities: ['prompt_append'] }).messages, messages)
+  assert.deepEqual(body, original)
+})
+
+test('native CRAG rejects invalid or lossy inline image aliases, including in tool results', () => {
+  const options = { capabilities: ['prompt_append', 'generation_controls_v3'] }
+  for (const imageUrl of [
+    null,
+    {},
+    { url: 123 },
+    'data:image/png;base64,!!==',
+    'data:text/plain;base64,AAAB',
+    'data:image/png,AAAB',
+    { url: 'data:image/png;base64,AAAB', detail: 'high' },
+  ]) {
+    const block = { type: 'image_url', image_url: imageUrl }
+    for (const content of [[block], [{ type: 'tool_result', tool_use_id: 'toolu_example', content: [block] }]]) {
+      assert.throws(
+        () => prepareCragPrintBody({ messages: [{ role: 'user', content }] }, options),
+        (error) => error.status === 400 && error.body.error.code === 'invalid_image_url',
+      )
+    }
+  }
 })
 
 test('caller tail drops billing lines and non-text blocks', () => {
@@ -407,7 +512,13 @@ test('V3 system text preserves caller cache markers only with the declared capab
   const out = prepareCragPrintBody(body, {
     capabilities: ['prompt_append', 'generation_controls_v3', 'system_text_cache_v3'],
   })
-  assert.deepEqual(out.crag_prompt, { mode: 'append', text: 'caller', blocks: body.system })
+  assert.equal(out.crag_prompt, undefined)
+  assert.deepEqual(out.system, body.system)
+  const zero = prepareCragPrintBody(body, {
+    preset: 'zero',
+    capabilities: ['prompt_replace', 'generation_controls_v3', 'system_text_cache_v3'],
+  })
+  assert.deepEqual(zero.crag_prompt, { mode: 'replace', text: 'caller', blocks: body.system })
   assert.deepEqual(body.system[0].cache_control, cache)
   const unsupported = { system: [{ type: 'text', text: 'caller', metadata: { origin: 'caller' } }] }
   assert.throws(
@@ -524,4 +635,22 @@ test('an agent summary leaves no unpaired tool_use for CRAG (history tool_result
     ['other'],
   )
   assert.equal(answered.length, 0)
+})
+
+test('summary cleanup turns ToolSearch tool_reference results into text', () => {
+  const body = agentBody({ summary: true })
+  const current = body.messages[2].content[0]
+  current.content = [{ type: 'tool_reference', tool_name: 'Monitor' }]
+  const before = structuredClone(body)
+  const out = prepareCragPrintBody(body, { agentSummary: true, officialPassthrough: true, foldSystemMessages: false })
+  const blocks = out.messages[2].content
+  // CRAG rejects a top-level tool_reference as "unsupported native history block".
+  assert.ok(blocks.every((block) => block.type === 'text'))
+  assert.deepEqual(blocks.slice(0, 2), [
+    { type: 'text', text: `[tool result ${current.tool_use_id}]` },
+    { type: 'text', text: '[tool_reference Monitor]' },
+  ])
+  assert.deepEqual(body, before)
+  // Outside a summary fork the live tool_reference continuation is untouched.
+  assert.deepEqual(prepareCragPrintBody(body, { foldSystemMessages: false }).messages, before.messages)
 })

@@ -95,7 +95,10 @@ export function observeUpstreamRisk({ inbound, body, identity, result, logBag, r
   if (message) logBag.error_message = message
   logBag.error_code ||= 'content_filter_refusal'
   if (!policy?.enabled) return reason
-  const fingerprint = reason === 'upstream:flagged_session' ? null : refusalFingerprint(body, inbound)
+  const fingerprint =
+    reason === 'upstream:flagged_session' || reason === 'upstream:extra_usage_session'
+      ? null
+      : refusalFingerprint(body, inbound)
   try {
     if (fingerprint)
       repo?.remember?.({
@@ -119,7 +122,7 @@ export function upstreamRiskClientError(reason, requestId) {
   return makeRefusalGuardError({
     requestId,
     message:
-      reason === 'upstream:flagged_session'
+      reason === 'upstream:flagged_session' || reason === 'upstream:extra_usage_session'
         ? '上游已标记此会话，请勿继续使用此会话。'
         : reason === 'upstream:configured_policy'
           ? '上游因内容策略拒绝了此请求，请勿重试。'
@@ -252,20 +255,24 @@ export async function evaluateProtocolIntercept({
         reason: `blocked_tool:${tool.name}`,
       })
     }
-    rawDocument = jevDocument(inbound, body, { ...interceptOpts, keepPromptReminders: true })
-    const system = systemRewrite(prepareInterceptText(rawDocument, { stripReminders: false, stripEnvironment: false }))
-    if (system) {
-      const error = hardPolicyError(requestId, 'system_prompt_rewrite_blocked', '不允许改写或绕过系统提示词。')
-      return reject({
-        kind: 'hard_regex',
-        via: 'hard-regex',
-        final_state: 'policy_blocked',
-        error,
-        intercept: gateVerdict({ kind: 'block', by: 'hard-regex', keyword: system, rule: 'system_prompt_rewrite' }),
-        banDevice: true,
-        forceDeviceBan: true,
-        reason: 'system_prompt_rewrite',
-      })
+    if (audit?.block_system_prompt_rewrite !== false) {
+      rawDocument = jevDocument(inbound, body, { ...interceptOpts, keepPromptReminders: true })
+      const system = systemRewrite(
+        prepareInterceptText(rawDocument, { stripReminders: false, stripEnvironment: false }),
+      )
+      if (system) {
+        const error = hardPolicyError(requestId, 'system_prompt_rewrite_blocked', '不允许改写或绕过系统提示词。')
+        return reject({
+          kind: 'hard_regex',
+          via: 'hard-regex',
+          final_state: 'policy_blocked',
+          error,
+          intercept: gateVerdict({ kind: 'block', by: 'hard-regex', keyword: system, rule: 'system_prompt_rewrite' }),
+          banDevice: true,
+          forceDeviceBan: true,
+          reason: 'system_prompt_rewrite',
+        })
+      }
     }
   }
   const routeTarget = backend === 'api' ? audit?.downgrade_endpoint : audit?.downgrade_pool

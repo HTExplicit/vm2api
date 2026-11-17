@@ -20,6 +20,7 @@ const licenseMessages: Record<string, string> = {
     '注册码无法通过校验，可能不完整、已被修改或签发密钥不匹配。请重新复制完整注册码，或联系授权方重新签发。',
   license_binding_mismatch:
     '注册码不属于本槽或当前机器。请使用下方机器码申请匹配的注册码。',
+  license_crag_host_over_quota: '本槽超出宿主订阅额度，已暂停调度。',
   license_payload_key_mismatch:
     '注册码对应另一版 CRAG 内核。请复制含载荷 ID 的机器码，向授权方申请匹配当前版本的注册码。',
   license_unconfigured:
@@ -151,24 +152,14 @@ export function CragLicenseEditor({
   data,
   loading,
   loadError,
-  activationError,
-  registrationCode,
-  activating,
-  onChange,
   onRefresh,
-  onActivate,
   onClose,
 }: {
   vmId: string
   data?: CragLicenseResponse
   loading: boolean
   loadError: unknown
-  activationError: unknown
-  registrationCode: string
-  activating: boolean
-  onChange: (code: string) => void
   onRefresh: () => void
-  onActivate: () => void
   onClose: () => void
 }) {
   const formId = useId()
@@ -179,7 +170,7 @@ export function CragLicenseEditor({
         licenseMessages[statusCodes[license.status]] ||
         '授权状态未知。请刷新状态，并联系管理员检查授权配置。'
       : null
-  const busy = loading || activating
+  const busy = loading
 
   return (
     <section
@@ -232,14 +223,6 @@ export function CragLicenseEditor({
           {statusMessage}
         </p>
       ) : null}
-      <CragActivationForm
-        code={registrationCode}
-        disabled={busy || !data || !!loadError}
-        activating={activating}
-        error={activationError}
-        onChange={onChange}
-        onActivate={onActivate}
-      />
       <CragHostSubscription vmId={vmId} />
       {data?.machine_code ? (
         <details className='space-y-2'>
@@ -353,7 +336,7 @@ export function CragActivationForm({
           id={`${formId}-registration-help`}
           className='text-xs leading-relaxed text-muted-foreground'
         >
-          系统自动识别订阅码、设备兑换码、设备注册码和离线通用码。订阅码兑换到本机后无法转移；系统会为目标槽绑定应用锁，新套餐额度会替换现有额度。离线通用码会同步到所有兼容槽位。
+          系统自动识别订阅码、设备兑换码、设备注册码和离线通用码。提交前请核对目标槽和本机；授权状态及适用范围以服务端确认为准。
         </p>
       </div>
       {error ? (

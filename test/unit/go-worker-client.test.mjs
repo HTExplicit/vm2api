@@ -305,6 +305,37 @@ test('setup-token cli-hop summarizes hidden thinking by default and keeps update
   assert.ok(passed.body.betas.includes('thinking-display-updates-2026-08-18'))
 })
 
+test('CRAG aligns sampling after resolving explicit or default thinking', () => {
+  const exec = { workerStatus: { runtime_variant: 'crag-v2', capabilities: ['generation_controls_v3'] } }
+  const sampling = { temperature: 0.5, top_p: 0.9, top_k: 10 }
+  for (const [thinking, expectedType] of [
+    [undefined, 'adaptive'],
+    [{ type: 'adaptive' }, 'adaptive'],
+    [{ type: 'enabled', budget_tokens: 1024 }, 'enabled'],
+    [{ type: 'disabled' }, 'disabled'],
+  ]) {
+    const { body } = finalizeWorkerPayload({
+      body: {
+        model: thinking?.type === 'adaptive' || !thinking ? 'claude-opus-5-5' : 'claude-opus-4-8',
+        max_tokens: 2048,
+        messages: [{ role: 'user', content: 'hello' }],
+        thinking,
+        ...sampling,
+      },
+      exec,
+      cliHop: true,
+    })
+    assert.equal(body.thinking.type, expectedType)
+    if (expectedType === 'disabled') {
+      for (const [key, value] of Object.entries(sampling)) assert.equal(body[key], value)
+      continue
+    }
+    assert.equal(body.temperature, 1)
+    assert.equal(Object.hasOwn(body, 'top_p'), false)
+    assert.equal(Object.hasOwn(body, 'top_k'), false)
+  }
+})
+
 test('cli-hop appends inline-tools when a message carries a tool_definition', () => {
   const block = {
     type: 'tool_addition',
@@ -2444,16 +2475,34 @@ unixTest('invalid Messages are rejected before either kernel accepts a turn', as
   })
   t.after(() => fx.close())
   for (const runtime_variant of ['cli-node', 'crag-v2']) {
-    const exec = { ...fx.exec, workerStatus: { runtime_variant } }
+    const isCrag = runtime_variant === 'crag-v2'
+    const exec = {
+      ...fx.exec,
+      workerStatus: { runtime_variant, capabilities: isCrag ? ['generation_controls_v3'] : [] },
+    }
     for (const send of [callGoWorker, streamGoWorker]) {
       for (const prebuilt of [false, true]) {
-        for (const messages of [
-          [],
-          [{ role: 'user', content: ' \n\t' }],
-          [{ role: 'user', content: 42 }],
-          [{ role: 'user', content: [{ type: 'tool_result', content: 'result' }] }],
+        for (const fields of [
+          { messages: [] },
+          { messages: [{ role: 'user', content: ' \n\t' }] },
+          { messages: [{ role: 'user', content: 42 }] },
+          { messages: [{ role: 'user', content: [{ type: 'tool_result', content: 'result' }] }] },
+          {
+            messages: [
+              { role: 'assistant', content: [{ type: 'tool_use', id: 'call_bad', name: 'sample', input: [] }] },
+            ],
+          },
+          { tools: [{ type: 'function', name: 'sample', parameters: { type: 'object' } }] },
+          { tools: [{ name: 'sample', input_schema: { type: 'string' } }] },
+          {
+            tools: [
+              { name: 'sample', input_schema: { type: 'object', oneOf: [{ required: ['a'] }, { required: ['b'] }] } },
+            ],
+          },
+          { max_tokens: 3.5 },
+          ...(isCrag ? [{ tools: [{ type: 'web_search_20250305', name: 'web_search' }] }] : []),
         ]) {
-          const body = { model: 'claude-sonnet-5', messages }
+          const body = { model: 'claude-sonnet-5', messages: [{ role: 'user', content: 'hi' }], ...fields }
           const result = await send({ exec, ...(prebuilt ? { envelope: { body } } : { body }) })
           assert.equal(result.status, 400)
           assert.equal(result.body.error.code, 'invalid_kernel_request')

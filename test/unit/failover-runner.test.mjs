@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
 import { resolveOutboundSessionId } from '../../src/lib/identity/identity-rewrite.mjs'
+import { prepareCragPrintBody } from '../../src/lib/protocol/crag-print-prompt.mjs'
 
 class Scheduler {
   constructor(candidates) {
@@ -73,6 +74,33 @@ function success(text = 'ok') {
     },
   }
 }
+
+test('a CRAG quota change after selection skips that VM without a cooldown or upstream replay', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const runner = new FailoverRunner({ scheduler })
+  const visited = []
+  const result = await runner.run({
+    requestId: 'crag-seat-downgrade',
+    model: 'claude-sonnet-test',
+    canonicalBody: { model: 'claude-sonnet-test' },
+    callAttempt: ({ candidate: selected }) => {
+      visited.push(selected.vmId)
+      return selected.vmId === 'vm-01'
+        ? {
+            ok: false,
+            status: 403,
+            terminalState: 'rejected',
+            upstreamExecutions: 0,
+            body: { type: 'error', error: { type: 'permission_error', code: 'license_crag_host_over_quota' } },
+          }
+        : success()
+    },
+  })
+  assert.deepEqual(visited, ['vm-01', 'vm-02'])
+  assert.equal(result.ok, true)
+  assert.equal(result.attemptCount, 1)
+  assert.deepEqual(scheduler.cooldowns, [])
+})
 
 test('failed attempt logging returns the permit without dispatch or failover', async () => {
   let releases = 0
@@ -193,6 +221,27 @@ test('oversized CRAG zero replace stops before execution without cooling account
   })
   assert.equal(result.status, 400)
   assert.equal(result.body.error.code, 'crag_prompt_too_large')
+  assert.equal(result.attemptCount, 0)
+  assert.equal(scheduler.selectCalls, 1)
+  assert.deepEqual(scheduler.cooldowns, [])
+  assert.equal(attempts.items[0].errorScope, 'request')
+})
+
+test('unsupported CRAG provider tool reports its field without execution or account rotation', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const attempts = new Attempts()
+  const runner = new FailoverRunner({ scheduler, attemptsRepo: attempts })
+  const model = 'claude-sonnet-5-5'
+  const result = await runner.run({
+    requestId: 'unsupported-provider-tool',
+    model,
+    canonicalBody: { model, tools: [{ type: 'web_search_20250305', name: 'web_search' }] },
+    applyAttempt: (body) => prepareCragPrintBody(body, { capabilities: ['generation_controls_v3'] }),
+    callAttempt: () => assert.fail('unsupported provider tool must not execute'),
+  })
+  assert.equal(result.status, 400)
+  assert.equal(result.body.error.code, 'invalid_kernel_request')
+  assert.equal(result.body.error.param, 'tools[0].type')
   assert.equal(result.attemptCount, 0)
   assert.equal(scheduler.selectCalls, 1)
   assert.deepEqual(scheduler.cooldowns, [])

@@ -8,6 +8,7 @@ import { runFleetUpdate, fleetStatus, isWorkerProcessUp, applyNativeTelemetry } 
 import { initializeSlotSeedFiles } from '../../src/lib/vm/slot-seed.mjs'
 import { slotHost } from '../../src/lib/vm/slot-host.mjs'
 import { withVmLock } from '../../src/lib/vm/vm-file.mjs'
+import { readSlotProcessStatus } from '../../src/lib/vm/slot-process-status.mjs'
 
 function writeSlot(root, id, extra = {}) {
   const dir = path.join(root, 'vms')
@@ -237,6 +238,7 @@ test('CRAG telemetry publishes settings and applies at idle without changing sch
     fs.rmSync(root, { recursive: true, force: true })
   })
   const vm = { id }
+  const probe = () => readSlotProcessStatus({ projectRoot: root, vm: read(vmPath) })
   let running = true
   const lifecycle = {
     watchdog: {
@@ -275,6 +277,17 @@ test('CRAG telemetry publishes settings and applies at idle without changing sch
   assert.equal(read(settingsPath).env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, undefined)
   assert.equal((await apply()).applied, true)
   assert.deepEqual(events.splice(0), [['apply', true]])
+  const settingsBeforeProbe = fs.readFileSync(settingsPath, 'utf8')
+  const vmBeforeProbe = fs.readFileSync(vmPath, 'utf8')
+  assert.deepEqual((await probe()).telemetry, {
+    state: 'launch_policy',
+    enabled: true,
+    error: null,
+    upload_confirmed: false,
+  })
+  assert.deepEqual(events.splice(0), [['apply', true]])
+  assert.equal(fs.readFileSync(settingsPath, 'utf8'), settingsBeforeProbe)
+  assert.equal(fs.readFileSync(vmPath, 'utf8'), vmBeforeProbe)
 
   for (const changeRevision of [false, true]) {
     await t.test(
@@ -353,6 +366,10 @@ test('CRAG telemetry publishes settings and applies at idle without changing sch
     seed_policy: { telemetry_disabled: true },
   })
   active = 1
+  const beforeRestart = (await probe()).telemetry
+  assert.equal(beforeRestart.enabled, null)
+  assert.match(beforeRestart.error, /重启 CRAG/)
+  assert.deepEqual(events.splice(0), [['apply', false]])
   assert.equal((await apply()).code, 'telemetry_slot_busy')
   assert.equal(
     events.some(([event]) => event === 'restart'),
@@ -375,9 +392,17 @@ test('CRAG telemetry publishes settings and applies at idle without changing sch
   assert.equal((await apply()).applied, true)
   assert.equal(bootEnabled, false)
   assert.equal(read(settingsPath).env.DISABLE_TELEMETRY, '1')
+  assert.equal(read(settingsPath).env.CLAUDE_CODE_DISABLE_TELEMETRY, '1')
   assert.equal(read(vmPath).schedulable, false)
   assert.equal(read(vmPath).status, 'paused')
   events.length = 0
+  assert.deepEqual((await probe()).telemetry, {
+    state: 'launch_policy',
+    enabled: false,
+    error: null,
+    upload_confirmed: false,
+  })
+  assert.deepEqual(events.splice(0), [['apply', false]])
 
   nextError = 'telemetry_native_settings_blocked'
   assert.equal((await apply()).code, nextError)
@@ -385,11 +410,21 @@ test('CRAG telemetry publishes settings and applies at idle without changing sch
   nextError = null
   capability = false
   assert.equal((await apply()).code, 'crag_telemetry_apply_unavailable')
+  assert.equal((await probe()).telemetry.enabled, null)
   assert.deepEqual(events, [])
   running = false
+  writeSlot(root, id, { dataplane: 'crag', status: 'stopped', seed_policy: { telemetry_disabled: false } })
   const stopped = await apply()
   assert.equal(stopped.state, 'stopped')
   assert.equal(stopped.published, true)
   assert.equal(stopped.applied, false)
+  for (const key of [
+    'DISABLE_TELEMETRY',
+    'CLAUDE_CODE_DISABLE_TELEMETRY',
+    'DO_NOT_TRACK',
+    'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+  ]) {
+    assert.equal(Object.hasOwn(read(settingsPath).env, key), false)
+  }
   assert.deepEqual(events, [])
 })

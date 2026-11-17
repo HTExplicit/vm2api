@@ -6,7 +6,7 @@ import test from 'node:test'
 import { DatabaseSync } from 'node:sqlite'
 import { applyMigrations } from '../../src/lib/db/database.mjs'
 
-test('130 appends migrations to the published 121 ledger and preserves business data across reopen', (t) => {
+test('136 appends migrations to the published 121 ledger and preserves business data across reopen', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-130-migrations-'))
   t.after(() => fs.rmSync(root, { recursive: true }))
   const migrations = path.resolve('src/lib/db/migrations')
@@ -29,7 +29,11 @@ test('130 appends migrations to the published 121 ledger and preserves business 
   db.close()
   fs.copyFileSync(file, path.join(root, 'pre-upgrade.db'))
   db = new DatabaseSync(file)
-  assert.deepEqual(applyMigrations(db), ['063_api_key_endpoint.sql', '064_risk_audit_bans.sql'])
+  assert.deepEqual(applyMigrations(db), [
+    '063_api_key_endpoint.sql',
+    '064_risk_audit_bans.sql',
+    '065_crag_shop_order_dispatch.sql',
+  ])
   db.close()
   db = new DatabaseSync(file)
   try {

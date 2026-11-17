@@ -356,15 +356,18 @@ async function protocolKernelFixture(t, { health, staleHealth, preset = 'officia
   fs.writeFileSync(path.join(kernel.root, 'routing.json'), JSON.stringify(routing))
   const { handler, finished, preparedCandidates, request } = protocolHarness(kernel, routing, interceptRules)
   return {
-    async send(body, candidateHealth = staleHealth) {
+    async send(body, candidateHealth = staleHealth, { protocol = 'anthropic.messages', headers = {} } = {}) {
       kernel.selected.exec.workerStatus = structuredClone(candidateHealth)
       const postedBefore = kernel.posted.length
       const finishedBefore = finished.length
       const requestsBefore = kernel.requests.length
       const response = fakeResponse()
-      await handler.handleProtocol(request(body), response, 'anthropic.messages', '/v1/messages')
+      const req = request(body)
+      Object.assign(req.headers, headers)
+      if (protocol === 'openai.responses') req.url = '/v1/responses'
+      await handler.handleProtocol(req, response, protocol, req.url)
       response.finish()
-      assert.equal(response.statusCode, 200)
+      assert.equal(response.statusCode, 200, response.writes.join(''))
       assert.deepEqual(preparedCandidates.at(-1), candidateHealth)
       assert.equal(kernel.posted.length, postedBefore + 1)
       assert.equal(finished.length, finishedBefore + 1)
@@ -389,6 +392,134 @@ async function protocolKernelFixture(t, { health, staleHealth, preset = 'officia
       return { envelope, extra }
     },
   }
+}
+
+unixTest('native CRAG receives caller tool names and structured system cache blocks', async (t) => {
+  const fixture = await protocolKernelFixture(t, {
+    health: {
+      ...printHealth,
+      capabilities: [...printCapabilities, 'generation_controls_v3', 'system_text_cache_v3'],
+    },
+    staleHealth: ordinaryHealth,
+  })
+  const anchor = { type: 'ephemeral', ttl: '1h' }
+  const system = [
+    { type: 'text', text: 'Policy alpha', cache_control: anchor },
+    { type: 'text', text: 'Policy beta', cache_control: anchor },
+    { type: 'text', text: 'Supplementary policy' },
+  ]
+  const tools = ['lookup', 'mcp__lookup', 'mcp_legacy'].map((name) => ({
+    name,
+    input_schema: { type: 'object' },
+  }))
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: 'Look up the entry' }] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_fixture', name: 'lookup', input: {} }] },
+    {
+      role: 'user',
+      content: [
+        { type: 'tool_result', tool_use_id: 'toolu_fixture', content: 'result' },
+        { type: 'text', text: 'Summarize it', cache_control: anchor },
+      ],
+    },
+  ]
+  const { envelope } = await fixture.send({
+    model: 'claude-sonnet-5-5',
+    max_tokens: 32000,
+    stream: true,
+    system,
+    tools,
+    messages,
+    tool_choice: { type: 'auto' },
+  })
+  assert.deepEqual(envelope.body.tools, tools)
+  assert.deepEqual(envelope.body.system, system)
+  assert.equal(envelope.body.crag_prompt, undefined)
+  assert.deepEqual(envelope.body.messages, messages)
+  assert.deepEqual(envelope.body.tool_choice, { type: 'auto' })
+  assert.equal(envelope.body.max_tokens, 32000)
+})
+
+unixTest('zero CRAG sends mixed Responses tools and structured system to the capable worker', async (t) => {
+  const fixture = await protocolKernelFixture(t, {
+    health: {
+      ...printHealth,
+      capabilities: [...printCapabilities, 'generation_controls_v3', 'provider_managed_tools_v1'],
+    },
+    staleHealth: ordinaryHealth,
+    preset: 'zero',
+  })
+  const search = { type: 'web_search_20260209', name: 'web_search', max_uses: 2, allowed_domains: ['example.org'] }
+  const { envelope } = await fixture.send(
+    {
+      model: 'claude-sonnet-5-5',
+      instructions: 'Caller policy',
+      input: 'Sample',
+      tools: [
+        ...Array.from({ length: 47 }, (_, index) => ({
+          type: 'function',
+          name: `client_${index}`,
+          parameters: { type: 'object' },
+        })),
+        search,
+      ],
+    },
+    ordinaryHealth,
+    { protocol: 'openai.responses' },
+  )
+  assert.equal(envelope.body.tools.length, 48)
+  assert.deepEqual(envelope.body.tools[47], search)
+  assert.deepEqual(envelope.body.system, [{ type: 'text', text: 'Caller policy' }])
+  assert.equal(envelope.body.crag_prompt, undefined)
+})
+
+for (const runtime of ['crag-v2', 'cli-node']) {
+  unixTest(`Codex Responses tool continuation is structured before ${runtime} dispatch`, async (t) => {
+    const health =
+      runtime === 'crag-v2'
+        ? { ...printHealth, capabilities: [...printCapabilities, 'generation_controls_v3', 'system_text_cache_v3'] }
+        : ordinaryHealth
+    const fixture = await protocolKernelFixture(t, { health, staleHealth: ordinaryHealth })
+    const { envelope } = await fixture.send(
+      {
+        model: 'claude-sonnet-5-5',
+        max_output_tokens: 32000,
+        instructions: 'Caller policy',
+        input: [
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Find it' }] },
+          {
+            type: 'function_call',
+            id: 'fc_different',
+            call_id: 'call_existing',
+            name: 'read_file',
+            arguments: '{"file":"sample"}',
+          },
+          { type: 'function_call_output', call_id: 'call_existing', output: 'Here it is' },
+        ],
+        tools: [{ type: 'function', name: 'read_file', parameters: { type: 'object' } }],
+      },
+      ordinaryHealth,
+      { protocol: 'openai.responses', headers: { 'user-agent': 'codex_cli_rs/0.0.0' } },
+    )
+    const expectedName = runtime === 'crag-v2' ? 'read_file' : 'mcp__read_file'
+    assert.equal(envelope.body.tools[0].name, expectedName)
+    assert.deepEqual(envelope.body.tools[0].input_schema, { type: 'object' })
+    assert.equal(envelope.body.max_tokens, 32000)
+    assert.equal(envelope.body.input, undefined)
+    const blocks = envelope.body.messages.flatMap((message) => message.content)
+    assert.deepEqual(
+      blocks.find((block) => block.type === 'tool_use'),
+      {
+        type: 'tool_use',
+        id: 'call_existing',
+        name: expectedName,
+        input: { file: 'sample' },
+      },
+    )
+    const result = blocks.find((block) => block.type === 'tool_result')
+    assert.equal(result.tool_use_id, 'call_existing')
+    assert.deepEqual(result.content, [{ type: 'text', text: 'Here it is' }])
+  })
 }
 
 function cwdRequest(stream, fields = {}) {

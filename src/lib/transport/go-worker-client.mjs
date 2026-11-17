@@ -6,7 +6,7 @@ import { isMainThread } from 'node:worker_threads'
 import { kernelHealthInWorker } from './kernel-health-thread.mjs'
 import { resolveStreamIdleTimeoutMs } from '../core/config.mjs'
 import { prepareOutboundHeaders } from '../protocol/outbound-attempt.mjs'
-import { sanitizeAnthropicBodyForBetaTokens } from '../protocol/anthropic-policy.mjs'
+import { alignSamplingWithThinking, sanitizeAnthropicBodyForBetaTokens } from '../protocol/anthropic-policy.mjs'
 import { prepareCliNodeRequest, prepareCragRequest } from '../protocol/kernel-request.mjs'
 import { withRequestProtocolBetas } from '../protocol/claude-code-betas.mjs'
 import { pinThreadBetas, rememberThreadTurn } from '../protocol/thread-betas.mjs'
@@ -566,9 +566,13 @@ function dumpSessionEnvelope(envelope) {
 
 function gateCragBody(body, print, health, isolated = false) {
   if (!body || typeof body !== 'object') return body
+  if (print) alignSamplingWithThinking(body)
   const caps = print && Array.isArray(health?.capabilities) ? health.capabilities : []
   const prompt = body.crag_prompt
-  const model = print && !isolated && cragConsumesModelDirective(health) ? modelDirectiveForCrag(body.model) : null
+  const model =
+    print && !isolated && body.thread == null && cragConsumesModelDirective(health)
+      ? modelDirectiveForCrag(body.model)
+      : null
   const hasAlias = body.crag_options != null && Object.hasOwn(body.crag_options, 'prompt')
   if (!model && !Object.hasOwn(body, 'crag_prompt') && !Object.hasOwn(body, 'crag_model') && !hasAlias) {
     return body
@@ -607,7 +611,7 @@ export function prepareWorkerPayload({
 } = {}) {
   const health = exec?.workerStatus
   const print = nativeCragRequest(exec, cragPrint)
-  const canonicalBody = print ? prepareCragRequest(body) : prepareCliNodeRequest(body)
+  const canonicalBody = print ? prepareCragRequest(body, health) : prepareCliNodeRequest(body)
   const model = canonicalBody?.model || ''
   const credMode = credentialModeFromOauth(exec?.vm?.claude || {})
   const headers = prepareOutboundHeaders(reqHeaders, exec?.homeDir, identity, model, {
@@ -734,7 +738,7 @@ async function preparePrebuiltEnvelope(envelope, redaction, messages, exec, crag
     delete out.gateway_policy
     const print = nativeCragRequest(exec, cragPrint)
     out.body = gateCragBody(
-      print ? prepareCragRequest(out.body) : prepareCliNodeRequest(out.body),
+      print ? prepareCragRequest(out.body, exec?.workerStatus) : prepareCliNodeRequest(out.body),
       print,
       exec?.workerStatus,
       out.request_context?.purpose === 'auto_mode_classifier',
@@ -2006,7 +2010,12 @@ export function prepareClaudeClientCredentials(exec, { refreshInSlot = runSlotOa
   return reconcileClaudeClientCredentials(exec, { ...options, refreshInSlot })
 }
 
-export async function callWorkerPost(exec, requestPath, body, { timeoutMs = 20000, signal } = {}) {
+export async function callWorkerPost(
+  exec,
+  requestPath,
+  body,
+  { timeoutMs = 20000, signal, requireInternalToken = false } = {},
+) {
   try {
     const response = await workerRequest(exec, {
       method: 'POST',
@@ -2014,6 +2023,7 @@ export async function callWorkerPost(exec, requestPath, body, { timeoutMs = 2000
       body,
       timeoutMs,
       signal,
+      requireInternalToken,
       maxRequestBytes: 8192,
     })
     const parsed = parseJson(await readAll(response, 16384), response.statusCode)

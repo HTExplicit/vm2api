@@ -17,7 +17,7 @@ import {
 const ROOT = '/api/panel/crag-shop'
 const DEVICE_ROOT = `${ROOT}/device`
 const ORDER_PATH =
-  /^\/api\/panel\/crag-shop(?:\/device)?\/orders\/([^/]+)(\/(?:claim|resume|apply|apply-renewal|retry-activation))?$/
+  /^\/api\/panel\/crag-shop(?:\/device)?\/orders\/([^/]+)(\/(?:claim|resume|cancel|apply|apply-renewal|retry-activation))?$/
 const DEVICE_COOKIE = 'kin_crag_device_checkout'
 const MAX_BODY = 4096
 const PAGE_SIZE = 100
@@ -40,7 +40,8 @@ export function cragShopRoute(method, pathname) {
     if (match[2]) {
       const action = match[2].slice(1)
       if (method !== 'POST') return null
-      if (action === 'resume' || (device ? action === 'apply' : action !== 'apply')) return action
+      if (action === 'resume' || action === 'cancel' || (device ? action === 'apply' : action !== 'apply'))
+        return action
       return null
     }
     return method === 'GET' ? 'status' : null
@@ -66,7 +67,7 @@ export function sessionBuyerOwner(session, record, configuredAdmin) {
 }
 
 export function sameOriginPost(req, publicBaseUrl) {
-  const { origin, host, 'sec-fetch-site': site } = req.headers
+  const { origin, host, 'sec-fetch-site': site } = req?.headers || {}
   if (site !== undefined && site !== 'same-origin') return false
   if (origin === undefined) return site === 'same-origin'
   if (typeof origin !== 'string' || typeof host !== 'string' || /[^a-zA-Z0-9.:[\]-]/.test(host) || !host) return false
@@ -92,6 +93,23 @@ function failure(status, code, message) {
 
 const missingOrder = () => failure(404, 'shop_order_not_found', 'Order not found')
 const badBody = () => failure(400, 'shop_invalid_request', 'Invalid CRAG shop request')
+const unavailableDevice = () =>
+  failure(503, 'shop_device_unavailable', 'Cannot verify the host device for CRAG checkout')
+const unavailableStorage = () =>
+  failure(503, 'shop_private_storage_unavailable', 'CRAG shop private storage is unavailable')
+
+function hostCheckoutError(error) {
+  switch (error?.code) {
+    case 'crag_subscription_host_identity_unavailable':
+      return unavailableDevice()
+    case 'crag_subscription_host_identity_changed':
+      return failure(409, 'shop_host_identity_changed', 'The host device no longer matches the subscription')
+    case 'crag_subscription_storage_unavailable':
+      return unavailableStorage()
+    default:
+      return null
+  }
+}
 
 async function readInput(req, readRawBody, emptyAllowed) {
   let raw
@@ -177,12 +195,14 @@ function view(row) {
     request_id,
     sku,
     payment_method,
-    status,
+    status: row.dispatch_state === 'cancelled' ? 'cancelled' : status,
     created_at: created_at ?? reserved_at,
     term,
     amount_minor,
     slot_limit,
   }
+  if (row.dispatch_state === 'cancelled') return result
+  if (row.dispatch_state === 'unsent') result.cancelable = true
   for (const key of ['expected_amount_minor', 'months', 'subtotal_minor', 'discount_minor', 'remaining']) {
     if (row[key] != null) result[key] = row[key]
   }
@@ -239,8 +259,8 @@ async function reserve(db, owner, input, pinTarget) {
       db
         .prepare(`INSERT INTO crag_shop_orders
                   (order_id, owner, request_id, sku, payment_method, reserved_at, purchase_json, expected_amount_minor,
-                   activation_vm_id, activation_fingerprint, activation_next_at, activation_deadline)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(owner, request_id) DO NOTHING`)
+                   activation_vm_id, activation_fingerprint, activation_next_at, activation_deadline, dispatch_state)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unsent') ON CONFLICT(owner, request_id) DO NOTHING`)
         .run(
           randomUUID(),
           owner,
@@ -347,11 +367,10 @@ export function createCragShopHandler({
     let hostId
     try {
       hostId = subscription?.purchaseDeviceId()
-    } catch {
-      throw failure(503, 'shop_device_unavailable', 'Cannot verify the host device for CRAG checkout')
+    } catch (error) {
+      throw hostCheckoutError(error) ?? unavailableDevice()
     }
-    if (typeof hostId !== 'string' || !/^[a-f0-9]{64}$/.test(hostId))
-      throw failure(503, 'shop_device_unavailable', 'Cannot verify the host device for CRAG checkout')
+    if (typeof hostId !== 'string' || !/^[a-f0-9]{64}$/.test(hostId)) throw unavailableDevice()
     return hostId
   }
 
@@ -359,7 +378,7 @@ export function createCragShopHandler({
     try {
       return loadOrderReceiptKey(dataDir, () => !!db.prepare('SELECT 1 FROM crag_shop_orders LIMIT 1').get())
     } catch {
-      throw failure(503, 'shop_private_storage_unavailable', 'CRAG shop private storage is unavailable')
+      throw unavailableStorage()
     }
   }
 
@@ -375,8 +394,11 @@ export function createCragShopHandler({
       const proof = await subscription.renewalProof()
       if (typeof proof !== 'string' || !proof.length || proof.length > 16384 || /[\p{Cc}]/u.test(proof)) throw badBody()
       return proof
-    } catch {
-      throw failure(409, 'shop_renewal_unavailable', 'The host subscription is not available for renewal')
+    } catch (error) {
+      throw (
+        hostCheckoutError(error) ??
+        failure(409, 'shop_renewal_unavailable', 'The host subscription is not available for renewal')
+      )
     }
   }
 
@@ -398,7 +420,7 @@ export function createCragShopHandler({
       return fingerprint
     } catch (error) {
       if (error instanceof ShopError) throw error
-      throw unavailableTarget()
+      throw hostCheckoutError(error) ?? unavailableTarget()
     }
   }
 
@@ -412,7 +434,8 @@ export function createCragShopHandler({
       // At most one in-flight order per process; a crashed lease expires on restart.
       const row = db
         .prepare(`SELECT * FROM crag_shop_orders
-        WHERE activation_vm_id IS NOT NULL AND activation_next_at IS NOT NULL AND activation_next_at <= ?
+        WHERE dispatch_state = 'submitted' AND activation_vm_id IS NOT NULL
+          AND activation_next_at IS NOT NULL AND activation_next_at <= ?
         ORDER BY activation_next_at, order_id LIMIT 1`)
         .get(now)
       if (!row) return
@@ -585,12 +608,13 @@ export function createCragShopHandler({
           }),
         })
         const { row, existing } = await reserve(db, owner, { ...input, purchase_json }, (id) => pinTarget(owner, id))
+        if (row.dispatch_state === 'cancelled') return ok(view(row))
         const receipt = deriveOrderReceipt(key, row.order_id)
         const result = (reply) => {
           const current = reflectOrder(db, owner, reply.order)
           return ok({ ...view(current), ...(current.status === 'pending' && reply.form ? reply.form : {}) })
         }
-        if (existing) {
+        if (existing && row.dispatch_state !== 'unsent') {
           try {
             return result(await supplier.resume(row, receipt, supplierOptions))
           } catch (err) {
@@ -610,6 +634,13 @@ export function createCragShopHandler({
         }
         if (row.activation_vm_id && (await pinTarget(owner, row.activation_vm_id)) !== row.activation_fingerprint)
           throw unavailableTarget()
+        const dispatch = durable(db, () =>
+          db
+            .prepare(`UPDATE crag_shop_orders SET dispatch_state = 'submitted'
+            WHERE owner = ? AND order_id = ? AND dispatch_state <> 'cancelled'`)
+            .run(owner, row.order_id),
+        )
+        if (!dispatch.changes) return ok(view(findOrder(db, owner, row.order_id)))
         const { order, form } = await supplier.create(row, receipt, proof, input.purchase, supplierOptions)
         const current = reflectOrder(db, owner, order)
         return ok({ ...view(current), ...(current.status === 'pending' && form ? form : {}) })
@@ -618,10 +649,27 @@ export function createCragShopHandler({
       if (!orderId || !isOrderId(orderId)) throw missingOrder()
       const row = findOrder(db, owner, orderId)
       if (!row) throw missingOrder()
-      if (['claim', 'resume', 'apply', 'apply-renewal', 'retry-activation'].includes(route)) {
+      if (['claim', 'resume', 'cancel', 'apply', 'apply-renewal', 'retry-activation'].includes(route)) {
         const input = await readInput(req, readRawBody, true)
         if (Object.keys(input).length !== 0) throw badBody()
       }
+      if (route === 'cancel') {
+        durable(db, () =>
+          db
+            .prepare(`UPDATE crag_shop_orders SET dispatch_state = 'cancelled', activation_next_at = NULL
+            WHERE owner = ? AND order_id = ? AND dispatch_state = 'unsent'`)
+            .run(owner, row.order_id),
+        )
+        const current = findOrder(db, owner, orderId)
+        if (current.dispatch_state !== 'cancelled')
+          throw failure(409, 'shop_order_cannot_cancel', 'Only orders not sent to the supplier can be cancelled')
+        return ok(view(current))
+      }
+      if (row.dispatch_state === 'cancelled') {
+        if (route === 'status') return ok(view(row))
+        throw failure(409, 'shop_order_cancelled', 'This order was cancelled')
+      }
+      if (row.dispatch_state === 'unsent' && route === 'status') return ok(view(row))
       if (route === 'apply') {
         if (row.activation_phase === 'active') return ok(view(row))
         const receipt = deriveOrderReceipt(receiptKey(db), row.order_id)
@@ -638,7 +686,10 @@ export function createCragShopHandler({
               'shop_device_package_unready',
               'No trusted host CRAG package available to apply the order',
             )
-          throw failure(409, 'shop_device_apply_failed', 'Could not apply this order to the host; retry the same order')
+          throw (
+            hostCheckoutError(error) ??
+            failure(409, 'shop_device_apply_failed', 'Could not apply this order to the host; retry the same order')
+          )
         }
         db.prepare("UPDATE crag_shop_orders SET activation_phase = 'active' WHERE owner = ? AND order_id = ?").run(
           owner,
@@ -688,11 +739,14 @@ export function createCragShopHandler({
         if (route === 'apply-renewal') {
           try {
             hostStatus = await subscription.redeemRenewal(result.redemption_code)
-          } catch {
-            throw failure(
-              503,
-              'shop_renewal_failed',
-              'Could not apply the renewal; refresh subscription status before retrying',
+          } catch (error) {
+            throw (
+              hostCheckoutError(error) ??
+              failure(
+                503,
+                'shop_renewal_failed',
+                'Could not apply the renewal; refresh subscription status before retrying',
+              )
             )
           }
         }
