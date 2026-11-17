@@ -4,6 +4,7 @@ import {
   API_DEFAULTS,
   DIRECT,
   draftFromStored,
+  endpointModelRequest,
   endpointSaveRequest,
 } from './endpoint-save'
 
@@ -23,6 +24,28 @@ describe('anthropic console endpoint save', () => {
     expect(stored.riskReviewEnabled).toBe(false)
     expect(stored.existingModels).toEqual(['upstream-model'])
     expect(stored.fetchedModels).toBeUndefined()
+  })
+
+  it('refreshes the saved channel but previews a changed address or credential', () => {
+    expect(endpointModelRequest(stored)).toMatchObject({
+      apply: true,
+      path: '/api/panel/api-endpoints/ep_1/fetch-models',
+      body: { key_id: 'ek_1' },
+    })
+    const changed = {
+      ...stored,
+      baseUrl: 'https://new.example',
+      apiKey: 'sk-fresh',
+    }
+    expect(endpointModelRequest(changed)).toMatchObject({
+      apply: false,
+      path: '/api/panel/api-endpoints/fetch-models',
+      body: {
+        base_url: changed.baseUrl,
+        api_key: changed.apiKey,
+        key_id: 'ek_1',
+      },
+    })
   })
 
   it('saving an unchanged stored row never sends name, models or proxy', () => {

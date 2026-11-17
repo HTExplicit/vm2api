@@ -176,9 +176,15 @@ test('migration 053 adds unknown observed models without rewriting historical mo
     `)
     const before = { ...db.prepare('SELECT * FROM usage_logs WHERE id = ?').get('log-legacy') }
     applyMigrations(db, { migrationsDir: migrations })
-    const { sent_model, upstream_response_model, failure_diagnostics_json, usage_account_id, ...after } = db
-      .prepare('SELECT * FROM usage_logs WHERE id = ?')
-      .get('log-legacy')
+    const {
+      sent_model,
+      upstream_response_model,
+      failure_diagnostics_json,
+      usage_account_id,
+      upstream_status,
+      upstream_400_message,
+      ...after
+    } = db.prepare('SELECT * FROM usage_logs WHERE id = ?').get('log-legacy')
     assert.equal(failure_diagnostics_json, null)
     assert.equal(usage_account_id, null)
     assert.equal(sent_model, null)
@@ -254,9 +260,15 @@ test('migration 059 onward preserves the published 9102 ledger, browser state an
       '060_crag_shop_orders.sql',
       '061_crag_shop_commerce.sql',
       '062_crag_shop_activation.sql',
+      '063_api_key_endpoint.sql',
+      '064_risk_audit_bans.sql',
     ])
     assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '059' ORDER BY version").all(), ledger)
-    for (const table of preservedTables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), before[table])
+    for (const table of preservedTables)
+      assert.deepEqual(
+        db.prepare(`SELECT ${Object.keys(before[table][0] || {}).join(', ') || '*'} FROM ${table}`).all(),
+        before[table],
+      )
     assert.deepEqual(db.prepare(`SELECT ${oldColumns.join(', ')} FROM usage_logs`).all(), beforeLogs)
     assert.equal(
       db.prepare("SELECT usage_account_id FROM usage_logs WHERE id = 'kept-log'").get().usage_account_id,
@@ -269,7 +281,11 @@ test('migration 059 onward preserves the published 9102 ledger, browser state an
     db = new DatabaseSync(dbPath)
     assert.deepEqual(applyMigrations(db, { migrationsDir: migrations }), [])
     assert.deepEqual(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all(), completeLedger)
-    for (const table of preservedTables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), before[table])
+    for (const table of preservedTables)
+      assert.deepEqual(
+        db.prepare(`SELECT ${Object.keys(before[table][0] || {}).join(', ') || '*'} FROM ${table}`).all(),
+        before[table],
+      )
     assert.deepEqual(db.prepare(`SELECT ${oldColumns.join(', ')} FROM usage_logs`).all(), beforeLogs)
   } finally {
     db.close()
@@ -555,6 +571,8 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       '060_crag_shop_orders.sql',
       '061_crag_shop_commerce.sql',
       '062_crag_shop_activation.sql',
+      '063_api_key_endpoint.sql',
+      '064_risk_audit_bans.sql',
     ])
     const { risk_review_enabled, ...after } = db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy')
     assert.equal(risk_review_enabled, 0)

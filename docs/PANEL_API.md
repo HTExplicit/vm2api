@@ -91,10 +91,10 @@ GPT 订阅主动刷新仅管理员，普通 user 不可调用；其他普通租�
 | GET/PUT | `/vms/:id/seed-settings` | 播种；面板默认锁定，解锁后改、播种前确认。`settings.json` 可编辑 env（经 `extra_env`）与 `theme`；`autoUpdates`/`grove_enabled` 与 TZ/LANG/LC_ALL、telemetry/bedrock/vertex 等契约 env 只读展示，TZ/LANG 经 PUT `timezone` / `timezone_follow_proxy` / `locale` 写入槽位后再播种，不经 `extra_env`；`claude_setting` 可编辑。`GET ?debug=1` 额外返回 `telemetry_log`（最近 40 行脱敏上传审计，默认不带） |
 | POST | `/vms/:id/collect-identity` | guest 采集（locale/tz/`guest_machine_id`、槽内 `/etc/os-release` 的 `VERSION_ID`、系统与架构）；Codex Analytics 只使用这次采集的运行环境 |
 | POST | `/vms/:id/reload` | 重载该槽 worker |
-| GET | `/kernels` | 仅 admin/master。返回两种产品 `kernels`（`cli-node` 默认免费、`crag` 签名加密 V2）、本地包的就绪状态、按 VM 的公开 `licenses` 与 `installations`。`install_licenses` 单独报告当前下载包的授权结果。CRAG 的 `release_options` 提供 3.1.3 标准版和 3.1.2 旧授权兼容版的完整发行标签，`payload_tag` 标识已下载或已安装的实际包（仅在可识别时返回）。不初始化身份、不签发许可，不返回机器码、注册码或私钥 |
-| GET | `/kernels/releases` | 返回近期具备完整附件的公开版本。`cli-node` 使用应用标签 `vX.Y.Z`，`crag` 使用完整载荷标签，同版本不同载荷分别列出 |
-| POST | `/kernels/pull` | `{ kernel: "cli-node" \| "crag", tag?: string }`。只更新安装包缓存，不安装、不停 VM。cli-node 接受 `vX.Y.Z`；CRAG 另接受完整 `payload-YYYY.MM.DD-crag-X.Y.Z[-legacy]` 标签。省略 `tag` 拉取最新，CRAG 默认和普通版本号不匹配 `-legacy`。返回 `release.payload_tag`；已固定的 CRAG 包另校验归档 SHA-256，拉取失败保留当前包 |
-| POST | `/kernels/install` | `{ targets: [{ id, kernel: "cli-node" \| "crag", expected_tag?, payload_tag?, reissue? }] }`：必须给出非空显式范围；`expected_tag` 与 CRAG `payload_tag` 必须匹配确认的当前缓存。同源管理员会话可在确认指定 CRAG 包时提交 `reissue: true`，授权本机 Docker 槽在缺少许可或载荷不匹配时使用已激活的宿主订阅。向 Authority `/bind` 申请目标包许可，有有效的同槽宿主许可则重签，否则普通绑定，可能占用一个剩余名额。许可在停机前验证，恢复不发送重签标记；KVM 与集群仍使用匹配的离线许可。验证后直接停止并安装，不暂停调度或等待在途请求；原运行槽重启并经健康检查，原停止槽保持停止。逐槽报告实际 `version` / `payload_tag` 与结果。 |
+| GET | `/kernels` | 仅 admin/master。返回两种产品 `kernels`（`cli-node` 默认免费、`crag` 签名加密 V2）、本地包的就绪状态、按 VM 的公开 `licenses` 与 `installations`。`install_licenses` 单独报告当前下载包的授权结果。CRAG 的 `release_options` 提供标准发行标签；`payload_tag` 标识可识别的已下载或已安装包。不初始化身份、不签发许可，不返回机器码、注册码或私钥 |
+| GET | `/kernels/releases` | 返回近期具备完整附件的公开版本。`cli-node` 使用应用标签 `vX.Y.Z`，`crag` 使用完整载荷标签，不列出 `-legacy` |
+| POST | `/kernels/pull` | `{ kernel: "cli-node" \| "crag", tag?: string }`。只更新安装包缓存，不安装、不停 VM。cli-node 接受 `vX.Y.Z`；CRAG 另接受完整 `payload-YYYY.MM.DD-crag-X.Y.Z[-legacy]` 标签。省略 `tag` 拉取最新，CRAG 默认和普通版本号不匹配 `-legacy`。返回 `release.payload_tag`；CRAG 校验受信归档摘要，已固定的发行另校验 manifest 摘要。拉取失败保留当前包 |
+| POST | `/kernels/install` | `{ targets: [{ id, kernel: "cli-node" \| "crag", expected_tag?, payload_tag? }] }`。缓存不符时拒绝重装。同一载荷密钥沿用已有许可；同源管理员会话确认指定发行时，后端可为缺少许可的槽自动绑定现有宿主订阅。密钥不符返回 `crag_subscription_migration_required`，不重签、不停槽。安装直接停止服务，不暂停调度或等待在途请求；原运行槽经健康检查后恢复，原停机槽保持停止。逐槽返回安装结果；本地已运行 CRAG 在可验证回滚成功时返回 `rolled_back: true`，集群槽不承诺自动回滚 |
 | GET | `/wrap-cli` | kernel / wrap 样本 inspect：`ok, dir, kernel_bin, glibc_shim, wrapper, meta, kernel`。`kernel.source` 为 `configured`（仓内 `KIN_KERNEL_BIN` / `bin/kin-kernel`）或 `sample` |
 | POST | `/wrap-cli/make` | `{ glibc_vm? }` 重整 share/wrap-cli；叠上仓内最新 kernel；可从指定槽拷 glibc shim |
 | POST | `/wrap-cli/kernel` | 原始 `application/octet-stream` linux amd64 ELF。替换仓内 `bin/kin-kernel` 与 `share/wrap-cli/kin-kernel.bin`。不自动同步槽位 |
@@ -134,7 +134,9 @@ GPT 订阅主动刷新仅管理员，普通 user 不可调用；其他普通租�
 
 拉取与安装分离：拉取失败保留旧包，安装包就绪不代表服务已启动。默认内核不依赖 cc-node 或 legacy CRAG。注册码无效、过期或包未就绪时不停止该槽；停止后的复制、配置或就绪检查失败返回 `stopped:true`，不恢复调度。凭据、授权设备密钥、指纹和工作数据保留。若停止状态写入失败，看门狗保持暂停，修复存储后成功重装、启动或恢复服务才释放。
 
-该安装与重装入口支持 Linux amd64 本机和集群的 Docker、KVM Claude 槽，支持 cli-node ↔ CRAG 双向更换；KVM 同步 guest 内核入口。Codex 和 macOS 原生目标在停止前拒绝。KVM 的 CRAG 切核使用此入口；既有 PATCH、槽策略和 `/dataplane` 入口仍限制将 KVM 切至 CRAG。独立 `crag-update` 支持本机 Docker、KVM，但存在选用 CRAG 的集群槽时拒绝更新；集群须在内核页明确选择目标安装或重装。
+该重装入口支持本机和集群 Linux Docker/KVM Claude 槽；原生 macOS 和 Codex 目标明确拒绝且不停止服务，不伪装成已安装。本机 KVM 的旧临时授权挂载若不具备管理标记，需要完整停止并重新启动槽位后迁移，单独重启内核不足以清理；详见 [CRAG KVM 部署与内核更换](crag-kvm.md)。
+
+KVM 的 CRAG 切核使用此入口；既有 PATCH、槽策略和 `/dataplane` 入口仍限制将 KVM 切至 CRAG。独立 `crag-update` 存在选用 CRAG 的集群槽时拒绝更新，须明确选择目标重装。
 
 新安装与既有 PATCH/槽策略、同步、数据面切换、Release 同步及单槽修复共用同一记录锁；多槽操作在接收时固定目标并按稳定顺序加锁。其他页面的并发重装不能在安装器停止服务后穿插复制或自动重启；`restart:false` 仍只读检查。
 
@@ -148,7 +150,7 @@ GPT 订阅主动刷新仅管理员，普通 user 不可调用；其他普通租�
 
 `account.runtime_window`：`rate_limited_at` / `rate_limit_reset_at` / `overload_until` / `session_window_start|end|status`。
 
-`schedule_level` 是当前有效调度等级，范围 1–10；`schedule_level_mode` 为 `manual` 或 `auto`。`PATCH {"schedule_level": 1..10}` 写入手动等级，`null` 或 `"auto"` 清除手动值。Claude 和 Codex 的自动模式按各自 7D 重置剩余时间滚动分档：不足 24h 为 7，之后每 24h 降一级，144h 及以上或无有效重置时间为 1。新分配和换槽先比较可承接请求的 VM 的等级；亲和、Claude 的 `balanced` / `fill`、Codex 的 `weight` 和选槽策略只在同级内生效。显式指定的 VM、仍在使用的 Claude 席位及绑定原 VM 的 `previous_response_id` 不重新选槽。整池改等级或权重用 `POST /vms/pool-policy`（只写记录，不重建槽详情）。
+`schedule_level` 是当前有效调度等级，范围 1–10；`schedule_level_mode` 为 `manual` 或 `auto`。`PATCH {"schedule_level": 1..10}` 写入手动等级，`null` 或 `"auto"` 清除手动值。Claude 和 Codex 的自动模式按各自 7D 重置剩余时间滚动分档：不足 24h 为 7，之后每 24h 降一级，144h 及以上或无有效重置时间为 1。有效的会话绑定优先，调高其它 VM 的等级或权重不会迁移续轮。新分配和失去粘性后的换槽先比较可承接请求的 VM 的等级；设备和父会话亲和、Claude 的 `balanced` / `fill`、Codex 的 `weight` 和选槽策略只在同级内生效。显式指定的 VM、仍在使用的 Claude 席位及绑定原 VM 的 `previous_response_id` 不重新选槽。整池改等级或权重用 `POST /vms/pool-policy`（只写记录，不重建槽详情）。
 
 ### 调度状态（四态）
 
@@ -288,12 +290,12 @@ OpenAI 图像模型不进入 GPT 对话矩阵，单独由 `image_tools` 管理�
 
 收据主密钥保存在数据目录的 `crag-shop-private/receipt.key`，仅控制进程可读；迁移安装或恢复订单库时，须单独安全备份并恢复同一份密钥。标准数据库备份不含该密钥，已有订单而密钥丢失时服务拒绝重建密钥。
 
-宿主订阅状态 `GET /crag-subscription` 仅管理员可查。面板统一使用 `state` 和 `available_seats` 展示状态与剩余可绑定槽位；`null` 表示待核对，`"unlimited"` 表示不限。Docker、KVM 与集群槽共享同一订阅，不按 CRAG 发行版本分池。`used_slots` / `available_slots` 保留供兼容，`ready` 表示有兼容的绑定目标。H2 受签名名单 10,000 槽上限约束；支持的 H1 宿主可通过 `POST /crag-subscription/upgrade`（JSON `{}`）升级。H2 确认槽已销毁后才释放额度，停机不释放；回收中断可通过 `POST /crag-subscription/recover`（JSON `{}`）继续。
+宿主订阅状态 `GET /crag-subscription` 仅管理员可查。面板统一使用 `state` 和 `available_seats` 展示状态与剩余可绑定槽位；`null` 表示待核对，`"unlimited"` 表示不限。Docker、KVM 与集群槽共享同一订阅，不按 CRAG 发行版本分池。`used_slots` / `available_slots` 保留供兼容，`ready` 表示有兼容的绑定目标。H2 受签名名单 10,000 槽上限约束；支持的 H1 宿主可通过 `POST /crag-subscription/upgrade`（JSON `{}`）升级。删除 H2 槽须确认运行实例销毁后才释放额度；停机本身不释放额度，名额不足时可按需回收确认已停机且未在操作的槽。回收中断可通过 `POST /crag-subscription/recover`（JSON `{}`）继续。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/crag-subscription/redeem` | 管理员同源登录会话，JSON `{ "redemption_code": "<CRAGR1 宿主码>" }`，无需已有 VM，不自动绑定或启动。没有可信发行包时返回 `409 crag_subscription_host_package_unready`，不核销。每张新码从兑换时独立计时，未到期额度相加；兑换中断可用 `/crag-subscription/recover` 继续同步。 |
-| POST | `/vms/:id/crag-license/bind` | 管理员同源登录会话，JSON `{}`。本机和集群 Linux Docker/KVM CRAG 槽从同一池绑定，绑定时才按实际载荷签发逐槽许可；绑定不启动或重启槽位。KVM 来宾使用本地临时目录，集群 Docker 使用只读挂载；都不接收兑换码或宿主鉴权凭据。回读槽授权确认 `license.valid` 与 `license.scope`；尚未加载许可的内核需按正常流程重启。 |
+| POST | `/vms/:id/crag-license/bind` | 管理员同源登录会话，JSON `{}`。本机和集群 Linux Docker/KVM CRAG 槽从同一池绑定，绑定时才按实际载荷签发逐槽许可；绑定不启动或重启槽位。KVM 来宾使用本地临时目录，集群 Docker 使用只读挂载；都不接收兑换码或宿主鉴权凭据。本机 KVM 进一步验证 guest 身份、tmpfs 副本与只读挂载，同步失败时拒绝新请求。回读槽授权确认 `license.valid` 与 `license.scope`；尚未加载许可的内核需按正常流程重启。 |
 
 宿主 `expires_at` 是当前签名额度的下一个到期点，不表示全部套餐同时失效。到期后控制面向 Authority 刷新剩余有效额度；刷新不可用时不沿用过期签名。
 
@@ -345,6 +347,8 @@ Analytics 按官方 [`codex_thread_initialized`](https://github.com/openai/codex
 ### 通用路由选项
 
 `failover.stream_idle_timeout_ms`（毫秒，30 秒–60 分钟，默认 180 秒）：上游流连续无事件即判超时；网关流路径、各槽 `kernel.json` 的 `idle_timeout_seconds` 与 job 看门狗共用。优先级：面板该字段 → 启动时写入 `cfg.limits.stream_idle_timeout_ms` → 控制面 `.env` 的 `KIN_STREAM_IDLE_TIMEOUT` → 180 秒。保存后热写各槽 `kernel.json`；运行中 kernel 在无任务时自动重启以读取新看门狗值。
+
+`failover.max_accounts_per_request`（正整数，默认 `0` 不限制）：单请求实际执行过的不同账号数达到上限后，不再向新账号发起推理；没执行的准入失败不计入。无配额、模型或重试时间证据的上游 429 不直接冷却账号或 Fable；同一请求在两个账号收到此类 429 时保留上游错误并停止调度。
 
 `compatibility.persona_preset`（`official` / `official_full` / `zero` / `custom`）和 `compatibility.cache_ttl`（`5m` / `1h`）保存后投影到每个 Claude 槽的 `vms/<id>/run/kernel.json`：`persona_preset`、`system_layout`（`zero`→`zero`，其余→`identity`）、`default_cache_ttl`。响应 `kernel_persona.updated` 是本次字节有变化的槽数。`PATCH /vms/:id` 的 `timezone` / `timezone_follow_proxy` 另把 `timezone` 热写进该槽 `kernel.json`，`timezone_sync.kernel_hot` 表示文件有变化。容器 `TZ` 不在这次写入里。Codex 槽不写。
 
@@ -731,7 +735,9 @@ API 主日志计费身份仍为上游 key ID，`vm_id` 为空；主日志及 `re
 - 仅改名无需 SSH 连接，也不重连。SSH 配置保存时服务端会重新验证，不能以先前 probe 成功代替：先使用原指纹建立候选连接，验证成功再保存并接管原链路；失败保留原配置和连接。已有终端和转发连接可能在切换时断开，远端 VM 容器不会被重建。这里只修改控制面保存的连接配置，不修改远端 sshd、密码或 authorized_keys。
 - 省略凭证字段表示保留。切换认证方式必须提供新密码或新私钥，并清理旧方式的凭证；新私钥不继承旧私钥的口令，`passphrase: ""` 表示清空。空密码/空私钥不是“保持不变”，会校验失败；响应不返回凭证。
 - 已有 VM 的节点不能修改登录用户（`node_username_in_use`）。候选连接必须仍能访问现有 VM 容器、挂载目录及匹配的 UID/GID（否则 `node_runtime_mismatch`）；不用于将已有节点迁移到另一台 VPS。被其他节点用作跳板、正在安装 Docker、构建镜像、处理调度请求或有 `withVmLock` 操作（如 VM 重置）尚未完成时拒绝修改连接配置，仍可改名。主机密钥轮换、跳板拓扑修改和 VM 迁移不在此接口范围。
-- 直连通道：远程槽的 kernel / worker 请求默认在节点那一条 SSH 长连接里各开一个通道，长时间零碎流量会让这条连接的拥塞窗口卡在很低的值（实测约 17KB/s），突发的请求正文全部排队。`PUT /direct-link` 后控制面经 SSH 在节点上建 `kin-slot-gate`（宿主网络、只读挂载 `<root>/vms`、监听 `0.0.0.0:<port>`），之后每个槽连接是一条独立的 TLS 1.3 连接。gate 首次启动自签证书（`<root>/gate/tls/`），控制面经已固定主机密钥的 SSH 读取并固定其 SHA-256，指纹不符即不发令牌；每节点随机令牌加密存库，令牌与指纹任何响应都不回传。请求正文紧跟前言发出，不等 gate 应答。gate 只连 `<root>/vms/<vm>/run/{kernel,worker}.sock`，以 `O_PATH|O_NOFOLLOW` 打开，不跟随槽内植入的符号链接。连不上、证书不符或令牌被拒时该节点退回 SSH 30 秒，健康检查 ping 成功即恢复；Docker、终端、健康检查始终走 SSH。**节点防火墙应只对控制面出口 IP 放行该端口**（令牌之外的第二道门）。`direct_link.state`：`ok` 直连、`down` 已退回 SSH（`error` 为原因）、`pending` 尚未检查或尚未固定证书；`gate_error` 为节点端创建失败原因（如节点上还没有槽位镜像）。
+- 直连通道：默认 kernel / worker 通过 SSH 转发。对 Linux 节点执行 `PUT /direct-link` 后，控制面经 SSH 创建 `kin-slot-gate`（宿主网络、只读挂载 `<root>/vms`、监听 `0.0.0.0:<port>`），每个槽连接走独立的 TLS 1.3 通道。控制面通过已验证的 SSH 固定 gate 自签证书的 SHA-256；指纹不符不发令牌，令牌和指纹不出现在 API 响应中。gate 只连 `<root>/vms/<vm>/run/{kernel,worker}.sock`，不跟随槽内符号链接。**节点防火墙应只对控制面出口 IP 放行该端口**。
+- 可用性：控制面每 5 秒独立探测 gate，不依赖 SSH。`direct_link.state` 为 `ok`（近期探测成功）、`down`（探测失败，原因见 `error`）、`pending`（没有有效结果或未固定证书）；`gate_error` 记录部署失败原因。SSH 暂断时，已建立的 TLS 流不依赖 SSH，且新请求只有通过槽位内核健康检查才会继续走该 VM。SSH 认证或主机密钥错误不按暂断处理。Docker、终端和节点管理仍需要 SSH；gate 可达不代表出口可达。
+- 回退：gate 回复 `OK` 之前不转发业务字节，此阶段失败可回退到同一 VM 的 SSH。两个通道均不可用时，已有会话在原调度预算内等待，超时返回 `503 cluster_slot_reconnecting`（响应已进入 SSE 时发错误事件），保留会话绑定。已可能投递的请求不自动重放或换号，无法确认结果时返回 `502 cluster_delivery_unconfirmed`；已开始的流以错误事件结束，不补成功终止符，也不续传。
 - 本机 Docker 桥：每个节点在 `<data>/cluster/<id>/docker.sock`（0600）监听，`docker -H unix://…/docker.sock ps` 直接操作远端 daemon。数据目录所在文件系统不支持 unix socket（如 WSL `/mnt/*`）时设 `VM2API_CLUSTER_SOCKET_DIR`。
 
 ## 管理口（master）

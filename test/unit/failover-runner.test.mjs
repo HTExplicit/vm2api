@@ -323,6 +323,72 @@ test('slot_busy spill serves the turn elsewhere but keeps the session pinned', a
   })
 })
 
+test('with session_affinity_first a slot_busy spill moves the pin to the unit that served the turn', async (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-slot-busy-follow-'))
+  const sticky = new StickyRouter({ dataDir, config: { sticky: { enabled: true } } })
+  t.after(() => {
+    sticky.db.close()
+    fs.rmSync(dataDir, { recursive: true, force: true })
+  })
+  const callerSession = 'slot-busy-follow'
+  const stickyKey = sticky.canonicalSessionKey(callerSession)
+  sticky.bind(stickyKey, { accountId: 'account-1', vmId: 'vm-01', sessionId: 'stored-home' }, { countHit: false })
+  const selections = [1, 2].map((n) => ({
+    ok: true,
+    accountId: `account-${n}`,
+    vmId: `vm-0${n}`,
+    seatKey: `seat:sess:${callerSession}`,
+    release() {},
+  }))
+  let index = 0
+  const scheduler = {
+    config: { session_affinity_first: true },
+    async selectAndReserve() {
+      return selections[Math.min(index++, selections.length - 1)]
+    },
+    markSuccess() {},
+    markCooldown() {},
+    releaseAccountSessions() {
+      assert.fail('capacity spill must not unbind')
+    },
+  }
+  const runner = new FailoverRunner({ scheduler, stickyRouter: sticky, config: { same_account_retry_delay_ms: 0 } })
+  let clock = 1_000
+  const result = await runner.run({
+    requestId: 'req-spill-follow',
+    canonicalBody: { model: 'claude-opus-test' },
+    model: 'claude-opus-test',
+    stickyKey,
+    seatKey: `seat:sess:${callerSession}`,
+    applyAttempt: (body, selected, extra) => ({
+      body,
+      meta: {
+        sessionId: resolveOutboundSessionId(callerSession, {
+          boundSessionId: extra.stickyBound?.sessionId,
+          boundVmId: extra.stickyBound?.vmId,
+          vmId: selected.vmId,
+          epoch: `${clock++}:${selected.vmId}`,
+        }),
+      },
+    }),
+    callAttempt: ({ candidate: selected }) =>
+      selected.accountId === 'account-1'
+        ? {
+            ok: false,
+            status: 503,
+            terminalState: 'rejected',
+            body: { error: { type: 'api_error', code: 'slot_busy', message: 'no free slot' } },
+          }
+        : success(),
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.accountId, 'account-2')
+  const bound = sticky.resolve(stickyKey)
+  assert.equal(bound.accountId, 'account-2')
+  assert.equal(bound.vmId, 'vm-02')
+  assert.notEqual(bound.sessionId, 'stored-home')
+})
+
 test('a late device-affinity hop does not overwrite a newer cross-account session pin', async (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-device-move-race-'))
   const sticky = new StickyRouter({ dataDir, config: { sticky: { enabled: true } } })
@@ -500,6 +566,50 @@ test('request-scoped entitlement error does not walk the pool', async () => {
   assert.equal(scheduler.cooldowns.length, 0)
 })
 
+test('bare 429s on two accounts stop without cooling accounts or Fable', async () => {
+  for (const model of ['claude-sonnet-test', 'claude-fable-test']) {
+    const scheduler = new Scheduler([candidate(1), candidate(2), candidate(3)])
+    const runner = new FailoverRunner({ scheduler })
+    const result = await runner.run({
+      requestId: `req-bare-${model}`,
+      model,
+      callAttempt: () => ({
+        ok: false,
+        status: 429,
+        terminalState: 'rejected',
+        body: { error: { type: 'rate_limit_error', message: 'Error' } },
+      }),
+    })
+    assert.equal(result.status, 429)
+    assert.equal(result.policy.reason, 'rate_limited_request')
+    assert.equal(result.attemptCount, 2)
+    assert.equal(scheduler.selectCalls, 2)
+    assert.deepEqual(scheduler.cooldowns, [])
+    assert.deepEqual(scheduler.releasedAccounts, [])
+  }
+})
+
+test('the optional account cap counts executions, not admission misses', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2), candidate(3), candidate(4)])
+  const runner = new FailoverRunner({ scheduler, config: { max_accounts_per_request: 1 } })
+  const seen = []
+  const result = await runner.run({
+    requestId: 'req-account-cap',
+    model: 'claude-sonnet-test',
+    callAttempt: ({ candidate: selected }) => {
+      seen.push(selected.accountId)
+      if (selected.accountId === 'account-1') {
+        return { ok: false, status: 503, upstreamExecutions: 0, body: { error: { code: 'slot_busy' } } }
+      }
+      return { ok: false, status: 529, terminalState: 'rejected', body: { error: { message: 'Overloaded' } } }
+    },
+  })
+  assert.deepEqual(seen, ['account-1', 'account-2'])
+  assert.equal(result.account_cap, 1)
+  assert.equal(result.attemptCount, 1)
+  assert.equal(result.status, 529)
+})
+
 test('committed realtime stream failure never switches accounts', async () => {
   const scheduler = new Scheduler([candidate(1), candidate(2)])
   const runner = new FailoverRunner({ scheduler })
@@ -522,6 +632,30 @@ test('committed realtime stream failure never switches accounts', async () => {
   assert.equal(result.finalState, 'incomplete')
   assert.equal(result.attemptCount, 1)
   assert.equal(scheduler.selectCalls, 1)
+})
+
+test('unconfirmed cluster delivery stops account failover even before any client output', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const runner = new FailoverRunner({ scheduler })
+  const result = await runner.run({
+    requestId: 'cluster-unconfirmed',
+    canonicalBody: { model: 'claude-opus-test' },
+    model: 'claude-opus-test',
+    stream: true,
+    callAttempt: () => ({
+      ok: false,
+      status: 0,
+      transportError: true,
+      committed: false,
+      clusterDeliveryUnconfirmed: true,
+      terminalState: 'transport_error',
+      body: { error: { code: 'worker_timeout', message: 'slot worker timeout' } },
+    }),
+  })
+  assert.equal(result.policy.reason, 'cluster_delivery_unconfirmed')
+  assert.equal(result.attemptCount, 1)
+  assert.equal(scheduler.selectCalls, 1)
+  assert.equal(scheduler.cooldowns.length, 0)
 })
 
 test('cloudflare 403 does not trigger SOCKS disconnect', async () => {
@@ -2121,4 +2255,71 @@ test('a slot that cannot refresh its credential hops and cools down', async () =
   assert.equal(scheduler.cooldowns.length, 1)
   assert.equal(scheduler.cooldowns[0].update.reason, 'credential_refresh_failed')
   assert.equal(scheduler.cooldowns[0].update.status, 'cooldown')
+})
+
+test('signature 400 on a hop that replayed foreign thinking is stripped and retried with the switch off', async () => {
+  const scheduler = new Scheduler([candidate(1)])
+  const runner = new FailoverRunner({ scheduler })
+  const seen = []
+  const result = await runner.run({
+    requestId: 'req-foreign-sig',
+    canonicalBody: {
+      model: 'claude-opus-test',
+      thinking: { type: 'adaptive' },
+      messages: [
+        { role: 'user', content: 'q' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: '', signature: 'other-pool-signature' },
+            { type: 'text', text: 'keep' },
+          ],
+        },
+        { role: 'user', content: 'next' },
+      ],
+    },
+    model: 'claude-opus-test',
+    applyAttempt: (body, _selected, extra) => {
+      seen.push(extra.repairs)
+      return { body, meta: { foreignThinking: true } }
+    },
+    callAttempt: ({ body }) => {
+      if (seen.length === 1) {
+        return {
+          ok: false,
+          status: 400,
+          terminalState: 'error',
+          body: { error: { message: 'messages.1.content.0: Invalid `signature` in `thinking` block' } },
+        }
+      }
+      assert.deepEqual(body.messages[1].content, [{ type: 'text', text: 'keep' }])
+      return success('stripped')
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(seen.length, 2)
+  assert.deepEqual(seen[1], [{ action: 'repair-and-retry', reason: 'signature_repairable' }])
+})
+
+test('signature 400 without foreign thinking still surfaces with the switch off', async () => {
+  const scheduler = new Scheduler([candidate(1)])
+  const runner = new FailoverRunner({ scheduler })
+  let calls = 0
+  const result = await runner.run({
+    requestId: 'req-own-sig',
+    canonicalBody: { model: 'claude-opus-test', messages: [{ role: 'user', content: 'q' }] },
+    model: 'claude-opus-test',
+    applyAttempt: (body) => ({ body, meta: { foreignThinking: false } }),
+    callAttempt: () => {
+      calls++
+      return {
+        ok: false,
+        status: 400,
+        terminalState: 'error',
+        body: { error: { message: 'Invalid `signature` in `thinking` block' } },
+      }
+    },
+  })
+  assert.equal(result.status, 400)
+  assert.equal(calls, 1)
 })

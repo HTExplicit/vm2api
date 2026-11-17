@@ -2,13 +2,14 @@ import type { Vm } from '@/types/panel-vm'
 import { isOpenaiApiKeyCandidate } from '@/features/vm/openai-api-state'
 
 export type KeyGroupType =
-  'all' | 'anthropic' | 'openai' | 'openai_apikey' | 'pool'
+  'all' | 'anthropic' | 'openai' | 'openai_apikey' | 'gemini' | 'pool'
 
 export const KEY_ALLOWED_MODELS_MAX = 200
 
 export type KeyLimitsDraft = {
   name: string
   category: 'oauth' | 'api'
+  api_endpoint_id?: string
   max_concurrency: number
   quota_requests: number
   quota_usd: number
@@ -40,7 +41,12 @@ export function parseModelList(text: string): string[] {
 }
 
 function groupTypeOf(value: string): KeyGroupType {
-  if (value === 'anthropic' || value === 'openai' || value === 'openai_apikey')
+  if (
+    value === 'anthropic' ||
+    value === 'openai' ||
+    value === 'openai_apikey' ||
+    value === 'gemini'
+  )
     return value
   return 'all'
 }
@@ -66,6 +72,14 @@ export function keyLimitsPayload(
   if (isAdmin)
     body.category =
       draft.group_type === 'openai_apikey' ? 'api' : draft.category
+  if (draft.group_type === 'gemini' && (!isAdmin || isApi)) {
+    throw new Error('Gemini 平台只允许管理员创建宿主机 OAuth 密钥')
+  }
+  if (isAdmin && isApi && draft.api_endpoint_id !== undefined) {
+    const endpointId = draft.api_endpoint_id.trim()
+    if (mode === 'create' && !endpointId) throw new Error('请选择 API 渠道')
+    body.api_endpoint_id = endpointId || null
+  }
   if (isAdmin && draft.group_type === 'pool' && !isApi) {
     const vm_pool_id = String(draft.vm_pool_id || '').trim()
     if (!vm_pool_id) throw new Error('选择一个账号池')
@@ -75,14 +89,19 @@ export function keyLimitsPayload(
   } else {
     const group_type = groupTypeOf(draft.group_type)
     let allowed_vms =
-      isApi || group_type === 'all'
+      isApi || group_type === 'all' || group_type === 'gemini'
         ? []
         : [...new Set(draft.allowed_vms.map((id) => id.trim()).filter(Boolean))]
     if (mode === 'edit' && options.vms) {
       const liveIds = new Set(options.vms.map((vm) => vm.id))
       allowed_vms = allowed_vms.filter((id) => liveIds.has(id))
     }
-    if (!isApi && group_type !== 'all' && allowed_vms.length === 0) {
+    if (
+      !isApi &&
+      group_type !== 'all' &&
+      group_type !== 'gemini' &&
+      allowed_vms.length === 0
+    ) {
       throw new Error(
         group_type === 'openai_apikey'
           ? '至少选择一个 API 账号'
@@ -103,7 +122,9 @@ export function keyLimitsPayload(
     body.allowed_vms = allowed_vms
     if (
       isAdmin &&
-      (isApi || draft.vm_pool_id !== undefined || group_type === 'openai_apikey')
+      (isApi ||
+        draft.vm_pool_id !== undefined ||
+        group_type === 'openai_apikey')
     )
       body.vm_pool_id = null
   }

@@ -73,7 +73,12 @@ test('new shop migrations preserve existing orders and apply once after the publ
   )
   const before = db.prepare('SELECT * FROM crag_shop_orders ORDER BY order_id').all()
   const ledger = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()
-  assert.deepEqual(applyMigrations(db), ['061_crag_shop_commerce.sql', '062_crag_shop_activation.sql'])
+  assert.deepEqual(applyMigrations(db), [
+    '061_crag_shop_commerce.sql',
+    '062_crag_shop_activation.sql',
+    '063_api_key_endpoint.sql',
+    '064_risk_audit_bans.sql',
+  ])
   assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '061' ORDER BY version").all(), ledger)
   for (const old of before) {
     const saved = db.prepare('SELECT * FROM crag_shop_orders WHERE order_id = ?').get(old.order_id)
@@ -638,7 +643,14 @@ test('pinned fulfillment survives lost redeem and H2 bind replies without reappl
     fs.writeFileSync(path.join(dir, 'machine-id'), randomBytes(16).toString('hex'))
   }
   assert.equal(materializeCragV2(root, slots[0], { select: false }).ok, true)
-  const pinnedPayload = cragTargetIds(root, slots[0]).payloadKeyId
+  const { payloadKeyId: pinnedPayload, issuerId: pinnedIssuer } = cragTargetIds(root, slots[0])
+  fs.mkdirSync(path.join(root, 'deploy'))
+  fs.writeFileSync(
+    path.join(root, 'deploy/payload.json'),
+    JSON.stringify({
+      crag_authorization: { payload_key_id: pinnedPayload, issuer_public_key_id: pinnedIssuer },
+    }),
+  )
   // Refreshing the download cache must not invalidate the installed target's unpaid order.
   const refreshCache = () => {
     seedEncryptedPackage(root, { payloadKey: randomBytes(32) })
@@ -696,7 +708,8 @@ test('pinned fulfillment survives lost redeem and H2 bind replies without reappl
         assert.equal(init.headers.authorization, bearer)
         if (url.endsWith('/redeem')) {
           assert.equal(input.redemption_code, CODE)
-          assert.deepEqual(Object.keys(input).sort(), ['host_id', 'redemption_code'])
+          assert.equal(input.payload_key_id, pinnedPayload)
+          assert.equal(input.issuer_public_key_id, pinnedIssuer)
           if (++redeems === 1) {
             rights = signedRights(input.host_id, 1, [])
             throw new Error('lost redeem reply after authority commit')

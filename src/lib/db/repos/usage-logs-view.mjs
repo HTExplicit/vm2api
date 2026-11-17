@@ -236,6 +236,8 @@ export function toUsageLogRow(row, names, chain = []) {
     context1mApplied: row.long_context == null ? null : row.long_context === 1,
     reasoningEffort: row.reasoning_effort ?? null,
     inboundDeviceId: row.inbound_device_id ?? null,
+    upstreamStatus: nullableNum(row.upstream_status),
+    upstream400Message: row.upstream_400_message ?? null,
     jevState: row.jev_state || null,
     errorClass: row.error_class ?? null,
     errorLabel: row.error_label ?? null,
@@ -346,6 +348,8 @@ function buildFilter(filters, defaultMuted) {
   }
   eq('path', filters.endpoint)
   eq('protocol', filters.protocol)
+  if (filters.upstream_400) where.push('upstream_status = 400')
+  eq('request_id', filters.request_id)
   if (filters.account_id) {
     where.push('(account_id = ? OR final_account_id = ?)')
     params.push(filters.account_id, filters.account_id)
@@ -697,7 +701,8 @@ export class UsageLogsView {
         .map((r) => r.id)
     }
     const names = lookupNames(this.db, { vmIds, accountIds })
-    const sourceAccounts = this.db.prepare(`
+    const sourceAccounts = this.db
+      .prepare(`
       WITH recent AS ${recent}, sources AS (
         SELECT source_account_id, source_email, created_at FROM recent
         UNION ALL
@@ -710,7 +715,8 @@ export class UsageLogsView {
       SELECT source_account_id AS id, COALESCE(MAX(NULLIF(source_email, '')), source_account_id) AS name
       FROM sources WHERE source_account_id IS NOT NULL AND source_account_id <> ''
       GROUP BY source_account_id ORDER BY MAX(created_at) DESC LIMIT ${OPTION_LIMIT}
-    `).all(...own.params)
+    `)
+      .all(...own.params)
     return {
       users: users.map((u) => ({ id: String(u.id), name: u.username || u.email || String(u.id) })),
       keys: keys.map((k) => ({ id: String(k.id), name: k.name || String(k.id), userId: k.user_id ?? null })),

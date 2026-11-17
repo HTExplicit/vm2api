@@ -76,7 +76,11 @@ function fixture(t, { body, identity = { apiKeyKind: 'master' }, bootFailure } =
     proxyPool,
     calls,
     async start() {
-      await handlePanel({ method: 'POST' }, {}, new URL(`http://localhost/api/panel/vms/${vm.id}/start`))
+      await handlePanel(
+        { method: 'POST', headers: { host: 'localhost', origin: 'http://localhost' } },
+        {},
+        new URL(`http://localhost/api/panel/vms/${vm.id}/start`),
+      )
       return response
     },
   }

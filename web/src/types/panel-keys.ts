@@ -15,6 +15,7 @@ export type ApiKeyItem = {
   revealable?: boolean
   status?: string
   category?: 'oauth' | 'api'
+  api_endpoint_id?: string | null
   max_concurrency?: number
   quota_requests?: number
   quota_used?: number
@@ -27,8 +28,8 @@ export type ApiKeyItem = {
   last_used_at?: string
   requests?: number
   inflight?: number
-  /** 平台分组带 allowed_vms；openai_apikey 仅使用所选账号的 API key。 */
-  group_type?: 'all' | 'anthropic' | 'openai' | 'openai_apikey'
+  /** 平台分组；账号 API 和 Gemini 各自隔离。 */
+  group_type?: 'all' | 'anthropic' | 'openai' | 'openai_apikey' | 'gemini'
   allowed_vms?: string[]
   vm_pool_id?: string | null
   vm_pool_name?: string | null

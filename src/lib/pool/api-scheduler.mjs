@@ -169,12 +169,14 @@ export class ApiScheduler {
   }
 
   catalog(scope = {}) {
+    const endpointId = scope.endpointId || null
     const data = []
     const seen = new Set()
     const targetGroup = String(scope.group_type || 'all').toLowerCase()
     const fullCatalog = scope.group_type !== 'openai_apikey'
     for (const ep of this.scopedEndpoints(scope)) {
       if (ep.disabled) continue
+      if (endpointId && ep.id !== endpointId) continue
       const proto = normalizeProtocol(ep.protocol, ep.kind)
       if (targetGroup === 'anthropic' && proto !== 'anthropic') continue
       if (targetGroup === 'openai' && proto !== 'openai') continue
@@ -203,11 +205,13 @@ export class ApiScheduler {
   }
 
   pick(requestedModel, now = Date.now(), scope = {}, { excludedAccountIds, excludedKeyIds } = {}) {
+    const endpointId = scope.endpointId || null
     const targetGroup = String(scope.group_type || 'all').toLowerCase()
     const modelOptions = { fullCatalog: scope.group_type !== 'openai_apikey' }
     const parents = this.scopedEndpoints(scope)
       .filter((ep) => {
         if (ep.disabled) return false
+        if (endpointId && ep.id !== endpointId) return false
         const proto = normalizeProtocol(ep.protocol, ep.kind)
         if (targetGroup === 'anthropic' && proto !== 'anthropic') return false
         if (targetGroup === 'openai' && proto !== 'openai') return false

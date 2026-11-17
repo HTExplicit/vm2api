@@ -43,7 +43,7 @@ export function parseAllowedVms(value) {
   ]
 }
 
-/** null for an unknown stored/written group. Empty uses fallback. */
+/** Empty uses fallback; an unsupported platform returns null. */
 export function normalizeGroupType(value, { fallback = 'all' } = {}) {
   if (value == null || value === '') return fallback
   if (value === 'pool') return null
@@ -52,6 +52,7 @@ export function normalizeGroupType(value, { fallback = 'all' } = {}) {
   if (v === 'anthropic' || v === 'claude') return 'anthropic'
   if (v === 'openai' || v === 'gpt' || v === 'codex') return 'openai'
   if (v === 'openai_apikey') return 'openai_apikey'
+  if (v === 'gemini') return 'gemini'
   return null
 }
 
@@ -72,10 +73,10 @@ function poolIdOf(value) {
 export function keyScopeFromRecord(rec) {
   if (!rec) return { group_type: 'all', allowed_vms: [], vm_pool_id: null }
   const group_type = normalizeGroupType(rec.group_type) || 'all'
-  const vm_pool_id = poolIdOf(rec.vm_pool_id)
+  const vm_pool_id = group_type === 'gemini' ? null : poolIdOf(rec.vm_pool_id)
   return {
     group_type,
-    allowed_vms: vm_pool_id || group_type === 'all' ? [] : parseAllowedVms(rec.allowed_vms),
+    allowed_vms: vm_pool_id || group_type === 'all' || group_type === 'gemini' ? [] : parseAllowedVms(rec.allowed_vms),
     vm_pool_id,
   }
 }
@@ -112,6 +113,7 @@ export function vmPoolDenial(scope) {
 export function keyAllowsVm(scope, vm) {
   // Account API keys have their own picker and must never enter OAuth scheduling.
   if (scope?.group_type === 'openai_apikey') return false
+  if (scope?.group_type === 'gemini') return false
   if (scope?.vm_pool_id) {
     if (scope.vm_pool_error) return false
     if (!vm?.id || !(scope.allowed_vms || []).includes(vm.id)) return false
@@ -136,14 +138,12 @@ export function normalizeKeyScope(input = {}, { partial = false, current = null,
   const hasType = input.group_type != null && input.group_type !== ''
   const hasVms = input.allowed_vms != null
   const hasPool = Object.prototype.hasOwnProperty.call(input, 'vm_pool_id')
-  if (partial && !hasType && !hasVms && !hasPool) return null
-
   const base = current ? keyScopeFromRecord(current) : { group_type: 'all', allowed_vms: [], vm_pool_id: null }
   let group_type = !partial && !hasType ? 'all' : base.group_type
   if (hasType) {
     const parsed = normalizeGroupType(input.group_type, { fallback: null })
     if (!parsed) {
-      throw Object.assign(new Error('group_type 只能是 all、anthropic、openai 或 openai_apikey'), {
+      throw Object.assign(new Error('group_type 只能是 all、anthropic、openai、openai_apikey 或 gemini'), {
         code: 'invalid_group_type',
       })
     }
@@ -154,6 +154,15 @@ export function normalizeKeyScope(input = {}, { partial = false, current = null,
     String(input.category || current?.category || '')
       .trim()
       .toLowerCase() === 'api'
+  if (group_type === 'gemini') {
+    if (apiMode || (hasVms && parseAllowedVms(input.allowed_vms).length) || (hasPool && input.vm_pool_id)) {
+      throw Object.assign(new Error('Gemini 密钥只能使用宿主机 OAuth 池，不能绑定 VM、账号池或 API 渠道'), {
+        code: 'invalid_gemini_key_scope',
+      })
+    }
+    return { group_type, allowed_vms: [], vm_pool_id: null }
+  }
+  if (partial && !hasType && !hasVms && !hasPool) return null
   let allowed_vms = hasVms ? parseAllowedVms(input.allowed_vms) : !partial && !hasType ? [] : base.allowed_vms
   let vm_pool_id = hasPool ? parsePoolId(input.vm_pool_id) : base.vm_pool_id
   if (apiMode && group_type !== 'openai_apikey') {
@@ -176,7 +185,7 @@ export function normalizeKeyScope(input = {}, { partial = false, current = null,
 
 /** Panel check: every id is a live VM of the chosen platform. Pool membership is checked separately. */
 export function assertVmScope(vms, scope) {
-  if (!scope || scope.group_type === 'all' || scope.vm_pool_id) return []
+  if (!scope || scope.group_type === 'all' || scope.group_type === 'gemini' || scope.vm_pool_id) return []
   const byId = new Map((vms || []).map((vm) => [vm.id, vm]))
   for (const id of scope.allowed_vms) {
     const vm = byId.get(id)

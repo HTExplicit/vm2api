@@ -80,7 +80,11 @@ async function route(root, method, endpoint, body, options = {}) {
     readBody: async () => body,
     ...options.ctx,
   })
-  await handle({ method }, {}, new URL(`http://localhost/api/panel/kernels${endpoint}`))
+  await handle(
+    { method, headers: { host: 'localhost', origin: 'http://localhost' } },
+    {},
+    new URL(`http://localhost/api/panel/kernels${endpoint}`),
+  )
   return response
 }
 
@@ -242,7 +246,7 @@ test('install route changes only explicit Claude target, returns partial outcome
   assert.equal(report.items[0].stopped, false)
   assert.equal(report.items[0].restarted, true)
   assert.equal(report.items[1].stopped, false)
-  assert.equal(report.items[1].code, 'license_unconfigured')
+  assert.equal(report.items[1].code, 'license_required')
   assert.equal(getVm(root, 'vm-13').status, 'running')
   assert.equal(getVm(root, 'vm-14').status, 'running')
   assert.equal(fs.existsSync(cragLicenseDirectory(root, { id: 'vm-14' })), false)
@@ -315,7 +319,7 @@ test('pull route updates cache only and returns actionable paid asset failure wi
   assert.equal(versions.status, 200)
   assert.deepEqual(versions.body.data, {
     'cli-node': ['v1.2.3', 'v1.2.1'],
-    crag: ['payload-2026.11.14-crag-1.2.1-legacy', 'payload-2026.11.14-crag-1.2.1'],
+    crag: ['payload-2026.11.14-crag-1.2.1'],
   })
   const historical = await route(root, 'POST', '/pull', { kernel: 'cli-node', tag: 'v1.2.1' }, options)
   assert.equal(historical.status, 200, JSON.stringify(historical.body))

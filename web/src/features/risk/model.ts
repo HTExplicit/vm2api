@@ -1,37 +1,45 @@
 import type { JevScopeAccount } from '@/types/panel-routing'
 import type { UsageLogRow } from '@/types/panel-usage-logs'
 
-/** Gate order matches `evaluateProtocolIntercept`: cheap rules first, the model last. */
-export type StageId = 'distill' | 'hard-regex' | 'refusal' | 'jev'
-export type ViewKey = 'all' | StageId | 'pass'
+export type PreflightRule = 'distill' | 'hard-regex' | 'refusal'
+export type StageId = PreflightRule | 'jev'
+export type RiskView = 'preflight' | 'jev' | 'status'
 
-export const STAGES: { id: StageId; name: string; does: string }[] = [
+export const PREFLIGHT_RULES = [
   {
     id: 'distill',
     name: '蒸馏',
-    does: '收割模板、结构特征、题目指纹。命中即 403，并封 device。',
+    does: '识别收割模板、结构特征和题目指纹，命中不出站。',
   },
   {
     id: 'hard-regex',
     name: '硬正则',
-    does: '按类别正则扫用户正文。命中即 403，不 hop。',
+    does: '按类别和自定义正则拦截。系统提示词改写与禁用工具规则始终单独检查。',
   },
   {
     id: 'refusal',
-    name: '拒答缓存',
-    does: '上游拒过的正文、近似正文和被封的 device，直接 503。',
+    name: '拒答与封禁',
+    does: '配置拒答指纹、设备和会话封禁、禁用工具与上游拒答短语。',
   },
-  {
-    id: 'jev',
-    name: '决策模型',
-    does: '三题各自打分，任一题低于阈值就拦。色情命中会封设备。',
-  },
-]
+] as const
 
-export const VIEW_KEYS: ViewKey[] = ['all', ...STAGES.map((s) => s.id), 'pass']
+export function isPreflightRule(value: unknown): value is PreflightRule {
+  return PREFLIGHT_RULES.some((rule) => rule.id === value)
+}
 
-export function isViewKey(value: unknown): value is ViewKey {
-  return typeof value === 'string' && VIEW_KEYS.includes(value as ViewKey)
+export function riskSearch(search: Record<string, unknown>): {
+  view?: RiskView
+  rule?: PreflightRule
+} {
+  if (isPreflightRule(search.view))
+    return { view: 'preflight', rule: search.view }
+  if (search.view === 'preflight') {
+    return {
+      view: 'preflight',
+      rule: isPreflightRule(search.rule) ? search.rule : 'distill',
+    }
+  }
+  return { view: search.view === 'jev' ? 'jev' : 'status' }
 }
 
 export const PASS_REASONS: Record<string, { label: string; hint: string }> = {
@@ -105,7 +113,7 @@ export function feedKindOf(row: UsageLogRow): FeedKind {
 const REFUSAL_MATCH: Record<string, string> = {
   refusal_guard: '精确指纹',
   refusal_similar: '近似正文',
-  refusal_device: '封禁 device',
+  refusal_device: '设备或会话封禁',
 }
 
 /** The part of the stored block message that says why: `nsfw: 关键词`. */
