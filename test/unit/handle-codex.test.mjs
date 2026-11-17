@@ -11,6 +11,7 @@ import {
   pickCodexCandidates,
   codexFailureHold,
   codexFailoverBudget,
+  codexToolHistorySummary,
 } from '../../src/lib/protocol/handle-codex.mjs'
 import { persistCodexUsage, getVm } from '../../src/lib/vm/vm-registry.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
@@ -28,6 +29,39 @@ import {
 } from '../../src/lib/oauth/openai-auth-state.mjs'
 
 beforeEach(() => resetOpenAIAccountRuntime())
+
+test('Codex tool-history diagnostics keep only bounded pairing metadata', () => {
+  const input = [
+    { type: 'custom_tool_call', call_id: 'call_paired', input: 'private tool input' },
+    { type: 'custom_tool_call_output', call_id: 'call_paired', output: 'private tool output' },
+    { type: 'function_call', call_id: 'call_wrong_kind', arguments: 'private arguments' },
+    { type: 'custom_tool_call_output', call_id: 'call_wrong_kind', output: 'private output' },
+    ...Array.from({ length: 12 }, (_, i) => ({
+      type: 'function_call_output',
+      call_id: `call_missing_${i}`,
+      output: 'secret',
+    })),
+  ]
+  const summary = codexToolHistorySummary({ input }, { _kinResponsesWs: { replayExpanded: true } })
+  assert.equal(summary.transport, 'websocket')
+  assert.equal(summary.replayExpanded, true)
+  assert.equal(summary.inputCount, 16)
+  assert.equal(summary.toolCallCount, 2)
+  assert.equal(summary.toolOutputCount, 14)
+  assert.equal(summary.unmatchedOutputCount, 13)
+  assert.equal(summary.unmatchedCallIdHashes.length, 8)
+  assert.ok(summary.unmatchedCallIdHashes.every((value) => /^[a-f0-9]{12}$/.test(value)))
+  assert.doesNotMatch(JSON.stringify(summary), /call_|private|secret/)
+  assert.deepEqual(codexToolHistorySummary({ input: 'plain input' }), {
+    transport: 'http',
+    replayExpanded: false,
+    inputCount: 0,
+    toolCallCount: 0,
+    toolOutputCount: 0,
+    unmatchedOutputCount: 0,
+    unmatchedCallIdHashes: [],
+  })
+})
 
 test('502 upstream_transport is retryable before commit', () => {
   assert.equal(
@@ -1435,16 +1469,17 @@ function emptyCodexRes() {
   return { headersSent: false, write() {}, end() {} }
 }
 
-async function hopCodex({ root, stickyRouter, routing = {}, headers = {}, body, onHop }) {
+async function hopCodex({ root, stickyRouter, routing = {}, headers = {}, body, onHop, requestContext = {} }) {
   const envelopes = []
   const res = emptyCodexRes()
+  const logBag = {}
   const out = await handleCodexProtocol({
-    req: { headers, apiKeyKind: 'user' },
+    req: { headers, apiKeyKind: 'user', ...requestContext },
     res,
     protocol: 'openai.responses',
     ctx: { body },
     inbound: { stream: false },
-    logBag: {},
+    logBag,
     stats: { errors: 0, requests: 0, by_route: {} },
     json: (_res, status, payload) => {
       res.statusCode = status
@@ -1467,8 +1502,36 @@ async function hopCodex({ root, stickyRouter, routing = {}, headers = {}, body, 
       },
     },
   })
-  return { out, envelopes, res }
+  return { out, envelopes, res, logBag }
 }
+
+test('a rejected Codex continuation logs pairing evidence without retrying or retaining tool content', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-history-'))
+  t.after(() => fs.rmSync(root, { recursive: true }))
+  writeGptVm(root, 'vm-gpt-a')
+  const { envelopes, res, logBag } = await hopCodex({
+    root,
+    requestContext: { _kinResponsesWs: { replayExpanded: true } },
+    body: {
+      model: 'gpt-6.1-sol',
+      stream: false,
+      input: [{ type: 'custom_tool_call_output', call_id: 'call_missing_fixture', output: 'sensitive fixture output' }],
+    },
+    onHop: async () => ({
+      ok: false,
+      status: 400,
+      committed: false,
+      body: { error: { type: 'invalid_request_error', message: 'No tool call found for custom tool call output.' } },
+      failureDiagnostics: { phase: 'headers' },
+    }),
+  })
+  assert.equal(res.statusCode, 400)
+  assert.equal(envelopes.length, 1)
+  assert.equal(logBag.failure_diagnostics.phase, 'headers')
+  assert.equal(logBag.failure_diagnostics.responsesHistory.replayExpanded, true)
+  assert.equal(logBag.failure_diagnostics.responsesHistory.unmatchedOutputCount, 1)
+  assert.doesNotMatch(JSON.stringify(logBag.failure_diagnostics), /call_missing_fixture|sensitive fixture output/)
+})
 
 test('codex rebuild outbound session is not the inbound session', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-sess-'))

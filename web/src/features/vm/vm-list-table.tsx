@@ -89,7 +89,7 @@ const ROW_INTERACTIVE =
 /** 早期七列结构；读数在各列内分行，窄屏由外层滚动。 */
 const GRID: CSSProperties = {
   gridTemplateColumns:
-    '34px minmax(200px,1.2fr) 62px minmax(110px,0.7fr) minmax(190px,1.1fr) minmax(160px,1fr) minmax(230px,1.4fr) minmax(110px,0.8fr) 56px',
+    '34px minmax(190px,1.25fr) 56px minmax(104px,0.65fr) minmax(180px,1.1fr) minmax(190px,1.15fr) minmax(240px,1.5fr) minmax(110px,0.7fr) 56px',
 }
 
 /** 悬停才出现的次要信息。 */
@@ -159,9 +159,29 @@ function StatusCell({ vm }: { vm: Vm }) {
     )
   const tone = poolStatus(vm)
   const reason = vm.restriction_text || vm.unschedulable_text
+  const requesting = vmRequestingCount(vm)
+  const queue = Number(vm.queue_depth) || 0
   return (
-    <div className='grid min-w-0 justify-items-start gap-1.5'>
-      <StatusMark tone={tone} variant='pill' className='text-xs' />
+    <div className='grid min-w-0 justify-items-start gap-2'>
+      <div className='flex flex-wrap items-center gap-2'>
+        <StatusMark tone={tone} variant='pill' className='text-xs' />
+        {requesting > 0 ? (
+          <span
+            data-vm-requesting={requesting}
+            title={`请求中 ${requesting}`}
+            className='inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full bg-[color:var(--tier-pro-solid)] px-1.5 font-mono text-xs font-semibold text-[color:var(--tier-pro-solid-fg)] tabular-nums'
+          >
+            <span className='sr-only'>请求中 </span>
+            {requesting}
+          </span>
+        ) : null}
+        {queue > 0 ? (
+          <span className='text-xs text-muted-foreground'>
+            排队{' '}
+            <b className='font-mono font-medium text-foreground'>{queue}</b>
+          </span>
+        ) : null}
+      </div>
       {reason ? (
         <span
           className={cn(
@@ -198,13 +218,17 @@ function CountPill({ n, failed = false }: { n: number; failed?: boolean }) {
 
 function RequestCell({ r }: { r: RowData }) {
   return (
-    <div className='grid min-w-0 gap-1.5 text-xs'>
-      <div className='flex items-center gap-2'>
-        <span className='w-7 shrink-0 text-muted-foreground'>今日</span>
-        <b className='font-mono font-medium tabular-nums'>
-          {fmtNum(r.today)}{' '}
-          <span className='font-normal text-muted-foreground'>req</span>
-        </b>
+    <div className='grid min-w-0 justify-items-start gap-2 text-xs'>
+      <div className='grid gap-1'>
+        <div className='flex items-baseline gap-2'>
+          <span className='w-7 shrink-0 text-muted-foreground'>今日</span>
+          <b className='font-mono text-[13px] font-semibold text-[color:var(--status-ok)] tabular-nums'>
+            {fmtUsd(r.todayCost, 2)}
+          </b>
+        </div>
+        <span className='font-mono text-muted-foreground tabular-nums'>
+          {fmtNum(r.today)} req · {fmtNum(r.todayTokens)} tok
+        </span>
       </div>
       <div className='flex items-center gap-1.5' title='7D 成功 / 失败'>
         <span className='mr-0.5 w-7 shrink-0 text-muted-foreground'>7D</span>
@@ -218,27 +242,6 @@ function RequestCell({ r }: { r: RowData }) {
             {fmtNum(r.week.req)} req · 失败 —
           </span>
         )}
-      </div>
-      <div className='flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground'>
-        <span>
-          请求中{' '}
-          <b
-            className={cn(
-              'font-mono font-semibold tabular-nums',
-              r.inflight > 0
-                ? 'text-[color:var(--tier-pro-fg)]'
-                : 'text-foreground'
-            )}
-          >
-            {r.inflight}
-          </b>
-        </span>
-        <span>
-          排队{' '}
-          <b className='font-mono font-medium text-foreground tabular-nums'>
-            {r.queue}
-          </b>
-        </span>
       </div>
       {r.seatsMax != null ? (
         <span
@@ -306,6 +309,7 @@ type RowData = {
   win: Partial<Record<WindowKey, WindowReadout>>
   today: number
   todayCost: number
+  todayTokens: number
   week: VmWeekOutcome
   seatsUsed: number
   seatsMax: number | null
@@ -332,6 +336,7 @@ function rowData(vm: Vm, accounts?: UsageAccountRow[]): RowData {
     win,
     today: today.req,
     todayCost: today.today,
+    todayTokens: today.tok,
     week,
     seatsUsed: Number(vm.seats_used) || 0,
     seatsMax: vm.seats_max == null ? null : Number(vm.seats_max),
@@ -414,24 +419,28 @@ const COLS: Col[] = [
     label: '用量窗口',
     sort: '5h',
     sortKeys: ['5h', '7d', 'fable'],
-    cell: (r, now) => <VmUsageWindows vm={r.vm} now={now} quiet quotaActions />,
+    cell: (r, now) => (
+      <VmUsageWindows vm={r.vm} now={now} quiet summaryOnly quotaActions />
+    ),
   },
   {
     label: '成本',
     sort: 'spend',
     sortKeys: ['spend', 'tokens', 'perReq', 'total'],
     cell: (r) => (
-      <div className='grid min-w-0 gap-1.5 text-xs'>
-        <div className='flex items-baseline justify-between gap-2'>
-          <span className='text-muted-foreground'>今日</span>
-          <b className='font-mono font-medium tabular-nums'>
-            {fmtUsd(r.todayCost, 2)}
-          </b>
-        </div>
+      <div className='grid min-w-0 gap-2 text-xs'>
         <div className='flex items-baseline justify-between gap-2'>
           <span className='text-muted-foreground'>7D</span>
           <b className='font-mono font-semibold tabular-nums'>
             {fmtUsd(r.spend, 2)}
+          </b>
+        </div>
+        <div className='flex items-baseline justify-between gap-2'>
+          <span className='text-muted-foreground' title='累计费用'>
+            Σ
+          </span>
+          <b className='font-mono font-medium text-muted-foreground tabular-nums'>
+            {fmtUsd(r.total, 2)}
           </b>
         </div>
       </div>
@@ -974,7 +983,7 @@ export function VmTable({
                             aria-expanded={open}
                             aria-label={`${vm.id}，${label}。Enter 展开明细，Shift+Enter 打开详情`}
                             className={cn(
-                              'group relative grid cursor-pointer items-start border-b border-[color:var(--hairline)] bg-[var(--row-bg)] py-2.5 outline-none [--row-bg:var(--card)] hover:[--row-bg:color-mix(in_oklab,var(--muted)_55%,var(--card))] focus-visible:after:pointer-events-none focus-visible:after:absolute focus-visible:after:inset-0 focus-visible:after:z-[4] focus-visible:after:border-2 focus-visible:after:border-ring',
+                              'group relative grid cursor-pointer items-start border-b border-[color:var(--hairline)] bg-[var(--row-bg)] py-3.5 outline-none [--row-bg:var(--card)] hover:[--row-bg:color-mix(in_oklab,var(--muted)_55%,var(--card))] focus-visible:after:pointer-events-none focus-visible:after:absolute focus-visible:after:inset-0 focus-visible:after:z-[4] focus-visible:after:border-2 focus-visible:after:border-ring',
                               open &&
                                 '[--row-bg:color-mix(in_oklab,var(--muted)_75%,var(--card))]'
                             )}
@@ -1021,7 +1030,10 @@ export function VmTable({
                                   'min-w-0 px-2',
                                   c.dim && 'text-muted-foreground',
                                   // 调度列（第一列）保持可读，其余在关闭时淡出。
-                                  dim && i > 0 && 'opacity-50'
+                                  dim &&
+                                    i > 0 &&
+                                    c.label !== '状态' &&
+                                    'opacity-50'
                                 )}
                               >
                                 {vm.gemini && c.label !== '状态' ? (

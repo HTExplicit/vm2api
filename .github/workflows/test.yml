@@ -258,6 +258,7 @@ jobs:
             test/unit/jev-usage-panel.test.mjs \
             test/unit/codex-slot-reload.test.mjs \
             test/unit/handle-codex.test.mjs \
+            test/unit/responses-ws.test.mjs \
             test/unit/handle-codex-reliability.test.mjs \
             test/unit/stream-timing.test.mjs \
             test/unit/handle-codex-search.test.mjs \
