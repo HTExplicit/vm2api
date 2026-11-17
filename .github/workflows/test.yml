@@ -57,7 +57,7 @@ jobs:
           sh -n scripts/panel-upgrade.sh
       - name: installer shared finalization
         working-directory: test/deploy
-        run: python3 -m unittest test_install_schedule
+        run: python3 -m unittest test_install_schedule test_docker_crag_apparmor test_entrypoint_x86_probe test_check_x86_deps
       - name: redaction helper unit checks
         working-directory: redact
         run: go test ./internal/server

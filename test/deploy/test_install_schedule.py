@@ -45,6 +45,8 @@ ensure_env() { :; }
 env_set() { :; }
 prepare_arch_env() { :; }
 prepare_arm64_host() { :; }
+prepare_docker_crag_apparmor() { :; }
+prepare_gemini_host() { :; }
 print_changelog_slice() { :; }
 release_notes() { :; }
 print_login_banner() { :; }
