@@ -129,7 +129,7 @@ function protocolHarness(
   kernel,
   routing = { compatibility: {}, failover: {} },
   interceptRules = [],
-  admitCragInference,
+  { admitCragInference, captureOutbound = () => true } = {},
 ) {
   const finished = []
   const preparedCandidates = []
@@ -154,7 +154,7 @@ function protocolHarness(
       paths: { data: kernel.root, project: kernel.root },
     },
     requestLog: {
-      start: () => ({ request_id: 'outbound-log', mode: 'debug', capture_outbound: finished.length < 2 }),
+      start: () => ({ request_id: 'outbound-log', mode: 'debug', capture_outbound: captureOutbound(finished.length) }),
       finish: (_ctx, extra) => finished.push(extra),
     },
     stickyRouter: { extractPoolKey: () => null, collectPoolKeys: () => [] },
@@ -210,18 +210,19 @@ unixTest('public JSON and SSE requests reject before worker POST, then resume wh
   kernel.selected.exec.projectRoot = kernel.root
   const code = 'license_crag_host_over_quota'
   let overQuota = true
-  const { handler } = protocolHarness(kernel, { inference: { engine: 'rust' }, failover: {} }, [], () =>
-    overQuota
-      ? {
-          ok: false,
-          status: 403,
-          terminalState: 'rejected',
-          upstreamExecutions: 0,
-          committed: false,
-          body: { type: 'error', error: { type: 'permission_error', code, message: 'CRAG host capacity exceeded' } },
-        }
-      : null,
-  )
+  const { handler } = protocolHarness(kernel, { inference: { engine: 'rust' }, failover: {} }, [], {
+    admitCragInference: () =>
+      overQuota
+        ? {
+            ok: false,
+            status: 403,
+            terminalState: 'rejected',
+            upstreamExecutions: 0,
+            committed: false,
+            body: { type: 'error', error: { type: 'permission_error', code, message: 'CRAG host capacity exceeded' } },
+          }
+        : null,
+  })
   const server = http.createServer(async (req, res) => {
     const chunks = []
     for await (const chunk of req) chunks.push(chunk)
@@ -260,11 +261,12 @@ unixTest('public JSON and SSE requests reject before worker POST, then resume wh
 
 unixTest('debug log uses final CLI headers, hides internal events and never substitutes envelope headers', async () => {
   const kernel = await fakeKernel({ health: { runtime_variant: 'cli-node', dataplane: 'wrap' } })
-  const { handler, finished, request } = protocolHarness(kernel, {
-    inference: { dataplane: 'wrap', health_ttl_ms: 0 },
-    compatibility: {},
-    failover: {},
-  })
+  const { handler, finished, request } = protocolHarness(
+    kernel,
+    { inference: { dataplane: 'wrap', health_ttl_ms: 0 }, compatibility: {}, failover: {} },
+    [],
+    { captureOutbound: (finishedCount) => finishedCount < 2 },
+  )
   // 路由只检查宿主 kernel 路径非空才放行这一跳；真正接请求的是上面的假 kernel socket。
   const prevKernelBin = process.env.KIN_KERNEL_BIN
   process.env.KIN_KERNEL_BIN = path.join(kernel.root, 'kin-kernel')
