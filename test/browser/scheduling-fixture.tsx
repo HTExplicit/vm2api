@@ -22,7 +22,7 @@ function Fixture() {
   return (
     <main className="space-y-4 p-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">列表调度控制</h1>
+        <h1 className="text-xl font-semibold">虚拟机列表 · 模拟数据</h1>
         <button onClick={() => rows.refetch()}>刷新离线数据</button>
       </div>
       <VmActionsContext.Provider
@@ -40,7 +40,9 @@ function Fixture() {
       >
         <VmTable vms={rows.data?.items || []} />
       </VmActionsContext.Provider>
-      <output aria-label="详情打开次数">{details}</output>
+      <output className="sr-only" aria-label="详情打开次数">
+        {details}
+      </output>
       <Toaster />
     </main>
   )

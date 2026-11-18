@@ -38,9 +38,10 @@ describe('VM scheduling priority', () => {
         weight: 42,
       }
       const list = render(vm)
-      expect(list).toContain('>调度 · 优先级</div>')
+      expect(list).toMatch(/role="columnheader"[^>]*>调度<\/div>/)
+      expect(list).toMatch(/role="columnheader"[^>]*>类型<\/div>/)
       expect(list).toMatch(
-        /text-blue-800[^"]*shadow-\[inset_0_0_0_1px_currentColor\][^"]*"[^>]*>P8</
+        /title="手动指定的优先级"[^>]*>P8<small[^>]*>手<\/small>/
       )
       expect(list).not.toMatch(/等级|权重/)
 
@@ -64,7 +65,34 @@ describe('VM scheduling priority', () => {
 })
 
 describe('VM row interaction and health', () => {
-  it('opens detail from a left button and exposes a separate expand control', () => {
+  it('shows the active request count in the account cell even while scheduling is off', () => {
+    const html = render({
+      platform: 'openai',
+      schedulable: false,
+      inflight: 3,
+      session_active: 7,
+    })
+    expect(html).toMatch(
+      /data-vm-cell="account"[\s\S]*?data-vm-requesting="3" title="请求中 3"/
+    )
+    expect(html).not.toContain('data-vm-requesting="7"')
+  })
+
+  it('omits the account badge for held seats and idle Codex sessions', () => {
+    expect(
+      render({
+        inflight: 4,
+        seat_sessions: [
+          { index: 1, session_id: 'held', state: 'held', inflight: 0 },
+        ],
+      })
+    ).not.toContain('data-vm-requesting=')
+    expect(
+      render({ platform: 'openai', inflight: 0, session_active: 7 })
+    ).not.toContain('data-vm-requesting=')
+  })
+
+  it('keeps separate controls to open and expand the details', () => {
     const html = render()
     expect(html).toContain('aria-label="打开 vm-01 详情页"')
     expect(html).toContain('aria-expanded="false"')
@@ -78,7 +106,7 @@ describe('VM row interaction and health', () => {
     )
     const html = render({ health_24h: buckets })
     expect(html).toContain('>99.0%</b>')
-    expect(html).toContain('>99/100</span>')
+    expect(html).toContain('title="成功 99 / 总数 100"')
     expect(render({ health_24h: null })).toContain('24h 无请求')
     expect(render()).toContain('24h 未知')
     expect(render()).not.toContain('24h 无请求')
@@ -141,7 +169,7 @@ describe('VM account column kernel label', () => {
     'renders %s as a silver standard kernel',
     (dataplane) => {
       const html = render({ resolved_dataplane: dataplane })
-      expect(html).toMatch(/class="[^"]*bg-zinc-200[^"]*"[^>]*>默认<\/span>/)
+      expect(html).toMatch(/title="当前内核"[^>]*>默认<\/span>/)
       expect(html).not.toContain('>crag</span>')
       expect(html).toContain('account@example.com')
     }
@@ -173,48 +201,28 @@ describe('VM account column kernel label', () => {
     expect(render()).toContain('>默认</span>')
   })
 
-  it('shows the platform mark, stable VM number, email and enrollment independently of the auth scheme', () => {
+  it('prioritizes the full account name and presents the platform, plan and kernel together', () => {
+    const name = 'A much longer operations account name'
     const vm: Partial<Vm> = {
+      name,
       has_token: true,
-      auth_scheme: 'authorization_bearer',
       subscription_type: 'max',
       runtime_type: 'kvm',
       node_name: '测试集群',
     }
     const html = render(vm)
     expect(html).toContain('aria-label="anthropic"')
-    for (const label of [
-      'vm-01',
-      'account@ex…',
-      'Max',
-      'kvm',
-      'oauth',
-      '测试集群',
-    ]) {
-      expect(html).toMatch(new RegExp(`>${label}</(?:span|div)>`))
-    }
-    expect(html).toContain('title="account@example.com"')
-    expect(html).not.toContain('订阅 未知')
-    expect(html).not.toContain('01·account')
-    expect(
-      render({
-        ...vm,
-        credential_mode: 'setup-token',
-        oauth_registration: 'oauth',
-      })
-    ).toContain('>oauth</span>')
-    expect(
-      render({
-        ...vm,
-        credential_mode: 'setup-token',
-        oauth_registration: 'console',
-      })
-    ).toContain('>console</span>')
-    expect(render({ platform: 'openai', has_token: true })).toContain(
-      'aria-label="openai"'
+    expect(html).toContain(`title="${name}">${name}</span>`)
+    expect(html).toContain('>Claude</span>')
+    expect(html).toContain('>Max</span>')
+    expect(render({ name: '' })).toContain(
+      'title="account@example.com">account@example.com</span>'
+    )
+    expect(render({ name: '', email: '' })).toContain(
+      'title="vm-01">vm-01</span>'
     )
     expect(render({ platform: 'openai', has_token: true })).toContain(
-      '>local</span>'
+      'aria-label="openai"'
     )
   })
 })
@@ -232,5 +240,22 @@ describe('VM list summary and toggles', () => {
     expect(html).toMatch(/aria-pressed="false"[^>]*>.*按状态分组/)
     expect(html).toMatch(/aria-pressed="false"[^>]*>.*次要信息常显/)
     expect(html).toContain('data-pin="false"')
+    const labels = Array.from(
+      html.matchAll(
+        /role="columnheader"[^>]*>(?:<(?:span|button)\b[^>]*>)*([^<]+)/g
+      ),
+      ([, label]) => label
+    )
+    expect(labels).toEqual([
+      '账号',
+      '调度',
+      '类型',
+      '状态',
+      '请求量',
+      '用量窗口',
+      '费用',
+    ])
+    expect(html).toContain('<option value="tokens">7D Token</option>')
+    expect(html).toContain('<option value="perReq">每请求费用</option>')
   })
 })

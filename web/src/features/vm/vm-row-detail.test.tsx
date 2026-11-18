@@ -102,6 +102,63 @@ beforeEach(() => {
   controls.api.mockReset().mockResolvedValue(health())
 })
 
+describe('VM row account identity', () => {
+  it('shows the full identity from the authorized row payload without fetching credentials', () => {
+    const html = render({
+      id: 'vm-east-keep-the-entire-slot-id',
+      name: 'Team account with a long display name',
+      email: 'full-account-alias@example.test',
+      node_name: 'East cluster host',
+      has_token: true,
+      oauth_registration: 'console',
+    })
+    const fields = html.match(
+      /<dl[^>]*aria-label="账号信息"[^>]*>([\s\S]*?)<\/dl>/
+    )?.[1]
+    expect(fields).toBeDefined()
+    for (const [label, value] of [
+      ['账号名称', 'Team account with a long display name'],
+      ['邮箱', 'full-account-alias@example.test'],
+      ['槽位 ID', 'vm-east-keep-the-entire-slot-id'],
+      ['所在主机', 'East cluster host'],
+      ['凭证登记', 'Console'],
+    ]) {
+      expect(fields).toMatch(new RegExp(`>${label}</dt><dd[^>]*>${value}</dd>`))
+    }
+    expect(html).toContain('打开完整详情')
+    expect(controls.api).not.toHaveBeenCalled()
+  })
+
+  it('does not infer a host or credential type from fields omitted in the list projection', () => {
+    controls.role = 'user'
+    const html = render()
+    expect(html).toMatch(/>所在主机<\/dt><dd[^>]*>—<\/dd>/)
+    expect(html).toMatch(/>凭证登记<\/dt><dd[^>]*>—<\/dd>/)
+    expect(controls.api).not.toHaveBeenCalled()
+  })
+})
+
+describe('VM row cost breakdown', () => {
+  it('retains window token counts, per-request cost and the cumulative cost', () => {
+    const html = section(
+      render({
+        today_requests: 2,
+        today_cost: 1.25,
+        window_7d_requests: 10,
+        window_7d_tokens: 987,
+        window_7d_cost: 4,
+        total_cost: 12.5,
+      }),
+      '成本拆分'
+    )
+    expect(html).toMatch(/scope="col"[^>]*>Token<\/th>/)
+    expect(html).toContain('>987</td>')
+    expect(html).toContain('每请求 · 7D')
+    expect(html).toContain('$0.400')
+    expect(html).toContain('$12.50')
+  })
+})
+
 describe('VM row request health', () => {
   it('enables the explicit 24h SLA query for admins and preserves its request identity', async () => {
     const html = section(render(), '请求健康')
