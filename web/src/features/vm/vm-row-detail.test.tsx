@@ -32,9 +32,6 @@ vi.mock('./vm-perms', async (importOriginal) => {
     useVmPerms: () => original.vmPermsFor(controls.role),
   }
 })
-vi.mock('@/features/proxies/proxy-chip', () => ({
-  ProxyChip: () => <span data-testid='proxy-chip' />,
-}))
 vi.mock('./openai-quota-actions', () => ({
   OpenaiQuotaActions: ({ vm, compact }: { vm: Vm; compact: boolean }) => (
     <span
@@ -105,38 +102,22 @@ beforeEach(() => {
   controls.api.mockReset().mockResolvedValue(health())
 })
 
-describe('VM row account identity', () => {
-  it('shows the full identity from the authorized row payload without fetching credentials', () => {
+describe('VM row detail layout', () => {
+  it('opens with the detail link and omits repeated account metadata', () => {
     const html = render({
-      id: 'vm-east-keep-the-entire-slot-id',
-      name: 'Team account with a long display name',
-      email: 'full-account-alias@example.test',
-      node_name: 'East cluster host',
-      has_token: true,
-      oauth_registration: 'console',
+      email: 'sample@example.test',
+      node_name: 'Example host',
+      seats_max: 2,
     })
-    const fields = html.match(
-      /<dl[^>]*aria-label="账号信息"[^>]*>([\s\S]*?)<\/dl>/
-    )?.[1]
-    expect(fields).toBeDefined()
-    for (const [label, value] of [
-      ['账号名称', 'Team account with a long display name'],
-      ['邮箱', 'full-account-alias@example.test'],
-      ['槽位 ID', 'vm-east-keep-the-entire-slot-id'],
-      ['所在主机', 'East cluster host'],
-      ['凭证登记', 'Console'],
-    ]) {
-      expect(fields).toMatch(new RegExp(`>${label}</dt><dd[^>]*>${value}</dd>`))
-    }
+    expect(html).not.toContain('aria-label="账号信息"')
+    expect(html).not.toContain('sample@example.test')
+    expect(html).not.toContain('Example host')
+    expect(html).not.toContain('席位占用')
+    expect(html).not.toContain('当前内核')
     expect(html).toContain('打开完整详情')
-    expect(controls.api).not.toHaveBeenCalled()
-  })
-
-  it('does not infer a host or credential type from fields omitted in the list projection', () => {
-    controls.role = 'user'
-    const html = render()
-    expect(html).toMatch(/>所在主机<\/dt><dd[^>]*>—<\/dd>/)
-    expect(html).toMatch(/>凭证登记<\/dt><dd[^>]*>—<\/dd>/)
+    expect(html.indexOf('打开完整详情')).toBeLessThan(
+      html.indexOf('aria-label="请求健康"')
+    )
     expect(controls.api).not.toHaveBeenCalled()
   })
 })
@@ -268,54 +249,85 @@ describe('VM row request health', () => {
 })
 
 describe('VM row quota integration', () => {
-  it('keeps the Codex sample, historical credits and both quota action entries in the windows card', () => {
-    const html = section(
-      render({
-        platform: 'openai',
-        family: 'codex',
-        has_token: true,
-        codex_usage: {
-          pending_refresh: true,
-          last_success_at: '2026-11-16T11:00:00Z',
-          last_success: {
-            windows: [
-              { id: '5h', used_percent: 12 },
-              { id: '7d', used_percent: 34 },
-            ],
-          },
+  it('puts both Codex actions below the historical credits inside the usage card', () => {
+    const page = render({
+      platform: 'openai',
+      family: 'codex',
+      has_token: true,
+      codex_usage: {
+        pending_refresh: true,
+        last_success_at: '2026-11-16T11:00:00Z',
+        last_success: {
+          windows: [
+            { id: '5h', used_percent: 12 },
+            { id: '7d', used_percent: 34 },
+          ],
         },
-        codex_credits: {
-          status: 'pending',
-          has_credits: true,
-          unlimited: false,
-          balance: '12.345',
-          fetched_at: '2026-11-16T11:00:00Z',
-          invalidated_at: null,
-        },
-      }),
-      '用量窗口明细'
-    )
+      },
+      codex_credits: {
+        status: 'pending',
+        has_credits: true,
+        unlimited: false,
+        balance: '12.345',
+        fetched_at: '2026-11-16T11:00:00Z',
+        invalidated_at: null,
+      },
+    })
+    const html = section(page, '用量窗口明细')
     expect(html).toContain('12%')
     expect(html).toContain('34%')
     expect(html).toContain('aria-label="额度待刷新，最近测量：')
     expect(html).toContain('历史余额 12.34 点')
     expect(html).toContain('待确认')
-    expect(html).toContain(
-      'data-testid="codex-quota-actions" data-vm="slot / one" data-compact="true"'
-    )
-    expect(html).toContain(
-      'data-testid="openai-api-actions" data-vm="slot / one" data-compact="true"'
-    )
-    expect(html).not.toContain('data-testid="claude-reset-actions"')
+    for (const action of ['codex-quota-actions', 'openai-api-actions']) {
+      const marker = `data-testid="${action}"`
+      expect(page.split(marker)).toHaveLength(2)
+      expect(html.indexOf(marker)).toBeGreaterThan(
+        html.indexOf('历史余额 12.34 点')
+      )
+    }
   })
 
-  it('keeps the Claude quota action entry and passes the shared clock', () => {
-    const html = section(render({ platform: 'anthropic' }), '用量窗口明细')
+  it('places supported Claude card actions in the usage card and passes the shared clock', () => {
+    const html = render({
+      platform: 'anthropic',
+      has_token: true,
+      credential_mode: 'oauth',
+    })
     expect(html).toContain(
       `data-testid="claude-reset-actions" data-vm="slot / one" data-now="${NOW}"`
     )
-    expect(html).not.toContain('data-testid="codex-quota-actions"')
-    expect(html).not.toContain('data-testid="openai-api-actions"')
+    expect(section(html, '用量窗口明细')).toContain(
+      'data-testid="claude-reset-actions"'
+    )
+    expect(
+      render({
+        platform: 'anthropic',
+        has_token: true,
+        credential_mode: 'apikey',
+      })
+    ).not.toContain('data-testid="claude-reset-actions"')
+  })
+
+  it('uses the server card capability for converted grants and respects explicit denial', () => {
+    const converted = {
+      platform: 'anthropic',
+      has_token: true,
+      credential_mode: 'setup-token',
+    } as const
+    expect(render({ ...converted, can_claude_reset: true })).toContain(
+      'data-testid="claude-reset-actions"'
+    )
+    const noCards = render({ ...converted, can_claude_reset: false })
+    expect(noCards).not.toContain('data-testid="claude-reset-actions"')
+    expect(noCards).toContain('主动查询')
+    expect(
+      render({
+        ...converted,
+        credential_mode: 'oauth',
+        can_claude_reset: false,
+      })
+    ).not.toContain('data-testid="claude-reset-actions"')
   })
 
   it.each([
@@ -362,7 +374,7 @@ describe('VM row quota integration', () => {
     ({ label, ...vm }) => {
       const html = section(render(vm), '用量窗口明细')
       expect(html).toContain(label)
-      expect(html).toContain('data-testid="claude-reset-actions"')
+      expect(html).not.toContain('data-testid="claude-reset-actions"')
     }
   )
 })

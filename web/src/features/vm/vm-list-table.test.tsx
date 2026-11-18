@@ -11,7 +11,6 @@ import {
 } from './vm-list-columns'
 import { VmTable } from './vm-list-table'
 import { VmRack } from './vm-rack'
-import { VmRowDetail } from './vm-row-detail'
 import { VmSchedulingBlock, VmSchedulingEditor } from './vm-scheduling'
 import { filterVms } from './vm-table'
 
@@ -170,35 +169,6 @@ describe('VM account column kernel label', () => {
     expect(hostOnly).not.toContain('24h 无请求')
   })
 
-  it.each([
-    ['wrap', undefined, '默认'],
-    ['cc', undefined, '默认'],
-    ['crag', 'wrap', 'crag'],
-    ['wrap', 'crag', '默认'],
-    [undefined, 'crag', 'crag'],
-    [undefined, undefined, '默认'],
-  ] as const)(
-    'shows the effective kernel in account details (%s, %s)',
-    (resolved, configured, expected) => {
-      const html = renderToStaticMarkup(
-        <QueryClientProvider client={new QueryClient()}>
-          <VmRowDetail
-            vm={{
-              id: 'vm-01',
-              resolved_dataplane: resolved,
-              dataplane: configured,
-            }}
-            now={0}
-            onOpenDetail={() => {}}
-            id='detail'
-          />
-        </QueryClientProvider>
-      )
-      expect(html).toMatch(
-        new RegExp('当前内核</dt><dd[^>]*>' + expected + '</dd>')
-      )
-    }
-  )
   it('prioritizes the full account name and presents the platform, plan and kernel together', () => {
     const name = 'A much longer operations account name'
     const vm: Partial<Vm> = {

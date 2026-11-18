@@ -864,6 +864,19 @@ export function VmTable({
     (sum, k) => sum + (k === 'vm' ? 0 : COLUMNS[k].width),
     2.65
   )
+  // Give surplus width to data columns; the pinned identity must keep its own width.
+  const flexible = visible.filter(
+    (key) => key === 'status' || key === 'req' || key === 'usage'
+  )
+  const stretch: ColumnKey[] = flexible.length
+    ? flexible
+    : visible.filter((key) => key !== 'vm')
+  function columnWidth(key: ColumnKey) {
+    if (key === 'vm') return 'var(--account-width)'
+    const base = `${COLUMNS[key].width}rem`
+    if (!stretch.includes(key)) return base
+    return `calc(${base} + (100% - var(--account-width) - ${width}rem) / ${stretch.length})`
+  }
   return (
     <div className='@container/vm-summary min-w-0'>
       <div className='classic-tools'>
@@ -989,17 +1002,11 @@ export function VmTable({
             >
               <colgroup>
                 {visible.map((key) => (
-                  <col
-                    key={key}
-                    style={{
-                      width:
-                        key === 'vm'
-                          ? 'var(--account-width)'
-                          : `${COLUMNS[key].width}rem`,
-                    }}
-                  />
+                  <col key={key} style={{ width: columnWidth(key) }} />
                 ))}
-                <col style={{ width: '2.65rem' }} />
+                <col
+                  style={{ width: stretch.length ? '2.65rem' : undefined }}
+                />
               </colgroup>
               <thead>
                 <tr>

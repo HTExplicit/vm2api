@@ -6,7 +6,7 @@
 }
 .classic-scroll {
   position: relative;
-  --account-width: clamp(13.25rem, 22cqi, 16.5rem);
+  --account-width: clamp(12rem, 18cqi, 13rem);
   border: 1px solid var(--border);
   border-radius: 0.55rem;
   overflow-x: auto;
@@ -67,7 +67,6 @@
   inset-inline-start: 0;
   z-index: 1;
   background-color: var(--card);
-  box-shadow: 1px 0 var(--border);
 }
 .classic-table th[data-column='vm'] {
   background: var(--muted);
@@ -293,6 +292,56 @@
   inset-inline-start: 0;
   width: min(100%, calc(100cqi - 2px));
 }
+.vm-priority-track {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 2px;
+  border-radius: 0.4rem;
+  padding: 2px;
+  background: var(--border);
+}
+@container window-tools (min-width: 17rem) {
+  .vm-priority-track {
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+  }
+}
+.vm-priority-option {
+  display: grid;
+  place-items: center;
+  min-height: 2rem;
+  border: 1px solid transparent;
+  border-radius: 0.28rem;
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.vm-priority-auto {
+  min-height: 1.5rem;
+  padding-inline: 0.45rem;
+  border-color: var(--input);
+}
+input[aria-disabled='false']:hover + .vm-priority-option {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+input:checked + .vm-priority-option,
+input:checked:hover + .vm-priority-option {
+  background: var(--foreground);
+  color: var(--background);
+  font-weight: 700;
+  border-color: transparent;
+}
+input:focus-visible + .vm-priority-option {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+@media (forced-colors: active) {
+  input:checked + .vm-priority-option {
+    outline: 2px solid Highlight;
+    outline-offset: -3px;
+  }
+}
 .classic-table :is(button, [tabindex]):focus-visible,
 .classic-data-row:focus-visible,
 .classic-scroll:focus-visible {
@@ -301,7 +350,7 @@
 }
 @container classic (max-width:30rem) {
   .classic-scroll {
-    --account-width: clamp(5.6rem, 44cqi, 10.75rem);
+    --account-width: clamp(5.6rem, 39.5cqi, 8.75rem);
   }
   .classic-name-line {
     flex-wrap: wrap;

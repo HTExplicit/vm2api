@@ -111,12 +111,15 @@ function FullResetActions({
   vm,
   now,
   usage,
+  inline = false,
 }: {
   vm: Vm
   now: number
   usage?: ResetUsage
+  inline?: boolean
 }) {
   const { queryCredits, refreshAll } = useResetMutations(vm)
+  const [cardsOpen, setCardsOpen] = useState(false)
   const [picked, setPicked] = useState<ResetCredit | null>(null)
   const keyRef = useRef<{ card: string; key: string } | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
@@ -183,7 +186,7 @@ function FullResetActions({
 
   return (
     <div
-      className='grid gap-2 border-t pt-3'
+      className={inline ? 'grid min-w-0 gap-2' : 'grid gap-2 border-t pt-3'}
       data-row-actions
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
@@ -192,12 +195,12 @@ function FullResetActions({
         <span className='text-xs text-muted-foreground'>
           重置卡{' '}
           <b className='font-semibold text-foreground tabular-nums'>
-            {snapshot ? count : '—'}
+            {snapshot ? count : inline ? '待查询' : '—'}
           </b>{' '}
-          张
+          {snapshot || !inline ? '张' : ''}
         </span>
         <span className='flex items-center gap-2'>
-          {Number.isFinite(fetchedAt) ? (
+          {!inline && Number.isFinite(fetchedAt) ? (
             <span className='text-[11px] text-muted-foreground tabular-nums'>
               查询于 {new Date(fetchedAt).toLocaleTimeString()}
             </span>
@@ -214,6 +217,17 @@ function FullResetActions({
             />
             {queryCredits.isPending ? '查询中' : '限额查询'}
           </Button>
+          {inline && cards.length > 0 ? (
+            <Button
+              type='button'
+              size='sm'
+              variant='outline'
+              aria-expanded={cardsOpen}
+              onClick={() => setCardsOpen(!cardsOpen)}
+            >
+              {cardsOpen ? '收起卡片' : '选卡使用'}
+            </Button>
+          ) : null}
         </span>
       </div>
       {snapshot?.eligible === false ? (
@@ -226,7 +240,7 @@ function FullResetActions({
           卡片信息是旧格式，点「限额查询」刷新后才能选卡
         </p>
       ) : null}
-      {cards.length ? (
+      {cards.length && (!inline || cardsOpen) ? (
         <div className='divide-y rounded-md border'>
           {cards.map((card) => {
             const state = liveState(card, snapshot || {}, now)
@@ -357,17 +371,19 @@ export function ClaudeResetActions({
   compact = false,
   now = Date.now(),
   usage,
+  inline = false,
 }: {
   vm: Vm
   compact?: boolean
   now?: number
   usage?: ResetUsage
+  inline?: boolean
 }) {
   const canUse = useVmPerms().credential
   if (!canUse) return null
   return compact ? (
     <CompactResetActions vm={vm} />
   ) : (
-    <FullResetActions vm={vm} now={now} usage={usage} />
+    <FullResetActions vm={vm} now={now} usage={usage} inline={inline} />
   )
 }

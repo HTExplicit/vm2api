@@ -85,9 +85,11 @@ function useOpenaiQuotaActions(vm: Vm) {
 export function OpenaiQuotaActions({
   vm,
   compact = false,
+  showCount = false,
 }: {
   vm: Vm
   compact?: boolean
+  showCount?: boolean
 }) {
   const {
     available,
@@ -104,20 +106,33 @@ export function OpenaiQuotaActions({
 
   return (
     <div
-      className={cn('flex flex-wrap items-center gap-1', !compact && 'gap-2')}
+      className={cn(
+        'flex flex-wrap items-center gap-1',
+        !compact && !showCount && 'gap-2'
+      )}
       data-row-actions
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
     >
+      {showCount ? (
+        <span className='text-xs font-medium'>
+          重置券{' '}
+          <b className='tabular-nums'>
+            {credits?.available_count == null ? '待查询' : `${available} 张`}
+          </b>
+        </span>
+      ) : null}
       <Button
         size='sm'
-        variant={compact ? 'ghost' : 'outline'}
+        variant={compact || showCount ? 'ghost' : 'outline'}
         disabled={busy}
         title='查询上游额度与重置券次数'
         className={
-          compact
-            ? 'h-6 gap-1 px-1.5 text-[11px] text-muted-foreground'
-            : undefined
+          showCount
+            ? 'h-7 gap-1 px-2 text-xs shadow-none'
+            : compact
+              ? 'h-6 gap-1 px-1.5 text-[11px] text-muted-foreground'
+              : undefined
         }
         onClick={() => queryQuota.mutate()}
       >
@@ -126,34 +141,49 @@ export function OpenaiQuotaActions({
         />
         {queryQuota.isPending
           ? '查询中'
-          : `券查询${credits ? ` ${available}` : ''}`}
+          : showCount
+            ? '查询'
+            : `券查询${credits ? ` ${available}` : ''}`}
       </Button>
       <Button
         size='sm'
-        variant={compact ? 'ghost' : 'destructive'}
+        variant={showCount ? 'outline' : compact ? 'ghost' : 'destructive'}
         disabled={busy || available < 1}
         title={
           available < 1
-            ? '先查询重置券次数'
+            ? credits?.available_count === 0
+              ? '没有可用的重置券'
+              : '先查询重置券次数'
             : `消费 1 / ${available} 张上游重置券`
         }
         className={
-          compact
-            ? 'h-6 gap-1 px-1.5 text-[11px] text-muted-foreground disabled:text-muted-foreground/50'
-            : undefined
+          showCount
+            ? 'h-7 gap-1 px-2 text-xs shadow-none'
+            : compact
+              ? 'h-6 gap-1 px-1.5 text-[11px] text-muted-foreground disabled:text-muted-foreground/50'
+              : undefined
         }
+        aria-label={showCount ? '使用重置券' : undefined}
         onClick={() => setConfirm(true)}
       >
         <RotateCcw
           className={cn('size-3', resetQuota.isPending && 'animate-spin')}
         />
-        {resetQuota.isPending ? '使用中' : compact ? '重置券' : '使用重置券'}
+        {resetQuota.isPending
+          ? '使用中'
+          : showCount
+            ? '使用'
+            : compact
+              ? '重置券'
+              : '使用重置券'}
       </Button>
       <ConfirmDialog
         open={confirm}
         onOpenChange={setConfirm}
         title='使用一张重置券'
         desc={`将消费 1 / ${available} 张上游重置券，不可退回。`}
+        cancelBtnText='取消'
+        disabled={busy || available < 1}
         confirmText='确认使用'
         destructive
         isLoading={resetQuota.isPending}

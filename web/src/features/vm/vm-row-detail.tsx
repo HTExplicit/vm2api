@@ -2,9 +2,9 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
-import { credEndpointLabel, credentialRegistrationOf } from '@/lib/cred-type'
+import { supportsOfficialCc } from '@/lib/cred-type'
 import { fmtResetClock, resetCountdown } from '@/lib/fable-status'
-import { fmtExpiresAt, fmtNum, fmtUsd } from '@/lib/format'
+import { fmtNum, fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import {
   fmtHealthPct,
@@ -14,12 +14,7 @@ import {
   SLOT_LABEL,
 } from '@/lib/vm-health'
 import { isCodexVm } from '@/lib/vm-kind'
-import {
-  poolStatus,
-  scheduleStateLabel,
-  seatTitle,
-  vmRequestingCount,
-} from '@/lib/vm-status'
+import { poolStatus, scheduleStateLabel } from '@/lib/vm-status'
 import {
   usageAccountForVm,
   vmCacheHitPct,
@@ -28,14 +23,18 @@ import {
   vmWeekOutcome,
 } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
-import { ProxyChip } from '@/features/proxies/proxy-chip'
+import { ActiveUsageAction } from './active-usage-action'
+import { ClaudeResetActions } from './claude-reset-actions'
 import { CodexCreditSummary } from './codex-credit-summary'
 import { CodexQuotaSampleStatus } from './codex-quota-sample-status'
+import { OpenaiApiActions } from './openai-api-actions'
+import { OpenaiQuotaActions } from './openai-quota-actions'
 import { vmHealthQueryOptions, type VmHealthRange } from './queries'
 import { riskFg } from './usage-meter'
-import { VmQuotaActions, WindowBar } from './usage-windows'
+import { WindowBar } from './usage-windows'
 import { useVmPerms } from './vm-perms'
 import { vmWindows } from './vm-rack-model'
+import { VmRowPriority } from './vm-row-priority'
 import { windowTiming } from './window-timing'
 
 const CARD = 'min-w-0 rounded-lg border bg-card p-3'
@@ -205,6 +204,13 @@ function HealthCard({ vm }: { vm: Vm }) {
 }
 
 function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
+  const perms = useVmPerms()
+  const codex = isCodexVm(vm)
+  const showClaudeCards =
+    !codex &&
+    perms.credential &&
+    (vm.can_claude_reset ?? supportsOfficialCc(vm))
+  const windows = vmWindows(vm)
   const hasToken = Boolean(vm.has_token)
   const restricted =
     vm.schedule_state === 'restricted' || vm.schedule_state === 'unschedulable'
@@ -221,7 +227,7 @@ function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
         </span>
       </div>
       <div className='grid gap-3'>
-        {vmWindows(vm).map((w) => {
+        {windows.map((w) => {
           const t = windowTiming(w, now)
           const full = w.pct != null && w.pct >= 100
           return (
@@ -312,8 +318,37 @@ function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
           调度{scheduleStateLabel(vm)}：{reason}
         </p>
       ) : null}
-      <div className='mt-3 border-t pt-2.5'>
-        <VmQuotaActions vm={vm} now={now} />
+      <div
+        role='group'
+        aria-label='账号快捷操作'
+        className='@container/window-tools mt-3 grid min-w-0 gap-2.5 border-t pt-2.5'
+      >
+        {codex ? (
+          <div className='flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 empty:hidden'>
+            {vm.has_token ? <OpenaiQuotaActions vm={vm} showCount /> : null}
+            <OpenaiApiActions vm={vm} compact />
+          </div>
+        ) : (
+          <div className='grid min-w-0 gap-1 empty:hidden'>
+            {showClaudeCards ? (
+              <ClaudeResetActions
+                vm={vm}
+                inline
+                now={now}
+                usage={{
+                  fiveHour: windows.find((w) => w.key === '5h')?.pct,
+                  sevenDay: windows.find((w) => w.key === '7d')?.pct,
+                  fable: windows.find((w) => w.key === 'fable')?.pct,
+                  sevenDayGate: vm.quota_policy
+                    ? vm.quota_policy.limit_7d * 100
+                    : null,
+                }}
+              />
+            ) : null}
+            <ActiveUsageAction vm={vm} />
+          </div>
+        )}
+        <VmRowPriority vm={vm} editable={perms.admin} />
       </div>
     </section>
   )
@@ -455,85 +490,12 @@ export function VmRowDetail({
       aria-label={`${vm.id} 明细`}
       className='@container/row-detail min-w-0 border-b border-border/40 bg-muted/40 p-3'
     >
-      <div className='mb-3 grid items-start gap-3 @lg/row-detail:grid-cols-[minmax(0,1fr)_auto]'>
-        <dl
-          aria-label='账号信息'
-          className='grid min-w-0 grid-cols-1 gap-x-4 gap-y-2 text-xs @sm/row-detail:grid-cols-2 @xl/row-detail:grid-cols-3'
-        >
-          {[
-            ['账号名称', vm.name?.trim() || vm.email?.trim() || vm.id],
-            ['邮箱', vm.email],
-            ...(isCodexVm(vm)
-              ? [
-                  [
-                    '订阅到期',
-                    vm.chatgpt_subscription_active_until
-                      ? fmtExpiresAt(vm.chatgpt_subscription_active_until)
-                      : null,
-                  ],
-                ]
-              : []),
-            ['运行环境', vm.runtime_type === 'kvm' ? 'KVM' : 'VM'],
-            [
-              '当前内核',
-              (vm.resolved_dataplane ?? vm.dataplane) === 'crag'
-                ? 'crag'
-                : '默认',
-            ],
-            [
-              '调度优先级',
-              vm.schedule_level != null &&
-              Number.isInteger(vm.schedule_level) &&
-              vm.schedule_level >= 1 &&
-              vm.schedule_level <= 10
-                ? `P${vm.schedule_level} · ${vm.schedule_level_mode === 'manual' ? '手动指定' : '自动分配'}`
-                : null,
-            ],
-            ['槽位 ID', vm.id],
-            [
-              '所在主机',
-              vm.node_name ||
-                vm.node_id ||
-                (vm.node_id === null ? '本机' : null),
-            ],
-            [
-              '凭证登记',
-              vm.has_token == null
-                ? null
-                : credEndpointLabel(credentialRegistrationOf(vm)),
-            ],
-          ].map(([label, value]) => (
-            <div key={label} className='min-w-0'>
-              <dt className={KV_LABEL}>{label}</dt>
-              <dd className='mt-0.5 wrap-anywhere'>{value || '—'}</dd>
-            </div>
-          ))}
-          <div className='min-w-0'>
-            <dt className={KV_LABEL}>出口</dt>
-            <dd className='mt-0.5'>
-              <ProxyChip vm={vm} />
-            </dd>
-          </div>
-          {vm.seats_max != null ? (
-            <div>
-              <dt className={KV_LABEL}>席位占用</dt>
-              <dd title={seatTitle(vm)}>
-                {vm.seats_used ?? 0}/{vm.seats_max}
-              </dd>
-            </div>
-          ) : null}
-          <div>
-            <dt className={KV_LABEL}>请求中 / 排队</dt>
-            <dd>
-              {vmRequestingCount(vm)} / {vm.queue_depth ?? 0}
-            </dd>
-          </div>
-        </dl>
+      <div className='mb-1 flex justify-end'>
         <Button
           type='button'
           variant='link'
           size='sm'
-          className='min-h-8 justify-self-start px-0 text-xs @lg/row-detail:justify-self-end'
+          className='h-auto min-h-6 px-0 py-0 text-xs'
           onClick={onOpenDetail}
         >
           打开完整详情 →

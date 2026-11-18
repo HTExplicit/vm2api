@@ -1,3 +1,5 @@
+export const SCHEDULE_LEVELS = Array.from({ length: 10 }, (_, i) => i + 1)
+
 /** 并发档位；0 = 不限（只在单槽覆盖里给出，分档默认至少 1）。 */
 export const CONC_STEPS: [number, string][] = [
   [0, '不限'],

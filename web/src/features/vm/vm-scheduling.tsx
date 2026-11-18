@@ -27,6 +27,7 @@ import {
   RATIO_STEPS,
   RPM_STEPS,
   SEAT_CAP_STEPS,
+  SCHEDULE_LEVELS,
   withCurrent,
 } from '@/features/vm/scheduling-steps'
 import { useVmPerms } from '@/features/vm/vm-perms'
@@ -100,8 +101,6 @@ const QUOTA_FIELDS: { key: QuotaKey; label: string; desc: string }[] = [
     desc: '7d 一半留给 Fable（实验）',
   },
 ]
-
-const LEVELS = Array.from({ length: 10 }, (_, i) => i + 1)
 
 function isRatio(key: QuotaKey) {
   return key === 'limit_5h' || key === 'limit_7d'
@@ -748,10 +747,12 @@ export function VmSchedulingEditor({ vm }: { vm: Vm }) {
                         ? `自动（当前 ${vm.schedule_level}）`
                         : '自动',
                     ] as ['auto' | number, string],
-                    ...LEVELS.map((level): ['auto' | number, string] => [
-                      level,
-                      String(level),
-                    ]),
+                    ...SCHEDULE_LEVELS.map(
+                      (level): ['auto' | number, string] => [
+                        level,
+                        String(level),
+                      ]
+                    ),
                   ]}
                   onChange={(level) => setDraft({ ...draft, level })}
                   disabled={pending}
