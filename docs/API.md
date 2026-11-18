@@ -393,7 +393,11 @@ curl -sS http://127.0.0.1:8787/health
 | `upstream_error` | 401/403/502 |
 | `api_error` | 500 |
 
-上游 429 失败转移用尽后原样返回 429 `upstream_rate_limit`，有上游 `retry-after` 时透传；529 一定带 `retry-after`（号池估计，上游 529 取上游值，都没有时为 1）。恢复备份期间协议口 `503 restore_in_progress`。健康探测短请求在无缓存且 fail-closed 时 `503`。Claude Code Usage Policy `API Error`（含内核报成 400 的）不换号、不修复重试，客户端收到 400 `policy_blocked` / `refusal_guard`，避免 Claude Code 误提示 `/login` 或按一般 400 做修复重试；并把该 prompt 永久写入拒答缓存；再次相同请求，或用户正文与已缓存正文的估计 Jaccard 达到面板阈值（默认 0.90，可选 0.80/0.85/0.90/0.95），都在 hop 前被拦。本 fork 对 HTTP 400/503「Third-party apps now draw from your extra usage」和「no third-party apps allowed」返回 400 `quota_error` / `entitlement_required`，保留上游说明和请求标识，停止本次换号与修复重试；不写提示词或近似拒答缓存，不封 device，不改变账号调度状态。`content_policy`、`cyber_policy`、`moderation_blocked` 等内容错误码（含 `upstream_code`）同样入库。协议硬正则，或面板所选的 Jev / Laya / ModernBERT（`/v1/systemone`，`noul ≥ 0.5`）判为 NSFW、蒸馏、破解、破限时返回 403 `policy_blocked`，不 hop，不写入拒答缓存；device 封禁开启时封禁入站 device。模型不可用且 `fail_open` 为 false 时同样 403，文案写明决策模型不可用，不封设备。近似和 device 封禁可在面板关闭。拒答命中在 device 封禁开启时还会永久封禁该入站 device id。400 的原文后追加原因，`details.reason` 为 `device` / `exact` / `similar`。
+上游 429 失败转移用尽后返回上游的限流错误，有上游 `retry-after` 时透传。529 一定带 `retry-after`，取上游值或号池估计，都没有时为 1。恢复备份期间协议口返回 503 `restore_in_progress`。健康探测短请求在无缓存且配置了失败拦截时返回 503。
+
+Claude Code Usage Policy `API Error`（含内核报成 400 的）返回 400 `policy_blocked` / `refusal_guard`，网关停止换号和修复重试。拒答缓存会在发起上游请求前拦截相同请求，或估计 Jaccard 达到面板阈值的相似请求（默认 0.90，可选 0.80/0.85/0.90/0.95）。命中封禁或缓存时，`details.reason` 为 `session`、`device`、`exact` 或 `similar`。缓存、封禁与决策模型的规则见[风险审计](RISK.md)。
+
+上游 HTTP 400/503「Third-party apps now draw from your extra usage」和「no third-party apps allowed」按第三方客户端计费限制处理。客户端收到 400 `invalid_request_error` / `third_party_client`，`details.upstream_message` 保留最多 300 字符的上游原文，`details.retryable` 为 `false`。网关停止换号和修复重试。请求日志归「请求格式」，不计 SLA 失败。
 
 号池结果分开返回，不互相伪装：
 

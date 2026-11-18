@@ -1,34 +1,24 @@
-import { useState } from "react";
-import { createRoot } from "react-dom/client";
-import {
-  QueryClient,
-  QueryClientProvider,
-  useQuery,
-} from "@tanstack/react-query";
-import {
-  createMemoryHistory,
-  createRootRoute,
-  createRouter,
-  RouterProvider,
-} from "@tanstack/react-router";
-import { Toaster } from "../../web/src/components/ui/sonner";
-import { VmActionsContext } from "../../web/src/features/vm/vm-actions-context";
-import { VmTable } from "../../web/src/features/vm/vm-list-table";
-import { vmsListQueryOptions } from "../../web/src/features/vm/queries";
-import "../../web/src/styles/index.css";
+import { useState } from 'react'
+import { createRoot } from 'react-dom/client'
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
+import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } from '@tanstack/react-router'
+import { Toaster } from '../../web/src/components/ui/sonner'
+import { VmActionsContext } from '../../web/src/features/vm/vm-actions-context'
+import { VmTable } from '../../web/src/features/vm/vm-list-table'
+import { vmsListQueryOptions } from '../../web/src/features/vm/queries'
+import '../../web/src/styles/index.css'
 
 const client = new QueryClient({
   defaultOptions: {
     queries: { retry: false, refetchOnWindowFocus: false },
     mutations: { retry: false },
   },
-});
+})
 
 function Fixture() {
-  const rows = useQuery(vmsListQueryOptions());
-  const [details, setDetails] = useState(0);
-  const [zoom, setZoom] = useState(100);
-  const nothing = () => {};
+  const rows = useQuery(vmsListQueryOptions())
+  const [details, setDetails] = useState(0)
+  const nothing = () => {}
   return (
     <main className="space-y-4 p-6">
       <div className="flex items-center justify-between">
@@ -48,26 +38,22 @@ function Fixture() {
           recoveringId: null,
         }}
       >
-        <VmTable
-          vms={rows.data?.items || []}
-          zoom={zoom}
-          onZoomChange={setZoom}
-        />
+        <VmTable vms={rows.data?.items || []} />
       </VmActionsContext.Provider>
       <output aria-label="详情打开次数">{details}</output>
       <Toaster />
     </main>
-  );
+  )
 }
 
-const route = createRootRoute({ component: Fixture });
+const route = createRootRoute({ component: Fixture })
 const router = createRouter({
   routeTree: route,
-  history: createMemoryHistory({ initialEntries: ["/"] }),
-});
+  history: createMemoryHistory({ initialEntries: ['/'] }),
+})
 
-createRoot(document.getElementById("root")!).render(
+createRoot(document.getElementById('root')!).render(
   <QueryClientProvider client={client}>
     <RouterProvider router={router} />
   </QueryClientProvider>,
-);
+)

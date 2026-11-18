@@ -188,6 +188,26 @@ test('setup-token worker envelope is inference-only', () => {
   assert.match(String(out.headers['anthropic-beta'] || ''), /oauth-2025-04-20/)
 })
 
+test('native queue delegates ordinary headers to CC but keeps compatibility headers', () => {
+  const body = { model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'hi' }] }
+  const workerStatus = {
+    runtime_variant: 'crag-v2',
+    capabilities: ['generation_controls_v3', 'linux_tui_native_queue', 'message_threads_beta'],
+  }
+  const args = { body, exec: { workerStatus }, cliHop: true, cragPrint: true }
+  assert.equal(finalizeWorkerPayload(args).headers, undefined)
+  assert.equal(finalizeWorkerPayload(args).body.betas, undefined)
+  for (const overrides of [
+    { requestContext: { purpose: 'auto_mode_classifier', format: 'xml' } },
+    { repaired: true },
+    { body: { ...body, thread: { type: 'create' } } },
+    { exec: { workerStatus: { ...workerStatus, capabilities: ['generation_controls_v3'] } } },
+    { cragPrint: false },
+  ]) {
+    assert.ok(finalizeWorkerPayload({ ...args, ...overrides }).headers['anthropic-beta'])
+  }
+})
+
 test('worker canonicalizes passthrough bodies before either kernel', () => {
   const body = {
     model: 'claude-sonnet-5',
@@ -2581,5 +2601,44 @@ unixTest('kernel preparation isolates controls without rewriting tool continuati
       assert.equal(result.status, 409)
       assert.equal(result.transportError, false)
     }
+  }
+})
+
+unixTest('streamGoWorker preserves refusal details when an empty response becomes an error', async () => {
+  const details = {
+    type: 'refusal',
+    category: 'reasoning_extraction',
+    explanation: 'Synthetic provider refusal explanation.',
+  }
+  const fx = await fixture((_req, res) => {
+    res.setHeader('content-type', 'text/event-stream')
+    writeData(res, { type: 'message_start', message: { type: 'message', role: 'assistant', content: [] } })
+    writeData(res, { type: 'message_delta', delta: { stop_reason: 'refusal', stop_details: details } })
+    writeData(res, { type: 'message_stop' })
+    writeData(res, {
+      type: 'error',
+      error: { type: 'api_error', message: 'native request completed without response content' },
+    })
+    res.end()
+  })
+  try {
+    const lines = []
+    const result = await streamGoWorker({
+      exec: fx.exec,
+      body: {
+        model: 'claude-sonnet-5',
+        stream: true,
+        messages: [{ role: 'user', content: 'synthetic classifier input' }],
+      },
+      onEvent: (line) => lines.push(line),
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.committed, false)
+    assert.equal(result.stopReason, 'refusal')
+    assert.deepEqual(result.stopDetails, details)
+    assert.equal(result.body.error.code, 'empty_response')
+    assert.deepEqual(lines, [])
+  } finally {
+    await fx.close()
   }
 })

@@ -1,0 +1,228 @@
+{
+  "schema": 1,
+  "recorded_by": "HTExplicit/vm2api",
+  "record_type": "supplier_release_observation",
+  "statement": "This fork records the official 139 commit, successful official CI and release jobs, published payload metadata and the original CRAG 3.1.5 signature. No independent rebuild of the closed binaries is claimed.",
+  "application_release": "v1.4.139",
+  "application_commit": "89d482ade2686c823b8e3aa42965d7944cca75a2",
+  "application_source": "https://github.com/dofastted/vm2api/releases/tag/v1.4.139",
+  "payload_release": "payload-2026.11.18-crag-3.1.5",
+  "payload_source": {
+    "release": "https://github.com/dofastted/vm2api/releases/tag/payload-2026.11.18-crag-3.1.5",
+    "tag_commit": "a9f9e6f123a9c732c00e24bc77bb1c80878d9a6b",
+    "published_at": "2026-11-17T23:30:58Z",
+    "prerelease_snapshot": false,
+    "sources_asset": {
+      "name": "SOURCES.json",
+      "release": "payload-2026.11.18-crag-3.1.5",
+      "size": 1342,
+      "sha256": "cbedce1a95124d75ad2ac817fde8bebc20ea5a02271d3afe6757bc9f4f253034"
+    },
+    "previous_payload_release": "payload-2026.11.17-cli-node-321",
+    "statement": "Relative to v1.4.136, published SHA-256 values change for kin-oauth-auth and the CRAG 3.1.5 factory and archive. CLI and slot kernel bytes match.",
+    "github_immutable": false
+  },
+  "official_workflows": {
+    "ci": {
+      "run_id": 44214072250,
+      "url": "https://github.com/dofastted/vm2api/actions/runs/44214072250",
+      "source_commit": "89d482ade2686c823b8e3aa42965d7944cca75a2",
+      "conclusion": "success"
+    },
+    "pr-rerun": {
+      "run_id": 44216472067,
+      "url": "https://github.com/dofastted/vm2api/actions/runs/44216472067",
+      "source_commit": "89d482ade2686c823b8e3aa42965d7944cca75a2",
+      "conclusion": "success"
+    },
+    "release": {
+      "run_id": 44214173613,
+      "url": "https://github.com/dofastted/vm2api/actions/runs/44214173613",
+      "source_commit": "89d482ade2686c823b8e3aa42965d7944cca75a2",
+      "conclusion": "success",
+      "jobs": {
+        "linux-amd64": "success",
+        "image-arm64": "success",
+        "image-amd64": "success",
+        "manifest": "success"
+      }
+    }
+  },
+  "payload_paths": 24,
+  "unique_payload_assets": 23,
+  "native": {
+    "release": "payload-2026.11.18-crag-3.1.5",
+    "variant": "standard",
+    "source_repository": "dofastted/crag",
+    "source_commit": "e150275b41cbf2343d8795e241644948802b7783",
+    "fork_rebuilt": false,
+    "archive": {
+      "asset": "crag-v2-licensed-amd64.tar.gz",
+      "size": 170849999,
+      "sha256": "931f1eb0e0dc5cce9b0cd80f68fd818772d5db9b710e66c204b75a003daeb1b5"
+    },
+    "authority_pem_sha256": "a38372fb87af66678f7823538f2cf8b9fa7e0f3cbefcd612a4d5c47ebef10126",
+    "core_plaintext_sha256": "ac424cb0559481bbacdfe843ed4bb6fbd41dae991e6ed5d0edce559aea57118c",
+    "published_source_record": "docs/releases/v1.4.139-crag.json"
+  },
+  "cli": {
+    "version": "2.1.321",
+    "artifact": {
+      "name": "cli-node",
+      "size": 31005108,
+      "sha256": "f6c3744dda01f756049360113607d2bd9a25911de0fdaf30fe9bb1a1918a6788",
+      "platform": "linux",
+      "architecture": "amd64"
+    },
+    "published_release": "https://github.com/dofastted/vm2api/releases/tag/payload-2026.11.17-cli-node-321",
+    "compression": {
+      "tool": "UPX 5.0.2",
+      "flags": [
+        "--best",
+        "--lzma"
+      ],
+      "plain_size": 107234504,
+      "plain_sha256": "10791f6a0711eb5ce7ffdbbe2a582f074fdf2cb2bb6cc37b447e9da27ec88cb6"
+    },
+    "previous_build_record": "docs/releases/cli-node-cache-ttl-20261114.json",
+    "statement": "The CLI 2.1.321 bytes match the official v1.4.136 payload. The original upstream repack release remains the CLI build reference.",
+    "private_source_independently_rebuilt": false
+  },
+  "assets": [
+    {
+      "name": "cli-node",
+      "size": 31005108,
+      "sha256": "f6c3744dda01f756049360113607d2bd9a25911de0fdaf30fe9bb1a1918a6788"
+    },
+    {
+      "name": "crag-v2-amd64-claude-code-2.1.321-claude",
+      "size": 341910032,
+      "sha256": "426c33815ca6645a772f722fbff10dbf2cbdb124a8aeab733c1365dbf8bbf61f"
+    },
+    {
+      "name": "crag-v2-amd64-claude-code-2.1.321-LICENSE.md",
+      "size": 147,
+      "sha256": "8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a"
+    },
+    {
+      "name": "crag-v2-amd64-crag-license-public.pem",
+      "size": 113,
+      "sha256": "a38372fb87af66678f7823538f2cf8b9fa7e0f3cbefcd612a4d5c47ebef10126"
+    },
+    {
+      "name": "crag-v2-amd64-kernel.json.example",
+      "size": 1208,
+      "sha256": "78f7efce48658da76d996c2c99b50127265d7c6cf6ce13947162f057cf6d2f42"
+    },
+    {
+      "name": "crag-v2-amd64-LICENSES.txt",
+      "size": 514,
+      "sha256": "80ee2b207aa7a45ad09360dd874d62b3be2e079bfa84de368092940889e84784"
+    },
+    {
+      "name": "crag-v2-amd64-unpack-note.md",
+      "size": 15874,
+      "sha256": "1f5cce1c9491f03ceeeffcafa80db4bcbff8f5042fa86ef344c97bcf3b62062d"
+    },
+    {
+      "name": "crag-v2-amd64-v3.1.5-crag-v2",
+      "size": 894472,
+      "sha256": "527da7e347b68dc060de6d17bffe7761a43dbf527631d194b729d6fc146fa650"
+    },
+    {
+      "name": "crag-v2-amd64-v3.1.5-crag-v2.payload.enc",
+      "size": 13015284,
+      "sha256": "19533d9b676b45b687366a73d60612f2cbcd316b78dcb38bdb436e1c3327ad11"
+    },
+    {
+      "name": "crag-v2-amd64-v3.1.5-manifest.json",
+      "size": 2720,
+      "sha256": "62a1ba1a006d011e07fc62fa1e1ee4950cd498d6be8ec3cc19358025c08471ec"
+    },
+    {
+      "name": "crag-v2-licensed-amd64.tar.gz",
+      "size": 170849999,
+      "sha256": "931f1eb0e0dc5cce9b0cd80f68fd818772d5db9b710e66c204b75a003daeb1b5"
+    },
+    {
+      "name": "kin-codex-kernel",
+      "size": 5981528,
+      "sha256": "95727081222f4096e9e63d29e6c9c2e009ff00365a70add30a885063fe7f9993"
+    },
+    {
+      "name": "kin-computer",
+      "size": 5519576,
+      "sha256": "1512b4551f520528425f38c8e262fcab52f071bb7a435471eda9dccc1fc3f198"
+    },
+    {
+      "name": "kin-egress",
+      "size": 6199128,
+      "sha256": "528ca2a4044a13ed9f032f23efe41717c90fbed61ebfab39a05138331e080002"
+    },
+    {
+      "name": "kin-kernel",
+      "size": 13312992,
+      "sha256": "9284c8197d4aa665b92506c028b5621f8f429e1c855aca70bb6aa4a13ab5875e"
+    },
+    {
+      "name": "kin-kernel-crag",
+      "size": 9734168,
+      "sha256": "5764a186e3778278a8733ecaf924211070968def7c6648c6f6ecf3b76120a537"
+    },
+    {
+      "name": "kin-oauth-auth",
+      "size": 47393198,
+      "sha256": "e0eb86e5f9036437c84160ccf48e2fd31148f42933da930eb28eddb54825507f"
+    },
+    {
+      "name": "kin-slot-gate",
+      "size": 5603512,
+      "sha256": "99233d86da0476100acf026fdaa2246da765d4f1792e9f6294edbdd0901d5d29"
+    },
+    {
+      "name": "kin-worker",
+      "size": 11540584,
+      "sha256": "941a2ce603854a96e7d97ce0fb86a786c3581ff874b36492025f538dd4cb32ce"
+    },
+    {
+      "name": "ld-linux-x86-64.so.2",
+      "size": 236616,
+      "sha256": "cd4df4f3c7b83673d61189bf2eaebd33ca4f2853ab9772b8a25e025ef99b1e81"
+    },
+    {
+      "name": "libc.so.6",
+      "size": 2125328,
+      "sha256": "8db37cf3f2169f59a0f07ef1fea308c35656668c64c8ff294e1860f4121eb161"
+    },
+    {
+      "name": "libgcc_s.so.1",
+      "size": 183024,
+      "sha256": "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb"
+    },
+    {
+      "name": "libm.so.6",
+      "size": 952616,
+      "sha256": "e9c4b28d340e415b8137480ec442662f981e1399386c5931dae0e886e3639e91"
+    }
+  ],
+  "kernel_source": {
+    "release": "payload-2026.11.17-kernel-1091-968",
+    "url": "https://github.com/dofastted/vm2api/releases/tag/payload-2026.11.17-kernel-1091-968",
+    "published_at": "2026-11-16T18:52:36Z",
+    "supplier_statement": "PR payload for #1091 and #968. Replaces only kin-codex-kernel and kin-kernel (including the slot copy). All other pinned assets, including signed CRAG 3.1.3 Compact, are byte-identical to the baseline. Not an application release.",
+    "assets": [
+      {
+        "name": "kin-kernel",
+        "size": 13312992,
+        "sha256": "9284c8197d4aa665b92506c028b5621f8f429e1c855aca70bb6aa4a13ab5875e"
+      },
+      {
+        "name": "kin-codex-kernel",
+        "size": 5981528,
+        "sha256": "95727081222f4096e9e63d29e6c9c2e009ff00365a70add30a885063fe7f9993"
+      }
+    ],
+    "source_independently_rebuilt": false,
+    "statement": "The public release metadata identifies builds 1091/968 and their digests. No private-source commit or reproducible-build claim is inferred."
+  }
+}

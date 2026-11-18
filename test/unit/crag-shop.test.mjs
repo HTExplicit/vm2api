@@ -80,6 +80,7 @@ test('new shop migrations preserve existing orders and apply once after the publ
     '063_api_key_endpoint.sql',
     '064_risk_audit_bans.sql',
     '065_crag_shop_order_dispatch.sql',
+    '066_refusal_session_blocks.sql',
   ])
   assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '061' ORDER BY version").all(), ledger)
   for (const old of before) {

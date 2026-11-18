@@ -1,15 +1,10 @@
 import { detectDistill, distillBlockError, isOpenaiPlatformModel } from '../core/distill-detect.mjs'
 import { redactSecrets } from '../core/security.mjs'
-import {
-  ErrorType,
-  isThirdPartyEntitlementError,
-  isUsagePolicyErrorMessage,
-  makeError,
-  makeRefusalGuardError,
-} from '../core/errors.mjs'
+import { ErrorType, isThirdPartyClientMessage, makeError, makeRefusalGuardError } from '../core/errors.mjs'
 import {
   blockedRiskTool,
   DEFAULT_BAN_STEPS,
+  matchRefusalSession,
   matchStoredRefusal,
   refusalFingerprint,
   refusalGuardError,
@@ -95,10 +90,7 @@ export function observeUpstreamRisk({ inbound, body, identity, result, logBag, r
   if (message) logBag.error_message = message
   logBag.error_code ||= 'content_filter_refusal'
   if (!policy?.enabled) return reason
-  const fingerprint =
-    reason === 'upstream:flagged_session' || reason === 'upstream:extra_usage_session'
-      ? null
-      : refusalFingerprint(body, inbound)
+  const fingerprint = reason === 'upstream:flagged_session' ? null : refusalFingerprint(body, inbound)
   try {
     if (fingerprint)
       repo?.remember?.({
@@ -122,7 +114,7 @@ export function upstreamRiskClientError(reason, requestId) {
   return makeRefusalGuardError({
     requestId,
     message:
-      reason === 'upstream:flagged_session' || reason === 'upstream:extra_usage_session'
+      reason === 'upstream:flagged_session'
         ? '上游已标记此会话，请勿继续使用此会话。'
         : reason === 'upstream:configured_policy'
           ? '上游因内容策略拒绝了此请求，请勿重试。'
@@ -153,8 +145,16 @@ function similarityRatio(value) {
   return n > 1 ? n / 100 : n
 }
 
-export function commitProtocolBlock(decision, { repo, devices, policy, requestId } = {}) {
+export function commitProtocolBlock(decision, { repo, devices, sessions, policy, requestId } = {}) {
   if (!decision || decision.action !== 'block') return
+  if (decision.kind === 'session') {
+    try {
+      sessions?.hit?.(decision.sessionId)
+    } catch {
+      /* counter is best-effort */
+    }
+    return
+  }
   if (decision.kind === 'device') {
     try {
       devices?.hit?.(decision.deviceId)
@@ -212,6 +212,7 @@ export async function evaluateProtocolIntercept({
   jev,
   repo,
   devices,
+  sessions = null,
   requestId,
   account = null,
   scopeMatched = false,
@@ -228,6 +229,26 @@ export async function evaluateProtocolIntercept({
   const interceptOpts = { interceptSession, ctx: bodyCtx }
   let rawDocument
   if (!skipMandatory) {
+    // A session the provider already refused never hops again: before every
+    // other layer, whatever the prompt now says.
+    if (policy?.session_block_enabled !== false && sessions) {
+      const refused = matchRefusalSession({ inbound, body, headers, sessions })
+      if (refused) {
+        const error = refusalGuardError(requestId, refused)
+        return block({
+          kind: 'session',
+          via: 'refusal-guard',
+          final_state: 'refusal_session',
+          error,
+          errorMessage: error.body?.error?.message,
+          intercept: gateVerdict({ kind: 'block', by: 'refusal', keyword: 'session' }),
+          sessionId: refused.sessionId,
+          banDevice: false,
+          remember: false,
+          reason: 'refusal_session',
+        })
+      }
+    }
     const banned = devices?.findBan?.(identity, Date.now(), (row) => enforcesBan(policy, row))
     if (banned) {
       const error = refusalGuardError(requestId, { kind: 'device', row: banned })
@@ -389,12 +410,7 @@ export async function evaluateProtocolIntercept({
         intercept: gateVerdict({ kind: 'block', by: 'refusal', keyword: match.kind }),
         deviceId: match.deviceId,
         fingerprint: match.fingerprint,
-        banDevice:
-          match.kind !== 'device' &&
-          !(
-            isThirdPartyEntitlementError(400, match.row?.error_message) &&
-            !isUsagePolicyErrorMessage(match.row?.error_message)
-          ),
+        banDevice: match.kind !== 'device' && !isThirdPartyClientMessage(match.row?.error_message),
         reason:
           match.kind === 'device' ? 'refusal_device' : match.kind === 'similar' ? 'refusal_similar' : 'refusal_guard',
       })

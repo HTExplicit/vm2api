@@ -30,6 +30,7 @@ import {
   REFRESH_SKEW_MS,
   writeWorkerCredentialFile,
   ensureOfficialCredentialLink,
+  slotUidGidFromHomeDir,
 } from '../oauth/oauth-credentials.mjs'
 import { runSlotOauth } from './slot-oauth.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
@@ -612,13 +613,6 @@ export function prepareWorkerPayload({
   const health = exec?.workerStatus
   const print = nativeCragRequest(exec, cragPrint)
   const canonicalBody = print ? prepareCragRequest(body, health) : prepareCliNodeRequest(body)
-  const model = canonicalBody?.model || ''
-  const credMode = credentialModeFromOauth(exec?.vm?.claude || {})
-  const headers = prepareOutboundHeaders(reqHeaders, exec?.homeDir, identity, model, {
-    credentialMode: credMode,
-    routing,
-    want1m: want1m === true,
-  })
   const displayed =
     requestContext?.purpose === 'auto_mode_classifier' || repaired
       ? canonicalBody
@@ -627,20 +621,35 @@ export function prepareWorkerPayload({
           ccEntrypointFromRouting(routing),
         )
   const main = stripSubagentBilling(displayed)
-  const thread = pinThreadBetas(
-    main,
-    withRequestProtocolBetas(String(headers?.['anthropic-beta'] || '').split(','), main),
-  )
-  const betas = thread.betas
-  headers['anthropic-beta'] = betas.join(',')
   // V3's official CC owns beta selection. Its strict request contract does not
   // accept the panel's legacy cli-node beta body extension.
   const officialBetas = print && health?.capabilities?.includes('generation_controls_v3')
-  const gated = cliHop
-    ? officialBetas
-      ? main
-      : { ...main, betas }
-    : sanitizeAnthropicBodyForBetaTokens(main, headers['anthropic-beta'])
+  const nativeOwnsHeaders =
+    cliHop &&
+    cragPrint === true &&
+    officialBetas &&
+    health.capabilities.includes('linux_tui_native_queue') &&
+    !requestContext &&
+    !repaired &&
+    main.thread == null
+  let headers
+  let turn = null
+  let gated = main
+  if (!nativeOwnsHeaders) {
+    headers = prepareOutboundHeaders(reqHeaders, exec?.homeDir, identity, canonicalBody?.model || '', {
+      credentialMode: credentialModeFromOauth(exec?.vm?.claude || {}),
+      routing,
+      want1m: want1m === true,
+    })
+    const thread = pinThreadBetas(
+      main,
+      withRequestProtocolBetas(String(headers['anthropic-beta'] || '').split(','), main),
+    )
+    turn = thread.turn
+    headers['anthropic-beta'] = thread.betas.join(',')
+    if (!cliHop) gated = sanitizeAnthropicBodyForBetaTokens(main, headers['anthropic-beta'])
+    else if (!officialBetas) gated = { ...main, betas: thread.betas }
+  }
   const directed = gateCragBody(gated, print, health, requestContext?.purpose === 'auto_mode_classifier')
   return {
     headers,
@@ -648,7 +657,7 @@ export function prepareWorkerPayload({
     cliHop,
     routing,
     acceptsCallerCwd: print && Array.isArray(health?.capabilities) && health.capabilities.includes('caller_cwd'),
-    thread: thread.turn,
+    thread: turn,
   }
 }
 
@@ -714,7 +723,7 @@ async function workerEnvelope({
     ...(requestContext ? { request_context: requestContext } : {}),
     ...(typeof outgoingCwd === 'string' ? { caller_cwd: outgoingCwd } : {}),
     body: finalized.body,
-    headers: finalized.headers,
+    ...(finalized.headers ? { headers: finalized.headers } : {}),
     stream: !!stream,
     delivery_mode: deliveryMode || 'realtime',
     preserve_cache_breakpoints: preserveCacheBreakpoints == null ? cacheTtl == null : preserveCacheBreakpoints === true,
@@ -840,10 +849,6 @@ function restoreCragPolicyBlock(result) {
       },
     },
   }
-}
-
-export async function callGoWorker(options) {
-  return restoreCragPolicyBlock(await callGoWorkerRaw(options))
 }
 
 async function callGoWorkerRaw({
@@ -1053,10 +1058,6 @@ async function callGoWorkerRaw({
   } finally {
     stopCancel()
   }
-}
-
-export async function streamGoWorker(options) {
-  return restoreCragPolicyBlock(await streamGoWorkerRaw(options))
 }
 
 async function streamGoWorkerRaw({
@@ -1615,6 +1616,8 @@ async function streamGoWorkerRaw({
         model: meta.model || sseModel || assembled?.model || null,
         upstreamResponseModel,
         stopReason,
+        // Keep provider diagnostics even when a later error replaces the assembled body.
+        stopDetails: assembled?.stop_details ?? null,
         sawMessageStop,
         ...timing.snapshot(),
         committed,
@@ -1765,7 +1768,21 @@ export async function workerHealth(exec, { timeoutMs = 3000, signal, requireInte
   }
 }
 
-export async function ensureWorkerCredential(exec, { force = false } = {}) {
+/**
+ * Relink a local slot's `.credentials.json` onto credentials.json. A regular file
+ * left by the CLI's write-then-rename is adopted first when it holds the later
+ * grant, so the refresh token the CLI already rotated to is the one kept.
+ */
+export function repairLocalCredentialLink(homeDir) {
+  if (!homeDir) return Promise.resolve({ linked: false, error: 'home missing' })
+  return withCredentialRefreshLock(String(homeDir), async () => relinkKeepingRotation(homeDir))
+}
+
+function relinkKeepingRotation(homeDir) {
+  return ensureOfficialCredentialLink(homeDir, { ...slotUidGidFromHomeDir(homeDir), adoptOfficial: 'rotation' })
+}
+
+export async function ensureWorkerCredential(exec, { force = false, skewMs = REFRESH_SKEW_MS } = {}) {
   if (isCrsMock()) {
     return {
       ok: true,
@@ -1779,7 +1796,8 @@ export async function ensureWorkerCredential(exec, { force = false } = {}) {
     }
   }
 
-  if (exec?.homeDir) ensureOfficialCredentialLink(exec.homeDir, { adoptOfficial: false })
+  // Adopt a later CLI grant: dropping it and refreshing the older RT revokes the grant.
+  if (exec?.homeDir) relinkKeepingRotation(exec.homeDir)
   const credential = readWorkerCredentialFile(exec.homeDir)
   if (!credential) {
     return {
@@ -1792,7 +1810,7 @@ export async function ensureWorkerCredential(exec, { force = false } = {}) {
 
   const now = Date.now()
   const apiKey = isApiKeyMode(credential.type || credential.mode)
-  const alreadyFresh = apiKey || (!force && !needsRefresh(credential.expires_at, now, REFRESH_SKEW_MS))
+  const alreadyFresh = apiKey || (!force && !needsRefresh(credential.expires_at, now, skewMs))
   if (alreadyFresh) {
     return {
       ok: true,
@@ -1806,7 +1824,7 @@ export async function ensureWorkerCredential(exec, { force = false } = {}) {
   const snapshotRefresh = String(credential.refresh_token || '')
   const lockKey = String(exec.homeDir || exec.vm?.id || 'credential')
   return withCredentialRefreshLock(lockKey, async () => {
-    if (exec?.homeDir) ensureOfficialCredentialLink(exec.homeDir, { adoptOfficial: false })
+    if (exec?.homeDir) relinkKeepingRotation(exec.homeDir)
     const live = readWorkerCredentialFile(exec.homeDir) || credential
     const liveRefresh = String(live?.refresh_token || '')
     if (snapshotRefresh && liveRefresh && snapshotRefresh !== liveRefresh) {
@@ -1819,7 +1837,7 @@ export async function ensureWorkerCredential(exec, { force = false } = {}) {
       }
     }
     const liveNow = Date.now()
-    if (!force && !needsRefresh(live.expires_at, liveNow, REFRESH_SKEW_MS) && !isApiKeyMode(live.type || live.mode)) {
+    if (!force && !needsRefresh(live.expires_at, liveNow, skewMs) && !isApiKeyMode(live.type || live.mode)) {
       return {
         ok: true,
         status: 200,
@@ -1828,7 +1846,9 @@ export async function ensureWorkerCredential(exec, { force = false } = {}) {
         credential: credentialSummary(live, liveNow),
       }
     }
-    const result = await runSlotOauth(exec, 'refresh', { force: !!force })
+    // The slot oauth helper only refreshes inside its own 5-minute window; an early
+    // scheduled refresh has to force it.
+    const result = await runSlotOauth(exec, 'refresh', { force: !!force || skewMs > REFRESH_SKEW_MS })
     const body = result?.body || {}
     const refreshedCredential = readWorkerCredentialFile(exec.homeDir)
     const mapped = {
@@ -2143,4 +2163,123 @@ export async function countTokensViaWorker(exec, { body, headers = {}, timeoutMs
     return { ok: true, status: 200, body: { input_tokens: 8 }, headers: {}, via: 'go-worker-mock' }
   }
   return runSlotOauth(exec, 'count-tokens', { body, headers, timeoutMs })
+}
+
+const EMPTY_CONTENT_VERDICT = 'native request completed without response content'
+
+/**
+ * Records which SSE events actually reached `onEvent`, so a recovered
+ * thinking-only reply can be closed cleanly after the hop already committed
+ * (realtime delivery commits on the first thinking delta).
+ */
+function trackDownstreamEvents(onEvent) {
+  const state = { messageStarted: false, terminal: false, open: new Set() }
+  if (typeof onEvent !== 'function') return { onEvent, state }
+  return {
+    state,
+    onEvent: (line) => {
+      const text = typeof line === 'string' ? line : ''
+      if (text.startsWith('data:') && !text.includes('"type":"content_block_delta"')) {
+        try {
+          const event = JSON.parse(text.slice(5))
+          if (event?.type === 'message_start') state.messageStarted = true
+          else if (event?.type === 'content_block_start' && Number.isInteger(event.index)) state.open.add(event.index)
+          else if (event?.type === 'content_block_stop') state.open.delete(event.index)
+          else if (['message_delta', 'message_stop', 'error'].includes(event?.type)) state.terminal = true
+        } catch {}
+      }
+      return onEvent(line)
+    },
+  }
+}
+
+/**
+ * CRAG 3.0.7 rejects a provider 200 whose only output is a thinking block that
+ * consumed all of max_tokens (e.g. Claude Code's 64-token `<severity>` probe or
+ * auto-mode classifier on an adaptive-thinking model) and projects it as 502.
+ * The official API returns 200 with `stop_reason: max_tokens`; clients treat it
+ * as "no answer" and move on, while a 502 makes every hop retry the same
+ * billable request. Rebuild the 200 from the authenticated provider facts
+ * (content left empty: the thinking block's signature is not forwarded by the
+ * kernel).
+ *
+ * Realtime delivery commits the hop on the first thinking delta, so a
+ * committed result is recovered too: with no downstream writer nothing was
+ * sent; with one, `downstream` says what was sent and only the missing
+ * block stops and terminal frames are appended.
+ */
+export function recoverThinkingOnlyMaxTokens(result, { onEvent, onCommit, downstream = null } = {}) {
+  const facts = result?.providerResult
+  const writer = typeof onEvent === 'function'
+  if (
+    !result ||
+    result.ok ||
+    (result.committed && writer && (!downstream || downstream.terminal)) ||
+    facts?.schema_version !== 2 ||
+    facts.http_status !== 200 ||
+    facts.provider_complete !== true ||
+    facts.usage_complete !== true ||
+    facts.stop_reason !== 'max_tokens' ||
+    facts.validation_error?.message !== EMPTY_CONTENT_VERDICT ||
+    !/^msg_[A-Za-z0-9_-]+$/.test(facts.message_id || '') ||
+    typeof facts.model !== 'string' ||
+    !facts.usage
+  )
+    return result
+  const usage = facts.usage
+  const body = {
+    id: facts.message_id,
+    type: 'message',
+    role: 'assistant',
+    model: facts.model,
+    content: [],
+    stop_reason: 'max_tokens',
+    stop_sequence: facts.stop_sequence ?? null,
+    usage,
+  }
+  return (async () => {
+    let committed = !!result.committed
+    if (writer) {
+      if (!committed) onCommit?.()
+      const started = committed && downstream?.messageStarted === true
+      committed = true
+      const startUsage = { ...usage, output_tokens: 0 }
+      const events = [
+        ...(started
+          ? []
+          : [{ type: 'message_start', message: { ...body, stop_reason: null, stop_sequence: null, usage: startUsage } }]),
+        ...(started ? [...downstream.open].sort((a, b) => a - b).map((index) => ({ type: 'content_block_stop', index })) : []),
+        { type: 'message_delta', delta: { stop_reason: 'max_tokens', stop_sequence: body.stop_sequence }, usage },
+        { type: 'message_stop' },
+      ]
+      for (const event of events) {
+        await onEvent(`event: ${event.type}`)
+        await onEvent(`data: ${JSON.stringify(event)}`)
+        await onEvent('')
+      }
+    }
+    return {
+      ...result,
+      ok: true,
+      status: 200,
+      body,
+      usage,
+      model: facts.model,
+      stopReason: 'max_tokens',
+      sawMessageStop: true,
+      committed,
+      terminalState: 'verified',
+      recoveredEmptyContent: true,
+    }
+  })()
+}
+
+export async function callGoWorker(opts = {}) {
+  return recoverThinkingOnlyMaxTokens(restoreCragPolicyBlock(await callGoWorkerRaw(opts)), {})
+}
+
+export async function streamGoWorker(opts = {}) {
+  const tracked = trackDownstreamEvents(opts.onEvent)
+  const result = restoreCragPolicyBlock(await streamGoWorkerRaw({ ...opts, onEvent: tracked.onEvent }))
+  return recoverThinkingOnlyMaxTokens(result, { ...opts, onEvent: opts.onEvent, downstream: tracked.state })
 }

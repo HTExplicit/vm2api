@@ -236,14 +236,16 @@ test('post-hop warms the right front rule without treating ordinary HTTP 400 as 
     )
     assert.equal(repo.count(), 0)
     assert.equal(devices.count(), 0)
-    devices.clear()
     assert.equal(
       observeUpstreamRisk({ ...opts, result: upstream('Third-party apps now draw from your extra usage', 503) }),
       '',
     )
+    assert.equal(
+      observeUpstreamRisk({ ...opts, result: upstream('Third-party apps now draw from your extra usage', 400) }),
+      '',
+    )
     assert.equal(repo.count(), 0)
     assert.equal(devices.count(), 0)
-    repo.clear()
     assert.equal(
       observeUpstreamRisk({ ...opts, result: upstream('API Error: this session has been flagged') }),
       'upstream:flagged_session',

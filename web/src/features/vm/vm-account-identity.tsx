@@ -28,105 +28,31 @@ export function PlatformMark({ vm }: { vm: Vm }) {
   )
 }
 
-export function VmAccountIdentity({
-  vm,
-  showQuotaSample = true,
-  compactLabels = true,
-  showRegistration = true,
-}: {
-  vm: Vm
-  showQuotaSample?: boolean
-  compactLabels?: boolean
-  showRegistration?: boolean
-}) {
+export function VmAccountIdentity({ vm }: { vm: Vm }) {
   const email = vm.email?.trim() || ''
   const registration = credentialRegistrationOf(vm)
   const crag = (vm.resolved_dataplane ?? vm.dataplane) === 'crag'
   const node = vm.node_name || vm.node_id || 'local'
-  if (!compactLabels) {
-    return (
-      <div className='grid min-w-0 gap-2'>
-        <div className='flex min-w-0 items-center gap-1.5'>
-          <PlatformMark vm={vm} />
-          <span
-            className='truncate text-[13px] font-semibold'
-            title={email || undefined}
-          >
-            {email || '未绑定邮箱'}
-          </span>
-          <ActiveVmBadge vm={vm} />
-        </div>
-        <div className='flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground'>
-          {isCodexVm(vm) ? (
-            <OpenaiPlanBadge vm={vm} size='sm' />
-          ) : (
-            <span
-              className={cn('rounded px-1 font-semibold', tierVisual(vm).badge)}
-            >
-              {vm.gemini
-                ? vm.gemini.account?.plan || 'Gemini'
-                : claudeTier(vm).label}
-            </span>
-          )}
-          <span className='rounded border px-1.5 py-0.5 leading-none'>
-            {vm.gemini ? '宿主机' : vm.runtime_type === 'kvm' ? 'kvm' : 'vm'}
-          </span>
-          <span className='min-w-0 truncate' title={node}>
-            {node}
-          </span>
-          <VmRentedMark vm={vm} />
-        </div>
-        <div className='flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground'>
-          <span
-            className={cn(
-              'shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none font-semibold',
-              crag
-                ? 'bg-orange-200 text-orange-900 dark:bg-orange-400/20 dark:text-orange-300'
-                : 'bg-zinc-200 text-zinc-700 dark:bg-zinc-300/20 dark:text-zinc-300'
-            )}
-            title='当前内核'
-          >
-            {vm.gemini ? 'CRAGAnti' : crag ? 'crag' : '默认'}
-          </span>
-          <span className='truncate font-mono' title={vm.id}>
-            {vm.gemini ? vm.name || vm.id : vm.id}
-          </span>
-        </div>
-      </div>
-    )
-  }
   return (
     <div className='min-w-0 space-y-0.5'>
-      <div
-        className={cn(
-          'flex min-w-0 items-center gap-1.5',
-          compactLabels ? 'text-[11px]' : 'text-xs'
-        )}
-      >
+      <div className='flex min-w-0 items-center gap-1.5 text-[11px]'>
         <PlatformMark vm={vm} />
         <span
           className='truncate font-mono font-medium'
-          title={compactLabels ? vm.name || vm.id : vm.id}
+          title={vm.name || vm.id}
         >
-          {compactLabels
-            ? clipLabel(vm.gemini ? vm.name || vm.id : vm.id)
-            : vm.gemini
-              ? vm.name || vm.id
-              : vm.id}
+          {clipLabel(vm.gemini ? vm.name || vm.id : vm.id)}
         </span>
       </div>
       <div className='flex min-w-0 items-center gap-1.5'>
         <div
-          className={cn(
-            'truncate font-semibold',
-            compactLabels ? 'text-xs' : 'text-sm'
-          )}
+          className='truncate text-xs font-semibold'
           title={email || undefined}
         >
-          {email ? (compactLabels ? clipLabel(email) : email) : '未绑定邮箱'}
+          {email ? clipLabel(email) : '未绑定邮箱'}
         </div>
         <ActiveVmBadge vm={vm} />
-        {showQuotaSample ? <CodexQuotaSampleStatus vm={vm} compact /> : null}
+        <CodexQuotaSampleStatus vm={vm} compact />
       </div>
       <div className='flex min-w-0 flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground'>
         {isCodexVm(vm) ? (
@@ -144,12 +70,8 @@ export function VmAccountIdentity({
         <span>
           {vm.gemini ? '宿主机' : vm.runtime_type === 'kvm' ? 'kvm' : 'vm'}
         </span>
-        {showRegistration ? (
-          <>
-            <span aria-hidden='true'>|</span>
-            <span>{registration === 'none' ? '无凭证' : registration}</span>
-          </>
-        ) : null}
+        <span aria-hidden='true'>|</span>
+        <span>{registration === 'none' ? '无凭证' : registration}</span>
         <VmRentedMark vm={vm} />
       </div>
       <div className='flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground'>

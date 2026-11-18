@@ -53,7 +53,7 @@ function WindowRow({
   const futureReset = expiresAtToMs(w.reset) > now
   const eta = reset ?? (full ? '已满' : '')
   return (
-    <div data-window-readout={w.key} className={cn(WINDOW_GRID, METRIC_ROW)}>
+    <div className={cn(WINDOW_GRID, METRIC_ROW)}>
       <span className='text-xs font-medium text-muted-foreground'>
         {w.label}
       </span>
@@ -127,7 +127,6 @@ export function VmUsageWindows({
   now,
   quiet = false,
   quotaActions = false,
-  summaryOnly = false,
   className,
 }: {
   vm: Vm
@@ -135,8 +134,6 @@ export function VmUsageWindows({
   now: number
   quiet?: boolean
   quotaActions?: boolean
-  /** 列表只保留窗口与入口；测量状态和余额在展开区展示。 */
-  summaryOnly?: boolean
   className?: string
 }) {
   const hasToken = Boolean(vm.has_token)
@@ -151,12 +148,8 @@ export function VmUsageWindows({
           quiet={quiet}
         />
       ))}
-      {summaryOnly ? null : (
-        <>
-          <CodexQuotaSampleStatus vm={vm} />
-          <CodexCreditSummary vm={vm} />
-        </>
-      )}
+      <CodexQuotaSampleStatus vm={vm} />
+      <CodexCreditSummary vm={vm} />
       {quotaActions ? <VmQuotaActions vm={vm} now={now} /> : null}
     </div>
   )

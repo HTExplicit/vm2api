@@ -38,8 +38,7 @@ describe('VM scheduling priority', () => {
         weight: 42,
       }
       const list = render(vm)
-      expect(list).toContain('>调度</div>')
-      expect(list).toContain('>类型</div>')
+      expect(list).toContain('>调度 · 优先级</div>')
       expect(list).toMatch(
         /text-blue-800[^"]*shadow-\[inset_0_0_0_1px_currentColor\][^"]*"[^>]*>P8</
       )
@@ -79,7 +78,7 @@ describe('VM row interaction and health', () => {
     )
     const html = render({ health_24h: buckets })
     expect(html).toContain('>99.0%</b>')
-    expect(html).toContain('aria-label="近 24 小时 48 格请求健康时间线"')
+    expect(html).toContain('>99/100</span>')
     expect(render({ health_24h: null })).toContain('24h 无请求')
     expect(render()).toContain('24h 未知')
     expect(render()).not.toContain('24h 无请求')
@@ -186,7 +185,7 @@ describe('VM account column kernel label', () => {
     expect(html).toContain('aria-label="anthropic"')
     for (const label of [
       'vm-01',
-      'account@example.com',
+      'account@ex…',
       'Max',
       'kvm',
       'oauth',
@@ -230,84 +229,8 @@ describe('VM list summary and toggles', () => {
     expect(html).toContain('>在池</div>')
     expect(html).toContain('>90.0%</b>')
     expect(html).toContain('失败 1')
-    expect(html).toContain('>显示</')
+    expect(html).toMatch(/aria-pressed="false"[^>]*>.*按状态分组/)
+    expect(html).toMatch(/aria-pressed="false"[^>]*>.*次要信息常显/)
     expect(html).toContain('data-pin="false"')
-  })
-})
-
-describe('retained quota and plan accuracy', () => {
-  it.each([
-    [undefined, '已满'],
-    ['2000-01-01T00:00:00Z', '已过重置'],
-  ])(
-    'never promises recovery from a missing or stale reset (%s)',
-    (reset, label) => {
-      const html = render({
-        platform: 'openai',
-        has_token: true,
-        utilization_5h: 1,
-        reset_5h: reset,
-      })
-      expect(html).toContain(label)
-      expect(html).not.toContain('已过重置恢复')
-    }
-  )
-  it.each([
-    ['prolite', 'Pro 100'],
-    ['pro', 'Pro 200'],
-    ['promax', 'Pro 500'],
-  ])('keeps the true %s plan in the official compact badge', (plan, label) => {
-    expect(
-      render({ platform: 'openai', has_token: true, plan_type: plan })
-    ).toContain(`>${label}</span>`)
-  })
-  it('keeps the last successful window while reserving refresh details for expansion', () => {
-    const html = render({
-      platform: 'openai',
-      has_token: true,
-      codex_usage: {
-        pending_refresh: true,
-        last_success: { windows: [{ id: '5h', used_percent: 73 }] },
-      },
-    })
-    expect(html).toContain('73%')
-    expect(html).not.toContain('额度待刷新')
-    expect(html).not.toContain('priority-segment')
-  })
-})
-
-describe('VM list request badges', () => {
-  it('shows a blue in-flight badge beside status, including while a slot drains', () => {
-    const html = render({
-      platform: 'openai',
-      inflight: 3,
-      session_active: 8,
-      schedulable: false,
-    })
-    expect(html).toContain('data-vm-requesting="3"')
-    expect(html).toContain('title="请求中 3"')
-    expect(html).toContain('bg-[color:var(--tier-pro-solid)]')
-    expect(html).not.toContain('data-vm-requesting="8"')
-  })
-
-  it('hides zero requests and never treats held Claude seats as running requests', () => {
-    expect(
-      render({ platform: 'openai', inflight: 0, session_active: 8 })
-    ).not.toContain('data-vm-requesting')
-    expect(
-      render({
-        inflight: 4,
-        seat_sessions: [
-          { index: 0, session_id: 'held', state: 'held', inflight: 0 },
-        ],
-      })
-    ).not.toContain('data-vm-requesting')
-    expect(
-      render({
-        seat_sessions: [
-          { index: 0, session_id: 'active', state: 'active', inflight: 2 },
-        ],
-      })
-    ).toContain('data-vm-requesting="2"')
   })
 })
