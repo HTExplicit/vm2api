@@ -4,7 +4,7 @@ import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
 import { credEndpointLabel, credentialRegistrationOf } from '@/lib/cred-type'
 import { fmtResetClock, resetCountdown } from '@/lib/fable-status'
-import { fmtNum, fmtUsd } from '@/lib/format'
+import { fmtExpiresAt, fmtNum, fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import {
   fmtHealthPct,
@@ -13,7 +13,13 @@ import {
   SLOT_BG,
   SLOT_LABEL,
 } from '@/lib/vm-health'
-import { poolStatus, scheduleStateLabel } from '@/lib/vm-status'
+import { isCodexVm } from '@/lib/vm-kind'
+import {
+  poolStatus,
+  scheduleStateLabel,
+  seatTitle,
+  vmRequestingCount,
+} from '@/lib/vm-status'
 import {
   usageAccountForVm,
   vmCacheHitPct,
@@ -22,6 +28,7 @@ import {
   vmWeekOutcome,
 } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
+import { ProxyChip } from '@/features/proxies/proxy-chip'
 import { CodexCreditSummary } from './codex-credit-summary'
 import { CodexQuotaSampleStatus } from './codex-quota-sample-status'
 import { vmHealthQueryOptions, type VmHealthRange } from './queries'
@@ -60,12 +67,16 @@ function HealthCard({ vm }: { vm: Vm }) {
     ...vmHealthQueryOptions(vm.id, range),
     enabled: perms.admin,
   })
-  const slots = range === '7d' ? 84 : 48
-  const slotMin = q.data?.slot_min ?? (range === '7d' ? 120 : 30)
-  const s = healthSummary(q.data?.buckets ?? null, slots)
-  const startMs = q.data ? Date.parse(q.data.start) : null
+  const fromList = perms.known && !perms.admin
+  const buckets = fromList ? vm.health_24h : q.data?.buckets
+  const slots = !fromList && range === '7d' ? 84 : 48
+  const slotMin = fromList
+    ? 30
+    : (q.data?.slot_min ?? (range === '7d' ? 120 : 30))
+  const s = healthSummary(buckets, slots)
+  const startMs = !fromList && q.data ? Date.parse(q.data.start) : null
   const axis =
-    range === '7d'
+    !fromList && range === '7d'
       ? ['7 天前', '5d', '3d', '1d', '现在']
       : ['24h 前', '18h', '12h', '6h', '现在']
   return (
@@ -100,17 +111,18 @@ function HealthCard({ vm }: { vm: Vm }) {
           ) : null}
         </span>
       </div>
-      {perms.known && !perms.admin ? (
+      {fromList ? (
         <div className='text-xs text-muted-foreground'>
           健康明细仅管理员可查看
         </div>
-      ) : q.isPending ? (
+      ) : null}
+      {!perms.known || (!fromList && q.isPending) ? (
         <div className='h-7 animate-pulse rounded bg-muted' />
-      ) : q.isError ? (
+      ) : !fromList && q.isError ? (
         <div className='text-xs text-[color:var(--status-bad)]'>
           加载失败：{(q.error as Error).message}
         </div>
-      ) : q.data?.buckets === undefined ? (
+      ) : buckets === undefined ? (
         <div className='text-xs text-muted-foreground'>请求健康数据未知</div>
       ) : (
         <>
@@ -156,34 +168,36 @@ function HealthCard({ vm }: { vm: Vm }) {
               <b className={KV_VALUE}>{fmtDur(s.active * slotMin * 60_000)}</b>
             </div>
           </div>
-          <div className='mt-3 border-t pt-2'>
-            <div className={cn(KV_LABEL, 'mb-1 font-medium')}>主要错误</div>
-            {q.data?.top_errors?.length ? (
-              q.data.top_errors.map((e) => (
-                <div
-                  key={e.code}
-                  className='grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 py-0.5 text-[11.5px] @sm/row-detail:grid-cols-[minmax(0,1fr)_auto_auto]'
-                >
-                  <span className='font-mono wrap-anywhere'>
-                    {e.status && String(e.status) !== e.code
-                      ? `${e.status} `
-                      : ''}
-                    {e.code}
-                  </span>
-                  <span className='font-mono text-[color:var(--status-bad)] tabular-nums'>
-                    × {fmtNum(e.count)}
-                  </span>
-                  <span className='font-mono text-muted-foreground tabular-nums @max-sm/row-detail:col-span-full'>
-                    {fmtResetClock(e.last_at) ?? ''}
-                  </span>
+          {!fromList ? (
+            <div className='mt-3 border-t pt-2'>
+              <div className={cn(KV_LABEL, 'mb-1 font-medium')}>主要错误</div>
+              {q.data?.top_errors?.length ? (
+                q.data.top_errors.map((e) => (
+                  <div
+                    key={e.code}
+                    className='grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 py-0.5 text-[11.5px] @sm/row-detail:grid-cols-[minmax(0,1fr)_auto_auto]'
+                  >
+                    <span className='font-mono wrap-anywhere'>
+                      {e.status && String(e.status) !== e.code
+                        ? `${e.status} `
+                        : ''}
+                      {e.code}
+                    </span>
+                    <span className='font-mono text-[color:var(--status-bad)] tabular-nums'>
+                      × {fmtNum(e.count)}
+                    </span>
+                    <span className='font-mono text-muted-foreground tabular-nums @max-sm/row-detail:col-span-full'>
+                      {fmtResetClock(e.last_at) ?? ''}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <div className='text-[11.5px] text-[color:var(--text-tertiary)]'>
+                  {s.req ? '该时段无失败请求' : '该时段无请求'}
                 </div>
-              ))
-            ) : (
-              <div className='text-[11.5px] text-[color:var(--text-tertiary)]'>
-                {s.req ? '该时段无失败请求' : '该时段无请求'}
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          ) : null}
         </>
       )}
     </section>
@@ -449,6 +463,32 @@ export function VmRowDetail({
           {[
             ['账号名称', vm.name?.trim() || vm.email?.trim() || vm.id],
             ['邮箱', vm.email],
+            ...(isCodexVm(vm)
+              ? [
+                  [
+                    '订阅到期',
+                    vm.chatgpt_subscription_active_until
+                      ? fmtExpiresAt(vm.chatgpt_subscription_active_until)
+                      : null,
+                  ],
+                ]
+              : []),
+            ['运行环境', vm.runtime_type === 'kvm' ? 'KVM' : 'VM'],
+            [
+              '当前内核',
+              (vm.resolved_dataplane ?? vm.dataplane) === 'crag'
+                ? 'crag'
+                : '默认',
+            ],
+            [
+              '调度优先级',
+              vm.schedule_level != null &&
+              Number.isInteger(vm.schedule_level) &&
+              vm.schedule_level >= 1 &&
+              vm.schedule_level <= 10
+                ? `P${vm.schedule_level} · ${vm.schedule_level_mode === 'manual' ? '手动指定' : '自动分配'}`
+                : null,
+            ],
             ['槽位 ID', vm.id],
             [
               '所在主机',
@@ -468,6 +508,26 @@ export function VmRowDetail({
               <dd className='mt-0.5 wrap-anywhere'>{value || '—'}</dd>
             </div>
           ))}
+          <div className='min-w-0'>
+            <dt className={KV_LABEL}>出口</dt>
+            <dd className='mt-0.5'>
+              <ProxyChip vm={vm} />
+            </dd>
+          </div>
+          {vm.seats_max != null ? (
+            <div>
+              <dt className={KV_LABEL}>席位占用</dt>
+              <dd title={seatTitle(vm)}>
+                {vm.seats_used ?? 0}/{vm.seats_max}
+              </dd>
+            </div>
+          ) : null}
+          <div>
+            <dt className={KV_LABEL}>请求中 / 排队</dt>
+            <dd>
+              {vmRequestingCount(vm)} / {vm.queue_depth ?? 0}
+            </dd>
+          </div>
         </dl>
         <Button
           type='button'

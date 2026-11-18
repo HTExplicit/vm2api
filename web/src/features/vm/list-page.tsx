@@ -127,14 +127,14 @@ export function VmListPage() {
   usePoolSeatStream()
   const usage = useQuery({
     ...usageQueryOptions(5000),
-    enabled: me.data?.role !== 'user',
+    enabled: me.data?.role === 'admin' || me.data?.role === 'super',
   })
   const qc = useQueryClient()
   const [q, setQ] = useState('')
   const [filter, setFilter] = useState<VmZoneFilter>('all')
   const [kind, setKind] = useState<VmKindFilter>('all')
   const [view, setViewState] = useState(() =>
-    readPref(LS_VIEW, ['grid', 'list'] as const, 'grid')
+    readPref(LS_VIEW, ['grid', 'list'] as const, 'list')
   )
   const [size, setSizeState] = useState(() =>
     readPref(LS_SIZE, ['s', 'm', 'l'] as const, 'l')
@@ -229,7 +229,8 @@ export function VmListPage() {
     (me.data?.role === 'user' && (me.data.vm_create_quota || 0) > 0)
   const perms = vmPermsFor(me.data?.role)
   const scoped = filterVms(slots, '', 'all', kind)
-  const list = sortVms(filterVms(slots, q, filter, kind), sort, dir, accounts)
+  const matches = filterVms(slots, q, filter, kind)
+  const list = view === 'grid' ? sortVms(matches, sort, dir, accounts) : matches
   const deletePlan = deleteTarget
     ? planDeleteActiveVm(deleteTarget, vms)
     : { kind: 'normal' as const }
@@ -237,10 +238,86 @@ export function VmListPage() {
   const deleteSwitchId =
     deletePlan.kind === 'switch' ? deletePlan.replacement.id : undefined
 
+  const filters = (
+    <>
+      <KindFilterChips
+        vms={slots}
+        kind={kind}
+        onChange={setKind}
+        showGemini={isAdmin}
+      />
+      <Separator orientation='vertical' className='mx-1 h-5' />
+      <Input
+        aria-label='搜索账号'
+        className={cn('h-8 max-w-full', view === 'list' ? 'w-44' : 'w-64')}
+        type='search'
+        name='vm-filter'
+        autoComplete='off'
+        data-1p-ignore
+        data-lpignore='true'
+        data-bwignore
+        placeholder='搜索名称 / 邮箱 / 代理'
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+      />
+    </>
+  )
+  const viewControls = (
+    <>
+      <Button
+        size='sm'
+        variant={view === 'list' ? 'default' : 'outline'}
+        aria-pressed={view === 'list'}
+        aria-label='列表视图'
+        title='列表'
+        onClick={() => setView('list')}
+      >
+        <List />
+      </Button>
+      <Button
+        size='sm'
+        variant={view === 'grid' ? 'default' : 'outline'}
+        aria-pressed={view === 'grid'}
+        aria-label='网格视图'
+        title='网格'
+        onClick={() => setView('grid')}
+      >
+        <LayoutGrid />
+      </Button>
+    </>
+  )
+  const zoomControl = (
+    <div className='flex items-center gap-2'>
+      <span className='text-xs text-muted-foreground'>放大</span>
+      <Slider
+        className='w-28'
+        min={ZOOM_MIN}
+        max={ZOOM_MAX}
+        step={10}
+        value={[zoom]}
+        aria-label='列表放大'
+        onValueChange={(next) => setZoom(next[0] ?? ZOOM_MIN)}
+      />
+      <span className='w-10 text-right font-mono text-xs text-muted-foreground tabular-nums'>
+        {zoom}%
+      </span>
+    </div>
+  )
+  const emptyState = (
+    <EmptyState
+      reason='没有符合当前筛选的槽位。'
+      actionLabel={canCreate ? '创建' : undefined}
+      onAction={canCreate ? () => setCreateOpen(true) : undefined}
+    />
+  )
   return (
     <PageHeader
       title={VIEW_TITLES.vm}
-      description='槽位和账号用量。按服务器分机架、按状态分区；未探测的额度不会冒充可用。'
+      description={
+        view === 'grid'
+          ? '槽位和账号用量。按服务器分机架、按状态分区；未探测的额度不会冒充可用。'
+          : undefined
+      }
       fluid
       extra={
         poolQueue || canCreate ? (
@@ -282,127 +359,80 @@ export function VmListPage() {
           </div>
         ) : null}
         <FleetPulse
-          className='mb-3'
+          className={cn('mb-3', view === 'list' && 'classic-pulse')}
+          classicList={view === 'list'}
           vms={scoped}
           accounts={accounts}
           filter={filter}
           onFilter={setFilter}
         />
-        <div className='mb-4 flex flex-wrap items-center gap-2'>
-          <KindFilterChips
-            vms={slots}
-            kind={kind}
-            onChange={setKind}
-            showGemini={isAdmin}
-          />
-          <Separator orientation='vertical' className='mx-1 h-5' />
-          <Input
-            className='h-8 w-64'
-            type='search'
-            name='vm-filter'
-            autoComplete='off'
-            data-1p-ignore
-            data-lpignore='true'
-            data-bwignore
-            placeholder='搜索名称 / 邮箱 / 代理'
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
-          <div className='ms-auto flex flex-wrap items-center gap-2'>
-            <span className='text-xs text-muted-foreground'>排序</span>
-            <Select
-              value={sort}
-              onValueChange={(next) => {
-                setSort(next as VmSortKey)
-                setDir(next === 'name' ? 'asc' : 'desc')
-              }}
-            >
-              <SelectTrigger size='sm' className='w-28' aria-label='排序字段'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent align='end'>
-                {SORT_CHIPS.map(([key, label]) => (
-                  <SelectItem key={key} value={key}>
-                    {label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Button
-              size='sm'
-              variant='outline'
-              title={dir === 'asc' ? '升序' : '降序'}
-              aria-label={
-                dir === 'asc' ? '当前升序，切到降序' : '当前降序，切到升序'
-              }
-              onClick={() => setDir(dir === 'asc' ? 'desc' : 'asc')}
-            >
-              {dir === 'asc' ? <ArrowUpNarrowWide /> : <ArrowDownWideNarrow />}
-            </Button>
-            <Separator orientation='vertical' className='mx-1 h-5' />
-            {view === 'grid' ? (
-              <div
-                role='group'
-                aria-label='卡片大小'
-                className='inline-flex gap-0.5 rounded-lg bg-muted p-0.5'
+        {view === 'grid' ? (
+          <div className='mb-4 flex flex-wrap items-center gap-2'>
+            {filters}
+            <div className='ms-auto flex flex-wrap items-center gap-2'>
+              <span className='text-xs text-muted-foreground'>排序</span>
+              <Select
+                value={sort}
+                onValueChange={(next) => {
+                  setSort(next as VmSortKey)
+                  setDir(next === 'name' ? 'asc' : 'desc')
+                }}
               >
-                {SIZES.map(([key, label, title]) => (
-                  <button
-                    key={key}
-                    type='button'
-                    title={title}
-                    aria-pressed={size === key}
-                    onClick={() => setSize(key)}
-                    className={cn(
-                      'h-7 min-w-8 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground',
-                      size === key &&
-                        'bg-card text-foreground shadow-[0_1px_2px_oklch(0_0_0/12%),0_0_0_1px_var(--border)]'
-                    )}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            {view === 'list' ? (
-              <div className='flex items-center gap-2'>
-                <span className='text-xs text-muted-foreground'>放大</span>
-                <Slider
-                  className='w-28'
-                  min={ZOOM_MIN}
-                  max={ZOOM_MAX}
-                  step={10}
-                  value={[zoom]}
-                  aria-label='列表放大'
-                  onValueChange={(next) => setZoom(next[0] ?? ZOOM_MIN)}
-                />
-                <span className='w-10 text-right font-mono text-xs text-muted-foreground tabular-nums'>
-                  {zoom}%
-                </span>
-              </div>
-            ) : null}
-            <Button
-              size='sm'
-              variant={view === 'list' ? 'default' : 'outline'}
-              aria-pressed={view === 'list'}
-              aria-label='列表视图'
-              title='列表'
-              onClick={() => setView('list')}
-            >
-              <List />
-            </Button>
-            <Button
-              size='sm'
-              variant={view === 'grid' ? 'default' : 'outline'}
-              aria-pressed={view === 'grid'}
-              aria-label='网格视图'
-              title='网格'
-              onClick={() => setView('grid')}
-            >
-              <LayoutGrid />
-            </Button>
+                <SelectTrigger size='sm' className='w-28' aria-label='排序字段'>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent align='end'>
+                  {SORT_CHIPS.map(([key, label]) => (
+                    <SelectItem key={key} value={key}>
+                      {label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                size='sm'
+                variant='outline'
+                title={dir === 'asc' ? '升序' : '降序'}
+                aria-label={
+                  dir === 'asc' ? '当前升序，切到降序' : '当前降序，切到升序'
+                }
+                onClick={() => setDir(dir === 'asc' ? 'desc' : 'asc')}
+              >
+                {dir === 'asc' ? (
+                  <ArrowUpNarrowWide />
+                ) : (
+                  <ArrowDownWideNarrow />
+                )}
+              </Button>
+              <Separator orientation='vertical' className='mx-1 h-5' />
+              {view === 'grid' ? (
+                <div
+                  role='group'
+                  aria-label='卡片大小'
+                  className='inline-flex gap-0.5 rounded-lg bg-muted p-0.5'
+                >
+                  {SIZES.map(([key, label, title]) => (
+                    <button
+                      key={key}
+                      type='button'
+                      title={title}
+                      aria-pressed={size === key}
+                      onClick={() => setSize(key)}
+                      className={cn(
+                        'h-7 min-w-8 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground',
+                        size === key &&
+                          'bg-card text-foreground shadow-[0_1px_2px_oklch(0_0_0/12%),0_0_0_1px_var(--border)]'
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {viewControls}
+            </div>
           </div>
-        </div>
+        ) : null}
         <VmActionsProvider
           accounts={accounts}
           onReset={
@@ -423,24 +453,27 @@ export function VmListPage() {
               : undefined
           }
         >
-          {list.length ? (
-            view === 'grid' ? (
-              <VmRack
-                vms={list}
-                accounts={accounts}
-                filter={filter}
-                size={size}
-                onCreate={canCreate ? () => setCreateOpen(true) : undefined}
-              />
-            ) : (
-              <VmTable vms={list} accounts={accounts} zoom={zoom} />
-            )
-          ) : (
-            <EmptyState
-              reason='没有符合当前筛选的槽位。'
-              actionLabel={canCreate ? '创建' : undefined}
-              onAction={canCreate ? () => setCreateOpen(true) : undefined}
+          {view === 'list' ? (
+            <VmTable
+              vms={list}
+              accounts={accounts}
+              zoom={zoom}
+              fleetCount={scoped.length}
+              filters={filters}
+              viewControls={viewControls}
+              zoomControl={zoomControl}
+              emptyState={emptyState}
             />
+          ) : list.length ? (
+            <VmRack
+              vms={list}
+              accounts={accounts}
+              filter={filter}
+              size={size}
+              onCreate={canCreate ? () => setCreateOpen(true) : undefined}
+            />
+          ) : (
+            emptyState
           )}
         </VmActionsProvider>
       </QueryGate>

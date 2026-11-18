@@ -1,7 +1,10 @@
-import { useMemo } from 'react'
+import { useId, useMemo, useState } from 'react'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import { ChevronDown } from 'lucide-react'
+import { codexQuotaDisplayVm } from '@/lib/codex-quota-display'
 import { fmtNum, fmtUsd, usedPctOf } from '@/lib/format'
+import { windowProbed } from '@/lib/pool-quota'
 import { cn } from '@/lib/utils'
 import { vmTodayStats, vmWeekOutcome } from '@/lib/vm-usage'
 import {
@@ -42,7 +45,11 @@ type Pulse = {
   weekFail: number
 }
 
-function computePulse(vms: Vm[], accounts?: UsageAccountRow[]): Pulse {
+function computePulse(
+  vms: Vm[],
+  accounts: UsageAccountRow[] | undefined,
+  measuredHeadroom: boolean
+): Pulse {
   const counts: Record<VmZone, number> = {
     pool: 0,
     restricted: 0,
@@ -64,8 +71,9 @@ function computePulse(vms: Vm[], accounts?: UsageAccountRow[]): Pulse {
   for (const vm of vms) {
     counts[zoneOf(vm)] += 1
     if (vm.gemini) continue
-    if (vm.has_token) {
-      const remain = Math.max(0, 100 - usedPctOf(vm, '7d'))
+    const quota = measuredHeadroom ? codexQuotaDisplayVm(vm) : vm
+    if (vm.has_token && (!measuredHeadroom || windowProbed(quota, '7d'))) {
+      const remain = Math.max(0, 100 - usedPctOf(quota, '7d'))
       remains.push(remain)
       headroom[Math.min(4, Math.floor(remain / 20))] += 1
     }
@@ -149,6 +157,7 @@ export function FleetPulse({
   filter,
   onFilter,
   className,
+  classicList = false,
 }: {
   /** 已按凭证面（Claude / GPT）筛过、但未经搜索与分组筛选的全集。 */
   vms: Vm[]
@@ -156,74 +165,169 @@ export function FleetPulse({
   filter: VmZoneFilter
   onFilter: (next: VmZoneFilter) => void
   className?: string
+  classicList?: boolean
 }) {
-  const pulse = useMemo(() => computePulse(vms, accounts), [vms, accounts])
+  const overviewId = useId()
+  const [overviewOpen, setOverviewOpen] = useState(false)
+  const pulse = useMemo(
+    () => computePulse(vms, accounts, classicList),
+    [vms, accounts, classicList]
+  )
   const segments = ZONES.filter((z) => pulse.counts[z.key] > 0)
   const focused = filter !== 'all'
   const headroomMax = Math.max(...pulse.headroom, 1)
   const weekTotal = pulse.weekSuccess + pulse.weekFail
   const weekRate = weekTotal > 0 ? (pulse.weekSuccess / weekTotal) * 100 : null
 
-  return (
+  const overview = (
     <div
+      id={overviewId}
       className={cn(
         'grid gap-px overflow-hidden rounded-xl border bg-border/60 sm:grid-cols-2 xl:grid-cols-10',
         className
       )}
     >
-      <Cell
-        title='状态分区'
-        className='sm:col-span-2 xl:col-span-4'
-        meta={
-          <button
-            type='button'
-            aria-pressed={filter === 'all'}
-            onClick={() => onFilter('all')}
-            className={cn(
-              'rounded-md px-1.5 py-0.5 text-[12px] leading-none transition-colors hover:bg-accent/60',
-              focused ? 'text-muted-foreground' : 'font-medium text-foreground'
-            )}
-          >
-            全部 <span className='tabular-nums'>{pulse.total}</span>
-          </button>
-        }
-      >
-        <div
-          role='group'
-          aria-label='按状态分区筛选'
-          className='flex min-h-8 flex-wrap gap-[3px]'
+      {classicList ? (
+        <Cell
+          title='舰队构成'
+          className='xl:col-span-4'
+          meta={
+            <span className='text-[13px] leading-none font-[590] tracking-[-0.01em] tabular-nums'>
+              <span className='text-[color:var(--status-ok)]'>
+                {pulse.counts.pool}
+              </span>
+              <span className='text-muted-foreground'>
+                {' '}
+                / {pulse.total} 在池
+              </span>
+            </span>
+          }
         >
-          {segments.map((z) => (
-            <Tooltip key={z.key}>
-              <TooltipTrigger asChild>
-                <button
-                  type='button'
-                  aria-pressed={filter === z.key}
-                  onClick={() => onFilter(filter === z.key ? 'all' : z.key)}
-                  className={cn(
-                    "flex h-8 min-w-max items-center gap-1.5 overflow-hidden rounded-[7px] px-2.5 text-xs font-semibold whitespace-nowrap before:h-3.5 before:w-[3px] before:shrink-0 before:rounded-[2px] before:bg-[color:var(--zc)] before:content-[''] motion-safe:transition-[flex-grow,opacity] motion-safe:duration-500 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)]",
-                    'bg-[color:color-mix(in_oklch,var(--zc)_20%,var(--card))] shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--zc)_40%,transparent)]',
-                    focused && filter !== z.key && 'opacity-35'
-                  )}
-                  style={
-                    {
-                      flexGrow: pulse.counts[z.key],
-                      flexBasis: 'auto',
-                      '--zc': z.color,
-                    } as React.CSSProperties
-                  }
-                >
-                  <span className='tabular-nums'>{pulse.counts[z.key]}</span>
-                  <span className='font-medium text-muted-foreground'>
-                    {z.label}
-                  </span>
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>{z.hint}</TooltipContent>
-            </Tooltip>
-          ))}
-        </div>
-      </Cell>
+          <div className='flex h-2.5 w-full gap-px overflow-hidden rounded-full track-recessed'>
+            {segments.map((g) => (
+              <Tooltip key={g.key}>
+                <TooltipTrigger asChild>
+                  <button
+                    type='button'
+                    aria-label={`${g.label} ${pulse.counts[g.key]} 台`}
+                    aria-pressed={filter === g.key}
+                    onClick={() => onFilter(filter === g.key ? 'all' : g.key)}
+                    className={cn(
+                      'h-full min-w-[3px] motion-safe:transition-[flex-grow,opacity] motion-safe:duration-500 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)]',
+                      focused && filter !== g.key && 'opacity-25'
+                    )}
+                    style={{
+                      flexGrow: pulse.counts[g.key],
+                      flexBasis: 0,
+                      backgroundColor: g.color,
+                    }}
+                  />
+                </TooltipTrigger>
+                <TooltipContent>
+                  {g.label} {pulse.counts[g.key]} 台
+                </TooltipContent>
+              </Tooltip>
+            ))}
+          </div>
+          <div className='-mx-1 flex flex-wrap items-center gap-x-0.5 gap-y-0.5'>
+            <button
+              type='button'
+              aria-pressed={filter === 'all'}
+              onClick={() => onFilter('all')}
+              className={cn(
+                'rounded-md px-1.5 py-1 text-xs transition-colors hover:bg-accent/60',
+                filter === 'all'
+                  ? 'font-medium text-foreground'
+                  : 'text-muted-foreground'
+              )}
+            >
+              全部{' '}
+              <span className='font-medium tabular-nums'>{pulse.total}</span>
+            </button>
+            {ZONES.map((g) => (
+              <button
+                key={g.key}
+                type='button'
+                aria-pressed={filter === g.key}
+                onClick={() => onFilter(filter === g.key ? 'all' : g.key)}
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-xs transition-colors hover:bg-accent/60',
+                  filter === g.key
+                    ? 'font-medium text-foreground'
+                    : 'text-muted-foreground',
+                  !pulse.counts[g.key] && 'text-muted-foreground'
+                )}
+              >
+                <span
+                  className='size-2 shrink-0 rounded-[3px]'
+                  style={{ backgroundColor: g.color }}
+                  aria-hidden='true'
+                />
+                {g.label}
+                <span className='font-medium tabular-nums'>
+                  {pulse.counts[g.key]}
+                </span>
+              </button>
+            ))}
+          </div>
+        </Cell>
+      ) : (
+        <Cell
+          title='状态分区'
+          className='sm:col-span-2 xl:col-span-4'
+          meta={
+            <button
+              type='button'
+              aria-pressed={filter === 'all'}
+              onClick={() => onFilter('all')}
+              className={cn(
+                'rounded-md px-1.5 py-0.5 text-[12px] leading-none transition-colors hover:bg-accent/60',
+                focused
+                  ? 'text-muted-foreground'
+                  : 'font-medium text-foreground'
+              )}
+            >
+              全部 <span className='tabular-nums'>{pulse.total}</span>
+            </button>
+          }
+        >
+          <div
+            role='group'
+            aria-label='按状态分区筛选'
+            className='flex min-h-8 flex-wrap gap-[3px]'
+          >
+            {segments.map((z) => (
+              <Tooltip key={z.key}>
+                <TooltipTrigger asChild>
+                  <button
+                    type='button'
+                    aria-pressed={filter === z.key}
+                    onClick={() => onFilter(filter === z.key ? 'all' : z.key)}
+                    className={cn(
+                      "flex h-8 min-w-max items-center gap-1.5 overflow-hidden rounded-[7px] px-2.5 text-xs font-semibold whitespace-nowrap before:h-3.5 before:w-[3px] before:shrink-0 before:rounded-[2px] before:bg-[color:var(--zc)] before:content-[''] motion-safe:transition-[flex-grow,opacity] motion-safe:duration-500 motion-safe:ease-[cubic-bezier(0.16,1,0.3,1)]",
+                      'bg-[color:color-mix(in_oklch,var(--zc)_20%,var(--card))] shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--zc)_40%,transparent)]',
+                      focused && filter !== z.key && 'opacity-35'
+                    )}
+                    style={
+                      {
+                        flexGrow: pulse.counts[z.key],
+                        flexBasis: 'auto',
+                        '--zc': z.color,
+                      } as React.CSSProperties
+                    }
+                  >
+                    <span className='tabular-nums'>{pulse.counts[z.key]}</span>
+                    <span className='font-medium text-muted-foreground'>
+                      {z.label}
+                    </span>
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>{z.hint}</TooltipContent>
+              </Tooltip>
+            ))}
+          </div>
+        </Cell>
+      )}
 
       <Cell
         title='7d 余量分布'
@@ -250,7 +354,7 @@ export function FleetPulse({
                   aria-label={`余量 ${bucket.label}–${Number(bucket.label) + 20}% ${pulse.headroom[i]} 台`}
                   className='flex h-full flex-1 cursor-default flex-col justify-end gap-1'
                 >
-                  <span className='text-center text-[10px] leading-none text-muted-foreground tabular-nums'>
+                  <span className='text-center text-[11px] leading-none text-muted-foreground tabular-nums'>
                     {pulse.headroom[i] || ''}
                   </span>
                   <span
@@ -273,7 +377,7 @@ export function FleetPulse({
             </Tooltip>
           ))}
         </div>
-        <div className='flex justify-between font-mono text-[10px] leading-none text-muted-foreground tabular-nums'>
+        <div className='flex justify-between font-mono text-[11px] leading-none text-muted-foreground tabular-nums'>
           {HEADROOM_BUCKETS.map((bucket) => (
             <span key={bucket.label} className='flex-1 text-center'>
               {bucket.label}
@@ -366,5 +470,30 @@ export function FleetPulse({
         </div>
       </Cell>
     </div>
+  )
+  if (!classicList) return overview
+  return (
+    <>
+      <button
+        type='button'
+        className='classic-overview-compact'
+        aria-controls={overviewId}
+        aria-expanded={overviewOpen}
+        onClick={() => setOverviewOpen(!overviewOpen)}
+      >
+        账号总览{' '}
+        <small>
+          {pulse.counts.pool} / {pulse.total} 在池
+          {filter !== 'all'
+            ? ` · ${ZONES.find((z) => z.key === filter)?.label}`
+            : ''}
+        </small>
+        <ChevronDown
+          aria-hidden
+          className={cn('size-4', overviewOpen && 'rotate-180')}
+        />
+      </button>
+      {overview}
+    </>
   )
 }
