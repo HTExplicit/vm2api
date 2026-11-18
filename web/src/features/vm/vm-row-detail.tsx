@@ -2,13 +2,9 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
-import {
-  credEndpointLabel,
-  credentialRegistrationOf,
-  supportsOfficialCc,
-} from '@/lib/cred-type'
+import { supportsOfficialCc } from '@/lib/cred-type'
 import { fmtResetClock, resetCountdown } from '@/lib/fable-status'
-import { fmtExpiresAt, fmtNum, fmtUsd } from '@/lib/format'
+import { fmtNum, fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import {
   fmtHealthPct,
@@ -18,12 +14,7 @@ import {
   SLOT_LABEL,
 } from '@/lib/vm-health'
 import { isCodexVm } from '@/lib/vm-kind'
-import {
-  poolStatus,
-  scheduleStateLabel,
-  seatTitle,
-  vmRequestingCount,
-} from '@/lib/vm-status'
+import { poolStatus, scheduleStateLabel } from '@/lib/vm-status'
 import {
   usageAccountForVm,
   vmCacheHitPct,
@@ -32,7 +23,6 @@ import {
   vmWeekOutcome,
 } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
-import { ProxyChip } from '@/features/proxies/proxy-chip'
 import { ActiveUsageAction } from './active-usage-action'
 import { ClaudeResetActions } from './claude-reset-actions'
 import { CodexCreditSummary } from './codex-credit-summary'
@@ -500,71 +490,7 @@ export function VmRowDetail({
       aria-label={`${vm.id} 明细`}
       className='@container/row-detail min-w-0 border-b border-border/40 bg-muted/40 p-3'
     >
-      <div className='mb-3 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3'>
-        <dl
-          aria-label='账号信息'
-          className='grid min-w-0 grid-cols-1 gap-x-4 gap-y-2 text-xs @sm/row-detail:grid-cols-2 @xl/row-detail:grid-cols-3'
-        >
-          {[
-            ['账号名称', vm.name?.trim() || vm.email?.trim() || vm.id],
-            ['邮箱', vm.email],
-            ...(isCodexVm(vm)
-              ? [
-                  [
-                    '订阅到期',
-                    vm.chatgpt_subscription_active_until
-                      ? fmtExpiresAt(vm.chatgpt_subscription_active_until)
-                      : null,
-                  ],
-                ]
-              : []),
-            ['运行环境', vm.runtime_type === 'kvm' ? 'KVM' : 'VM'],
-            [
-              '当前内核',
-              (vm.resolved_dataplane ?? vm.dataplane) === 'crag'
-                ? 'crag'
-                : '默认',
-            ],
-            ['槽位 ID', vm.id],
-            [
-              '所在主机',
-              vm.node_name ||
-                vm.node_id ||
-                (vm.node_id === null ? '本机' : null),
-            ],
-            [
-              '凭证登记',
-              vm.has_token == null
-                ? null
-                : credEndpointLabel(credentialRegistrationOf(vm)),
-            ],
-          ].map(([label, value]) => (
-            <div key={label} className='min-w-0'>
-              <dt className={KV_LABEL}>{label}</dt>
-              <dd className='mt-0.5 wrap-anywhere'>{value || '—'}</dd>
-            </div>
-          ))}
-          <div className='min-w-0'>
-            <dt className={KV_LABEL}>出口</dt>
-            <dd className='mt-0.5'>
-              <ProxyChip vm={vm} />
-            </dd>
-          </div>
-          {vm.seats_max != null ? (
-            <div>
-              <dt className={KV_LABEL}>席位占用</dt>
-              <dd title={seatTitle(vm)}>
-                {vm.seats_used ?? 0}/{vm.seats_max}
-              </dd>
-            </div>
-          ) : null}
-          <div>
-            <dt className={KV_LABEL}>请求中 / 排队</dt>
-            <dd>
-              {vmRequestingCount(vm)} / {vm.queue_depth ?? 0}
-            </dd>
-          </div>
-        </dl>
+      <div className='mb-1 flex justify-end'>
         <Button
           type='button'
           variant='link'

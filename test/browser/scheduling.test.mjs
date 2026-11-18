@@ -487,6 +487,17 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
   await row.focus()
   await page.keyboard.press('Enter')
   await detail.getByText('99.0%', { exact: true }).waitFor()
+  const assertCompactDetail = async () => {
+    assert.equal(await detail.getByLabel('账号信息', { exact: true }).count(), 0)
+    const link = await detail.getByRole('button', { name: '打开完整详情 →' }).boundingBox()
+    const panel = await detail.boundingBox()
+    const card = await detail.getByRole('region', { name: '请求健康', exact: true }).boundingBox()
+    assert.ok(link && panel && card)
+    assert.ok(link.y >= panel.y && link.x + link.width > panel.x + panel.width - 24)
+    assert.ok(card.y >= link.y + link.height - 1 && card.y < link.y + link.height + 12)
+  }
+  await assertCompactDetail()
+
   const rangeTargets = await detail
     .getByRole('group', { name: '健康时间范围', exact: true })
     .getByRole('button')
@@ -548,6 +559,10 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
   await row.focus()
   await page.keyboard.press('Shift+Enter')
   assert.equal(await page.getByRole('status', { name: '详情打开次数' }).innerText(), '2')
+  await expand.click()
+  await detail.getByRole('button', { name: '打开完整详情 →' }).click()
+  assert.equal(await page.getByRole('status', { name: '详情打开次数' }).innerText(), '3')
+  await row.getByRole('button', { name: '收起 offline-slot 明细' }).click()
   const accountName = cell(row, 'account').getByText('测试槽', { exact: true })
   await accountName.evaluate((el) => {
     const selection = window.getSelection()
@@ -583,6 +598,7 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
   assert.ok(narrowBadge && narrowBadge.x >= 0 && narrowBadge.x + narrowBadge.width <= 390)
   await expand.click()
   await detail.waitFor()
+  await assertCompactDetail()
   await assertNoHorizontalOverflow()
   await row.getByRole('button', { name: '收起 offline-slot 明细', exact: true }).click()
   if (screenshotDirectory) {

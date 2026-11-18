@@ -32,9 +32,6 @@ vi.mock('./vm-perms', async (importOriginal) => {
     useVmPerms: () => original.vmPermsFor(controls.role),
   }
 })
-vi.mock('@/features/proxies/proxy-chip', () => ({
-  ProxyChip: () => <span data-testid='proxy-chip' />,
-}))
 vi.mock('./openai-quota-actions', () => ({
   OpenaiQuotaActions: ({ vm, compact }: { vm: Vm; compact: boolean }) => (
     <span
@@ -105,38 +102,22 @@ beforeEach(() => {
   controls.api.mockReset().mockResolvedValue(health())
 })
 
-describe('VM row account identity', () => {
-  it('shows the full identity from the authorized row payload without fetching credentials', () => {
+describe('VM row detail layout', () => {
+  it('opens with the detail link and omits repeated account metadata', () => {
     const html = render({
-      id: 'vm-east-keep-the-entire-slot-id',
-      name: 'Team account with a long display name',
-      email: 'full-account-alias@example.test',
-      node_name: 'East cluster host',
-      has_token: true,
-      oauth_registration: 'console',
+      email: 'sample@example.test',
+      node_name: 'Example host',
+      seats_max: 2,
     })
-    const fields = html.match(
-      /<dl[^>]*aria-label="账号信息"[^>]*>([\s\S]*?)<\/dl>/
-    )?.[1]
-    expect(fields).toBeDefined()
-    for (const [label, value] of [
-      ['账号名称', 'Team account with a long display name'],
-      ['邮箱', 'full-account-alias@example.test'],
-      ['槽位 ID', 'vm-east-keep-the-entire-slot-id'],
-      ['所在主机', 'East cluster host'],
-      ['凭证登记', 'Console'],
-    ]) {
-      expect(fields).toMatch(new RegExp(`>${label}</dt><dd[^>]*>${value}</dd>`))
-    }
+    expect(html).not.toContain('aria-label="账号信息"')
+    expect(html).not.toContain('sample@example.test')
+    expect(html).not.toContain('Example host')
+    expect(html).not.toContain('席位占用')
+    expect(html).not.toContain('当前内核')
     expect(html).toContain('打开完整详情')
-    expect(controls.api).not.toHaveBeenCalled()
-  })
-
-  it('does not infer a host or credential type from fields omitted in the list projection', () => {
-    controls.role = 'user'
-    const html = render()
-    expect(html).toMatch(/>所在主机<\/dt><dd[^>]*>—<\/dd>/)
-    expect(html).toMatch(/>凭证登记<\/dt><dd[^>]*>—<\/dd>/)
+    expect(html.indexOf('打开完整详情')).toBeLessThan(
+      html.indexOf('aria-label="请求健康"')
+    )
     expect(controls.api).not.toHaveBeenCalled()
   })
 })
