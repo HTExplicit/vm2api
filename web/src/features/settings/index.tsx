@@ -493,6 +493,10 @@ export function SettingsPage() {
                     (draft.telemetry as Record<string, unknown> | undefined)
                       ?.upload_interval_seconds
                   )}
+                  defaultEnabled={
+                    (draft.telemetry as Record<string, unknown> | undefined)
+                      ?.default_enabled === true
+                  }
                   onIntervalChange={(seconds) =>
                     setDraft((current) => ({
                       ...current,
@@ -500,6 +504,16 @@ export function SettingsPage() {
                         ...((current.telemetry as Record<string, unknown>) ||
                           {}),
                         upload_interval_seconds: seconds,
+                      },
+                    }))
+                  }
+                  onDefaultEnabledChange={(enabled) =>
+                    setDraft((current) => ({
+                      ...current,
+                      telemetry: {
+                        ...((current.telemetry as Record<string, unknown>) ||
+                          {}),
+                        default_enabled: enabled,
                       },
                     }))
                   }

@@ -1145,7 +1145,7 @@ test('transient GPT failures retry the same account three times before switching
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('same-account retry never replays after the first SSE event', async () => {
+test('buffered Responses JSON returns the hop error without replaying after the first SSE event', async () => {
   const rt = await import('../../src/lib/pool/openai-account-runtime.mjs')
   rt.resetOpenAIAccountRuntime()
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-same-emitted-'))

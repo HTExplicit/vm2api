@@ -508,6 +508,107 @@ function writeData(res, event) {
   res.write(`data: ${JSON.stringify(event)}\n\n`)
 }
 
+for (const eventType of ['response.completed', 'response.incomplete']) {
+  unixTest(`Codex delivers ${eventType} without any assistant deltas`, async (t) => {
+    const incomplete = eventType === 'response.incomplete'
+    const response = {
+      id: 'resp_test',
+      status: incomplete ? 'incomplete' : 'completed',
+      output: [],
+      ...(incomplete ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
+      usage: { input_tokens: 20000, output_tokens: 0 },
+    }
+    const events = [
+      { type: 'response.created', response: { id: response.id } },
+      { type: eventType, response },
+    ]
+    const fx = await fixture((req, res) => {
+      req.resume()
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      for (const event of events) writeData(res, event)
+      res.end()
+    })
+    t.after(() => fx.close())
+    fx.exec.vm.runtime.codex_kernel_socket = fx.exec.vm.runtime.worker_socket
+    const received = []
+    const result = await streamCodexKernel({
+      exec: fx.exec,
+      envelope: { body: { model: 'gpt-6.2-sol', input: [] } },
+      onEvent(line) {
+        if (line.startsWith('data:')) received.push(JSON.parse(line.slice(5)))
+      },
+    })
+    assert.deepEqual(received, events)
+    assert.equal(result.ok, true)
+    assert.equal(result.status, 200)
+    assert.equal(result.terminalState, incomplete ? 'incomplete' : 'verified')
+    assert.deepEqual(result.body, response)
+    assert.deepEqual(result.usage, response.usage)
+  })
+}
+
+unixTest('Codex EOF without a terminal event is a failure even with reported usage', async (t) => {
+  const fx = await fixture((req, res) => {
+    req.resume()
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    writeData(res, { type: 'response.in_progress', response: { usage: { input_tokens: 20000, output_tokens: 0 } } })
+    res.end()
+  })
+  t.after(() => fx.close())
+  fx.exec.vm.runtime.codex_kernel_socket = fx.exec.vm.runtime.worker_socket
+  const result = await streamCodexKernel({ exec: fx.exec, envelope: { body: { input: [] } } })
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 502)
+  assert.equal(result.upstreamStatus, 200)
+  assert.equal(result.body.error.code, 'upstream_stream_incomplete')
+  assert.equal(result.usage.input_tokens, 20000)
+})
+
+unixTest('Codex EOF after visible output sends a failed event, not an implicit success', async (t) => {
+  const fx = await fixture((req, res) => {
+    req.resume()
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    writeData(res, { type: 'response.created', response: { id: 'resp_truncated' } })
+    writeData(res, { type: 'response.output_text.delta', delta: 'Partial' })
+    res.end()
+  })
+  t.after(() => fx.close())
+  fx.exec.vm.runtime.codex_kernel_socket = fx.exec.vm.runtime.worker_socket
+  const frames = []
+  const result = await streamCodexKernel({
+    exec: fx.exec,
+    envelope: { body: { input: [] } },
+    onEvent(line) {
+      if (line.startsWith('data:')) frames.push(JSON.parse(line.slice(5)))
+    },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.committed, true)
+  assert.deepEqual(
+    frames.map((frame) => frame.type),
+    ['response.created', 'response.output_text.delta', 'response.failed'],
+  )
+  assert.equal(frames.at(-1).response.id, 'resp_truncated')
+  assert.equal(frames.at(-1).response.error.code, 'upstream_stream_incomplete')
+})
+
+unixTest('Codex response.failed before commitment keeps its provider error', async (t) => {
+  const error = { type: 'invalid_request_error', code: 'invalid_tool', message: 'Invalid tool', param: 'tools' }
+  const fx = await fixture((req, res) => {
+    req.resume()
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    writeData(res, { type: 'response.failed', response: { status: 'failed', error } })
+    res.end()
+  })
+  t.after(() => fx.close())
+  fx.exec.vm.runtime.codex_kernel_socket = fx.exec.vm.runtime.worker_socket
+  const result = await streamCodexKernel({ exec: fx.exec, envelope: { body: { input: [] } } })
+  assert.equal(result.ok, false)
+  assert.equal(result.committed, false)
+  assert.equal(result.status, 400)
+  assert.deepEqual(result.body.error, error)
+})
+
 function gate() {
   let release
   const ready = new Promise((resolve) => {
@@ -1382,6 +1483,12 @@ for (const scenario of [
           assert.equal(result.failureDiagnostics.cleanupErrorCode, 'ECONNRESET')
           assert.equal(result.failureDiagnostics.usageState, 'final')
         } else assert.equal(result.failureDiagnostics, null)
+      } else if (scenario === 'incomplete-terminal') {
+        assert.equal(result.ok, true)
+        assert.equal(result.terminalState, 'incomplete')
+        assert.equal(result.stopReason, 'max_output_tokens')
+        assert.equal(result.usage.input_tokens, 5)
+        assert.equal(result.failureDiagnostics, null)
       } else {
         const d = result.failureDiagnostics
         assert.equal(d.kernelRequestId, kernelRequestId)
@@ -1396,14 +1503,13 @@ for (const scenario of [
             ? 'headers'
             : ['headers-reset', 'first-byte-timeout'].includes(scenario)
               ? 'first_event'
-              : ['incomplete-terminal', 'terminal-forward-error'].includes(scenario)
+              : scenario === 'terminal-forward-error'
                 ? 'finalize'
                 : 'stream',
         )
         if (scenario.includes('timeout')) assert.equal(result.body.error.code, 'worker_timeout')
         if (scenario.endsWith('reset')) assert.equal(result.body.error.code, 'ECONNRESET')
         if (scenario === 'cancelled') assert.equal(result.terminalState, 'cancelled')
-        if (scenario === 'incomplete-terminal') assert.equal(result.body.error.code, 'stream_incomplete')
         if (scenario === 'terminal-forward-error') assert.equal(result.body.error.code, 'fixture_delivery_error')
         if (!['headers-timeout', 'headers-reset', 'first-byte-timeout'].includes(scenario))
           assert.equal(result.usage.input_tokens, 5)
@@ -1518,12 +1624,13 @@ for (const [type, terminal] of [
         requestPath: '/internal/v1/codex/responses',
         onEvent() {},
       })
-      assert.equal(result.ok, terminal === 'completed')
+      const delivered = terminal === 'completed' || type === 'response.incomplete'
+      assert.equal(result.ok, delivered)
       assert.equal(result.status, 200)
       assert.equal(result.terminalState, terminal === 'completed' ? 'verified' : 'incomplete')
       assert.equal(result.transportError, false)
       assert.deepEqual(result.usage, usage)
-      if (terminal === 'completed') assert.deepEqual(result.body, response)
+      if (delivered) assert.deepEqual(result.body, response)
       else assert.equal(result.body.error.code, terminal === 'failed' ? 'server_error' : 'stream_incomplete')
     } finally {
       await fx.close()

@@ -63,7 +63,10 @@ jobs:
         run: go test ./internal/server
       - name: egress timeout and DNS regressions
         working-directory: worker
-        run: go test -race ./internal/egress ./internal/proxy
+        run: |
+          go test -race ./internal/egress ./internal/proxy
+          CGO_ENABLED=0 go build -o ../bin/kin-egress ./cmd/kin-egress
+          node --test ../test/unit/egress.test.mjs
       - name: prepare fixed OAuth and Responses helpers
         run: |
           node --input-type=module -e "import fs from 'node:fs'; const p = JSON.parse(fs.readFileSync('deploy/payload.json')); p.files = p.files.filter(f => ['bin/kin-oauth-auth', 'bin/kin-kernel', 'share/wrap-cli/cli-node'].includes(f.path)); fs.writeFileSync('/tmp/oauth-payload.json', JSON.stringify(p));"
@@ -76,6 +79,9 @@ jobs:
           for file in \
             test/unit/forced-tool-choice.test.mjs \
             test/unit/egress-container-runtime.test.mjs \
+            test/unit/seed-policy.test.mjs \
+            test/unit/remote-egress.test.mjs \
+            test/unit/credential-weight.test.mjs \
             test/unit/haiku-55-policy.test.mjs \
             test/unit/opus-55-policy.test.mjs \
             test/unit/model-policy-fable51.test.mjs \
