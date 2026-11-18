@@ -8,6 +8,8 @@ import {
   installKernelTargets,
   releaseKernelInstallSafetyHold,
   resumePendingKernelInstalls,
+  cancelKernelInstall,
+  listActiveKernelInstalls,
 } from '../../src/lib/vm/kernel-install.mjs'
 import { kvmKernelSelector, selectChangedPayloadFiles } from '../../src/lib/cluster/remote-slot-files.mjs'
 import { describeKernelCatalog, pullKernelRelease } from '../../src/lib/admin/kernel-catalog.mjs'
@@ -404,7 +406,13 @@ for (const authenticated of [true, false]) {
       rustKernelHealth(exec, options) {
         assert.equal(exec.vmId, vm.id)
         assert.deepEqual(options, { requireInternalToken: true })
-        return { ok: true, healthy: true, cli_pid: 42, internalTokenAuthenticated: authenticated }
+        return {
+          ok: true,
+          healthy: true,
+          cli_pid: 0,
+          execution_mode: 'v2_process_pool',
+          internalTokenAuthenticated: authenticated,
+        }
       },
     })
     const result = await installKernelTargets({
@@ -1554,4 +1562,70 @@ test('kernel installation resets an open request circuit only after verified rea
   assert.equal(repaired.ok, true, JSON.stringify(repaired))
   assert.equal(repaired.items[0].restarted, true)
   assert.equal(unitCircuit.view(account).state, 'closed')
+})
+
+test('a forced cancel stops the installer at its next checkpoint without starting the slot', async (t) => {
+  const { root, vm } = fixture(t)
+  let releaseStop
+  const stopping = new Promise((resolve) => (releaseStop = resolve))
+  let stopEntered
+  const entered = new Promise((resolve) => (stopEntered = resolve))
+  let started = false
+  const life = lifecycle(root, {
+    async stopSlot(current) {
+      stopEntered()
+      await stopping
+      return { ok: true, runtime: { ...current.runtime, stopped: true } }
+    },
+    startSlotReady() {
+      started = true
+      return { ok: true, rust_ok: true }
+    },
+  })
+  const running = installKernelTargets({ projectRoot: root, targets: target('cli-node'), ops: life.ops })
+  await entered
+  assert.deepEqual(
+    listActiveKernelInstalls().map(({ id, kernel, phase }) => ({ id, kernel, phase })),
+    [{ id: vm.id, kernel: 'cli-node', phase: 'kernel_stop_failed' }],
+  )
+  const cancel = cancelKernelInstall(vm.id)
+  assert.equal(cancel.ok, true, JSON.stringify(cancel))
+  releaseStop()
+  const result = await running
+  assert.equal(result.ok, false)
+  assert.equal(result.items[0].code, 'kernel_install_cancelled')
+  assert.equal(result.items[0].stopped, true)
+  assert.equal(started, false, 'a cancelled install must not start the slot')
+  const saved = getVm(root, vm.id)
+  assert.equal(saved.kernel_operation.phase, 'failed')
+  assert.equal(saved.kernel_operation.code, 'kernel_install_cancelled')
+  assert.equal(saved.schedulable, false, 'the cancelled slot must remain out of the pool')
+  assert.equal(saved.schedule_off_reason, 'stopped')
+  const retry = await installKernelTargets({ projectRoot: root, targets: target('cli-node'), ops: life.ops })
+  assert.equal(retry.ok, true, JSON.stringify(retry))
+  assert.equal(retry.items[0].stopped, true)
+  assert.equal(started, false, 'retrying a stopped slot must not start it')
+  assert.deepEqual(listActiveKernelInstalls(), [])
+  assert.equal(cancelKernelInstall(vm.id).code, 'kernel_install_not_running')
+})
+
+test('a cancel racing an already-dispatched start stops the late process without clearing operator-off intent', async (t) => {
+  const { root, vm } = fixture(t, { schedule_off: true, schedule_off_reason: 'manual' })
+  let stops = 0
+  const life = lifecycle(root, {
+    stopSlot() {
+      stops++
+      return { ok: true }
+    },
+    startSlotReady() {
+      assert.equal(cancelKernelInstall(vm.id).ok, true)
+      return { ok: true, rust_ok: true }
+    },
+  })
+  const result = await installKernelTargets({ projectRoot: root, targets: target('cli-node'), ops: life.ops })
+  assert.equal(result.items[0].code, 'kernel_install_cancelled')
+  assert.equal(stops, 2)
+  const saved = getVm(root, vm.id)
+  assert.equal(saved.status, 'stopped')
+  assert.equal(saved.schedule_off_reason, 'manual')
 })

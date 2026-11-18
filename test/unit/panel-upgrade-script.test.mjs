@@ -20,6 +20,10 @@ if (process.env.DOCKER_DEFAULT_PLATFORM) {
 }
 fs.appendFileSync(process.env.TEST_LOG, JSON.stringify(recorded) + '\n')
 if (args[0] === 'compose') {
+  if (args.includes('pull') && process.env.FAIL_PULL === '1') {
+    if (process.env.VM2API_IMAGE_TAG !== 'v1.2.7') process.exit(2)
+    process.exit(1)
+  }
   if (args.includes('build') && process.env.FAIL_BUILD === '1') process.exit(1)
   if (args.includes('config')) {
     if (process.env.FAIL_CONFIG === '1') process.exit(1)
@@ -180,6 +184,15 @@ test('source upgrade builds the backend, preserves overrides, recreates it, and 
     (args) => args[0] === 'exec' && args[2] === 'node' && args[3].endsWith('/fleet-services.mjs'),
   )
   assert.deepEqual(fleet.slice(4, 6), [result.root, '1'])
+})
+
+test('failed image pull keeps the previous image tag and running control plane', async () => {
+  const result = await runUpgrade({ source: false, env: { FAIL_PULL: '1' } })
+  assert.equal(result.code, 1, result.stderr)
+  assert.equal(result.env, 'VM2API_ADMIN_PASSWORD=keep-me\nVM2API_IMAGE_TAG=v1.2.6\n')
+  assert.equal(result.version, '1.2.6\n')
+  assert.ok(result.calls.some((args) => args.includes('pull')))
+  assert.ok(!result.calls.some((args) => args.includes('up')))
 })
 
 test('failed backend build never replaces the running control plane', async () => {
