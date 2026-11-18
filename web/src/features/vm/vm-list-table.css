@@ -294,32 +294,37 @@
 }
 .vm-priority-track {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 2px;
-  border-radius: 0.4rem;
-  padding: 2px;
-  background: var(--border);
+  inline-size: max-content;
+  max-inline-size: 100%;
+  grid-template-columns: repeat(5, minmax(0, 1.5rem));
+  column-gap: 0.125rem;
 }
 @container window-tools (min-width: 17rem) {
   .vm-priority-track {
-    grid-template-columns: repeat(10, minmax(0, 1fr));
+    grid-template-columns: repeat(10, minmax(0, 1.5rem));
   }
+}
+.vm-priority-track > label {
+  display: grid;
+  min-block-size: 2rem;
+  place-items: center;
 }
 .vm-priority-option {
   display: grid;
   place-items: center;
-  min-height: 2rem;
-  border: 1px solid transparent;
-  border-radius: 0.28rem;
-  background: var(--card);
+  min-block-size: 1.25rem;
+  border: 1px solid var(--input);
+  border-radius: 0.25rem;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
   font-weight: 500;
 }
+.vm-priority-track .vm-priority-option {
+  inline-size: min(100%, 1.375rem);
+}
 .vm-priority-auto {
-  min-height: 1.5rem;
-  padding-inline: 0.45rem;
-  border-color: var(--input);
+  min-block-size: 1.5rem;
+  padding-inline: 0.375rem;
 }
 input[aria-disabled='false']:hover + .vm-priority-option {
   background: var(--accent);
