@@ -6,7 +6,7 @@
 }
 .classic-scroll {
   position: relative;
-  --account-width: clamp(13.25rem, 22cqi, 16.5rem);
+  --account-width: clamp(12rem, 18cqi, 13rem);
   border: 1px solid var(--border);
   border-radius: 0.55rem;
   overflow-x: auto;
@@ -67,7 +67,6 @@
   inset-inline-start: 0;
   z-index: 1;
   background-color: var(--card);
-  box-shadow: 1px 0 var(--border);
 }
 .classic-table th[data-column='vm'] {
   background: var(--muted);
@@ -301,7 +300,7 @@
 }
 @container classic (max-width:30rem) {
   .classic-scroll {
-    --account-width: clamp(5.6rem, 44cqi, 10.75rem);
+    --account-width: clamp(5.6rem, 39.5cqi, 8.75rem);
   }
   .classic-name-line {
     flex-wrap: wrap;

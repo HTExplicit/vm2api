@@ -2,7 +2,11 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
-import { credEndpointLabel, credentialRegistrationOf } from '@/lib/cred-type'
+import {
+  credEndpointLabel,
+  credentialRegistrationOf,
+  supportsOfficialCc,
+} from '@/lib/cred-type'
 import { fmtResetClock, resetCountdown } from '@/lib/fable-status'
 import { fmtExpiresAt, fmtNum, fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -29,13 +33,18 @@ import {
 } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
 import { ProxyChip } from '@/features/proxies/proxy-chip'
+import { ActiveUsageAction } from './active-usage-action'
+import { ClaudeResetActions } from './claude-reset-actions'
 import { CodexCreditSummary } from './codex-credit-summary'
 import { CodexQuotaSampleStatus } from './codex-quota-sample-status'
+import { OpenaiApiActions } from './openai-api-actions'
+import { OpenaiQuotaActions } from './openai-quota-actions'
 import { vmHealthQueryOptions, type VmHealthRange } from './queries'
 import { riskFg } from './usage-meter'
-import { VmQuotaActions, WindowBar } from './usage-windows'
+import { WindowBar } from './usage-windows'
 import { useVmPerms } from './vm-perms'
 import { vmWindows } from './vm-rack-model'
+import { VmRowPriority } from './vm-row-priority'
 import { windowTiming } from './window-timing'
 
 const CARD = 'min-w-0 rounded-lg border bg-card p-3'
@@ -312,9 +321,6 @@ function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
           调度{scheduleStateLabel(vm)}：{reason}
         </p>
       ) : null}
-      <div className='mt-3 border-t pt-2.5'>
-        <VmQuotaActions vm={vm} now={now} />
-      </div>
     </section>
   )
 }
@@ -448,6 +454,13 @@ export function VmRowDetail({
   onOpenDetail: () => void
   id: string
 }) {
+  const perms = useVmPerms()
+  const codex = isCodexVm(vm)
+  const showClaudeCards =
+    !codex &&
+    perms.credential &&
+    (vm.can_claude_reset ?? supportsOfficialCc(vm))
+  const windows = showClaudeCards ? vmWindows(vm) : []
   return (
     <div
       id={id}
@@ -455,7 +468,48 @@ export function VmRowDetail({
       aria-label={`${vm.id} 明细`}
       className='@container/row-detail min-w-0 border-b border-border/40 bg-muted/40 p-3'
     >
-      <div className='mb-3 grid items-start gap-3 @lg/row-detail:grid-cols-[minmax(0,1fr)_auto]'>
+      <div
+        role='group'
+        aria-label='账号快捷操作'
+        className='mb-3 flex min-w-0 flex-wrap items-start gap-x-4 gap-y-2 border-b pb-2.5'
+      >
+        {codex ? (
+          <>
+            {vm.has_token ? <OpenaiQuotaActions vm={vm} showCount /> : null}
+            <OpenaiApiActions vm={vm} />
+          </>
+        ) : (
+          <>
+            {showClaudeCards ? (
+              <ClaudeResetActions
+                vm={vm}
+                inline
+                now={now}
+                usage={{
+                  fiveHour: windows.find((w) => w.key === '5h')?.pct,
+                  sevenDay: windows.find((w) => w.key === '7d')?.pct,
+                  fable: windows.find((w) => w.key === 'fable')?.pct,
+                  sevenDayGate: vm.quota_policy
+                    ? vm.quota_policy.limit_7d * 100
+                    : null,
+                }}
+              />
+            ) : null}
+            <ActiveUsageAction vm={vm} />
+          </>
+        )}
+        <VmRowPriority vm={vm} editable={perms.admin} />
+        <Button
+          type='button'
+          variant='link'
+          size='sm'
+          className='ms-auto min-h-8 px-0 text-xs'
+          onClick={onOpenDetail}
+        >
+          打开完整详情 →
+        </Button>
+      </div>
+      <div className='mb-3'>
         <dl
           aria-label='账号信息'
           className='grid min-w-0 grid-cols-1 gap-x-4 gap-y-2 text-xs @sm/row-detail:grid-cols-2 @xl/row-detail:grid-cols-3'
@@ -479,15 +533,6 @@ export function VmRowDetail({
               (vm.resolved_dataplane ?? vm.dataplane) === 'crag'
                 ? 'crag'
                 : '默认',
-            ],
-            [
-              '调度优先级',
-              vm.schedule_level != null &&
-              Number.isInteger(vm.schedule_level) &&
-              vm.schedule_level >= 1 &&
-              vm.schedule_level <= 10
-                ? `P${vm.schedule_level} · ${vm.schedule_level_mode === 'manual' ? '手动指定' : '自动分配'}`
-                : null,
             ],
             ['槽位 ID', vm.id],
             [
@@ -529,15 +574,6 @@ export function VmRowDetail({
             </dd>
           </div>
         </dl>
-        <Button
-          type='button'
-          variant='link'
-          size='sm'
-          className='min-h-8 justify-self-start px-0 text-xs @lg/row-detail:justify-self-end'
-          onClick={onOpenDetail}
-        >
-          打开完整详情 →
-        </Button>
       </div>
       <div className='grid min-w-0 gap-3 @min-[60rem]/row-detail:grid-cols-[1.3fr_1fr_1.1fr]'>
         <HealthCard vm={vm} />

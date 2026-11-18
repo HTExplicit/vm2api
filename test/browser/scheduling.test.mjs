@@ -62,6 +62,8 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
   })
   const rejectedOrigins = []
   const errors = []
+  const priorityWrites = []
+  let rejectPriority = false
   const switchWrites = []
   const healthRequests = []
   let rejectHealth = false
@@ -250,6 +252,21 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
       return route.fulfill({
         json: { ok: true, data: { items: allRows } },
       })
+    }
+    if (request.method() === 'PATCH' && url.pathname === '/api/panel/vms/offline-slot') {
+      assert.equal(role, 'admin')
+      const body = request.postDataJSON()
+      assert.deepEqual(Object.keys(body), ['schedule_level'])
+      priorityWrites.push(body.schedule_level)
+      if (rejectPriority) {
+        return route.fulfill({
+          status: 409,
+          json: { ok: false, error: { message: '测试保存失败' } },
+        })
+      }
+      vm.schedule_level_mode = body.schedule_level === null ? 'auto' : 'manual'
+      vm.schedule_level = body.schedule_level ?? 6
+      return route.fulfill({ json: { ok: true, data: { vm } } })
     }
     if (url.pathname.endsWith('/health')) {
       assert.equal(request.method(), 'GET')
@@ -484,6 +501,24 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
   await detail.getByLabel(/额度待刷新，最近测量/).waitFor()
   await detail.getByText('余额 12.5 点', { exact: true }).waitFor()
   assert.equal(await detail.getByRole('button', { name: 'API配置', exact: true }).count(), 1)
+  const quick = detail.getByRole('group', { name: '账号快捷操作' })
+  await quick.getByRole('button', { name: 'API配置', exact: true }).waitFor()
+  const priority = quick.getByRole('combobox', { name: '调度优先级' })
+  assert.equal(await priority.inputValue(), 'auto')
+  await priority.selectOption('2')
+  await row.getByText('P2 手', { exact: true }).waitFor()
+  await priority.selectOption('5')
+  await row.getByText('P5 手', { exact: true }).waitFor()
+  rejectPriority = true
+  await priority.selectOption('8')
+  await quick.getByRole('alert').waitFor()
+  assert.match(await quick.getByRole('alert').innerText(), /测试保存失败/)
+  assert.equal(await priority.inputValue(), '5')
+  rejectPriority = false
+  await priority.selectOption('auto')
+  await row.getByText('P6', { exact: true }).waitFor()
+  assert.deepEqual(priorityWrites, [2, 5, 8, null])
+
   const costDetail = detail.getByRole('region', { name: '成本拆分', exact: true })
   assert.match(await costDetail.innerText(), /57\.1M/)
   assert.match(await costDetail.innerText(), /\$0\.130/)
@@ -556,6 +591,7 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
     await detail.getByText('健康明细仅管理员可查看', { exact: true }).waitFor()
     assert.equal(healthRequests.length, beforeHealth)
     assert.equal(await detail.getByRole('button', { name: 'API配置', exact: true }).count(), 0)
+    assert.equal(await detail.getByRole('combobox', { name: '调度优先级' }).count(), 0)
   }
   assert.deepEqual(rejectedOrigins, [])
   assert.deepEqual(errors, [])
