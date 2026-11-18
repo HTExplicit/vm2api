@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import { credEndpointLabel, credentialRegistrationOf } from '@/lib/cred-type'
 import { fmtResetClock, resetCountdown } from '@/lib/fable-status'
 import { fmtNum, fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -32,10 +33,11 @@ import { windowTiming } from './window-timing'
 
 const CARD = 'min-w-0 rounded-lg border bg-card p-3'
 const CARD_HEAD =
-  'mb-2.5 flex items-baseline justify-between gap-2 text-xs font-semibold'
+  'mb-2.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs font-semibold'
 const CARD_NOTE = 'text-[11px] font-normal text-muted-foreground'
 const KV_LABEL = 'text-[11px] text-muted-foreground'
-const KV_VALUE = 'mt-0.5 block font-mono text-sm font-bold tabular-nums'
+const KV_VALUE =
+  'mt-0.5 block font-mono text-sm font-bold tabular-nums wrap-anywhere'
 
 function fmtDur(ms: number | null): string {
   if (ms == null || !Number.isFinite(ms)) return '—'
@@ -70,13 +72,13 @@ function HealthCard({ vm }: { vm: Vm }) {
     <section className={CARD} aria-label='请求健康'>
       <div className={CARD_HEAD}>
         <span>请求健康</span>
-        <span className='flex items-center gap-2'>
+        <span className='flex flex-wrap items-center gap-2'>
           <span className={CARD_NOTE}>按错误率着色 · 无请求不计</span>
           {perms.admin ? (
             <span
               role='group'
               aria-label='健康时间范围'
-              className='inline-flex overflow-hidden rounded-md border'
+              className='inline-flex shrink-0 overflow-hidden rounded-md border'
             >
               {(['24h', '7d'] as const).map((r) => (
                 <button
@@ -116,7 +118,7 @@ function HealthCard({ vm }: { vm: Vm }) {
             {s.slots.map((state, i) => (
               <span
                 key={i}
-                className='flex-1 rounded-[2px]'
+                className='min-w-0 flex-1 rounded-[2px]'
                 style={{ backgroundColor: SLOT_BG[state] }}
                 title={`${startMs ? fmtClock(startMs + i * slotMin * 60_000) : ''} · ${SLOT_LABEL[state]}`}
               />
@@ -160,9 +162,9 @@ function HealthCard({ vm }: { vm: Vm }) {
               q.data.top_errors.map((e) => (
                 <div
                   key={e.code}
-                  className='grid grid-cols-[1fr_auto_auto] gap-3 py-0.5 text-[11.5px]'
+                  className='grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 py-0.5 text-[11.5px] @sm/row-detail:grid-cols-[minmax(0,1fr)_auto_auto]'
                 >
-                  <span className='truncate font-mono'>
+                  <span className='font-mono wrap-anywhere'>
                     {e.status && String(e.status) !== e.code
                       ? `${e.status} `
                       : ''}
@@ -171,7 +173,7 @@ function HealthCard({ vm }: { vm: Vm }) {
                   <span className='font-mono text-[color:var(--status-bad)] tabular-nums'>
                     × {fmtNum(e.count)}
                   </span>
-                  <span className='font-mono text-muted-foreground tabular-nums'>
+                  <span className='font-mono text-muted-foreground tabular-nums @max-sm/row-detail:col-span-full'>
                     {fmtResetClock(e.last_at) ?? ''}
                   </span>
                 </div>
@@ -210,7 +212,7 @@ function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
           const full = w.pct != null && w.pct >= 100
           return (
             <div key={w.key}>
-              <div className='flex items-baseline justify-between gap-2 text-[11px] text-muted-foreground'>
+              <div className='flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 text-[11px] text-muted-foreground'>
                 <span>
                   <b className='text-foreground'>{w.label}</b>{' '}
                   {w.note ? (
@@ -271,7 +273,7 @@ function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
                   <div className='my-1.5'>
                     <WindowBar w={w} timing={t} size='md' />
                   </div>
-                  <div className='flex justify-between gap-2 font-mono text-[10.5px] text-muted-foreground tabular-nums'>
+                  <div className='flex flex-wrap justify-between gap-x-2 gap-y-1 font-mono text-[10.5px] text-muted-foreground tabular-nums'>
                     <span>{fmtClock(t.startMs)}</span>
                     <span>
                       时间已过{' '}
@@ -344,13 +346,21 @@ function CostCard({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
         <span>成本</span>
         <span className={CARD_NOTE}>官方价估算 · 网关外用量不计</span>
       </div>
-      <table className='w-full text-xs'>
+      <table className='w-full table-fixed text-xs wrap-anywhere'>
         <thead>
           <tr className='text-[11px] text-muted-foreground'>
-            <th className='py-1 text-left font-medium' />
-            <th className='py-1 text-right font-medium'>请求</th>
-            <th className='py-1 text-right font-medium'>token</th>
-            <th className='py-1 text-right font-medium'>花费</th>
+            <th scope='col' className='py-1 text-left font-medium'>
+              窗口
+            </th>
+            <th scope='col' className='py-1 text-right font-medium'>
+              请求
+            </th>
+            <th scope='col' className='py-1 text-right font-medium'>
+              Token
+            </th>
+            <th scope='col' className='py-1 text-right font-medium'>
+              花费
+            </th>
           </tr>
         </thead>
         <tbody className='font-mono tabular-nums'>
@@ -362,7 +372,9 @@ function CostCard({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
                 r.total && 'font-bold'
               )}
             >
-              <td className='py-1 font-sans'>{r.label}</td>
+              <th scope='row' className='py-1 text-left font-sans font-medium'>
+                {r.label}
+              </th>
               <td className='py-1 text-right'>
                 {r.req == null ? '—' : fmtNum(r.req)}
               </td>
@@ -427,20 +439,47 @@ export function VmRowDetail({
       id={id}
       role='region'
       aria-label={`${vm.id} 明细`}
-      className='border-b border-border/40 bg-muted/40 py-3 pr-4 pl-12'
+      className='@container/row-detail min-w-0 border-b border-border/40 bg-muted/40 p-3'
     >
-      <div className='mb-2 flex justify-end'>
+      <div className='mb-3 grid items-start gap-3 @lg/row-detail:grid-cols-[minmax(0,1fr)_auto]'>
+        <dl
+          aria-label='账号信息'
+          className='grid min-w-0 grid-cols-1 gap-x-4 gap-y-2 text-xs @sm/row-detail:grid-cols-2 @xl/row-detail:grid-cols-3'
+        >
+          {[
+            ['账号名称', vm.name?.trim() || vm.email?.trim() || vm.id],
+            ['邮箱', vm.email],
+            ['槽位 ID', vm.id],
+            [
+              '所在主机',
+              vm.node_name ||
+                vm.node_id ||
+                (vm.node_id === null ? '本机' : null),
+            ],
+            [
+              '凭证登记',
+              vm.has_token == null
+                ? null
+                : credEndpointLabel(credentialRegistrationOf(vm)),
+            ],
+          ].map(([label, value]) => (
+            <div key={label} className='min-w-0'>
+              <dt className={KV_LABEL}>{label}</dt>
+              <dd className='mt-0.5 wrap-anywhere'>{value || '—'}</dd>
+            </div>
+          ))}
+        </dl>
         <Button
           type='button'
           variant='link'
           size='sm'
-          className='h-6 px-0 text-xs'
+          className='min-h-8 justify-self-start px-0 text-xs @lg/row-detail:justify-self-end'
           onClick={onOpenDetail}
         >
           打开完整详情 →
         </Button>
       </div>
-      <div className='grid gap-3 lg:grid-cols-[1.3fr_1fr_1.1fr]'>
+      <div className='grid min-w-0 gap-3 @min-[60rem]/row-detail:grid-cols-[1.3fr_1fr_1.1fr]'>
         <HealthCard vm={vm} />
         <WindowsCard vm={vm} now={now} />
         <CostCard vm={vm} accounts={accounts} />
