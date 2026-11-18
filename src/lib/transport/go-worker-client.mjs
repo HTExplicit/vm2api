@@ -1366,7 +1366,9 @@ async function streamGoWorkerRaw({
     let sseModel = null
     let sseStop = null
     let sseRateHeaders = {}
-    let responseTerminal = null
+    const codexResponses = requestPath === '/internal/v1/codex/responses'
+    let responsesId = null
+    let responsesTerminal = null
     const assembler = createClaudeMessageAssembler()
     const pendingLines = []
     const takeSseEvent = () => {
@@ -1401,23 +1403,39 @@ async function streamGoWorkerRaw({
       if (event.type === 'response_headers' && event.headers && typeof event.headers === 'object') {
         sseRateHeaders = { ...sseRateHeaders, ...event.headers }
       }
-      if (event.type === 'error') {
-        lastError = event
-        handoff?.observeError(event)
-      }
-      if (event.type === 'response.completed' || event.type === 'response.done') responseTerminal = event
-      if (
-        event.type === 'response.completed' ||
-        (event.type === 'response.done' && event.response?.status === 'completed')
-      ) {
-        successfulTerminal = event
-      }
-      if (
+      const responsesFailure =
         event.type === 'response.failed' ||
-        event.type === 'response.incomplete' ||
-        (event.type === 'response.done' && event.response?.status !== 'completed')
+        (event.type === 'response.incomplete' && event.response?.status !== 'incomplete')
+      if (event.type === 'error' || (codexResponses && responsesFailure)) {
+        const error = event.error ?? event.response?.error
+        lastError = codexResponses
+          ? {
+              ...event,
+              error: {
+                type: 'upstream_error',
+                message: 'Upstream returned a Responses error',
+                ...error,
+                code: error?.code || 'upstream_error',
+              },
+            }
+          : event
+        handoff?.observeError(lastError)
+      }
+      if (event.response && typeof event.response === 'object' && !Array.isArray(event.response)) {
+        if (codexResponses && typeof event.response.id === 'string') responsesId = event.response.id
+        if (
+          event.type === 'response.completed' ||
+          (event.type === 'response.done' && event.response.status === 'completed') ||
+          (codexResponses && event.type === 'response.incomplete' && event.response.status === 'incomplete')
+        ) {
+          responsesTerminal = event
+          successfulTerminal = event
+        }
+      }
+      if (
+        (event.type === 'response.done' && event.response?.status !== 'completed') ||
+        (!codexResponses && ['response.incomplete', 'response.failed'].includes(event.type))
       ) {
-        responseTerminal = event
         lastError = {
           type: 'error',
           error: event.response?.error || {
@@ -1438,6 +1456,7 @@ async function streamGoWorkerRaw({
       if (stop) sseStop = stop
       return event
     }
+    const shouldCommit = (event) => isDownstreamCommitEvent(event) || (!!event && event === responsesTerminal)
     const firstByteMs = Math.max(0, Number(timeoutMs) || 0)
     const idleMs = Math.max(0, Number(idleTimeoutMs) || 0)
     let lastChunkAt = Date.now()
@@ -1516,19 +1535,19 @@ async function streamGoWorkerRaw({
                 if (piece && piece !== '[DONE]') {
                   dataBuf = dataBuf ? `${dataBuf}\n${piece}` : piece
                   const event = observeSseEvent(takeSseEvent())
-                  if (isDownstreamCommitEvent(event)) await flushCommit()
+                  if (shouldCommit(event)) await flushCommit()
                 }
               } else if (line === '') {
                 if (dataBuf) {
                   const event = takeSseEvent()
                   dataBuf = ''
                   observeSseEvent(event)
-                  if (isDownstreamCommitEvent(event)) await flushCommit()
+                  if (shouldCommit(event)) await flushCommit()
                 }
               } else if (dataBuf && !line.startsWith('event:') && !line.startsWith(':')) {
                 dataBuf = `${dataBuf}\n${line}`
                 const event = observeSseEvent(takeSseEvent())
-                if (isDownstreamCommitEvent(event)) await flushCommit()
+                if (shouldCommit(event)) await flushCommit()
               }
               await emitLine(line)
             }
@@ -1560,7 +1579,7 @@ async function streamGoWorkerRaw({
           if (piece && piece !== '[DONE]') {
             dataBuf = dataBuf ? `${dataBuf}\n${piece}` : piece
             const event = observeSseEvent(takeSseEvent())
-            if (isDownstreamCommitEvent(event)) await flushCommit()
+            if (shouldCommit(event)) await flushCommit()
           }
         }
         await emitLine(buffer)
@@ -1573,21 +1592,45 @@ async function streamGoWorkerRaw({
       }
       if (dataBuf) {
         const event = observeSseEvent(takeSseEvent())
-        if (isDownstreamCommitEvent(event)) await flushCommit()
+        if (shouldCommit(event)) await flushCommit()
       }
       const trailers = mergeRateLimitHeaders(publicHeaders(response.trailers))
       handoff?.observeHeaders(response.trailers)
       const meta = streamMetaFromHeaders({ ...headers, ...trailers })
       const assembled = assembler.message
-      const stopReason = meta.stopReason || sseStop || assembled?.stop_reason || null
+      const incomplete = responsesTerminal?.type === 'response.incomplete'
+      const stopReason =
+        responsesTerminal?.response.incomplete_details?.reason ||
+        meta.stopReason ||
+        sseStop ||
+        assembled?.stop_reason ||
+        null
+      if (codexResponses && !responsesTerminal && !lastError) {
+        lastError = {
+          type: 'error',
+          error: {
+            type: 'upstream_error',
+            code: 'upstream_stream_incomplete',
+            message: 'Upstream closed the stream without a terminal Responses event',
+          },
+        }
+        if (committed && onEvent) {
+          const failed = { ...(responsesId ? { id: responsesId } : {}), status: 'failed', error: lastError.error }
+          await onEvent(`data: ${JSON.stringify({ type: 'response.failed', response: failed })}`)
+          await onEvent('')
+        }
+      }
       const complete =
         !lastError &&
-        (responseTerminal?.type === 'response.completed' ||
-          (responseTerminal?.type === 'response.done' && responseTerminal.response?.status === 'completed') ||
-          isCompleteAssistantMessage({ body: assembled, stopReason, sawMessageStop }))
+        (codexResponses
+          ? !!responsesTerminal
+          : !!responsesTerminal || isCompleteAssistantMessage({ body: assembled, stopReason, sawMessageStop }))
       if (!committed && complete) await flushCommit()
-      const terminalState = complete ? 'verified' : 'incomplete'
+      const terminalState = complete && !incomplete ? 'verified' : 'incomplete'
       const rateHeaders = mergeRateLimitHeaders({ ...sseRateHeaders, ...headers, ...trailers })
+      const responseBody = lastError ||
+        responsesTerminal?.response ||
+        assembled || { type: 'message', role: 'assistant', content: [] }
       // A native activity timeout can follow HTTP/SSE metadata but precede
       // visible output. It is neither an empty hop nor a transport failure.
       const nativeTimeout = managedCrag && lastError?.error?.type === 'timeout_error'
@@ -1602,18 +1645,12 @@ async function streamGoWorkerRaw({
         upstreamStatus: response.statusCode ?? null,
         via: 'go-worker-stream',
 
-        body: handoff
-          ? handoff.finish(
-              lastError ||
-                responseTerminal?.response ||
-                assembled || { type: 'message', role: 'assistant', content: [] },
-            )
-          : lastError || responseTerminal?.response || assembled || { type: 'message', role: 'assistant', content: [] },
+        body: handoff ? handoff.finish(responseBody) : responseBody,
         headers: rateHeaders,
         // Trailer stays authoritative, but it may carry totals only (Codex/Responses hops).
         // Merge so SSE `input_tokens_details` / cache breakdown survives instead of being short-circuited.
         usage: mergeUsage(mergeUsage(assembled?.usage || null, sseUsage), meta.usage),
-        model: meta.model || sseModel || assembled?.model || null,
+        model: meta.model || responsesTerminal?.response.model || sseModel || assembled?.model || null,
         upstreamResponseModel,
         stopReason,
         // Keep provider diagnostics even when a later error replaces the assembled body.
@@ -2247,8 +2284,15 @@ export function recoverThinkingOnlyMaxTokens(result, { onEvent, onCommit, downst
       const events = [
         ...(started
           ? []
-          : [{ type: 'message_start', message: { ...body, stop_reason: null, stop_sequence: null, usage: startUsage } }]),
-        ...(started ? [...downstream.open].sort((a, b) => a - b).map((index) => ({ type: 'content_block_stop', index })) : []),
+          : [
+              {
+                type: 'message_start',
+                message: { ...body, stop_reason: null, stop_sequence: null, usage: startUsage },
+              },
+            ]),
+        ...(started
+          ? [...downstream.open].sort((a, b) => a - b).map((index) => ({ type: 'content_block_stop', index }))
+          : []),
         { type: 'message_delta', delta: { stop_reason: 'max_tokens', stop_sequence: body.stop_sequence }, usage },
         { type: 'message_stop' },
       ]

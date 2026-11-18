@@ -43,7 +43,7 @@
 
 ## 本 fork 的发布来源
 
-本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，主分支为 `main`，当前维护版 `v1.4.14204` 基于官方 `v1.4.142`（`ed193a2f`），版本与升级说明见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随上游 `main` 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始，合入 031 后从 3101 开始，合入 032 后从 3201 开始，合入 036 后从 3601 开始，合入 038 后从 3801 开始，合入 041 后从 4101 开始。
+本仓库为 [HTExplicit/vm2api](https://github.com/HTExplicit/vm2api)，主分支为 `main`，当前维护版 `v1.4.14601` 基于官方 `v1.4.146`（`8dd9a759`），版本与升级说明见[最新 Release](https://github.com/HTExplicit/vm2api/releases/latest)与 [CHANGELOG.md](CHANGELOG.md)。首版 `v1.4.2801` 基于 [dofastted/vm2api 的 1.4.028](https://github.com/dofastted/vm2api/tree/77b72613c90f2eda0f90165d524d7a247b9d1974)，改进健康检查、账单统计和面板升级；`v1.4.2802` 修正 GPT 槽位的升级收尾任务适用范围。后续按上游正式 Release 审阅合入，不自动跟随上游 `main` 部署；同一 028 基线使用 2801、2802 等修订号，合入 029 后从 2901 开始，合入 031 后从 3101 开始，合入 032 后从 3201 开始，合入 036 后从 3601 开始，合入 038 后从 3801 开始，合入 041 后从 4101 开始。
 
 旧 `maint` 分支仅保留已发布版本的安装链接兼容；新开发、PR 和 CI 统一使用 `main`。
 
@@ -51,9 +51,9 @@
 
 控制面镜像默认使用 `ghcr.io/htexplicit/vm2api`，通过 `VM2API_IMAGE` 配置；`VM2API_GITHUB_REPO` 指定发布仓库，Compose 会传入控制面，面板更新默认检查本 fork 的公开 Release。槽位闭源二进制由 `deploy/payload.json` 固定上游来源、版本、大小和 SHA256；`kin-egress` 与控制面 helper 从本 fork 源码编译，客体系统镜像来源保持原配置。
 
-当前发布 **linux/amd64** 控制面镜像、23 个载荷附件及 `build-provenance.json`，共 24 个附件。载荷全部从同一最终镜像按 digest 提取；22 个上游资产按官方 `payload-2026.11.18-crag-3.1.5` 固定大小与 SHA256，包含 CLI 2.1.321、Codex kernel 0.1.2、换票助手、四个 glibc 文件及 CRAG 3.1.5 standard 原版签名包和完整归档；`kin-egress` 使用镜像内由 fork 源码编译的同一份字节。来源清单记录提交、镜像 digest 和实际附件校验值。发布流程先准备草稿，再构建推送版本镜像并提取、校验、上传附件，核验 GHCR 匿名访问后才移动镜像 `latest` 并公开 Release。若新建包为私有，维护者需设为 Public；匿名访问检查失败时保留草稿，修正包权限后可重跑失败的 `publish` job。当前不提供 ARM64 控制面镜像。
+当前发布 **linux/amd64** 控制面镜像、23 个载荷附件及 `build-provenance.json`，共 24 个附件。载荷全部从同一最终镜像按 digest 提取；22 个上游资产按官方 `payload-2026.11.18-oauth-profiles` 固定大小与 SHA256，包含 CLI 2.1.321、Codex kernel 0.1.2、换票助手、四个 glibc 文件及 CRAG 3.1.6 standard 原版签名包和完整归档；`kin-egress` 使用镜像内由 fork 源码编译的同一份字节。来源清单记录提交、镜像 digest 和实际附件校验值。发布流程先准备草稿，再构建推送版本镜像并提取、校验、上传附件，核验 GHCR 匿名访问后才移动镜像 `latest` 并公开 Release。若新建包为私有，维护者需设为 Public；匿名访问检查失败时保留草稿，修正包权限后可重跑失败的 `publish` job。当前不提供 ARM64 控制面镜像。
 
-普通 CLI/Codex 集群槽不依赖可选 CRAG 包，cc-node 继续可选。镜像携带原签名 `v3.1.5` standard 工厂包；入口仅在工厂缺失时预装，已有工厂、自定义来源和下载选择保持，预装不选择或激活 CRAG。控制面升级不主动拉取最新 CRAG 或当前应用标签的 CLI，统一收尾按当前模板和已选缓存同步适用槽的差异，并核验服务。运行中的 Claude 槽有载荷差异时可能重启；停止槽不开机，人工调度关闭保持，内核重启不暂停调度。非空且全部为本地 Codex 时跳过 CRAG 与无适用目标 CLI 同步，启动恢复器在控制面替换后补起 Codex 内核。CRAG 下载与应用发布分仓，内核页通过固定载荷标签拉取和明确确认安装；已选下载缓存优先于工厂，同步不构成长期固定已装版本。
+普通 CLI/Codex 集群槽不依赖可选 CRAG 包，cc-node 继续可选。镜像携带原签名 `v3.1.6` standard 工厂包；入口仅在工厂缺失时预装，已有工厂、自定义来源和下载选择保持，预装不选择或激活 CRAG。控制面升级不主动拉取最新 CRAG 或当前应用标签的 CLI，统一收尾按当前模板和已选缓存同步适用槽的差异，并核验服务。运行中的 Claude 槽有载荷差异时可能重启；停止槽不开机，人工调度关闭保持，内核重启不暂停调度。非空且全部为本地 Codex 时跳过 CRAG 与无适用目标 CLI 同步，启动恢复器在控制面替换后补起 Codex 内核。CRAG 下载与应用发布分仓，内核页通过固定载荷标签拉取和明确确认安装；已选下载缓存优先于工厂，同步不构成长期固定已装版本。
 
 代理池支持 SOCKS5/HTTP 默认导入和显式协议编辑；仅用户保存连接变化时更新对应绑定槽，账密留空保持。槽位透明出口支持 HTTP 代理：`kin-egress` 与 `kin-worker` 使用 HTTP CONNECT，支持 Basic 认证；现有代理协议与绑定保持。原生 CRAG 交接按运行中内核声明的 `native_handoff_v1`、`provider_result_v2` 与 V3 请求能力分别协商，按真实消息、终止原因、用量和错误整流；工具通过完整终态验证后交付。发布新包不会启用 CRAG 或切换内核；旧 CLI 与 Codex 路径保持。
 

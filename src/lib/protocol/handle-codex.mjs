@@ -995,10 +995,9 @@ export async function handleCodexProtocol({
                 if (model) logBag.upstream_response_model = model
                 if (
                   stream &&
-                  protocol === 'openai.responses' &&
                   (event?.type === 'error' ||
                     event?.type === 'response.failed' ||
-                    event?.type === 'response.incomplete' ||
+                    (event?.type === 'response.incomplete' && event.response?.status !== 'incomplete') ||
                     (event?.type === 'response.done' && event.response?.status !== 'completed'))
                 )
                   errorEmitted = true
@@ -1116,9 +1115,12 @@ export async function handleCodexProtocol({
           bindSticky(outboundSessionId)
           if (isOpenaiCredentialCurrent(hopAuth)) reportOpenAIAttempt(vm.id, 'succeeded', result.ttftMs ?? null)
           logBag.final_state = result.terminalState || 'verified'
+          logBag.stop_reason = result.body?.incomplete_details?.reason || null
           logBag.upstream_model = converted.body.model
           if (hops > 1) logBag.codex_failed_over = true
           if (!stream) {
+            if (protocol === 'openai.responses' && result.body?.status === 'incomplete')
+              return json(res, 200, result.body)
             let body
             try {
               const assembled = assembleCodexBodyFromSse(chunks, result.body || {})
@@ -1162,7 +1164,7 @@ export async function handleCodexProtocol({
           logBag.error_message = result?.body?.error?.message || ''
           logBag.final_state = result.terminalState === 'cancelled' ? 'cancelled' : 'incomplete'
           logBag.upstream_status = result?.status || 0
-          if (!stream) return json(res, result.status >= 400 ? result.status : 502, result.body)
+          if (!stream) return json(res, result?.status >= 400 ? result.status : 502, result?.body)
           if (!conversionError && !errorEmitted && !gone.signal.aborted) {
             const error = result.body?.error || {
               type: 'api_error',

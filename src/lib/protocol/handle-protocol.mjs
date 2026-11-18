@@ -154,9 +154,11 @@ import {
 import { createDownstreamKeepalive } from './stream-keepalive.mjs'
 import {
   buildAnthropicSseError,
+  buildRetryableTruncationError,
   createAnthropicSseErrorRemapper,
   createAnthropicStreamTracker,
   isRecoverableTruncation,
+  truncationReason,
 } from './stream-truncation.mjs'
 import {
   hidePersonaUsageInSseLine,
@@ -293,7 +295,11 @@ export function createHandleProtocol(deps) {
   // official cost usage_logs prices for the same row (image generation
   // included) times the group rate; logBag is left as is so the row is too.
   function billCodexKey(managedKey, logBag) {
-    if (logBag.final_state !== 'verified') return
+    if (
+      logBag.final_state !== 'verified' &&
+      !(logBag.final_state === 'incomplete' && logBag.usage && !logBag.error_code)
+    )
+      return
     const model = logBag.upstream_model || logBag.model
     const image = logBag.image_usage
       ? { usage: logBag.image_usage, model: logBag.image_model || null, only: logBag.protocol === 'openai.images' }
@@ -2555,6 +2561,12 @@ export function createHandleProtocol(deps) {
         ) {
           const mapped = mapProtocolClientError(result, logBag, logBag.error_code)
           res.write(`data: ${JSON.stringify({ error: mapped.body.error })}\n\ndata: [DONE]\n\n`)
+        } else if (protocol === 'anthropic.messages' && !res.writableEnded && !streamTracker?.isFinished()) {
+          // Started but not closable: ask the client to retry instead of
+          // dropping the connection. error_code/error_message keep the cause.
+          logBag.client_error_type = 'rate_limit_error'
+          logBag.truncation_reason = truncationReason(result, streamTracker)
+          res.write(buildRetryableTruncationError())
         }
       }
       return res.end()
