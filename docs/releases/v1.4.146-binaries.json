@@ -34,6 +34,21 @@
       "name": "crag-v2-licensed-amd64.tar.gz",
       "size": 170991467,
       "sha256": "6846f67eb52c12d35514ec7d51a77b4ab9526368a2d4f1c701ca2517374ace92"
+    },
+    "sources_url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.18-crag-3.1.6/SOURCES.json",
+    "manifest_sha256": "f1e687b7d256afee53438a4ce35c75b08851c57460065fbf20995cda36fe5aac",
+    "fork_rebuilt": false,
+    "assets": {
+      "crag-v2-amd64-LICENSES.txt": "80ee2b207aa7a45ad09360dd874d62b3be2e079bfa84de368092940889e84784",
+      "crag-v2-amd64-claude-code-2.1.321-LICENSE.md": "8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a",
+      "crag-v2-amd64-claude-code-2.1.321-claude": "426c33815ca6645a772f722fbff10dbf2cbdb124a8aeab733c1365dbf8bbf61f",
+      "crag-v2-amd64-crag-license-public.pem": "a38372fb87af66678f7823538f2cf8b9fa7e0f3cbefcd612a4d5c47ebef10126",
+      "crag-v2-amd64-kernel.json.example": "78f7efce48658da76d996c2c99b50127265d7c6cf6ce13947162f057cf6d2f42",
+      "crag-v2-amd64-unpack-note.md": "ee7ca2fce548bc4b35ad4236c9a36d76d38e55315cb5175faec454952582e731",
+      "crag-v2-amd64-v3.1.6-crag-v2": "fa6ba81a2da59832855bbbc8a133e8226df7da4558ebdc6c3187fb43b1e1257d",
+      "crag-v2-amd64-v3.1.6-crag-v2.payload.enc": "55988b9b6221437cce2a96e962574a4021e9fd6108432c9577dfdba46dc83c72",
+      "crag-v2-amd64-v3.1.6-manifest.json": "f1e687b7d256afee53438a4ce35c75b08851c57460065fbf20995cda36fe5aac",
+      "crag-v2-licensed-amd64.tar.gz": "6846f67eb52c12d35514ec7d51a77b4ab9526368a2d4f1c701ca2517374ace92"
     }
   },
   "assets": [

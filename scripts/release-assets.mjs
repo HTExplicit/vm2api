@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { verifyCragV2Tree } from '../src/lib/vm/wrap-cli-runtime.mjs'
 
 const root = path.resolve(import.meta.dirname, '..')
+const upstreamSourceRecord = 'docs/releases/v1.4.146-binaries.json'
 export function imageAssets(manifest) {
   const assets = new Map()
   for (const file of manifest.files) {
@@ -95,7 +96,7 @@ export function writeProvenance({ manifest, dir, image, sourceCommit, upstreamBu
       release: manifest.release,
       build: {
         ...upstreamBuild,
-        source_record: 'docs/releases/v1.4.142-binaries.json',
+        source_record: upstreamSourceRecord,
         assets: upstreamBuild.assets.filter((asset) => pinnedAssets.some((item) => item.name === asset.name)),
       },
       crag: cragBuild,
@@ -164,14 +165,15 @@ function main() {
   }
   const expected = stagedAssets(manifest, opts.dest)
   verifyCragArchive(manifest, opts.dest)
+  const upstreamBuild = JSON.parse(fs.readFileSync(path.join(root, upstreamSourceRecord), 'utf8'))
   expected.push(
     writeProvenance({
       manifest,
       dir: opts.dest,
       image: opts.image,
       sourceCommit: capture('git', ['rev-parse', 'HEAD']),
-      upstreamBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.142-binaries.json'), 'utf8')),
-      cragBuild: JSON.parse(fs.readFileSync(path.join(root, 'docs/releases/v1.4.139-crag.json'), 'utf8')),
+      upstreamBuild,
+      cragBuild: upstreamBuild.native,
       assets: [...expected],
     }),
   )
