@@ -106,7 +106,10 @@ export function OpenaiQuotaActions({
 
   return (
     <div
-      className={cn('flex flex-wrap items-center gap-1', !compact && 'gap-2')}
+      className={cn(
+        'flex flex-wrap items-center gap-1',
+        !compact && !showCount && 'gap-2'
+      )}
       data-row-actions
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
@@ -121,13 +124,15 @@ export function OpenaiQuotaActions({
       ) : null}
       <Button
         size='sm'
-        variant={compact ? 'ghost' : 'outline'}
+        variant={compact || showCount ? 'ghost' : 'outline'}
         disabled={busy}
         title='查询上游额度与重置券次数'
         className={
-          compact
-            ? 'h-6 gap-1 px-1.5 text-[11px] text-muted-foreground'
-            : undefined
+          showCount
+            ? 'h-7 gap-1 px-2 text-xs shadow-none'
+            : compact
+              ? 'h-6 gap-1 px-1.5 text-[11px] text-muted-foreground'
+              : undefined
         }
         onClick={() => queryQuota.mutate()}
       >
@@ -152,16 +157,25 @@ export function OpenaiQuotaActions({
             : `消费 1 / ${available} 张上游重置券`
         }
         className={
-          compact
-            ? 'h-6 gap-1 px-1.5 text-[11px] text-muted-foreground disabled:text-muted-foreground/50'
-            : undefined
+          showCount
+            ? 'h-7 gap-1 px-2 text-xs shadow-none'
+            : compact
+              ? 'h-6 gap-1 px-1.5 text-[11px] text-muted-foreground disabled:text-muted-foreground/50'
+              : undefined
         }
+        aria-label={showCount ? '使用重置券' : undefined}
         onClick={() => setConfirm(true)}
       >
         <RotateCcw
           className={cn('size-3', resetQuota.isPending && 'animate-spin')}
         />
-        {resetQuota.isPending ? '使用中' : compact ? '重置券' : '使用重置券'}
+        {resetQuota.isPending
+          ? '使用中'
+          : showCount
+            ? '使用'
+            : compact
+              ? '重置券'
+              : '使用重置券'}
       </Button>
       <ConfirmDialog
         open={confirm}

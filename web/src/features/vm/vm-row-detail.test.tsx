@@ -268,7 +268,7 @@ describe('VM row request health', () => {
 })
 
 describe('VM row quota integration', () => {
-  it('keeps the Codex sample, historical credits and both action entries in the top group', () => {
+  it('puts both Codex actions below the historical credits inside the usage card', () => {
     const page = render({
       platform: 'openai',
       family: 'codex',
@@ -301,14 +301,13 @@ describe('VM row quota integration', () => {
     for (const action of ['codex-quota-actions', 'openai-api-actions']) {
       const marker = `data-testid="${action}"`
       expect(page.split(marker)).toHaveLength(2)
-      expect(page.indexOf(marker)).toBeLessThan(
-        page.indexOf('aria-label="账号信息"')
+      expect(html.indexOf(marker)).toBeGreaterThan(
+        html.indexOf('历史余额 12.34 点')
       )
-      expect(html).not.toContain(marker)
     }
   })
 
-  it('places supported Claude card actions in the top group and passes the shared clock', () => {
+  it('places supported Claude card actions in the usage card and passes the shared clock', () => {
     const html = render({
       platform: 'anthropic',
       has_token: true,
@@ -317,7 +316,7 @@ describe('VM row quota integration', () => {
     expect(html).toContain(
       `data-testid="claude-reset-actions" data-vm="slot / one" data-now="${NOW}"`
     )
-    expect(section(html, '用量窗口明细')).not.toContain(
+    expect(section(html, '用量窗口明细')).toContain(
       'data-testid="claude-reset-actions"'
     )
     expect(

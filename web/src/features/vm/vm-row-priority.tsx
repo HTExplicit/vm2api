@@ -1,3 +1,4 @@
+import { useId } from 'react'
 import {
   useIsMutating,
   useMutation,
@@ -10,6 +11,7 @@ import { vmQueryOptions, vmsListQueryOptions } from './queries'
 import { SCHEDULE_LEVELS } from './scheduling-steps'
 
 export function VmRowPriority({ vm, editable }: { vm: Vm; editable: boolean }) {
+  const groupName = useId()
   const client = useQueryClient()
   const mutationKey = ['vm-row-priority', vm.id]
   const busy = useIsMutating({ mutationKey, exact: true }) > 0
@@ -32,50 +34,66 @@ export function VmRowPriority({ vm, editable }: { vm: Vm; editable: boolean }) {
   const level = vm.schedule_level
   const known = level != null && SCHEDULE_LEVELS.includes(level)
   const manual = vm.schedule_level_mode === 'manual'
-  const current = manual && known ? String(level) : 'auto'
-  const automatic = known && !manual ? `自动（当前 P${level}）` : '自动'
-  return (
-    <div className='flex flex-wrap items-center gap-2 text-xs'>
-      <label className='flex items-center gap-2 font-medium'>
-        调度优先级
-        {editable ? (
-          <select
-            className='h-8 rounded-md border border-input bg-background px-2 text-sm font-normal'
-            disabled={busy}
-            value={save.isPending ? String(save.variables ?? 'auto') : current}
-            onChange={(e) => {
-              const choice = e.currentTarget.value
-              if (
-                choice === current ||
-                client.isMutating({ mutationKey, exact: true })
-              )
-                return
-              save.mutate(choice === 'auto' ? null : Number(choice))
-            }}
-          >
-            <option value='auto'>{automatic}</option>
-            {SCHEDULE_LEVELS.map((n) => (
-              <option key={n} value={n}>
-                P{n}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <span className='text-muted-foreground'>
-            {known ? `P${level} · ${manual ? '手动' : '自动'}` : '—'}
-          </span>
-        )}
+  const current = manual ? (known ? level : undefined) : null
+  const selected = save.isPending ? save.variables : current
+  const summary = manual
+    ? known
+      ? `手动 P${level}`
+      : '手动 · 档位未知'
+    : known
+      ? `自动 · 当前 P${level}`
+      : '自动'
+
+  function option(value: number | null) {
+    const auto = value === null
+    return (
+      <label key={value ?? 'auto'} className='relative block min-w-0'>
+        <input
+          type='radio'
+          name={groupName}
+          value={value ?? 'auto'}
+          aria-label={auto ? '自动' : `P${value}`}
+          checked={selected === value}
+          disabled={!editable}
+          aria-disabled={!editable || busy}
+          className='absolute inset-0 z-10 m-0 size-full cursor-pointer opacity-0 disabled:cursor-default aria-disabled:cursor-default'
+          onChange={() => {
+            if (!editable || client.isMutating({ mutationKey, exact: true }))
+              return
+            save.mutate(value)
+          }}
+        />
+        <span
+          className={
+            auto ? 'vm-priority-option vm-priority-auto' : 'vm-priority-option'
+          }
+        >
+          {auto ? '自动' : value}
+        </span>
       </label>
-      {busy ? (
-        <span role='status' className='text-muted-foreground'>
-          保存中…
+    )
+  }
+
+  return (
+    <fieldset className='m-0 min-w-0 border-0 p-0 text-xs'>
+      <legend className='sr-only'>调度优先级</legend>
+      <div className='mb-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-1'>
+        <span aria-hidden='true' className='font-semibold'>
+          调度优先级
         </span>
-      ) : null}
+        <div className='flex items-center gap-2'>
+          <span role='status' className='text-muted-foreground tabular-nums'>
+            {busy ? '保存中…' : summary}
+          </span>
+          {option(null)}
+        </div>
+      </div>
+      <div className='vm-priority-track'>{SCHEDULE_LEVELS.map(option)}</div>
       {save.isError && editable ? (
-        <span role='alert' className='text-destructive'>
+        <p role='alert' className='mt-1.5 text-destructive'>
           保存失败：{save.error.message}
-        </span>
+        </p>
       ) : null}
-    </div>
+    </fieldset>
   )
 }

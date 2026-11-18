@@ -214,6 +214,13 @@ function HealthCard({ vm }: { vm: Vm }) {
 }
 
 function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
+  const perms = useVmPerms()
+  const codex = isCodexVm(vm)
+  const showClaudeCards =
+    !codex &&
+    perms.credential &&
+    (vm.can_claude_reset ?? supportsOfficialCc(vm))
+  const windows = vmWindows(vm)
   const hasToken = Boolean(vm.has_token)
   const restricted =
     vm.schedule_state === 'restricted' || vm.schedule_state === 'unschedulable'
@@ -230,7 +237,7 @@ function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
         </span>
       </div>
       <div className='grid gap-3'>
-        {vmWindows(vm).map((w) => {
+        {windows.map((w) => {
           const t = windowTiming(w, now)
           const full = w.pct != null && w.pct >= 100
           return (
@@ -321,6 +328,38 @@ function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
           调度{scheduleStateLabel(vm)}：{reason}
         </p>
       ) : null}
+      <div
+        role='group'
+        aria-label='账号快捷操作'
+        className='@container/window-tools mt-3 grid min-w-0 gap-2.5 border-t pt-2.5'
+      >
+        {codex ? (
+          <div className='flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 empty:hidden'>
+            {vm.has_token ? <OpenaiQuotaActions vm={vm} showCount /> : null}
+            <OpenaiApiActions vm={vm} compact />
+          </div>
+        ) : (
+          <div className='grid min-w-0 gap-1 empty:hidden'>
+            {showClaudeCards ? (
+              <ClaudeResetActions
+                vm={vm}
+                inline
+                now={now}
+                usage={{
+                  fiveHour: windows.find((w) => w.key === '5h')?.pct,
+                  sevenDay: windows.find((w) => w.key === '7d')?.pct,
+                  fable: windows.find((w) => w.key === 'fable')?.pct,
+                  sevenDayGate: vm.quota_policy
+                    ? vm.quota_policy.limit_7d * 100
+                    : null,
+                }}
+              />
+            ) : null}
+            <ActiveUsageAction vm={vm} />
+          </div>
+        )}
+        <VmRowPriority vm={vm} editable={perms.admin} />
+      </div>
     </section>
   )
 }
@@ -454,13 +493,6 @@ export function VmRowDetail({
   onOpenDetail: () => void
   id: string
 }) {
-  const perms = useVmPerms()
-  const codex = isCodexVm(vm)
-  const showClaudeCards =
-    !codex &&
-    perms.credential &&
-    (vm.can_claude_reset ?? supportsOfficialCc(vm))
-  const windows = showClaudeCards ? vmWindows(vm) : []
   return (
     <div
       id={id}
@@ -468,48 +500,7 @@ export function VmRowDetail({
       aria-label={`${vm.id} 明细`}
       className='@container/row-detail min-w-0 border-b border-border/40 bg-muted/40 p-3'
     >
-      <div
-        role='group'
-        aria-label='账号快捷操作'
-        className='mb-3 flex min-w-0 flex-wrap items-start gap-x-4 gap-y-2 border-b pb-2.5'
-      >
-        {codex ? (
-          <>
-            {vm.has_token ? <OpenaiQuotaActions vm={vm} showCount /> : null}
-            <OpenaiApiActions vm={vm} />
-          </>
-        ) : (
-          <>
-            {showClaudeCards ? (
-              <ClaudeResetActions
-                vm={vm}
-                inline
-                now={now}
-                usage={{
-                  fiveHour: windows.find((w) => w.key === '5h')?.pct,
-                  sevenDay: windows.find((w) => w.key === '7d')?.pct,
-                  fable: windows.find((w) => w.key === 'fable')?.pct,
-                  sevenDayGate: vm.quota_policy
-                    ? vm.quota_policy.limit_7d * 100
-                    : null,
-                }}
-              />
-            ) : null}
-            <ActiveUsageAction vm={vm} />
-          </>
-        )}
-        <VmRowPriority vm={vm} editable={perms.admin} />
-        <Button
-          type='button'
-          variant='link'
-          size='sm'
-          className='ms-auto min-h-8 px-0 text-xs'
-          onClick={onOpenDetail}
-        >
-          打开完整详情 →
-        </Button>
-      </div>
-      <div className='mb-3'>
+      <div className='mb-3 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3'>
         <dl
           aria-label='账号信息'
           className='grid min-w-0 grid-cols-1 gap-x-4 gap-y-2 text-xs @sm/row-detail:grid-cols-2 @xl/row-detail:grid-cols-3'
@@ -574,6 +565,15 @@ export function VmRowDetail({
             </dd>
           </div>
         </dl>
+        <Button
+          type='button'
+          variant='link'
+          size='sm'
+          className='h-auto min-h-6 px-0 py-0 text-xs'
+          onClick={onOpenDetail}
+        >
+          打开完整详情 →
+        </Button>
       </div>
       <div className='grid min-w-0 gap-3 @min-[60rem]/row-detail:grid-cols-[1.3fr_1fr_1.1fr]'>
         <HealthCard vm={vm} />
