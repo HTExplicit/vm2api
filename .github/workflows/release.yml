@@ -51,7 +51,7 @@ jobs:
           cat > release-notes.md <<'NOTES'
           HTExplicit/vm2api 维护版。本次变更与升级说明见下方对应版本的 CHANGELOG.md。
 
-          本轮仅支持 linux/amd64。23 个载荷附件均从同一最终控制面镜像提取：22 个按 deploy/payload.json 核验官方 136 的不可变发行 payload-2026.11.17-cli-node-321，包含按新摘要固定的 CLI 2.1.321 重打包字节及未变化的 CRAG v3.1.4 standard 原签名归档，kin-egress 由本 fork 源码构建；另附 build-provenance.json，共 24 个附件。供应来源记录由 fork 根据官方固定提交、实际发行工作流结果与公开资产整理，不声明独立重建或重签。CRAG 归档与出厂散件核对签名及字节一致；kin-redact 由源码构建并随镜像交付。HTTP CONNECT 已支持槽位出口，现有代理绑定保持。CRAG 原生交接依据实际运行内核能力协商，新工厂首次缺少时预装，不启用 CRAG；已有工厂与下载选择保持。控制面升级按现有来源同步适用槽，不额外主动拉包。
+          本轮仅支持 linux/amd64。从同一最终控制面镜像提取 23 个载荷附件。22 个按 deploy/payload.json 核验官方固定载荷 payload-2026.11.18-crag-3.1.5，包含更新的换票助手与 CRAG 3.1.5 standard 原签名归档。kin-egress 由本 fork 源码构建。另附 build-provenance.json，共 24 个附件。升级仅在工厂缺失时预装 CRAG，按当前来源同步适用槽。
           控制面镜像：`ghcr.io/htexplicit/vm2api:TAG` 和 `ghcr.io/htexplicit/vm2api:TAG-amd64`。
 
           变更与升级说明：[CHANGELOG.md](https://github.com/HTExplicit/vm2api/blob/TAG/CHANGELOG.md)。许可证与上游归属保留。

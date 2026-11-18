@@ -207,8 +207,8 @@ async function runCase(
   await handler.handleProtocol(request, response, 'anthropic.messages', '/v1/messages')
   if (repeatAfterEntitlement) {
     assert.equal(response.status, 400)
-    assert.equal(response.body.error.code, 'entitlement_required')
-    assert.equal(response.body.error.message, fixture.error)
+    assert.equal(response.body.error.code, 'third_party_client')
+    assert.equal(response.body.error.details.upstream_message, fixture.error)
     assert.equal(hops.length, 1, 'billing failure must not retry or switch accounts')
     assert.equal(refusalWrites, 0, 'billing failure must not enter exact or similar refusal memory')
     assert.equal(deviceBlocks, 0, 'billing failure must not ban the device')
@@ -224,7 +224,11 @@ async function runCase(
     assert.equal(JSON.stringify(hop.body).split(rule).length - 1, 1)
     assert.equal(hop.repaired, !repeatAfterEntitlement && index > 0 && !(repeatWithCachedSearchRepair && index === 2))
     assert.equal(hop.body.system[0].text.includes('prompt_version=<'), hop.preset === 'zero')
-    if (hop.preset === 'zero') assert.ok(hop.body.system.some((block) => block.text === rule))
+    // A third-party caller's system is relocated to the head of the first user
+    // message before any hop renders (#1208), on every slot preset.
+    const firstUser = hop.body.messages.find((message) => message.role === 'user')
+    assert.ok(firstUser.content.some((block) => block.text === rule))
+    assert.ok(!JSON.stringify(hop.body.system).includes(rule))
     if (index > 0) fixture.check(hop.body)
     validateCacheBreakpoints(hop.body)
   }

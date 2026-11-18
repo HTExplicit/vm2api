@@ -53,6 +53,16 @@ test('installation and release scripts do not require cc-node', () => {
   assert.doesNotMatch(installer, /cc-node/)
 })
 
+test('the fork publishes the verified amd64 image after draft asset verification', () => {
+  const release = fs.readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8')
+  assert.match(release, /platforms: linux\/amd64/)
+  assert.doesNotMatch(release, /^  image-arm64:/m)
+  assert.match(release, /publish:\n[\s\S]*?needs: image-amd64/)
+  const anonymousCheck = release.indexOf('verify image is anonymously readable')
+  const publish = release.indexOf('gh release edit "$GITHUB_REF_NAME" --draft=false')
+  assert.ok(anonymousCheck >= 0 && anonymousCheck < publish)
+})
+
 test('macOS host preparation binds the platform UUID and does not overwrite it on a different host', (t) => {
   const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'install-crag-host-'))
   t.after(() => fs.rmSync(dest, { recursive: true, force: true }))

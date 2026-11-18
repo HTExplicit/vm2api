@@ -7,7 +7,8 @@ import {
   retryAfterSeconds,
   isWrapConnectionError,
   isUsagePolicyErrorMessage,
-  isThirdPartyEntitlementError,
+  isThirdPartyClientMessage,
+  isUnanswerablePromptMessage,
   makeRefusalGuardError,
   isAssistantMessageBody,
   isCompleteAssistantMessage,
@@ -351,31 +352,30 @@ test('Claude Code AUP API Error is a non-retryable 400 policy rejection, not a l
   }
 })
 
-test('third-party extra-usage 400 and 503 preserve the billing error without a policy refusal', () => {
+test('third-party extra-usage 400 and 503 are non-retryable third_party_client errors, not refusals', () => {
   const msg =
     'HTTP 400: Third-party apps now draw from your extra usage, not your plan limits. Claim it at claude.ai/settings/usage.'
   assert.equal(isUsagePolicyErrorMessage(msg), false)
-  assert.equal(isThirdPartyEntitlementError(400, msg), true)
-  assert.equal(isThirdPartyEntitlementError(400, 'Extra usage required for this model'), false)
+  assert.equal(isUnanswerablePromptMessage(msg), false)
+  assert.equal(isThirdPartyClientMessage(msg), true)
+  assert.equal(isThirdPartyClientMessage('400 no third-party apps allowed on subscription'), true)
+  assert.equal(isThirdPartyClientMessage('Extra usage required for this model'), false)
+  assert.equal(isUnanswerablePromptMessage('Extra usage required for this model'), false)
   for (const status of [400, 503]) {
     const mapped = mapUpstreamError(status, {
       type: 'error',
       error: { type: 'invalid_request_error', code: 'upstream_invalid_request', message: msg, request_id: 'billing-1' },
     })
     assert.equal(mapped.status, 400)
-    assert.equal(mapped.body.error.code, 'entitlement_required')
-    assert.equal(mapped.body.error.type, 'quota_error')
-    assert.equal(mapped.body.error.message, msg)
+    assert.equal(mapped.body.error.code, 'third_party_client')
+    assert.equal(mapped.body.error.type, 'invalid_request_error')
     assert.equal(mapped.body.error.request_id, 'billing-1')
+    assert.equal(mapped.body.error.details.retryable, false)
     assert.equal(mapped.body.error.details.upstream_status, status)
-  }
-  for (const [status, code] of [
-    [401, 'upstream_auth_error'],
-    [429, 'upstream_rate_limit'],
-    [502, 'upstream_error'],
-  ]) {
-    assert.equal(isThirdPartyEntitlementError(status, msg), false)
-    assert.equal(mapUpstreamError(status, { error: { message: msg } }).body.error.code, code)
+    assert.match(mapped.body.error.details.upstream_message, /Third-party apps now draw from/)
+    assert.match(mapped.body.error.message, /第三方客户端/)
+    assert.doesNotMatch(mapped.body.error.message, /改用|换用|渠道/)
+    assert.doesNotMatch(mapped.body.error.message, /usage policy/i)
   }
 })
 

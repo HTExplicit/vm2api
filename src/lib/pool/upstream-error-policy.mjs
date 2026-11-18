@@ -6,8 +6,8 @@ import {
   isCompleteAssistantMessage,
   isClientCancelledResult,
   isIncompleteAssistantMessage,
-  isUsagePolicyErrorMessage,
-  isThirdPartyEntitlementError,
+  isThirdPartyClientMessage,
+  isUnanswerablePromptMessage,
   isWrapConnectionError,
   ErrorCode,
 } from '../core/errors.mjs'
@@ -20,6 +20,17 @@ const ENTITLEMENT_PATTERNS = [
   /usage credits? (?:are )?required/i,
   /fast (?:mode|request).*(?:credit|entitlement)/i,
 ]
+
+// A Fable 429 with one of these bodies is the account's plan, not this request:
+// Pro seats whose included Fable allowance is gone answer every Fable request
+// this way until credits are bought. Any other model keeps the request stop.
+const FABLE_CREDITS_PATTERNS = [/extra usage required/i, /usage credits? (?:are )?required/i]
+
+/** Whether an upstream message says the account must buy usage credits (not fast mode). */
+export function isFableCreditsRequiredMessage(message) {
+  const text = String(message || '')
+  return !/\bfast (?:mode|request)/i.test(text) && FABLE_CREDITS_PATTERNS.some((pattern) => pattern.test(text))
+}
 
 const SIGNATURE_PATTERNS = [
   /signature/i,
@@ -398,15 +409,6 @@ function classifyUpstreamResultRaw(
   const reset = resetFromHeaders(result.headers, now)
 
   const hay = `${code} ${message} ${workerCode}`
-  if (isThirdPartyEntitlementError(status, message)) {
-    return {
-      scope: 'request',
-      action: 'stop',
-      reason: 'entitlement_required',
-      cooldownUntil: null,
-      retrySameAccount: false,
-    }
-  }
   if (code === 'license_crag_host_over_quota' && result.upstreamExecutions === 0 && !result.committed) {
     return continueWithoutCooldown({ scope: 'worker', reason: code, retrySameAccount: false })
   }
@@ -436,10 +438,22 @@ function classifyUpstreamResultRaw(
       retrySameAccount: false,
     }
   }
+  // The caller is a third-party client and the seat has no extra usage.
+  // Every seat without extra usage answers the same and one with it bills
+  // money, so stop here; the seat itself is fine, so no cooldown, no cache.
+  if (isThirdPartyClientMessage(message) || isThirdPartyClientMessage(hay)) {
+    return {
+      scope: 'request',
+      action: 'stop',
+      reason: 'third_party_client',
+      cooldownUntil: null,
+      retrySameAccount: false,
+    }
+  }
   // Claude Code wraps an AUP refusal as "API Error" and the kernel often
   // surfaces it as HTTP 400. That is the prompt, not a repairable request
   // and not an account failure: stop, do not hop again, cache forever.
-  if (isUsagePolicyErrorMessage(message) || isUsagePolicyErrorMessage(hay)) {
+  if (isUnanswerablePromptMessage(message) || isUnanswerablePromptMessage(hay)) {
     return cacheRefusal('usage_policy_refusal')
   }
   if (refusalCodes(result, code, workerCode).some(isContentPolicyErrorCode)) {
@@ -644,6 +658,15 @@ function classifyUpstreamResultRaw(
   }
   if (status === 429) {
     if (ENTITLEMENT_PATTERNS.some((pattern) => pattern.test(message))) {
+      if (isFableModel(model) && isFableCreditsRequiredMessage(message)) {
+        return {
+          scope: 'account',
+          action: 'continue',
+          reason: 'fable_credits_required',
+          cooldownUntil: null,
+          retrySameAccount: false,
+        }
+      }
       return { scope: 'request', action: 'stop', reason: 'entitlement_required', cooldownUntil: null }
     }
     const facts = result.providerResult

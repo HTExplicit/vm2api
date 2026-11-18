@@ -2161,6 +2161,63 @@ test('fable 403 marks pro and failovers without credential cooldown', async () =
   assert.equal(scheduler.cooldowns.length, 0)
 })
 
+test('fable usage-credits 429 marks the account and failovers to the next one', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const denied = []
+  const accepted = []
+  const runner = new FailoverRunner({
+    scheduler,
+    onFablePlanDenied: (event) => denied.push([event.selected.accountId, event.policy.reason]),
+    onFableSuccess: (event) => accepted.push(event.selected.accountId),
+  })
+  const result = await runner.run({
+    requestId: 'req-fable-credits',
+    canonicalBody: { model: 'claude-fable-5-2' },
+    model: 'claude-fable-5-2',
+    callAttempt: ({ candidate: selected }) => {
+      if (selected.accountId === 'account-1') {
+        return {
+          ok: false,
+          status: 429,
+          terminalState: 'rejected',
+          body: {
+            type: 'error',
+            error: { type: 'rate_limit_error', message: 'Usage credits are required for this model.' },
+          },
+        }
+      }
+      return success()
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.accountId, 'account-2')
+  assert.deepEqual(denied, [['account-1', 'fable_credits_required']])
+  assert.deepEqual(accepted, ['account-2'])
+  assert.equal(scheduler.cooldowns.length, 0)
+})
+
+test('when every account needs Fable usage credits the caller gets that 429, not a generic 502', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const runner = new FailoverRunner({ scheduler, onFablePlanDenied: () => {} })
+  const result = await runner.run({
+    requestId: 'req-fable-credits-all',
+    canonicalBody: { model: 'claude-fable-5-2' },
+    model: 'claude-fable-5-2',
+    callAttempt: () => ({
+      ok: false,
+      status: 429,
+      terminalState: 'incomplete',
+      body: {
+        type: 'error',
+        error: { type: 'rate_limit_error', message: 'Usage credits are required for this model.' },
+      },
+    }),
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 429)
+  assert.match(result.body.error.message, /Usage credits are required/)
+})
+
 function leasingScheduler(candidates, cap = 2) {
   const state = { inflight: 0, selects: [] }
   return {
@@ -2371,4 +2428,221 @@ test('signature 400 without foreign thinking still surfaces with the switch off'
   })
   assert.equal(result.status, 400)
   assert.equal(calls, 1)
+})
+
+// 2026-11-17 prod: three accounts each answered 429 (native stream path tags any
+// failed hop 'incomplete'), and the caller got 502 incomplete_response.
+test('when every account answers 429 the caller gets that 429, not a generic 502', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const seen = []
+  const runner = new FailoverRunner({ scheduler, config: { same_account_retry_delay_ms: 0 } })
+  const result = await runner.run({
+    requestId: 'req-all-429',
+    canonicalBody: { model: 'claude-opus-test' },
+    model: 'claude-opus-test',
+    callAttempt: ({ candidate: selected }) => {
+      seen.push(selected.accountId)
+      return {
+        ok: false,
+        status: 429,
+        committed: false,
+        terminalState: 'incomplete',
+        headers: { 'retry-after': '30' },
+        body: { type: 'error', error: { type: 'rate_limit_error', message: 'Error' } },
+      }
+    },
+  })
+  assert.ok(seen.includes('account-1') && seen.includes('account-2'), 'every account was tried first')
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 429)
+  assert.equal(result.body.error.type, 'rate_limit_error')
+  assert.equal(result.headers['retry-after'], '30')
+})
+
+function pinnedStickyRouter(accountId = 'account-1', vmId = 'vm-01') {
+  return {
+    resolve: (key) => (key === 'sess:home' ? { accountId, vmId, generation: 1 } : null),
+    bind() {},
+    unbind() {},
+  }
+}
+
+test('keep_session_home: a continuing session retries its account and never replays elsewhere', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const runner = new FailoverRunner({
+    scheduler,
+    stickyRouter: pinnedStickyRouter(),
+    config: { same_account_retry_delay_ms: 0, keep_session_home: true },
+  })
+  const seen = []
+  const result = await runner.run({
+    requestId: 'req-home-502',
+    canonicalBody: { model: 'claude-sonnet-test' },
+    model: 'claude-sonnet-test',
+    stickyKey: 'sess:home',
+    callAttempt: ({ candidate: selected }) => {
+      seen.push(selected.accountId)
+      return badGateway()
+    },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 502)
+  assert.equal(result.session_home_kept, true)
+  assert.deepEqual(seen, ['account-1', 'account-1'])
+})
+
+test('keep_session_home: a same-account retry goes straight back home and can recover there', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const runner = new FailoverRunner({
+    scheduler,
+    stickyRouter: pinnedStickyRouter(),
+    config: { same_account_retry_delay_ms: 0, keep_session_home: true },
+  })
+  const seen = []
+  const result = await runner.run({
+    requestId: 'req-home-recover',
+    canonicalBody: { model: 'claude-sonnet-test' },
+    model: 'claude-sonnet-test',
+    stickyKey: 'sess:home',
+    callAttempt: ({ candidate: selected }) => {
+      seen.push(selected.accountId)
+      return seen.length === 1 ? badGateway() : success('home')
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.accountId, 'account-1')
+  assert.deepEqual(seen, ['account-1', 'account-1'])
+})
+
+test('keep_session_home: an account-scope failure returns instead of moving the conversation', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const runner = new FailoverRunner({
+    scheduler,
+    stickyRouter: pinnedStickyRouter(),
+    config: { same_account_retry_delay_ms: 0, keep_session_home: true },
+  })
+  const seen = []
+  const result = await runner.run({
+    requestId: 'req-home-quota',
+    canonicalBody: { model: 'claude-sonnet-test' },
+    model: 'claude-sonnet-test',
+    stickyKey: 'sess:home',
+    callAttempt: ({ candidate: selected }) => {
+      seen.push(selected.accountId)
+      return {
+        ok: false,
+        status: 429,
+        headers: {
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-reset': '9999999999',
+        },
+        body: { type: 'error', error: { type: 'rate_limit_error', message: 'rate limited' } },
+      }
+    },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.session_home_kept, true)
+  assert.deepEqual(seen, ['account-1'])
+})
+
+test('keep_session_home: a session without a pin still fails over', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const runner = new FailoverRunner({
+    scheduler,
+    stickyRouter: pinnedStickyRouter(),
+    config: { same_account_retry_delay_ms: 0, keep_session_home: true },
+  })
+  const seen = []
+  const result = await runner.run({
+    requestId: 'req-home-new',
+    canonicalBody: { model: 'claude-sonnet-test' },
+    model: 'claude-sonnet-test',
+    stickyKey: 'sess:new',
+    callAttempt: ({ candidate: selected }) => {
+      seen.push(selected.accountId)
+      return selected.accountId === 'account-1' ? badGateway() : success('moved')
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.deepEqual(seen, ['account-1', 'account-2'])
+})
+
+test('keep_session_home off: a pinned session fails over as before', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const runner = new FailoverRunner({
+    scheduler,
+    stickyRouter: pinnedStickyRouter(),
+    config: { same_account_retry_delay_ms: 0 },
+  })
+  const seen = []
+  const result = await runner.run({
+    requestId: 'req-home-off',
+    canonicalBody: { model: 'claude-sonnet-test' },
+    model: 'claude-sonnet-test',
+    stickyKey: 'sess:home',
+    callAttempt: ({ candidate: selected }) => {
+      seen.push(selected.accountId)
+      return selected.accountId === 'account-1' ? badGateway() : success('moved')
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.deepEqual(seen, ['account-1', 'account-2'])
+})
+
+test('keep_session_home: a home kernel with no free slot is retried instead of spilling the transcript', async () => {
+  const scheduler = new Scheduler([candidate(1), candidate(2)])
+  const runner = new FailoverRunner({
+    scheduler,
+    stickyRouter: pinnedStickyRouter(),
+    config: { same_account_retry_delay_ms: 0, home_slot_busy_retry_ms: 0, keep_session_home: true },
+  })
+  const seen = []
+  const result = await runner.run({
+    requestId: 'req-home-slot-busy',
+    canonicalBody: { model: 'claude-sonnet-test' },
+    model: 'claude-sonnet-test',
+    stickyKey: 'sess:home',
+    callAttempt: ({ candidate: selected }) => {
+      seen.push(selected.accountId)
+      if (seen.length < 3) {
+        return {
+          ok: false,
+          status: 503,
+          upstreamExecutions: 0,
+          body: { error: { type: 'api_error', code: 'slot_busy', message: 'no free slot' } },
+        }
+      }
+      return success('home')
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.accountId, 'account-1')
+  assert.deepEqual(seen, ['account-1', 'account-1', 'account-1'])
+})
+
+test('keep_pin_on_model_gate: a borrowed account never takes the session, family or device pin', async () => {
+  const binds = []
+  const scheduler = new Scheduler([{ ...candidate(2), stickyBorrowed: true }])
+  const runner = new FailoverRunner({
+    scheduler,
+    stickyRouter: {
+      resolve: (key) => (key === 'sess:home' ? { accountId: 'account-1', vmId: 'vm-01', generation: 1 } : null),
+      bind: (key) => binds.push(key),
+      bindDeviceAffinity: (key) => binds.push(key),
+      unbind() {},
+    },
+    config: { same_account_retry_delay_ms: 0, keep_session_home: true },
+  })
+  const result = await runner.run({
+    requestId: 'req-borrow',
+    canonicalBody: { model: 'claude-fable-test' },
+    model: 'claude-fable-test',
+    stickyKey: 'sess:home',
+    familyKey: 'family2:home',
+    deviceKey: 'dev2:machine',
+    callAttempt: () => success('borrowed'),
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.accountId, 'account-2')
+  assert.deepEqual(binds, [])
 })

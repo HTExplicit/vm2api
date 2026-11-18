@@ -263,6 +263,7 @@ test('migration 059 onward preserves the published 9102 ledger, browser state an
       '063_api_key_endpoint.sql',
       '064_risk_audit_bans.sql',
       '065_crag_shop_order_dispatch.sql',
+      '066_refusal_session_blocks.sql',
     ])
     assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '059' ORDER BY version").all(), ledger)
     for (const table of preservedTables)
@@ -575,6 +576,7 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       '063_api_key_endpoint.sql',
       '064_risk_audit_bans.sql',
       '065_crag_shop_order_dispatch.sql',
+      '066_refusal_session_blocks.sql',
     ])
     const { risk_review_enabled, ...after } = db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy')
     assert.equal(risk_review_enabled, 0)

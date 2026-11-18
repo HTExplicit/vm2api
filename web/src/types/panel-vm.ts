@@ -475,6 +475,14 @@ export type Vm = {
   rate_limit_tier?: string | null
   /** Whether official usage lists a Fable window; not a subscription identifier. */
   usage_has_fable?: boolean | null
+  /** 开了 pool.fable_requires_max 且本槽不是 Max：Fable 不会派到这里。 */
+  fable_requires_max?: boolean
+  /** 上游回「Usage credits are required」后 Fable 暂停调度到此槽，`until` 前有效。 */
+  fable_credits_required?: {
+    model?: string | null
+    at?: string | null
+    until?: string | null
+  } | null
   /** anthropic | openai。缺省按 Claude 槽展示。 */
   platform?: string | null
   /** claude | codex */

@@ -283,6 +283,8 @@ export function KeysPage() {
         onOpenChange={setCreateOpen}
         pending={create.isPending}
         vms={vmItems}
+        vmsReady={vms.isSuccess && !vms.isFetching}
+        vmsError={vms.isError}
         pools={isAdmin ? pools.data?.pools || [] : undefined}
         channels={isAdmin ? channels.data?.items || [] : undefined}
         channelsLoading={channels.isPending}
@@ -297,6 +299,8 @@ export function KeysPage() {
         }}
         initial={editing}
         vms={vmItems}
+        vmsReady={vms.isSuccess && !vms.isFetching}
+        vmsError={vms.isError}
         pools={isAdmin ? pools.data?.pools || [] : undefined}
         channels={isAdmin ? channels.data?.items || [] : undefined}
         channelsLoading={channels.isPending}

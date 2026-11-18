@@ -701,7 +701,7 @@ test('Usage Policy API Error stops the request and is cached with no expiry', ()
   }
 })
 
-test('third-party extra-usage 400 and 503 stop only the request without caching or changing the account', () => {
+test('third-party extra-usage 400 and 503 stop as third_party_client without cooldown or refusal cache', () => {
   const messages = [
     "HTTP 400: Third-party apps now draw from your extra usage, not your plan limits. We've added a $20 credit to get you started.",
     'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Third-party apps now draw from your extra usage, not your plan limits."}}',
@@ -719,23 +719,18 @@ test('third-party extra-usage 400 and 503 stop only the request without caching 
         },
       })
       assert.equal(policy.action, 'stop', `${status} ${message}`)
-      assert.equal(policy.reason, 'entitlement_required')
+      assert.equal(policy.reason, 'third_party_client')
       assert.equal(policy.scope, 'request')
-      assert.equal(policy.retrySameAccount, false)
       assert.equal(policy.rememberRefusal, undefined)
-      assert.equal(policy.refusalTtlMs, undefined)
-      assert.equal(policy.pauseSchedule, undefined)
       assert.equal(policy.cooldownUntil, null)
+      assert.equal(policy.retrySameAccount, false)
       assert.equal(policy.circuit, undefined)
-      assert.equal(policy.decision.origin, 'upstream')
+      assert.equal(policy.decision.origin, 'client')
       assert.equal(shouldContinue(policy), false)
       assert.notEqual(policy.reason, 'invalid_request')
       assert.notEqual(policy.reason, 'provider_overloaded')
     }
   }
-  const message = messages[0]
-  assert.equal(classifyUpstreamResult({ status: 401, body: { error: { message } } }).reason, 'oauth_refresh_required')
-  assert.notEqual(classifyUpstreamResult({ status: 429, body: { error: { message } } }).reason, 'entitlement_required')
 })
 
 test('content policy codes cache the prompt even when the kernel renames the code', () => {
@@ -1139,4 +1134,23 @@ test('explicit overload errors retain overload classification', () => {
     const policy = classifyUpstreamResult({ status, body: { error: { message: 'Overloaded' } } })
     assert.equal(policy.reason, 'provider_overloaded')
   }
+})
+
+test('fable usage-credits 429 moves on and marks the account, not the request', () => {
+  for (const message of ['Usage credits are required for this model.', 'Extra usage required for this model']) {
+    const policy = classifyUpstreamResult(
+      { status: 429, body: { type: 'error', error: { type: 'rate_limit_error', message } } },
+      { model: 'claude-fable-5-2', now: 1000 },
+    )
+    assert.equal(policy.reason, 'fable_credits_required')
+    assert.equal(policy.scope, 'account')
+    assert.equal(policy.action, 'continue')
+    assert.equal(policy.retrySameAccount, false)
+    assert.equal(policy.cooldownUntil, null)
+  }
+  const fast = classifyUpstreamResult(
+    { status: 429, body: { error: { message: 'Usage credits are required for fast mode' } } },
+    { model: 'claude-fable-5-2' },
+  )
+  assert.equal(fast.reason, 'entitlement_required')
 })

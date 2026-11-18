@@ -13,14 +13,21 @@ import type { Vm } from '@/types/panel-vm'
 import {
   ArrowDown,
   ArrowUp,
+  Ban,
   ChevronDown,
   ChevronRight,
   Eye,
   Layers,
+  CircleCheck,
+  CircleOff,
   ExternalLink,
+  TriangleAlert,
+  Zap,
 } from 'lucide-react'
 import { credentialRegistrationOf } from '@/lib/cred-type'
+import { fmtResetClock, resetCountdown } from '@/lib/fable-status'
 import { fmtNum, fmtUsd } from '@/lib/format'
+import { tierVisual } from '@/lib/tier-visual'
 import { cn } from '@/lib/utils'
 import {
   fmtHealthPct,
@@ -30,6 +37,7 @@ import {
   SLOT_BG,
   type SlotState,
 } from '@/lib/vm-health'
+import { clipLabel } from '@/lib/vm-kind'
 import {
   claudeTier,
   poolStatus,
@@ -38,36 +46,16 @@ import {
   type ScheduleStateLabel,
   vmRequestingCount,
 } from '@/lib/vm-status'
-import {
-  vmCostLedger,
-  vmTodayStats,
-  vmWeekOutcome,
-  type VmWeekOutcome,
-} from '@/lib/vm-usage'
+import { vmCostLedger, vmTodayStats, vmWeekOutcome } from '@/lib/vm-usage'
 import { useNow } from '@/hooks/use-now'
 import { Button } from '@/components/ui/button'
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { Slider } from '@/components/ui/slider'
-import { CredLaneChip } from '@/components/platform-chip'
-import { StatusMark } from '@/components/status-mark'
 import { ProxyChip } from '@/features/proxies/proxy-chip'
 import {
   SchedulableSwitch,
   vmSchedulableProps,
 } from '@/features/vm/schedulable-switch'
-import { VmUsageWindows } from '@/features/vm/usage-windows'
-import { VmAccountIdentity } from '@/features/vm/vm-account-identity'
+import { riskFg, RISK_SOLID, riskLevel } from '@/features/vm/usage-meter'
+import { PlatformMark } from '@/features/vm/vm-account-identity'
 import { VmActionMenu } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
 import { GeminiSlotStatus } from '@/features/vm/vm-rack-blade'
@@ -81,177 +69,110 @@ import {
 } from '@/features/vm/vm-rack-model'
 import { VmRowDetail } from '@/features/vm/vm-row-detail'
 import { schedulingPriorityTextClass } from '@/features/vm/vm-type-visual'
+import { windowTiming } from '@/features/vm/window-timing'
 
 /** 行内点到这些元素时不切换展开。 */
 const ROW_INTERACTIVE =
   'button, a, input, select, textarea, label, [role="switch"], [role="menuitem"], [data-row-stop]'
 
-/** 早期七列结构；读数在各列内分行，窄屏由外层滚动。 */
+/**
+ * 固定网格：一行 38px，主读数常显，次要信息（邮箱、代理、成功数、倒计时、
+ * 菜单）悬停 / 聚焦 / 展开时才显示。槽位名和打开按钮横向滚动时固定在左边。
+ */
 const GRID: CSSProperties = {
   gridTemplateColumns:
-    '34px minmax(190px,1.25fr) 56px minmax(104px,0.65fr) minmax(180px,1.1fr) minmax(190px,1.15fr) minmax(240px,1.5fr) minmax(110px,0.7fr) 56px',
+    '34px minmax(240px,1.5fr) minmax(250px,1.3fr) minmax(190px,0.95fr) repeat(3,minmax(104px,0.55fr)) 48px 46px 40px 40px 80px 60px 62px 64px 56px',
 }
 
 /** 悬停才出现的次要信息。 */
 const SEC =
   'group-data-[pin=true]/tbl:opacity-100 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 group-aria-expanded:opacity-100 motion-reduce:transition-none'
 
+const NUM = 'justify-end font-mono tabular-nums'
 const TERT = 'text-[color:var(--text-tertiary)]'
 
-const STATE_STYLE: Record<ScheduleStateLabel, string> = {
+const STATE_STYLE: Record<
+  ScheduleStateLabel,
+  { cls: string; icon: typeof CircleCheck }
+> = {
+  开: { cls: 'text-muted-foreground font-medium', icon: CircleCheck },
+  受限: { cls: 'text-[color:var(--status-warn)]', icon: TriangleAlert },
+  关: { cls: TERT, icon: CircleOff },
+  不可调度: { cls: 'text-[color:var(--status-bad)]', icon: Ban },
+}
+
+const STATE_ICON_FG: Partial<Record<ScheduleStateLabel, string>> = {
   开: 'text-[color:var(--status-ok)]',
-  受限: 'text-[color:var(--status-warn)]',
-  关: TERT,
-  不可调度: 'text-[color:var(--status-bad)]',
 }
 
 function SchedCell({ vm }: { vm: Vm }) {
-  return vm.gemini ? (
-    <span className={TERT}>—</span>
-  ) : (
-    <SchedulableSwitch {...vmSchedulableProps(vm)} />
-  )
-}
-
-function TypeCell({ vm }: { vm: Vm }) {
+  if (vm.gemini) return <GeminiSlotStatus vm={vm} />
   const level = Number(vm.schedule_level)
-  const valid = Number.isInteger(level) && level >= 1 && level <= 10
+  const levelOk = Number.isInteger(level) && level >= 1 && level <= 10
   const manual = vm.schedule_level_mode === 'manual'
-  const registration = credentialRegistrationOf(vm)
+  const label = scheduleStateLabel(vm)
+  const tone = poolStatus(vm)
+  const breaker = label === '受限' && tone.key === 'circuit'
+  const style = STATE_STYLE[label]
+  const Icon = breaker ? Zap : style.icon
+  const reason =
+    label === '受限' || label === '不可调度'
+      ? vm.restriction_text || vm.unschedulable_text || tone.text
+      : label === '关'
+        ? '手动关闭'
+        : null
   return (
-    <div className='grid justify-items-start gap-2'>
-      {vm.has_token ? (
-        <CredLaneChip vm={vm} />
-      ) : (
-        <span className={TERT}>无凭证</span>
-      )}
+    <>
+      <SchedulableSwitch {...vmSchedulableProps(vm)} />
       <span
         className={cn(
-          'rounded border border-border/70 px-1.5 py-0.5 text-xs font-semibold tabular-nums',
-          valid ? schedulingPriorityTextClass(level) : TERT,
-          valid && manual && 'shadow-[inset_0_0_0_1px_currentColor]'
+          'inline-flex w-[72px] shrink-0 items-center gap-1 font-semibold',
+          breaker ? 'text-[color:var(--status-caution)]' : style.cls
+        )}
+      >
+        <Icon
+          className={cn('size-3 shrink-0', STATE_ICON_FG[label])}
+          aria-hidden
+        />
+        {label}
+      </span>
+      <span
+        className={cn(
+          'w-[42px] shrink-0 rounded-[3px] px-1 text-center text-[11px] leading-[1.5] font-bold tabular-nums',
+          levelOk
+            ? cn(
+                schedulingPriorityTextClass(level),
+                manual ? 'shadow-[inset_0_0_0_1px_currentColor]' : 'bg-muted'
+              )
+            : TERT
         )}
         title={
-          valid
-            ? `${manual ? '手动' : '自动'}调度优先级，数值越大越优先`
+          levelOk
+            ? `${manual ? '手动指定' : '自动分配'}的优先级，数字越大越优先`
             : '没有调度优先级'
         }
       >
-        P{valid ? level : '—'}
-        {valid && manual ? <span className='ml-1 text-[10px]'>手</span> : null}
+        P{levelOk ? level : '—'}
+        {levelOk && manual ? (
+          <small className='ml-0.5 font-sans font-semibold'>手</small>
+        ) : null}
       </span>
-      {registration !== 'none' ? (
-        <span className='text-[11px] text-muted-foreground'>
-          注册 <span>{registration}</span>
-        </span>
-      ) : null}
-    </div>
-  )
-}
-
-function StatusCell({ vm }: { vm: Vm }) {
-  if (vm.gemini)
-    return (
-      <div className='grid min-w-0 justify-items-start gap-1.5'>
-        <GeminiSlotStatus vm={vm} />
-        <ProxyChip vm={vm} compact className='max-w-full' />
-      </div>
-    )
-  const tone = poolStatus(vm)
-  const reason = vm.restriction_text || vm.unschedulable_text
-  const requesting = vmRequestingCount(vm)
-  const queue = Number(vm.queue_depth) || 0
-  return (
-    <div className='grid min-w-0 justify-items-start gap-2'>
-      <div className='flex flex-wrap items-center gap-2'>
-        <StatusMark tone={tone} variant='pill' className='text-xs' />
-        {requesting > 0 ? (
-          <span
-            data-vm-requesting={requesting}
-            title={`请求中 ${requesting}`}
-            className='inline-flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full bg-[color:var(--tier-pro-solid)] px-1.5 font-mono text-xs font-semibold text-[color:var(--tier-pro-solid-fg)] tabular-nums'
-          >
-            <span className='sr-only'>请求中 </span>
-            {requesting}
-          </span>
-        ) : null}
-        {queue > 0 ? (
-          <span className='text-xs text-muted-foreground'>
-            排队{' '}
-            <b className='font-mono font-medium text-foreground'>{queue}</b>
-          </span>
-        ) : null}
-      </div>
       {reason ? (
         <span
           className={cn(
-            'max-w-full text-xs leading-4 break-words',
-            STATE_STYLE[scheduleStateLabel(vm)]
+            'min-w-0 flex-1 truncate',
+            label === '关'
+              ? TERT
+              : breaker
+                ? 'text-[color:var(--status-caution)]'
+                : style.cls
           )}
+          title={reason}
         >
           {reason}
         </span>
       ) : null}
-      <div className='flex w-full min-w-0 items-end gap-1.5'>
-        <HealthCell vm={vm} />
-      </div>
-      <ProxyChip vm={vm} compact className='max-w-full' />
-    </div>
-  )
-}
-
-function CountPill({ n, failed = false }: { n: number; failed?: boolean }) {
-  return (
-    <span
-      className={cn(
-        'inline-flex min-w-7 items-center justify-center rounded-full px-1.5 py-0.5 font-mono text-xs font-semibold tabular-nums',
-        failed
-          ? 'bg-[color:var(--status-bad-bg)] text-[color:var(--status-bad)]'
-          : 'bg-[color:var(--status-ok-bg)] text-[color:var(--status-ok)]'
-      )}
-    >
-      <span className='sr-only'>{failed ? '失败' : '成功'} </span>
-      {fmtNum(n)}
-    </span>
-  )
-}
-
-function RequestCell({ r }: { r: RowData }) {
-  return (
-    <div className='grid min-w-0 justify-items-start gap-2 text-xs'>
-      <div className='grid gap-1'>
-        <div className='flex items-baseline gap-2'>
-          <span className='w-7 shrink-0 text-muted-foreground'>今日</span>
-          <b className='font-mono text-[13px] font-semibold text-[color:var(--status-ok)] tabular-nums'>
-            {fmtUsd(r.todayCost, 2)}
-          </b>
-        </div>
-        <span className='font-mono text-muted-foreground tabular-nums'>
-          {fmtNum(r.today)} req · {fmtNum(r.todayTokens)} tok
-        </span>
-      </div>
-      <div className='flex items-center gap-1.5' title='7D 成功 / 失败'>
-        <span className='mr-0.5 w-7 shrink-0 text-muted-foreground'>7D</span>
-        {r.week.known ? (
-          <>
-            <CountPill n={r.week.success} />
-            <CountPill n={r.week.fail} failed />
-          </>
-        ) : (
-          <span className='font-mono text-muted-foreground tabular-nums'>
-            {fmtNum(r.week.req)} req · 失败 —
-          </span>
-        )}
-      </div>
-      {r.seatsMax != null ? (
-        <span
-          className='text-[11px] text-muted-foreground'
-          title={seatTitle(r.vm)}
-        >
-          席位 {r.seatsUsed}/{r.seatsMax}
-        </span>
-      ) : null}
-    </div>
+    </>
   )
 }
 
@@ -264,14 +185,14 @@ const SLOT_HEIGHT: Record<SlotState, string> = {
 }
 
 function HealthCell({ vm }: { vm: Vm }) {
-  const known = vm.health_24h !== undefined
+  if (vm.health_24h === undefined) return <span className={TERT}>24h 未知</span>
   const h = healthSummary(vm.health_24h)
   return (
     <>
       <span
         role='img'
         aria-label='近 24 小时 48 格请求健康时间线'
-        className='grid h-4 min-w-0 flex-1 auto-cols-fr grid-flow-col items-end gap-px'
+        className='inline-grid h-4 shrink-0 auto-cols-[2px] grid-flow-col items-end gap-0 min-[1800px]:gap-px'
       >
         {h.slots.map((s, i) => (
           <i
@@ -292,11 +213,103 @@ function HealthCell({ vm }: { vm: Vm }) {
           >
             {fmtHealthPct(h.pct)}
           </b>
+          <span
+            className={cn(
+              'hidden font-mono text-muted-foreground tabular-nums min-[1800px]:inline',
+              SEC
+            )}
+            title={`成功 ${fmtNum(h.ok)} / 总数 ${fmtNum(h.req)}`}
+          >
+            {`${h.ok}/${h.req}`}
+          </span>
         </>
       ) : (
-        <span className={TERT}>{known ? '24h 无请求' : '24h 未知'}</span>
+        <span className={TERT}>24h 无请求</span>
       )}
     </>
+  )
+}
+
+function QuotaCell({
+  vm,
+  w,
+  now,
+}: {
+  vm: Vm
+  w: WindowReadout | undefined
+  now: number
+}) {
+  if (!w) return <span className={TERT}>不适用</span>
+  if (w.note)
+    return (
+      <span className='truncate text-[color:var(--status-warn)]' title={w.note}>
+        {w.note}
+      </span>
+    )
+  if (w.pct == null)
+    return (
+      <div className='grid w-full grid-cols-[auto_1fr] gap-y-1 font-mono'>
+        <span className={TERT}>—</span>
+        <span className={cn('text-right text-[11px]', TERT)}>未探测</span>
+        <span
+          className='col-span-2 h-1 rounded-full bg-[repeating-linear-gradient(135deg,var(--muted)_0_3px,transparent_3px_6px)]'
+          aria-hidden
+        />
+      </div>
+    )
+  const t = windowTiming(w, now)
+  const full = w.pct >= 100
+  const hot = w.pct >= 90
+  const left = vm.has_token ? resetCountdown(w.reset, now) : null
+  const eta = full
+    ? left && t.resetMs != null && t.resetMs > now
+      ? `${left}恢复`
+      : (left ?? '已满')
+    : left || '未开窗'
+  return (
+    <div
+      className='grid w-full grid-cols-[auto_1fr] items-baseline gap-y-1 font-mono tabular-nums'
+      title={`${w.label} 用量 ${w.pct.toFixed(0)}%${
+        t.elapsedPct != null
+          ? ` · 时间已过 ${t.elapsedPct.toFixed(0)}% · ${fmtResetClock(w.reset)} 重置`
+          : ''
+      }`}
+    >
+      <span
+        className={cn(
+          w.pct >= 70 ? riskFg(w.pct) : 'text-foreground',
+          hot ? 'font-extrabold' : 'font-medium'
+        )}
+      >
+        {w.pct.toFixed(0)}%
+      </span>
+      <span
+        className={cn(
+          'text-right text-[11px] whitespace-nowrap',
+          full
+            ? 'font-semibold text-[color:var(--status-bad)]'
+            : cn('text-muted-foreground', !hot && SEC)
+        )}
+      >
+        {eta}
+      </span>
+      <span className='relative col-span-2 h-1 rounded-full bg-muted'>
+        <i
+          className='absolute inset-y-0 left-0 rounded-full'
+          style={{
+            width: `${Math.min(100, w.pct)}%`,
+            backgroundColor: RISK_SOLID[riskLevel(w.pct)],
+          }}
+        />
+        {t.elapsedPct != null ? (
+          <b
+            aria-hidden
+            className='absolute -top-[3px] -bottom-[3px] w-0.5 rounded-[1px] bg-foreground'
+            style={{ left: `calc(${t.elapsedPct}% - 1px)` }}
+          />
+        ) : null}
+      </span>
+    </div>
   )
 }
 
@@ -308,9 +321,6 @@ type RowData = {
   hReq: number
   win: Partial<Record<WindowKey, WindowReadout>>
   today: number
-  todayCost: number
-  todayTokens: number
-  week: VmWeekOutcome
   seatsUsed: number
   seatsMax: number | null
   queue: number
@@ -327,17 +337,13 @@ function rowData(vm: Vm, accounts?: UsageAccountRow[]): RowData {
   const win: RowData['win'] = {}
   for (const w of vmWindows(vm)) win[w.key] = w
   const h = healthSummary(vm.health_24h)
-  const today = vmTodayStats(vm, accounts)
   return {
     vm,
     health: h.pct,
     hOk: h.ok,
     hReq: h.req,
     win,
-    today: today.req,
-    todayCost: today.today,
-    todayTokens: today.tok,
-    week,
+    today: vmTodayStats(vm, accounts).req,
     seatsUsed: Number(vm.seats_used) || 0,
     seatsMax: vm.seats_max == null ? null : Number(vm.seats_max),
     queue: Number(vm.queue_depth) || 0,
@@ -384,78 +390,177 @@ const ASC_FIRST: ReadonlySet<SortKey> = new Set(['health'])
 type Col = {
   label: string
   sort?: SortKey
-  sortKeys?: SortKey[]
   num?: boolean
   dim?: boolean
   cell: (r: RowData, now: number) => ReactNode
 }
 
-const SORT_LABEL: Record<SortKey, string> = {
-  health: '24h 成功率',
-  '5h': '5H 用量',
-  '7d': '7D 用量',
-  fable: 'Fable 用量',
-  today: '今日请求',
-  seats: '席位占用',
-  queue: '排队',
-  inflight: '请求中',
-  spend: '7D 费用',
-  tokens: '7D token',
-  perReq: '每请求成本',
-  total: '累计费用',
-}
-
 const COLS: Col[] = [
-  { label: '调度', cell: (r) => <SchedCell vm={r.vm} /> },
-  { label: '类型', cell: (r) => <TypeCell vm={r.vm} /> },
-  { label: '状态', sort: 'health', cell: (r) => <StatusCell vm={r.vm} /> },
   {
-    label: '今日 / 7D 请求',
-    sort: 'today',
-    sortKeys: ['today', 'seats', 'queue', 'inflight'],
-    cell: (r) => <RequestCell r={r} />,
+    label: '调度 · 优先级',
+    cell: (r) => <SchedCell vm={r.vm} />,
   },
   {
-    label: '用量窗口',
+    label: '健康 · 24h',
+    sort: 'health',
+    cell: (r) => <HealthCell vm={r.vm} />,
+  },
+  {
+    label: '5H',
     sort: '5h',
-    sortKeys: ['5h', '7d', 'fable'],
-    cell: (r, now) => (
-      <VmUsageWindows vm={r.vm} now={now} quiet summaryOnly quotaActions />
-    ),
+    cell: (r, now) => <QuotaCell vm={r.vm} w={r.win['5h']} now={now} />,
   },
   {
-    label: '成本',
+    label: '7D',
+    sort: '7d',
+    cell: (r, now) => <QuotaCell vm={r.vm} w={r.win['7d']} now={now} />,
+  },
+  {
+    label: 'Fable',
+    sort: 'fable',
+    cell: (r, now) => <QuotaCell vm={r.vm} w={r.win.fable} now={now} />,
+  },
+  {
+    label: '今日',
+    sort: 'today',
+    num: true,
+    cell: (r) => (r.today ? fmtNum(r.today) : <span className={TERT}>0</span>),
+  },
+  {
+    label: '席位',
+    sort: 'seats',
+    num: true,
+    cell: (r) =>
+      r.seatsMax == null ? (
+        <span className={TERT}>—</span>
+      ) : (
+        <span
+          className={cn(
+            r.seatsUsed >= r.seatsMax &&
+              r.seatsMax > 0 &&
+              'font-semibold text-[color:var(--status-warn)]'
+          )}
+          title={seatTitle(r.vm)}
+        >
+          {r.seatsUsed}/{r.seatsMax}
+        </span>
+      ),
+  },
+  {
+    label: '排队',
+    sort: 'queue',
+    num: true,
+    cell: (r) =>
+      r.queue ? (
+        <b className='text-[color:var(--status-warn)]'>{r.queue}</b>
+      ) : (
+        <span className={TERT}>0</span>
+      ),
+  },
+  {
+    label: '请求中',
+    sort: 'inflight',
+    num: true,
+    cell: (r) => (r.inflight ? r.inflight : <span className={TERT}>0</span>),
+  },
+  {
+    label: '7D 花费',
     sort: 'spend',
-    sortKeys: ['spend', 'tokens', 'perReq', 'total'],
-    cell: (r) => (
-      <div className='grid min-w-0 gap-2 text-xs'>
-        <div className='flex items-baseline justify-between gap-2'>
-          <span className='text-muted-foreground'>7D</span>
-          <b className='font-mono font-semibold tabular-nums'>
-            {fmtUsd(r.spend, 2)}
-          </b>
-        </div>
-        <div className='flex items-baseline justify-between gap-2'>
-          <span className='text-muted-foreground' title='累计费用'>
-            Σ
-          </span>
-          <b className='font-mono font-medium text-muted-foreground tabular-nums'>
-            {fmtUsd(r.total, 2)}
-          </b>
-        </div>
-      </div>
-    ),
+    num: true,
+    cell: (r) =>
+      r.spend ? <b>{fmtUsd(r.spend, 2)}</b> : <span className={TERT}>—</span>,
+  },
+  {
+    label: 'Token',
+    sort: 'tokens',
+    num: true,
+    dim: true,
+    cell: (r) => (r.tokens ? fmtNum(r.tokens) : '—'),
+  },
+  {
+    label: '$/请求',
+    sort: 'perReq',
+    num: true,
+    dim: true,
+    cell: (r) => (r.perReq == null ? '—' : `$${r.perReq.toFixed(3)}`),
+  },
+  {
+    label: '累计',
+    sort: 'total',
+    num: true,
+    dim: true,
+    cell: (r) => (r.total ? fmtUsd(r.total, 0) : '—'),
   },
 ]
 
 function ProdCell({ vm }: { vm: Vm }) {
+  const tier = claudeTier(vm)
+  const plan = vm.gemini ? vm.gemini.account?.plan : tier.label
+  const crag = (vm.resolved_dataplane ?? vm.dataplane) === 'crag'
+  const registration = credentialRegistrationOf(vm)
+  const node = vm.node_name || vm.node_id || 'local'
   return (
-    <VmAccountIdentity
-      vm={vm}
-      showQuotaSample={false}
-      compactLabels={false}
-      showRegistration={false}
-    />
+    <>
+      <PlatformMark vm={vm} />
+      <span
+        className={cn(
+          'font-mono font-semibold',
+          vm.gemini ? 'min-w-0 truncate' : 'shrink-0'
+        )}
+        title={vm.name || vm.id}
+      >
+        {clipLabel(vm.gemini ? vm.name || vm.id : vm.id)}
+      </span>
+      {plan && plan !== '—' ? (
+        <span
+          className={cn(
+            'shrink-0 rounded-[3px] px-1 font-mono text-[10px] leading-[1.5] font-semibold',
+            tierVisual(vm).badge
+          )}
+        >
+          {plan}
+        </span>
+      ) : null}
+      <span
+        className={cn(
+          'shrink-0 rounded-[3px] px-1 font-mono text-[10px] leading-[1.5] font-semibold',
+          crag
+            ? 'bg-orange-200 text-orange-900 dark:bg-orange-400/20 dark:text-orange-300'
+            : 'bg-zinc-200 text-zinc-700 dark:bg-zinc-300/20 dark:text-zinc-300'
+        )}
+        title='当前内核'
+      >
+        {vm.gemini ? 'CRAGAnti' : crag ? 'crag' : '默认'}
+      </span>
+      <span
+        className={cn(
+          'min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground',
+          SEC
+        )}
+        title={vm.email || ''}
+      >
+        {vm.email ? clipLabel(vm.email) : '未绑定邮箱'}
+      </span>
+      <span
+        className={cn(
+          'flex min-w-0 shrink items-center gap-1 overflow-hidden text-[11px] text-muted-foreground',
+          SEC
+        )}
+      >
+        <span>
+          {vm.gemini ? '宿主机' : vm.runtime_type === 'kvm' ? 'kvm' : 'vm'}
+        </span>
+        <span aria-hidden>·</span>
+        <span>{registration === 'none' ? '无凭证' : registration}</span>
+        <span aria-hidden>·</span>
+        <span className='max-w-[96px] truncate' title={node}>
+          {node}
+        </span>
+      </span>
+      <span className={cn('min-w-0 shrink overflow-hidden', SEC)}>
+        <ProxyChip vm={vm} compact />
+      </span>
+    </>
   )
 }
 
@@ -625,13 +730,11 @@ export function VmTable({
   vms,
   accounts,
   zoom = 100,
-  onZoomChange,
 }: {
   vms: Vm[]
   accounts?: UsageAccountRow[]
   /** 列表放大，100–200。100 为原尺寸。 */
   zoom?: number
-  onZoomChange?: (zoom: number) => void
 }) {
   const actions = useVmActions()
   const now = useNow()
@@ -724,125 +827,25 @@ export function VmTable({
   return (
     <div className='space-y-2'>
       <SummaryBar a={total} />
-      <div className='flex justify-end'>
-        <Popover>
-          <PopoverTrigger asChild>
-            <Button
-              type='button'
-              variant='outline'
-              size='sm'
-              className='h-8 gap-1.5'
-            >
-              <Eye className='size-3.5' />
-              显示
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent align='end' className='w-72 space-y-3'>
-            <p className='text-sm font-semibold'>列表显示</p>
-            <div className='flex flex-wrap gap-2'>
-              <ToggleBtn
-                on={grouped}
-                icon={Layers}
-                onClick={() => setGrouped(!grouped)}
-              >
-                按状态分组
-              </ToggleBtn>
-              <ToggleBtn
-                on={pinSec}
-                icon={Eye}
-                onClick={() => setPinSec(!pinSec)}
-              >
-                次要信息常显
-              </ToggleBtn>
-            </div>
-            <div className='grid gap-2 border-t pt-3'>
-              <label className='text-xs' htmlFor='vm-list-metric-sort'>
-                排序指标
-              </label>
-              <div className='flex gap-2'>
-                <Select
-                  value={sort?.key ?? 'default'}
-                  onValueChange={(key) =>
-                    setSort(
-                      key === 'default'
-                        ? null
-                        : {
-                            key: key as SortKey,
-                            dir: ASC_FIRST.has(key as SortKey) ? 1 : -1,
-                          }
-                    )
-                  }
-                >
-                  <SelectTrigger
-                    id='vm-list-metric-sort'
-                    className='h-8 flex-1'
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value='default'>跟随上方排序</SelectItem>
-                    {Object.entries(SORT_LABEL).map(([key, label]) => (
-                      <SelectItem key={key} value={key}>
-                        {label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button
-                  type='button'
-                  variant='outline'
-                  size='icon'
-                  className='size-8'
-                  disabled={!sort}
-                  aria-label={sort?.dir === 1 ? '改为降序' : '改为升序'}
-                  onClick={() =>
-                    setSort(
-                      sort ? { ...sort, dir: sort.dir === 1 ? -1 : 1 } : null
-                    )
-                  }
-                >
-                  {sort?.dir === 1 ? (
-                    <ArrowUp className='size-3.5' />
-                  ) : (
-                    <ArrowDown className='size-3.5' />
-                  )}
-                </Button>
-              </div>
-            </div>
-            {onZoomChange ? (
-              <div className='grid gap-2 border-t pt-3'>
-                <div className='flex items-center justify-between text-xs'>
-                  <span>列表放大</span>
-                  <span className='font-mono tabular-nums'>{zoom}%</span>
-                </div>
-                <Slider
-                  min={100}
-                  max={200}
-                  step={10}
-                  value={[zoom]}
-                  aria-label='列表放大'
-                  onValueChange={(value) => onZoomChange(value[0] ?? 100)}
-                />
-              </div>
-            ) : null}
-          </PopoverContent>
-        </Popover>
+      <div className='flex items-center justify-end gap-1.5'>
+        <ToggleBtn
+          on={grouped}
+          icon={Layers}
+          onClick={() => setGrouped(!grouped)}
+        >
+          按状态分组
+        </ToggleBtn>
+        <ToggleBtn on={pinSec} icon={Eye} onClick={() => setPinSec(!pinSec)}>
+          次要信息常显
+        </ToggleBtn>
       </div>
-      <span className='sr-only' role='status'>
-        {sort
-          ? `按${SORT_LABEL[sort.key]}${sort.dir === 1 ? '升序' : '降序'}排列`
-          : '跟随上方排序'}
-      </span>
       <div
         data-vm-table
         data-pin={pinSec}
-        role='region'
-        aria-label='槽位列表横向滚动区域'
-        tabIndex={0}
-        className='group/tbl overflow-x-auto rounded-lg border border-border/60 bg-card text-[13px]'
+        className='group/tbl overflow-x-auto rounded-lg border border-border/60 bg-card text-[12.5px]'
       >
         <div
-          className='min-w-[1180px]'
+          className='min-w-[1408px]'
           role='table'
           aria-label='槽位列表'
           style={zoom === 100 ? undefined : { zoom: zoom / 100 }}
@@ -859,12 +862,10 @@ export function VmTable({
               role='columnheader'
               className={cn(stickyLeft, 'left-[34px] flex items-center px-2')}
             >
-              账号
+              槽位
             </div>
             {COLS.map((c) => {
-              const active =
-                sort &&
-                (c.sortKeys ?? (c.sort ? [c.sort] : [])).includes(sort.key)
+              const active = sort && c.sort === sort.key
               return (
                 <div
                   key={c.label}
@@ -885,7 +886,7 @@ export function VmTable({
                   {c.sort ? (
                     <button
                       type='button'
-                      className='inline-flex min-h-6 items-center gap-0.5 rounded-sm hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring'
+                      className='inline-flex items-center gap-0.5 rounded-sm hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring'
                       title='点击排序'
                       onClick={() => onSort(c.sort!)}
                     >
@@ -983,7 +984,7 @@ export function VmTable({
                             aria-expanded={open}
                             aria-label={`${vm.id}，${label}。Enter 展开明细，Shift+Enter 打开详情`}
                             className={cn(
-                              'group relative grid cursor-pointer items-start border-b border-[color:var(--hairline)] bg-[var(--row-bg)] py-3.5 outline-none [--row-bg:var(--card)] hover:[--row-bg:color-mix(in_oklab,var(--muted)_55%,var(--card))] focus-visible:after:pointer-events-none focus-visible:after:absolute focus-visible:after:inset-0 focus-visible:after:z-[4] focus-visible:after:border-2 focus-visible:after:border-ring',
+                              'group relative grid h-[38px] cursor-pointer border-b border-[color:var(--hairline)] bg-[var(--row-bg)] outline-none [--row-bg:var(--card)] hover:[--row-bg:color-mix(in_oklab,var(--muted)_55%,var(--card))] focus-visible:after:pointer-events-none focus-visible:after:absolute focus-visible:after:inset-0 focus-visible:after:z-[4] focus-visible:after:border-2 focus-visible:after:border-ring',
                               open &&
                                 '[--row-bg:color-mix(in_oklab,var(--muted)_75%,var(--card))]'
                             )}
@@ -995,7 +996,7 @@ export function VmTable({
                               role='cell'
                               className={cn(
                                 stickyLeft,
-                                'left-0 flex h-full items-start justify-center pt-0.5',
+                                'left-0 flex items-center justify-center',
                                 max &&
                                   'shadow-[inset_2px_0_0_var(--tier-max-border)]'
                               )}
@@ -1016,7 +1017,7 @@ export function VmTable({
                               role='cell'
                               className={cn(
                                 stickyLeft,
-                                'left-[34px] flex h-full min-w-0 items-start overflow-hidden px-2',
+                                'left-[34px] flex min-w-0 items-center gap-1.5 overflow-hidden px-2 whitespace-nowrap',
                                 dim && 'opacity-50'
                               )}
                             >
@@ -1027,16 +1028,14 @@ export function VmTable({
                                 key={c.label}
                                 role='cell'
                                 className={cn(
-                                  'min-w-0 px-2',
+                                  'flex min-w-0 items-center gap-[7px] overflow-hidden px-2 whitespace-nowrap',
+                                  c.num && NUM,
                                   c.dim && 'text-muted-foreground',
                                   // 调度列（第一列）保持可读，其余在关闭时淡出。
-                                  dim &&
-                                    i > 0 &&
-                                    c.label !== '状态' &&
-                                    'opacity-50'
+                                  dim && i > 0 && 'opacity-50'
                                 )}
                               >
-                                {vm.gemini && c.label !== '状态' ? (
+                                {vm.gemini && i > 0 ? (
                                   <span className={TERT}>—</span>
                                 ) : (
                                   c.cell(r, now)

@@ -83,7 +83,24 @@ test('classifyRequestError maps known codes and statuses', () => {
       error_message: 'HTTP 400: Third-party apps now draw from your extra usage, not your plan limits.',
       vm_id: 'vm-billing',
     }).error_class,
-    'quota',
+    'request',
+  )
+  assert.equal(
+    classifyRequestError({
+      status: 400,
+      error_code: 'refusal_guard',
+      error_message:
+        'Third-party apps now draw from your extra usage, not your plan limits. Add more at claude.ai/settings/usage and keep going.',
+    }).error_class,
+    'request',
+  )
+  assert.equal(
+    classifyRequestError({
+      status: 400,
+      error_code: 'third_party_client',
+      error_message: 'Anthropic 将此请求识别为第三方客户端',
+    }).error_class,
+    'request',
   )
   assert.equal(
     classifyRequestError({
@@ -91,7 +108,7 @@ test('classifyRequestError maps known codes and statuses', () => {
       error_code: 'upstream_error',
       error_message: 'no third-party apps allowed on this subscription',
     }).error_class,
-    'quota',
+    'request',
   )
   assert.equal(classifyRequestError({ status: 400, error_code: 'entitlement_required' }).error_class, 'quota')
   assert.equal(

@@ -120,6 +120,7 @@ jobs:
             test/unit/upstream-error-policy.test.mjs \
             test/unit/zero-retry-contract.test.mjs \
             test/unit/refusal-guard.test.mjs \
+            test/unit/refusal-session-block.test.mjs \
             test/unit/errors-map.test.mjs \
             test/unit/error-class.test.mjs \
             test/unit/release.test.mjs \

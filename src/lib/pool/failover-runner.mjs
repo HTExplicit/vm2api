@@ -62,6 +62,13 @@ const DEFAULTS = {
   same_account_retry_delay_ms: 500,
   same_account_retry_max_hop_ms: 10_000,
   signature_repair: false,
+  // A conversation that already had a session pin when the request arrived
+  // stays on the account its first attempt ran on: a failed attempt retries
+  // that account or returns its error, it never replays the transcript on
+  // another account. Off by default (upstream behaviour).
+  keep_session_home: false,
+  // keep_session_home: pause between retries of a home kernel that had no free slot.
+  home_slot_busy_retry_ms: 2000,
 }
 
 function clone(value) {
@@ -330,9 +337,25 @@ function hasKernelFailureCode(result) {
   return Object.hasOwn(KERNEL_FAILURE_STATUS, String(result?.body?.error?.code || ''))
 }
 
+/**
+ * The provider answered 429 before anything reached the caller. The native
+ * stream path tags every failed hop 'incomplete', so when all accounts were
+ * rate limited the caller got a generic 502 incomplete_response and a gateway
+ * in front read it as a broken upstream. The 429 (with its retry-after) is the
+ * complete answer.
+ */
+function isUncommittedRateLimitAnswer(result) {
+  if (result.committed || Number(result.status) !== 429) return false
+  return result.body?.type === 'error' || !!result.body?.error
+}
+
 function isUnfinishedLastResult(result, policy) {
   if (!result) return false
   if (policy?.reason === 'incomplete_assistant') return true
+  if (isUncommittedRateLimitAnswer(result)) return false
+  // An upstream entitlement answer is a complete answer even when the kernel
+  // tags the hop incomplete; the caller needs its message, not a generic 502.
+  if (policy?.reason === 'fable_credits_required' || policy?.reason === 'fable_plan_denied') return false
   if (hasKernelFailureCode(result)) return false
   if (result.terminalState === 'incomplete') return true
   return isIncompleteAssistantMessage(result)
@@ -729,6 +752,10 @@ export class FailoverRunner {
     })
     const bindAll = (account, opts) => {
       if (!this.stickyRouter || !account) return
+      // keep_pin_on_model_gate: the pinned home only could not serve this
+      // model, so this request borrows the account. No session, family or
+      // device pin follows it; the next turn goes home.
+      if (lastSelected?.stickyBorrowed === true && lastSelected.accountId === account.accountId) return
       const sessionId = account.sessionId || (account.accountId === outboundSessionAccountId ? outboundSessionId : '')
       const payload = { accountId: account.accountId, vmId: account.vmId }
       const slotIndex = account.slotIndex != null ? account.slotIndex : pinnedSlot
@@ -811,6 +838,31 @@ export class FailoverRunner {
     }
     // A unit that just failed replayably waits behind every other free seat.
     let avoid = null
+    // keep_session_home: the continuing conversation's account for this
+    // request is the one its first attempt ran on.
+    const keepHome = this.config.keep_session_home === true && !pinVmId && !!stickyKey
+    const continuing = keepHome && !!this.stickyRouter?.resolve?.(stickyKey)?.accountId
+    let homeAccountId = null
+    let homeRetryPending = false
+    const isHome = (unit) => continuing && !!homeAccountId && unit?.accountId === homeAccountId
+    const retryOrStay = (unit) => {
+      if (isHome(unit)) {
+        homeRetryPending = true
+        return null
+      }
+      return new Set([unit.accountId, unit.vmId])
+    }
+    // The home kernel had no free slot: nothing ran, so wait for it instead of
+    // spilling the transcript to another account. The request deadline bounds it.
+    const waitHomeSlot = (unit, policy) => {
+      if (!isHome(unit) || policy?.reason !== 'slot_busy') return false
+      homeRetryPending = 'slot_busy'
+      return true
+    }
+    const keptHome = () => {
+      releaseStickySlots()
+      return preferLastResult(lastResult, lastPolicy, null, { ...attribution(), session_home_kept: true })
+    }
 
     for (;;) {
       const attemptNo = budget.hops + 1
@@ -854,6 +906,14 @@ export class FailoverRunner {
             sessionId: outboundSessionId || quotaRequest?.sessionId || stickyKey,
             preserveMessageCache: quotaRequest?.preserveMessageCache,
           },
+        }
+        if (homeRetryPending) {
+          const waitMs =
+            homeRetryPending === 'slot_busy'
+              ? Number(this.config.home_slot_busy_retry_ms ?? 2000)
+              : this.config.same_account_retry_delay_ms
+          homeRetryPending = false
+          await sleepWithSignal(waitMs, signal)
         }
         if (avoid) {
           const elsewhere = await this.scheduler.selectAndReserve({ ...selectArgs, avoid, allowWait: false })
@@ -904,6 +964,10 @@ export class FailoverRunner {
         ) {
           releaseStickySlots()
           return preferLastResult(lastResult, lastPolicy, null, { ...attribution(), account_cap: accountCap })
+        }
+        if (continuing && selected?.ok) {
+          if (!homeAccountId) homeAccountId = selected.accountId
+          else if (selected.accountId !== homeAccountId) return keptHome()
         }
         if (selected?.familyGated && familyKey && familyVmId) {
           // The family home left the pool (quota, credential): the family moves
@@ -1083,7 +1147,10 @@ export class FailoverRunner {
           )
         }
         notifyProxyFailure(this.onProxyFailure, selected, policy)
-        if (policy.reason === 'fable_plan_denied' && typeof this.onFablePlanDenied === 'function') {
+        if (
+          (policy.reason === 'fable_plan_denied' || policy.reason === 'fable_credits_required') &&
+          typeof this.onFablePlanDenied === 'function'
+        ) {
           try {
             this.onFablePlanDenied({ selected, policy })
           } catch {}
@@ -1106,7 +1173,8 @@ export class FailoverRunner {
         if (
           policy.reason === 'content_filter_refusal' ||
           policy.reason === 'usage_policy_refusal' ||
-          policy.reason === 'content_policy_refusal'
+          policy.reason === 'content_policy_refusal' ||
+          policy.reason === 'third_party_client'
         ) {
           this.scheduler.markSuccess(selected, { workerStatus: result.workerStatus || null, countUsage })
           bindAll({ accountId: selected.accountId, vmId: selected.vmId })
@@ -1171,9 +1239,11 @@ export class FailoverRunner {
         }
         if (budget.allowSameUnit(selected.accountId, policy, hopMs, this.config.same_account_retry_max_hop_ms)) {
           budget.noteSameUnit(selected.accountId)
-          avoid = new Set([selected.accountId, selected.vmId])
+          avoid = retryOrStay(selected)
           continue
         }
+        if (waitHomeSlot(selected, policy)) continue
+        if (isHome(selected)) return keptHome()
         budget.noteSwitch(selected.accountId, selected.vmId, { spill: policy.reason === 'slot_busy' })
       } catch (error) {
         if (attemptStarted === undefined) throw error
@@ -1294,9 +1364,11 @@ export class FailoverRunner {
         const hopMs = Date.now() - attemptStarted
         if (budget.allowSameUnit(selected.accountId, policy, hopMs, this.config.same_account_retry_max_hop_ms)) {
           budget.noteSameUnit(selected.accountId)
-          avoid = new Set([selected.accountId, selected.vmId])
+          avoid = retryOrStay(selected)
           continue
         }
+        if (waitHomeSlot(selected, policy)) continue
+        if (isHome(selected)) return keptHome()
         budget.noteSwitch(selected.accountId, selected.vmId, { spill: policy.reason === 'slot_busy' })
       } finally {
         // Setup and attempt share the same permit lifetime.
