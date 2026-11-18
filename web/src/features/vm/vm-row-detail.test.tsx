@@ -32,6 +32,9 @@ vi.mock('./vm-perms', async (importOriginal) => {
     useVmPerms: () => original.vmPermsFor(controls.role),
   }
 })
+vi.mock('@/features/proxies/proxy-chip', () => ({
+  ProxyChip: () => <span data-testid='proxy-chip' />,
+}))
 vi.mock('./openai-quota-actions', () => ({
   OpenaiQuotaActions: ({ vm, compact }: { vm: Vm; compact: boolean }) => (
     <span
@@ -193,6 +196,16 @@ describe('VM row request health', () => {
       expect(controls.api).not.toHaveBeenCalled()
     }
   )
+
+  it('shows only the 24h samples included in the authorized list for a non-admin', () => {
+    controls.role = 'user'
+    const html = section(render({ health_24h: [[97, 3]] }), '请求健康')
+    expect(controls.query.mock.calls[0][0].enabled).toBe(false)
+    expect(html).toContain('97.0%')
+    expect(html).not.toContain('90.0%')
+    expect(html).not.toContain('主要错误')
+    expect(controls.api).not.toHaveBeenCalled()
+  })
 
   it('keeps the query disabled while the role is unknown', () => {
     controls.role = null

@@ -13,19 +13,18 @@ import type { Vm } from '@/types/panel-vm'
 import {
   ArrowDown,
   ArrowUp,
-  Ban,
+  ChartNoAxesColumnIncreasing,
   ChevronDown,
   ChevronRight,
-  Eye,
-  Layers,
-  CircleCheck,
-  CircleOff,
-  ExternalLink,
-  TriangleAlert,
-  Zap,
+  Settings2,
 } from 'lucide-react'
-import { credentialRegistrationOf } from '@/lib/cred-type'
-import { fmtResetClock, resetCountdown } from '@/lib/fable-status'
+import {
+  expiresAtToMs,
+  fmtResetClock,
+  FABLE_MAX_ONLY_TEXT,
+  fableState,
+  resetCountdown,
+} from '@/lib/fable-status'
 import { fmtNum, fmtUsd } from '@/lib/format'
 import { tierVisual } from '@/lib/tier-visual'
 import { cn } from '@/lib/utils'
@@ -35,27 +34,31 @@ import {
   healthSummary,
   healthTone,
   SLOT_BG,
-  type SlotState,
 } from '@/lib/vm-health'
-import { platformLabel } from '@/lib/vm-kind'
+import { isCodexVm } from '@/lib/vm-kind'
 import {
-  claudeTier,
+  credentialStatus,
   poolStatus,
   scheduleStateLabel,
-  seatTitle,
-  type ScheduleStateLabel,
   vmRequestingCount,
+  seatTitle,
 } from '@/lib/vm-status'
 import { vmCostLedger, vmTodayStats, vmWeekOutcome } from '@/lib/vm-usage'
 import { useNow } from '@/hooks/use-now'
 import { Button } from '@/components/ui/button'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
+import { CredLaneChip, PlatformChip } from '@/components/platform-chip'
+import { StatusMark } from '@/components/status-mark'
 import { ProxyChip } from '@/features/proxies/proxy-chip'
 import {
   SchedulableSwitch,
   vmSchedulableProps,
 } from '@/features/vm/schedulable-switch'
 import { riskFg, RISK_SOLID, riskLevel } from '@/features/vm/usage-meter'
-import { PlatformMark } from '@/features/vm/vm-account-identity'
 import { VmActionMenu } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
 import { GeminiSlotStatus } from '@/features/vm/vm-rack-blade'
@@ -68,255 +71,73 @@ import {
   type VmZone,
 } from '@/features/vm/vm-rack-model'
 import { VmRowDetail } from '@/features/vm/vm-row-detail'
+import { sortVms, type VmSortKey } from '@/features/vm/vm-table'
 import { schedulingPriorityTextClass } from '@/features/vm/vm-type-visual'
-import { windowTiming } from '@/features/vm/window-timing'
+import { NodeChip } from './node-chip'
+import { OpenaiPlanBadge } from './openai-plan-badge'
+import { VmColumnPicker } from './vm-column-picker'
+import {
+  COLUMNS,
+  METRIC_COLUMNS,
+  useListColumns,
+  type ColumnKey,
+  type MetricKey,
+} from './vm-list-columns'
+import './vm-list-table.css'
 
 /** 行内点到这些元素时不切换展开。 */
 const ROW_INTERACTIVE =
-  'button, a, input, select, textarea, label, [role="switch"], [role="menuitem"], [data-row-stop]'
+  'button, a, input, select, textarea, label, [role="switch"], [role="menuitem"], [data-row-stop], [role="button"]'
 
-const COLUMN_GRID =
-  '@min-[64rem]/vm-list:grid-cols-[minmax(10rem,1.7fr)_minmax(3.5rem,0.5fr)_minmax(5.75rem,0.9fr)_minmax(8rem,1.15fr)_minmax(6rem,0.85fr)_minmax(10rem,1.45fr)_minmax(6.5rem,0.9fr)]'
-
-const TERT = 'text-[color:var(--text-tertiary)]'
-
-const STATE_STYLE: Record<
-  ScheduleStateLabel,
-  { cls: string; icon: typeof CircleCheck }
-> = {
-  开: { cls: 'text-muted-foreground font-medium', icon: CircleCheck },
-  受限: { cls: 'text-[color:var(--status-warn)]', icon: TriangleAlert },
-  关: { cls: TERT, icon: CircleOff },
-  不可调度: { cls: 'text-[color:var(--status-bad)]', icon: Ban },
-}
-
-const STATE_ICON_FG: Partial<Record<ScheduleStateLabel, string>> = {
-  开: 'text-[color:var(--status-ok)]',
-}
-
-function SchedCell({ vm }: { vm: Vm }) {
-  return vm.gemini ? (
-    <span className={TERT}>—</span>
-  ) : (
-    <SchedulableSwitch {...vmSchedulableProps(vm)} />
-  )
-}
-
-function TypeCell({ vm }: { vm: Vm }) {
-  const tier = claudeTier(vm)
-  const platform = vm.gemini ? 'Gemini' : platformLabel(vm)
-  const plan = vm.gemini ? vm.gemini.account?.plan : tier.label
-  const crag = (vm.resolved_dataplane ?? vm.dataplane) === 'crag'
-  const level = Number(vm.schedule_level)
-  const valid = Number.isInteger(level) && level >= 1 && level <= 10
-  const manual = vm.schedule_level_mode === 'manual'
-
-  return (
-    <div className='grid min-w-0 justify-items-start gap-1.5'>
-      <div className='flex flex-wrap items-center gap-x-1.5 gap-y-1'>
-        <span className='font-medium'>{platform}</span>
-        {plan && plan !== '—' && plan !== platform ? (
-          <span
-            className={cn(
-              'rounded px-1.5 text-xs leading-5 font-semibold',
-              tierVisual(vm).badge
-            )}
-          >
-            {plan}
-          </span>
-        ) : null}
-      </div>
-      <div className='flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs'>
-        <span
-          className={cn(
-            'rounded px-1.5 leading-5',
-            crag
-              ? 'bg-orange-200 text-orange-900 dark:bg-orange-400/20 dark:text-orange-300'
-              : 'bg-muted text-muted-foreground'
-          )}
-          title='当前内核'
-        >
-          {vm.gemini ? 'CRAGAnti' : crag ? 'crag' : '默认'}
-        </span>
-        {!vm.gemini ? (
-          <span
-            className={cn(
-              'rounded px-1.5 leading-5 font-semibold tabular-nums',
-              valid ? schedulingPriorityTextClass(level) : TERT,
-              valid && manual ? 'ring-1 ring-current ring-inset' : 'bg-muted'
-            )}
-            title={
-              valid
-                ? `${manual ? '手动指定' : '自动分配'}的优先级`
-                : '没有调度优先级'
-            }
-          >
-            P{valid ? level : '—'}
-            {valid && manual ? <small className='ml-0.5'>手</small> : null}
-          </span>
-        ) : null}
-      </div>
-      {vm.gemini ? (
-        <span className='text-xs text-muted-foreground'>宿主机</span>
-      ) : null}
-    </div>
-  )
-}
-
-function StatusCell({ vm }: { vm: Vm }) {
-  const label = scheduleStateLabel(vm)
-  const tone = poolStatus(vm)
-  const breaker = label === '受限' && tone.key === 'circuit'
-  const style = STATE_STYLE[label]
-  const Icon = breaker ? Zap : style.icon
-  const reason =
-    label === '受限' || label === '不可调度'
-      ? vm.restriction_text || vm.unschedulable_text || tone.text
-      : null
-  return (
-    <div className='grid min-w-0 justify-items-start gap-1.5'>
-      {vm.gemini ? (
-        <GeminiSlotStatus vm={vm} />
-      ) : (
-        <>
-          <span
-            className={cn(
-              'inline-flex items-center gap-1.5 font-semibold',
-              breaker ? 'text-[color:var(--status-caution)]' : style.cls
-            )}
-          >
-            <Icon
-              className={cn('size-3.5 shrink-0', STATE_ICON_FG[label])}
-              aria-hidden
-            />
-            {label === '开' ? '可调度' : label === '关' ? '调度关闭' : label}
-          </span>
-          {reason ? (
-            <span className='max-w-full text-xs [overflow-wrap:anywhere] text-muted-foreground'>
-              {reason}
-            </span>
-          ) : null}
-          <HealthCell vm={vm} />
-        </>
-      )}
-      <ProxyChip vm={vm} className='max-w-full' />
-    </div>
-  )
-}
-
-/** 颜色 + 高度双重编码（越高越糟），不只靠颜色。 */
-const SLOT_HEIGHT: Record<SlotState, string> = {
-  ok: '55%',
-  slow: '78%',
-  down: '100%',
-  none: '2px',
-}
-
-function HealthCell({ vm }: { vm: Vm }) {
-  if (vm.health_24h === undefined) return <span className={TERT}>24h 未知</span>
-  const h = healthSummary(vm.health_24h)
-  if (!h.req) return <span className={TERT}>24h 无请求</span>
-  return (
-    <div className='w-full min-w-0 space-y-1'>
-      <div className='flex items-baseline gap-1.5 text-xs'>
-        <span className='text-muted-foreground'>24h</span>
-        <b
-          className={cn('font-semibold tabular-nums', HEALTH_FG[h.tone])}
-          title={`成功 ${fmtNum(h.ok)} / 总数 ${fmtNum(h.req)}`}
-        >
-          {fmtHealthPct(h.pct)}
-        </b>
-      </div>
-      <span
-        role='img'
-        aria-label='近 24 小时 48 格请求健康时间线'
-        className='grid h-2.5 w-full auto-cols-fr grid-flow-col items-end gap-px'
-      >
-        {h.slots.map((state, i) => (
-          <i
-            key={i}
-            className='block'
-            style={{
-              height: SLOT_HEIGHT[state],
-              backgroundColor: SLOT_BG[state],
-            }}
-          />
-        ))}
-      </span>
-    </div>
-  )
-}
-
-function QuotaWindow({
-  vm,
+function Quota({
   w,
   now,
+  cost,
 }: {
-  vm: Vm
   w: WindowReadout
   now: number
+  cost?: number
 }) {
-  const t = windowTiming(w, now)
   const pct = w.pct
+  const reset = expiresAtToMs(w.reset)
   const full = pct != null && pct >= 100
-  const left = vm.has_token ? resetCountdown(w.reset, now) : null
   const eta =
-    full && left && t.resetMs != null && t.resetMs > now
-      ? `${left}恢复`
-      : left || (full ? '已满' : '重置未知')
-
+    reset > now ? resetCountdown(w.reset, now) : reset ? '已过重置' : '—'
   return (
     <div
+      className='classic-window'
       data-window-readout={w.key}
-      className='grid min-w-0 grid-cols-[2.75rem_minmax(0,1fr)] items-baseline gap-x-1.5 gap-y-1 text-xs'
+      title={reset ? `重置于 ${fmtResetClock(w.reset)}` : undefined}
     >
-      <span className='font-medium text-muted-foreground'>{w.label}</span>
-      {w.note ? (
-        <span className='[overflow-wrap:anywhere] text-[color:var(--status-warn)]'>
-          {w.note}
-        </span>
-      ) : pct == null ? (
-        <span className='text-muted-foreground'>未探测</span>
+      <span>{w.label}</span>
+      {w.note || pct == null ? (
+        <span className='classic-window-note'>{w.note || '未探测'}</span>
       ) : (
         <>
-          <div className='flex min-w-0 flex-wrap items-baseline justify-between gap-x-1.5 tabular-nums'>
-            <b className={cn('font-semibold', pct >= 70 && riskFg(pct))}>
-              {pct.toFixed(0)}%
-            </b>
-            <span
-              className={cn(
-                'text-muted-foreground',
-                full && 'font-medium text-[color:var(--status-bad)]'
-              )}
-            >
-              {eta}
-            </span>
-          </div>
-          <span
-            aria-hidden
-            className='relative col-start-2 h-1.5 rounded-full bg-muted'
-            title={
-              t.resetMs != null ? `重置于 ${fmtResetClock(w.reset)}` : undefined
-            }
-          >
+          <span className='classic-meter' aria-hidden>
             <i
-              className='absolute inset-y-0 left-0 rounded-full'
               style={{
-                width: `${Math.max(0, Math.min(100, pct))}%`,
-                backgroundColor: RISK_SOLID[riskLevel(pct)],
+                width: `${Math.min(100, Math.max(0, pct))}%`,
+                background: RISK_SOLID[riskLevel(pct)],
               }}
             />
-            {t.elapsedPct != null ? (
-              <b
-                className='absolute -top-0.5 -bottom-0.5 w-0.5 rounded-full bg-foreground'
-                style={{
-                  left: `clamp(0px, calc(${t.elapsedPct}% - 1px), calc(100% - 2px))`,
-                }}
-              />
-            ) : null}
           </span>
+          <b className={cn('text-end', pct >= 70 && riskFg(pct))}>
+            {Math.round(pct)}%
+          </b>
         </>
       )}
+      <span className='text-end text-muted-foreground'>
+        {cost ? fmtUsd(cost, 2) : ''}
+      </span>
+      <span
+        className={cn(
+          'text-end',
+          full ? 'text-[color:var(--status-bad)]' : 'text-muted-foreground'
+        )}
+      >
+        {full ? `已满 · ${reset > now ? eta : '待更新'}` : eta}
+      </span>
     </div>
   )
 }
@@ -327,10 +148,12 @@ type RowData = {
   health: number | null
   hOk: number
   hReq: number
+  healthSlots: ReturnType<typeof healthSummary>['slots']
+  todayStats: ReturnType<typeof vmTodayStats>
+  week: ReturnType<typeof vmWeekOutcome>
+  fiveCost: number
   win: Partial<Record<WindowKey, WindowReadout>>
   today: number
-  todayCost: number
-  week: number
   seatsUsed: number
   seatsMax: number | null
   queue: number
@@ -342,7 +165,7 @@ type RowData = {
 }
 
 function rowData(vm: Vm, accounts?: UsageAccountRow[]): RowData {
-  const [, d7, total] = vmCostLedger(vm, accounts)
+  const [five, d7, total] = vmCostLedger(vm, accounts)
   const week = vmWeekOutcome(vm, accounts)
   const today = vmTodayStats(vm, accounts)
   const win: RowData['win'] = {}
@@ -353,36 +176,24 @@ function rowData(vm: Vm, accounts?: UsageAccountRow[]): RowData {
     health: h.pct,
     hOk: h.ok,
     hReq: h.req,
+    healthSlots: h.slots,
+    todayStats: today,
+    week,
+    fiveCost: five.cost,
     win,
     today: today.req,
-    todayCost: today.today,
-    week: week.req,
     seatsUsed: Number(vm.seats_used) || 0,
     seatsMax: vm.seats_max == null ? null : Number(vm.seats_max),
     queue: Number(vm.queue_depth) || 0,
     inflight: vmRequestingCount(vm),
     spend: d7.cost,
     tokens: d7.tokens,
-    perReq: week.req > 0 && d7.cost ? d7.cost / week.req : null,
+    perReq: week.req > 0 ? d7.cost / week.req : null,
     total: total.cost,
   }
 }
 
-type SortKey =
-  | 'health'
-  | '5h'
-  | '7d'
-  | 'fable'
-  | 'today'
-  | 'seats'
-  | 'queue'
-  | 'inflight'
-  | 'spend'
-  | 'tokens'
-  | 'perReq'
-  | 'total'
-
-const SORT_VALUE: Record<SortKey, (r: RowData) => number | null> = {
+const SORT_VALUE: Record<MetricKey, (r: RowData) => number | null> = {
   health: (r) => r.health,
   '5h': (r) => r.win['5h']?.pct ?? null,
   '7d': (r) => r.win['7d']?.pct ?? null,
@@ -397,10 +208,21 @@ const SORT_VALUE: Record<SortKey, (r: RowData) => number | null> = {
   total: (r) => r.total,
 }
 
-/** 健康默认升序（差的在前），其余默认降序。 */
-const ASC_FIRST: ReadonlySet<SortKey> = new Set(['health'])
+const PAGE_SORT = {
+  name: 'name',
+  status: 'status',
+  todayCost: 'today',
+  cache: 'cache',
+} as const satisfies Record<string, VmSortKey>
+type SortKey = MetricKey | keyof typeof PAGE_SORT | 'remain'
+const ASC_FIRST: ReadonlySet<SortKey> = new Set(['health', 'status', 'name'])
 
 const SORT_LABEL: Record<SortKey, string> = {
+  status: '调度状态',
+  name: '账号名称',
+  remain: '5H 剩余',
+  todayCost: '今日费用',
+  cache: '缓存命中',
   health: '24h 成功率',
   '5h': '5H 用量',
   '7d': '7D 用量',
@@ -415,159 +237,343 @@ const SORT_LABEL: Record<SortKey, string> = {
   total: '累计费用',
 }
 
-function Metric({
-  label,
-  children,
-  strong = false,
-}: {
-  label: string
-  children: ReactNode
-  strong?: boolean
-}) {
+function TierBadge({ vm }: { vm: Vm }) {
+  if (isCodexVm(vm)) return <OpenaiPlanBadge vm={vm} size='sm' />
+  const skin = tierVisual(vm)
+  if (skin.key === 'none') {
+    return null
+  }
   return (
-    <div className='flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 text-xs'>
-      <span className='text-muted-foreground'>{label}</span>
+    <span
+      className={cn(
+        'shrink-0 rounded px-1.5 py-0.5 text-[11px] leading-none font-bold tracking-[0.03em] uppercase',
+        skin.badge
+      )}
+    >
+      {skin.label}
+    </span>
+  )
+}
+
+function AccountCell({
+  r,
+  showMeta,
+  open,
+  detailId,
+  toggle,
+  openDetail,
+}: {
+  r: RowData
+  showMeta: boolean
+  open: boolean
+  detailId: string
+  toggle: () => void
+  openDetail: () => void
+}) {
+  const { vm, inflight } = r
+  const name =
+    (vm.name?.trim() && vm.name.trim() !== vm.id
+      ? vm.name.trim()
+      : vm.email?.trim()) || vm.id
+  return (
+    <div className='classic-account'>
+      <div className='classic-name-line'>
+        <PlatformChip
+          vm={vm}
+          kind={vm.gemini ? 'gemini' : undefined}
+          className='text-[11px]'
+        />
+        <button
+          type='button'
+          className='classic-name'
+          title={name}
+          aria-label={`打开 ${name} 详情页`}
+          onClick={openDetail}
+        >
+          {name}
+        </button>
+        {!vm.gemini && inflight > 0 ? (
+          <span
+            className='classic-live'
+            data-vm-requesting={inflight}
+            aria-label={`请求中 ${inflight}`}
+            title={`请求中 ${inflight}`}
+          >
+            <span>请求中 </span>
+            {inflight}
+          </span>
+        ) : null}
+      </div>
+      <div className='classic-account-meta'>
+        {vm.gemini ? (
+          <span>{vm.gemini.account?.plan || '宿主机'}</span>
+        ) : (
+          <TierBadge vm={vm} />
+        )}
+        <NodeChip nodeId={vm.node_id} className='max-w-24 text-[11px]' />
+        <span className='truncate' title={vm.id}>
+          {vm.id}
+        </span>
+        <button
+          type='button'
+          className='classic-disclosure'
+          aria-expanded={open}
+          aria-controls={open ? detailId : undefined}
+          aria-label={`${open ? '收起' : '展开'} ${vm.id} 明细`}
+          title={open ? '收起明细' : '展开明细'}
+          onClick={toggle}
+        >
+          <ChevronDown
+            aria-hidden
+            className={cn('size-3.5', open && 'rotate-180')}
+          />
+        </button>
+      </div>
+      {showMeta && vm.email && vm.email !== name ? (
+        <div className='text-xs wrap-anywhere text-muted-foreground'>
+          {vm.email}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function TypeCell({ vm }: { vm: Vm }) {
+  if (vm.gemini) return <span>宿主机 · CRAGAnti</span>
+  const level = vm.schedule_level
+  const valid =
+    typeof level === 'number' &&
+    Number.isInteger(level) &&
+    level >= 1 &&
+    level <= 10
+  const manual = vm.schedule_level_mode === 'manual'
+  return (
+    <div className='classic-stack items-start'>
+      {vm.has_token ? (
+        <CredLaneChip vm={vm} className='text-[11px]' />
+      ) : (
+        <span className='text-muted-foreground'>无凭证</span>
+      )}
       <span
+        title={
+          valid
+            ? manual
+              ? '手动指定优先级'
+              : '自动分配优先级'
+            : '没有调度优先级'
+        }
         className={cn(
-          'tabular-nums',
-          strong ? 'font-semibold' : 'font-medium text-muted-foreground'
+          'classic-priority',
+          valid && schedulingPriorityTextClass(level)
         )}
       >
-        {children}
+        P{valid ? level : '—'}
+        {valid && manual ? ' 手' : ''}
       </span>
     </div>
   )
 }
 
-function RequestCell({ r }: { r: RowData }) {
-  return (
-    <div className='grid gap-1'>
-      <Metric label='今日' strong>
-        {fmtNum(r.today)}
-      </Metric>
-      <Metric label='7 日'>{fmtNum(r.week)}</Metric>
-      {r.seatsMax != null ? (
-        <div title={seatTitle(r.vm)}>
-          <Metric label='席位'>
-            {r.seatsUsed}/{r.seatsMax}
-          </Metric>
-        </div>
-      ) : null}
-      {r.queue > 0 ? (
-        <Metric label='排队'>
-          <b className='text-[color:var(--status-warn)]'>{fmtNum(r.queue)}</b>
-        </Metric>
-      ) : null}
-    </div>
-  )
-}
-
-function CostCell({ r }: { r: RowData }) {
-  return (
-    <div className='grid gap-1'>
-      <Metric label='今日'>{fmtUsd(r.todayCost, 2)}</Metric>
-      <Metric label='7 日' strong>
-        {fmtUsd(r.spend, 2)}
-      </Metric>
-      <Metric label='累计'>{fmtUsd(r.total, 2)}</Metric>
-    </div>
-  )
-}
-
-type Col = {
-  id: 'schedule' | 'type' | 'status' | 'requests' | 'quota' | 'cost'
-  label: string
-  sorts?: [SortKey, ...SortKey[]]
-  cell: (r: RowData, now: number) => ReactNode
-}
-
-const COLS: Col[] = [
-  { id: 'schedule', label: '调度', cell: (r) => <SchedCell vm={r.vm} /> },
-  { id: 'type', label: '类型', cell: (r) => <TypeCell vm={r.vm} /> },
-  {
-    id: 'status',
-    label: '状态',
-    sorts: ['health'],
-    cell: (r) => <StatusCell vm={r.vm} />,
-  },
-  {
-    id: 'requests',
-    label: '请求量',
-    sorts: ['today', 'seats', 'queue', 'inflight'],
-    cell: (r) => <RequestCell r={r} />,
-  },
-  {
-    id: 'quota',
-    label: '用量窗口',
-    sorts: ['5h', '7d', 'fable'],
-    cell: (r, now) => (
-      <div className='grid min-w-0 gap-2'>
-        {Object.values(r.win).map((window) => (
-          <QuotaWindow key={window.key} vm={r.vm} w={window} now={now} />
-        ))}
+function StatusCell({ r }: { r: RowData }) {
+  const { vm } = r
+  if (vm.gemini)
+    return (
+      <div className='classic-stack items-start'>
+        <GeminiSlotStatus vm={vm} />
+        <ProxyChip vm={vm} compact />
       </div>
-    ),
-  },
-  {
-    id: 'cost',
-    label: '费用',
-    sorts: ['spend', 'tokens', 'perReq', 'total'],
-    cell: (r) => <CostCell r={r} />,
-  },
-]
-
-function AccountCell({
-  vm,
-  inflight,
-  showMeta,
-}: {
-  vm: Vm
-  inflight: number
-  showMeta: boolean
-}) {
-  const name = vm.name?.trim()
-  const displayName =
-    (name && name !== vm.id ? name : vm.email?.trim()) || vm.id
-  const registration = credentialRegistrationOf(vm)
-  const node = vm.node_name || vm.node_id || (vm.node_id === null ? '本机' : '')
+    )
+  const tone = poolStatus(vm)
+  const credential = credentialStatus(vm)
+  const label = scheduleStateLabel(vm)
+  const reason =
+    label === '受限' || label === '不可调度'
+      ? vm.restriction_text || vm.unschedulable_text
+      : null
   return (
-    <div className='min-w-0'>
-      <div className='flex min-w-0 items-start gap-1.5'>
-        <span className='mt-0.5 shrink-0'>
-          <PlatformMark vm={vm} />
-        </span>
+    <div className='classic-stack items-start'>
+      <div className='classic-status-line'>
+        <StatusMark tone={tone} variant='pill' className='text-xs' />
         <span
-          className='line-clamp-2 min-w-0 text-sm leading-5 font-semibold [overflow-wrap:anywhere]'
-          title={displayName}
+          className={cn(
+            'classic-health-rate',
+            r.health != null && HEALTH_FG[healthTone(r.health)]
+          )}
+          title={`24h 成功 ${fmtNum(r.hOk)} / 总数 ${fmtNum(r.hReq)}`}
         >
-          {displayName}
+          {r.health == null
+            ? vm.health_24h === undefined
+              ? '24h 未知'
+              : '24h 无请求'
+            : `24h ${fmtHealthPct(r.health)}`}
         </span>
-        {!vm.gemini && inflight > 0 ? (
-          <span
-            data-vm-requesting={inflight}
-            title={`请求中 ${inflight}`}
-            className='shrink-0 rounded-full bg-blue-100 px-1.5 py-0.5 text-[11px] leading-4 font-semibold text-blue-800 tabular-nums dark:bg-blue-950 dark:text-blue-200'
-          >
-            请求中 {inflight}
-          </span>
+      </div>
+      <div
+        className='classic-availability'
+        title={`凭证可用性：${credential.text}`}
+      >
+        <span aria-hidden data-tone={credential.cls} />
+        <small>{credential.text}</small>
+      </div>
+      <div className='classic-status-line'>
+        <ProxyChip vm={vm} compact />
+        {r.queue > 0 ? (
+          <span className='classic-alert'>排队 {fmtNum(r.queue)}</span>
         ) : null}
       </div>
-      {showMeta ? (
-        <div className='mt-1 space-y-0.5 text-xs [overflow-wrap:anywhere] text-muted-foreground'>
-          {vm.email && vm.email !== displayName ? <p>{vm.email}</p> : null}
-          <p>
-            {[
-              vm.gemini ? '宿主机' : vm.runtime_type === 'kvm' ? 'KVM' : 'VM',
-              registration === 'none' ? '无凭证' : registration,
-              node,
-            ]
-              .filter(Boolean)
-              .join(' · ')}
-          </p>
-        </div>
+      {reason && reason !== tone.text ? (
+        <span className='classic-alert'>{reason}</span>
       ) : null}
     </div>
   )
+}
+
+function RequestCell({ r }: { r: RowData }) {
+  const s = r.todayStats,
+    w = r.week
+  return (
+    <div className='classic-stack'>
+      <div
+        className='classic-stats-line'
+        title={`入 ${fmtNum(s.inn)} · 出 ${fmtNum(s.out)} · 缓存 ${fmtNum(s.read)}/${fmtNum(s.write)}`}
+      >
+        <small>今日</small>
+        <b className='text-[color:var(--status-ok)]'>{fmtUsd(s.today, 2)}</b>
+      </div>
+      <div className='text-muted-foreground'>
+        {fmtNum(s.req)} 请求 · {fmtNum(s.tok)} tok
+      </div>
+      <div className='classic-stats-line'>
+        <small>7D</small>
+        {w.known ? (
+          <>
+            <span
+              title='7D 成功请求'
+              className='classic-outcome'
+              data-outcome='ok'
+            >
+              {fmtNum(w.success)}
+            </span>
+            <span
+              title='7D 失败请求'
+              className='classic-outcome'
+              data-outcome='bad'
+            >
+              {fmtNum(w.fail)}
+            </span>
+          </>
+        ) : (
+          <span className='text-muted-foreground'>
+            {fmtNum(w.req)} 请求 · 成败未知
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function cellValue(
+  key: Exclude<ColumnKey, 'vm'>,
+  r: RowData,
+  now: number
+): ReactNode {
+  const { vm } = r
+  if (key === 'type') return <TypeCell vm={vm} />
+  if (key === 'status') return <StatusCell r={r} />
+  if (vm.gemini) return '—'
+  switch (key) {
+    case 'sched':
+      return <SchedulableSwitch {...vmSchedulableProps(vm)} />
+    case 'req':
+      return <RequestCell r={r} />
+    case 'cost':
+      return (
+        <div className='classic-stack'>
+          <b>7D {fmtUsd(r.spend, 2)}</b>
+          <span className='text-muted-foreground' title='累计费用'>
+            Σ {fmtUsd(r.total, 2)}
+          </span>
+        </div>
+      )
+    case 'usage': {
+      const f = r.win.fable && fableState(vm)
+      const alert =
+        f &&
+        (f.tone.cls === 'bad' ||
+          f.tone.cls === 'warn' ||
+          f.tone.text === FABLE_MAX_ONLY_TEXT ||
+          (f.usedPct != null && f.usedPct >= 85))
+      return (
+        <div className='classic-stack'>
+          {r.win['5h'] && <Quota w={r.win['5h']} now={now} cost={r.fiveCost} />}
+          {r.win['7d'] && <Quota w={r.win['7d']} now={now} cost={r.spend} />}
+          {alert ? (
+            <span className='classic-alert'>
+              Fable{' '}
+              {f.usedPct != null && f.usedPct >= 100 ? '已满' : f.tone.text}
+            </span>
+          ) : null}
+        </div>
+      )
+    }
+    case 'health':
+      return (
+        <div className='classic-stack'>
+          <b>
+            {r.health == null
+              ? vm.health_24h === undefined
+                ? '未知'
+                : '无请求'
+              : fmtHealthPct(r.health)}
+          </b>
+          <span
+            className='classic-history'
+            role='img'
+            aria-label='近 24 小时请求健康时间线'
+          >
+            {r.healthSlots.map((state, i) => (
+              <i key={i} style={{ background: SLOT_BG[state] }} />
+            ))}
+          </span>
+        </div>
+      )
+    case '5h':
+    case '7d':
+    case 'fable': {
+      const w = r.win[key]
+      return !w
+        ? '—'
+        : w.note ||
+            (w.pct == null ? (
+              '未探测'
+            ) : (
+              <b className={w.pct >= 70 ? riskFg(w.pct) : undefined}>
+                {Math.round(w.pct)}%{w.pct >= 100 ? ' · 已满' : ''}
+              </b>
+            ))
+    }
+    case 'seats':
+      return r.seatsMax == null ? (
+        '—'
+      ) : (
+        <span title={seatTitle(vm)}>
+          {r.seatsUsed}/{r.seatsMax}
+        </span>
+      )
+    case 'perReq':
+      return r.perReq == null ? '—' : fmtUsd(r.perReq, 3)
+    case 'spend':
+    case 'total':
+      return fmtUsd(r[key], 2)
+    case 'queue':
+      return (
+        <span className={r.queue ? 'classic-alert' : undefined}>
+          {fmtNum(r.queue)}
+        </span>
+      )
+    default:
+      return fmtNum(r[key])
+  }
 }
 
 type Agg = {
@@ -663,7 +669,7 @@ function SummaryBar({ a }: { a: Agg }) {
   const pct = aggPct(a)
   return (
     <section
-      aria-label='全局汇总'
+      aria-label='当前列表汇总'
       className='grid grid-cols-2 gap-px rounded-lg border border-border/60 bg-card text-sm @min-[36rem]/vm-summary:grid-cols-3 @min-[64rem]/vm-summary:grid-cols-6'
     >
       <Kpi
@@ -708,44 +714,32 @@ function SummaryBar({ a }: { a: Agg }) {
   )
 }
 
-function ToggleBtn({
-  on,
-  onClick,
-  icon: Icon,
-  children,
-}: {
-  on: boolean
-  onClick: () => void
-  icon: typeof Eye
-  children: ReactNode
-}) {
-  return (
-    <Button
-      type='button'
-      size='sm'
-      variant={on ? 'default' : 'outline'}
-      aria-pressed={on}
-      className='h-7 gap-1 px-2 text-xs'
-      onClick={onClick}
-    >
-      <Icon className='size-3.5' />
-      {children}
-    </Button>
-  )
-}
-
 export function VmTable({
   vms,
   accounts,
   zoom = 100,
+  fleetCount = vms.length,
+  filters,
+  viewControls,
+  zoomControl,
+  emptyState,
 }: {
   vms: Vm[]
   accounts?: UsageAccountRow[]
   /** 列表放大，100–200。100 为原尺寸。 */
   zoom?: number
+  fleetCount?: number
+  filters?: ReactNode
+  viewControls?: ReactNode
+  zoomControl?: ReactNode
+  emptyState?: ReactNode
 }) {
   const actions = useVmActions()
+  const columns = useListColumns()
+  const [dragging, setDragging] = useState<ColumnKey | null>(null)
   const sortId = useId()
+  const summaryId = useId()
+  const [showSummary, setShowSummary] = useState(false)
   const now = useNow()
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 } | null>(null)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
@@ -762,16 +756,31 @@ export function VmTable({
       return next
     })
   const rows = useMemo(() => {
-    const list = vms.map((vm) => rowData(vm, accounts))
-    if (!sort) return list
-    const f = SORT_VALUE[sort.key]
+    const key = sort?.key ?? 'status'
+    const direction = sort?.dir ?? 1
+    if (key in PAGE_SORT) {
+      return sortVms(
+        vms,
+        PAGE_SORT[key as keyof typeof PAGE_SORT],
+        direction === 1 ? 'asc' : 'desc',
+        accounts
+      ).map((vm) => rowData(vm, accounts))
+    }
+    const f =
+      key === 'remain'
+        ? (r: RowData) => {
+            const pct = r.win['5h']?.pct
+            return pct == null ? null : 100 - pct
+          }
+        : SORT_VALUE[key as MetricKey]
     // 无数据永远排在最后，不随方向翻转。
-    return list
-      .map((r, i) => ({ r, i, v: f(r) }))
+    return vms
+      .map((vm) => rowData(vm, accounts))
+      .map((r, i) => ({ r, i, v: r.vm.gemini ? null : f(r) }))
       .sort((a, b) => {
         if (a.v == null || b.v == null)
           return a.v == null && b.v == null ? a.i - b.i : a.v == null ? 1 : -1
-        return sort.dir * (a.v - b.v) || a.i - b.i
+        return direction * (a.v - b.v) || a.i - b.i
       })
       .map((x) => x.r)
   }, [vms, accounts, sort])
@@ -784,14 +793,14 @@ export function VmTable({
       }).filter((g) => g.rows.length)
     : [{ key: 'all' as const, rows, agg: total, head: false }]
 
-  const onSort = (key: SortKey) =>
-    setSort((prev) =>
-      prev?.key === key
-        ? prev.dir === (ASC_FIRST.has(key) ? 1 : -1)
-          ? { key, dir: ASC_FIRST.has(key) ? -1 : 1 }
-          : null
-        : { key, dir: ASC_FIRST.has(key) ? 1 : -1 }
-    )
+  const onSort = (key: SortKey) => {
+    const first = ASC_FIRST.has(key) ? 1 : -1
+    setSort((previous) => {
+      const current = previous ?? { key: 'status', dir: 1 }
+      if (current.key !== key) return { key, dir: first }
+      return current.dir === first ? { key, dir: first === 1 ? -1 : 1 } : null
+    })
+  }
 
   const setOpen = (id: string, open: boolean) =>
     setExpanded((prev) => {
@@ -802,12 +811,12 @@ export function VmTable({
       return next
     })
   const toggle = (id: string) => setOpen(id, !expanded.has(id))
-  const onRowClick = (e: MouseEvent<HTMLDivElement>, vm: Vm) => {
+  const onRowClick = (e: MouseEvent<HTMLTableRowElement>, vm: Vm) => {
     if ((e.target as HTMLElement).closest(ROW_INTERACTIVE)) return
     if (String(window.getSelection?.() ?? '')) return
     toggle(vm.id)
   }
-  const onRowKey = (e: KeyboardEvent<HTMLDivElement>, vm: Vm) => {
+  const onRowKey = (e: KeyboardEvent<HTMLTableRowElement>, vm: Vm) => {
     if (e.target !== e.currentTarget) return
     if (e.key === 'Enter' && e.shiftKey) {
       e.preventDefault()
@@ -832,24 +841,46 @@ export function VmTable({
     }
   }
 
+  const activeKey = sort?.key ?? 'status'
+  const direction = sort?.dir ?? 1
+  const visible = columns.visible
+  const sortKeyFor = (key: ColumnKey): SortKey | undefined => {
+    if (METRIC_COLUMNS.some((k) => k === key)) return key as MetricKey
+    return (
+      {
+        vm: 'name',
+        status: 'status',
+        req: 'today',
+        usage: '5h',
+        cost: 'spend',
+      } as Partial<Record<ColumnKey, SortKey>>
+    )[key]
+  }
+  // Prefer the dedicated metric header if its classic group sorts by the same value.
+  const sortedColumn =
+    visible.find((k) => k === activeKey) ??
+    visible.find((k) => sortKeyFor(k) === activeKey)
+  const width = visible.reduce(
+    (sum, k) => sum + (k === 'vm' ? 0 : COLUMNS[k].width),
+    2.65
+  )
   return (
-    <div className='@container/vm-summary min-w-0 space-y-3'>
-      <SummaryBar a={total} />
-      <div className='flex flex-wrap items-center justify-between gap-2'>
-        <div className='flex flex-wrap items-center gap-2'>
-          <label className='text-xs text-muted-foreground' htmlFor={sortId}>
+    <div className='@container/vm-summary min-w-0'>
+      <div className='classic-tools'>
+        {filters}
+        <div className='classic-tools-end'>
+          <label htmlFor={sortId} className='sr-only'>
             排序指标
           </label>
           <select
             id={sortId}
-            className='min-h-8 max-w-full rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-2 focus-visible:outline-ring'
-            value={sort?.key ?? ''}
-            onChange={({ target }) => {
-              const key = target.value as SortKey | ''
-              setSort(key ? { key, dir: ASC_FIRST.has(key) ? 1 : -1 } : null)
+            className='classic-sort'
+            value={activeKey}
+            onChange={(e) => {
+              const key = e.target.value as SortKey
+              setSort({ key, dir: ASC_FIRST.has(key) ? 1 : -1 })
             }}
           >
-            <option value=''>跟随上方排序</option>
             {Object.entries(SORT_LABEL).map(([key, label]) => (
               <option key={key} value={key}>
                 {label}
@@ -858,310 +889,331 @@ export function VmTable({
           </select>
           <Button
             type='button'
-            size='icon'
             variant='outline'
+            size='icon'
             className='size-8'
-            disabled={!sort}
-            aria-label={sort?.dir === 1 ? '改为降序' : '改为升序'}
+            aria-label={direction === 1 ? '改为降序' : '改为升序'}
             onClick={() =>
-              setSort(
-                (current) =>
-                  current && { ...current, dir: current.dir === 1 ? -1 : 1 }
-              )
+              setSort({ key: activeKey, dir: direction === 1 ? -1 : 1 })
             }
           >
-            {sort?.dir === 1 ? (
-              <ArrowUp aria-hidden />
-            ) : (
-              <ArrowDown aria-hidden />
-            )}
+            {direction === 1 ? <ArrowUp /> : <ArrowDown />}
           </Button>
-        </div>
-        <div className='flex flex-wrap items-center gap-1.5'>
-          <ToggleBtn
-            on={grouped}
-            icon={Layers}
-            onClick={() => setGrouped(!grouped)}
+          <VmColumnPicker columns={columns} />
+          <Button
+            type='button'
+            variant={showSummary ? 'secondary' : 'outline'}
+            size='sm'
+            aria-expanded={showSummary}
+            aria-controls={showSummary ? summaryId : undefined}
+            onClick={() => setShowSummary(!showSummary)}
           >
-            按状态分组
-          </ToggleBtn>
-          <ToggleBtn on={pinSec} icon={Eye} onClick={() => setPinSec(!pinSec)}>
-            次要信息常显
-          </ToggleBtn>
+            <ChartNoAxesColumnIncreasing />
+            列表统计
+          </Button>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                type='button'
+                variant='outline'
+                size='icon'
+                className='size-8'
+                title='列表选项'
+                aria-label='列表选项'
+              >
+                <Settings2 />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              align='end'
+              aria-label='列表选项'
+              className='grid w-60 gap-2 text-sm'
+            >
+              <label className='flex items-center gap-2'>
+                <input
+                  type='checkbox'
+                  checked={grouped}
+                  onChange={() => setGrouped(!grouped)}
+                />
+                按状态分组
+              </label>
+              <label className='flex items-center gap-2'>
+                <input
+                  type='checkbox'
+                  checked={pinSec}
+                  onChange={() => setPinSec(!pinSec)}
+                />
+                次要信息常显
+              </label>
+              {zoomControl}
+            </PopoverContent>
+          </Popover>
+          {viewControls}
         </div>
       </div>
+      {showSummary ? (
+        <section
+          id={summaryId}
+          aria-label='列表统计'
+          className='mb-3 grid gap-2'
+        >
+          <h3 className='text-xs font-semibold'>
+            当前列表 {total.n} / 当前平台 {fleetCount}
+          </h3>
+          <SummaryBar a={total} />
+        </section>
+      ) : null}
       <span role='status' className='sr-only'>
-        {sort
-          ? `按${SORT_LABEL[sort.key]}${sort.dir === 1 ? '升序' : '降序'}排列`
-          : '跟随上方排序'}
+        按{SORT_LABEL[activeKey]}
+        {direction === 1 ? '升序' : '降序'}排列
       </span>
-      <div
-        data-vm-table
-        data-pin={pinSec}
-        className='min-w-0 rounded-lg border border-border/60 bg-card text-[13px]'
-      >
+      {!rows.length && emptyState ? (
+        emptyState
+      ) : (
         <div
-          className='@container/vm-list min-w-0'
-          role='table'
-          aria-label='槽位列表'
+          data-vm-table
+          data-pin={pinSec}
+          className='classic-frame'
           style={zoom === 100 ? undefined : { zoom: zoom / 100 }}
         >
           <div
-            role='row'
-            className={cn(
-              'sr-only rounded-t-lg border-b bg-muted/55 text-xs font-medium text-muted-foreground @min-[64rem]/vm-list:not-sr-only @min-[64rem]/vm-list:grid',
-              COLUMN_GRID
-            )}
+            className='classic-scroll'
+            role='region'
+            aria-label='账号列表横向滚动'
+            tabIndex={0}
           >
-            <div role='columnheader' className='px-3 py-2'>
-              账号
-            </div>
-            {COLS.map((c) => {
-              const active = sort && c.sorts?.includes(sort.key)
-              const key = c.sorts?.[0]
-              return (
-                <div
-                  key={c.label}
-                  role='columnheader'
-                  aria-sort={
-                    active
-                      ? sort.dir > 0
-                        ? 'ascending'
-                        : 'descending'
-                      : undefined
-                  }
-                  className={cn(
-                    'flex min-w-0 items-center px-3 py-2',
-                    active && 'font-semibold text-foreground'
-                  )}
-                >
-                  {key ? (
-                    <>
-                      <span className='@min-[64rem]/vm-list:hidden'>
-                        {c.label}
-                      </span>
-                      <button
-                        type='button'
-                        className='hidden min-h-6 items-center gap-1 rounded-sm hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring @min-[64rem]/vm-list:inline-flex'
-                        title='点击排序'
-                        onClick={() => onSort(key)}
-                      >
-                        {c.label}
-                        {active ? (
-                          sort.dir > 0 ? (
-                            <ArrowUp aria-hidden className='size-3' />
-                          ) : (
-                            <ArrowDown aria-hidden className='size-3' />
+            <table
+              className='classic-table'
+              aria-label='槽位列表'
+              style={{ minWidth: `calc(var(--account-width) + ${width}rem)` }}
+            >
+              <colgroup>
+                {visible.map((key) => (
+                  <col
+                    key={key}
+                    style={{
+                      width:
+                        key === 'vm'
+                          ? 'var(--account-width)'
+                          : `${COLUMNS[key].width}rem`,
+                    }}
+                  />
+                ))}
+                <col style={{ width: '2.65rem' }} />
+              </colgroup>
+              <thead>
+                <tr>
+                  {visible.map((key) => {
+                    const sortKey = sortKeyFor(key),
+                      active = sortedColumn === key
+                    return (
+                      <th
+                        key={key}
+                        scope='col'
+                        data-column={key}
+                        aria-sort={
+                          active
+                            ? direction === 1
+                              ? 'ascending'
+                              : 'descending'
+                            : undefined
+                        }
+                        draggable={key !== 'vm'}
+                        onDragStart={(e) => {
+                          e.dataTransfer.effectAllowed = 'move'
+                          e.dataTransfer.setData('text/plain', key)
+                          setDragging(key)
+                        }}
+                        onDragEnd={() => setDragging(null)}
+                        onDragOver={(e) => {
+                          if (dragging && key !== 'vm') e.preventDefault()
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault()
+                          if (dragging) columns.move(dragging, key)
+                          setDragging(null)
+                        }}
+                        onKeyDown={(e) => {
+                          if (
+                            !e.altKey ||
+                            key === 'vm' ||
+                            !['ArrowLeft', 'ArrowRight'].includes(e.key)
                           )
-                        ) : null}
-                      </button>
-                    </>
-                  ) : (
-                    c.label
-                  )}
-                </div>
-              )
-            })}
-          </div>
-          {sections.map((sec) => {
-            const isCol = sec.head && collapsed.has(sec.key as VmZone)
-            const pct = aggPct(sec.agg)
-            return (
-              <Fragment key={sec.key}>
-                {sec.head ? (
-                  <div role='rowgroup'>
-                    <div role='row' className='border-b bg-muted/50'>
-                      <div
-                        role='cell'
-                        aria-colspan={7}
-                        className='flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2 text-xs text-muted-foreground'
+                            return
+                          e.preventDefault()
+                          const next =
+                            visible[
+                              visible.indexOf(key) +
+                                (e.key === 'ArrowLeft' ? -1 : 1)
+                            ]
+                          if (next) columns.move(key, next)
+                        }}
+                        tabIndex={!sortKey && key !== 'vm' ? 0 : undefined}
                       >
-                        <button
-                          type='button'
-                          aria-expanded={!isCol}
-                          className='inline-flex items-center gap-1.5 rounded-sm font-semibold text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring'
-                          onClick={() => toggleGroup(sec.key as VmZone)}
+                        {sortKey ? (
+                          <button type='button' onClick={() => onSort(sortKey)}>
+                            {COLUMNS[key].label}
+                            {active ? (
+                              direction === 1 ? (
+                                <ArrowUp aria-hidden />
+                              ) : (
+                                <ArrowDown aria-hidden />
+                              )
+                            ) : null}
+                          </button>
+                        ) : (
+                          COLUMNS[key].label
+                        )}
+                      </th>
+                    )
+                  })}
+                  <th scope='col' className='classic-actions'>
+                    <span className='sr-only'>操作</span>
+                  </th>
+                </tr>
+              </thead>
+              {sections.map((sec) => {
+                const zone = sec.head
+                  ? ZONES.find((z) => z.key === sec.key)
+                  : undefined
+                const isCollapsed = zone && collapsed.has(zone.key)
+                return (
+                  <tbody key={sec.key} role='rowgroup'>
+                    {zone ? (
+                      <tr role='row'>
+                        <td
+                          colSpan={visible.length + 1}
+                          role='cell'
+                          className='classic-group'
                         >
-                          <ChevronRight
-                            className={cn(
-                              'size-3 transition-transform motion-reduce:transition-none',
-                              !isCol && 'rotate-90'
-                            )}
-                          />
-                          {ZONES.find((z) => z.key === sec.key)?.label}
-                          <span className='font-mono font-normal text-muted-foreground'>
-                            {sec.rows.length} 台
-                          </span>
-                        </button>
-                        <span>
-                          成功率{' '}
-                          <b className='font-mono text-foreground'>
-                            {fmtHealthPct(pct)}
-                          </b>
-                        </span>
-                        <span>
-                          24h 请求{' '}
-                          <b className='font-mono text-foreground'>
-                            {fmtNum(sec.agg.req)}
-                          </b>
-                        </span>
-                        <span>
-                          7D 花费{' '}
-                          <b className='font-mono text-foreground'>
-                            {sec.agg.spend ? fmtUsd(sec.agg.spend, 2) : '—'}
-                          </b>
-                        </span>
-                        <span>
-                          席位{' '}
-                          <b className='font-mono text-foreground'>
-                            {sec.agg.used}/{sec.agg.cap}
-                          </b>
-                        </span>
-                        {isCol ? (
-                          <span className='text-[color:var(--text-tertiary)]'>
-                            已折叠
-                          </span>
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-                {isCol
-                  ? null
-                  : sec.rows.map((r) => {
-                      const vm = r.vm
-                      const open = expanded.has(vm.id)
-                      const label = scheduleStateLabel(vm)
-                      const detailId = `vm-row-detail-${vm.id}`
-                      return (
-                        <div key={vm.id} role='rowgroup'>
-                          <div
-                            data-vm-row
-                            role='row'
-                            tabIndex={0}
-                            aria-expanded={open}
-                            aria-label={`${vm.id}，${label}。Enter 展开明细，Shift+Enter 打开详情`}
-                            className={cn(
-                              'relative grid min-w-0 cursor-pointer grid-cols-1 gap-y-3 border-b border-border/70 px-3 py-3 outline-none hover:bg-muted/35 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset @min-[20rem]/vm-list:grid-cols-2 @min-[64rem]/vm-list:gap-y-0 @min-[64rem]/vm-list:px-0',
-                              COLUMN_GRID,
-                              open && 'bg-muted/35'
-                            )}
-                            onClick={(e) => onRowClick(e, vm)}
-                            onKeyDown={(e) => onRowKey(e, vm)}
+                          <button
+                            type='button'
+                            aria-expanded={!isCollapsed}
+                            onClick={() => toggleGroup(zone.key)}
                           >
-                            <div
-                              role='cell'
-                              data-vm-cell='account'
-                              className='min-w-0 @min-[20rem]/vm-list:col-span-2 @min-[64rem]/vm-list:col-span-1 @min-[64rem]/vm-list:px-3'
-                            >
-                              <AccountCell
-                                vm={vm}
-                                inflight={r.inflight}
-                                showMeta={pinSec}
-                              />
-                              <div className='mt-1 flex flex-wrap items-center gap-0.5'>
-                                <Button
-                                  type='button'
-                                  size='icon'
-                                  variant='ghost'
-                                  className='size-7 text-muted-foreground'
-                                  aria-expanded={open}
-                                  aria-controls={detailId}
-                                  aria-label={`${open ? '收起' : '展开'} ${vm.id} 明细`}
-                                  title={
-                                    open ? '收起明细' : '展开明细（Enter）'
-                                  }
-                                  onClick={() => toggle(vm.id)}
-                                >
-                                  <ChevronDown
-                                    aria-hidden
-                                    className={cn(
-                                      'size-4 motion-safe:transition-transform',
-                                      open && 'rotate-180'
-                                    )}
-                                  />
-                                </Button>
-                                <Button
-                                  type='button'
-                                  size='icon'
-                                  variant='ghost'
-                                  className='size-7 text-muted-foreground'
-                                  title='打开详情页（Shift+Enter）'
-                                  aria-label={`打开 ${vm.id} 详情页`}
-                                  onClick={() => actions.openDetail(vm)}
-                                >
-                                  <ExternalLink
-                                    aria-hidden
-                                    className='size-3.5'
-                                  />
-                                </Button>
-                                <VmActionMenu vm={vm} />
-                              </div>
-                            </div>
-                            {COLS.map((c) => (
-                              <div
-                                key={c.id}
-                                role='cell'
-                                data-vm-cell={c.id}
-                                className={cn(
-                                  'min-w-0 @min-[20rem]/vm-list:px-2 @min-[64rem]/vm-list:px-3',
-                                  (c.id === 'quota' || c.id === 'cost') &&
-                                    '@min-[20rem]/vm-list:col-span-2 @min-[64rem]/vm-list:col-span-1'
-                                )}
-                              >
-                                <div
-                                  aria-hidden
-                                  className='mb-1.5 text-xs font-medium text-muted-foreground @min-[64rem]/vm-list:hidden'
-                                >
-                                  {c.label}
-                                </div>
-                                {vm.gemini &&
-                                (c.id === 'requests' ||
-                                  c.id === 'quota' ||
-                                  c.id === 'cost') ? (
-                                  <span className={TERT}>—</span>
-                                ) : (
-                                  c.cell(r, now)
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                          {open && vm.gemini ? (
-                            <div
-                              id={detailId}
-                              className='flex flex-wrap items-center gap-3 border-b px-4 py-2 text-xs [overflow-wrap:anywhere] text-muted-foreground'
-                            >
-                              <span>{vm.email || '未提供邮箱'}</span>
-                              <span>
-                                {vm.gemini.account?.plan || '未提供订阅'}
-                              </span>
-                              <ProxyChip vm={vm} compact />
-                              <Button
-                                type='button'
-                                size='sm'
-                                variant='ghost'
-                                onClick={() => actions.openDetail(vm)}
-                              >
-                                管理 Gemini 凭证
-                              </Button>
-                            </div>
-                          ) : open ? (
-                            <VmRowDetail
-                              id={detailId}
-                              vm={vm}
-                              accounts={accounts}
-                              now={now}
-                              onOpenDetail={() => actions.openDetail(vm)}
+                            <ChevronRight
+                              aria-hidden
+                              className={cn(
+                                'size-3',
+                                !isCollapsed && 'rotate-90'
+                              )}
                             />
-                          ) : null}
-                        </div>
-                      )
-                    })}
-              </Fragment>
-            )
-          })}
+                            {zone.label} · {sec.rows.length} 台
+                          </button>
+                          <span>成功率 {fmtHealthPct(aggPct(sec.agg))}</span>
+                          <span>24h 请求 {fmtNum(sec.agg.req)}</span>
+                          <span>7D 花费 {fmtUsd(sec.agg.spend, 2)}</span>
+                          <span>
+                            席位 {sec.agg.used}/{sec.agg.cap}
+                          </span>
+                        </td>
+                      </tr>
+                    ) : null}
+                    {!isCollapsed &&
+                      sec.rows.map((r) => {
+                        const { vm } = r
+                        const open = expanded.has(vm.id)
+                        const detailId = `vm-row-detail-${vm.id}`
+                        return (
+                          <Fragment key={vm.id}>
+                            <tr
+                              data-vm-row
+                              role='row'
+                              tabIndex={0}
+                              aria-expanded={open}
+                              aria-label={`${vm.id}，${scheduleStateLabel(vm)}。Enter 展开明细，Shift+Enter 打开详情`}
+                              className={cn(
+                                'classic-data-row',
+                                open && 'classic-open'
+                              )}
+                              onClick={(e) => onRowClick(e, vm)}
+                              onKeyDown={(e) => onRowKey(e, vm)}
+                            >
+                              {visible.map((key) =>
+                                key === 'vm' ? (
+                                  <th
+                                    scope='row'
+                                    data-vm-cell='account'
+                                    key={key}
+                                    className={cn(
+                                      'classic-pinned',
+                                      tierVisual(vm).row
+                                    )}
+                                  >
+                                    <AccountCell
+                                      r={r}
+                                      showMeta={pinSec}
+                                      open={open}
+                                      detailId={detailId}
+                                      toggle={() => toggle(vm.id)}
+                                      openDetail={() => actions.openDetail(vm)}
+                                    />
+                                  </th>
+                                ) : (
+                                  <td key={key} data-vm-cell={key}>
+                                    {cellValue(key, r, now)}
+                                  </td>
+                                )
+                              )}
+                              <td className='classic-actions'>
+                                <VmActionMenu vm={vm} />
+                              </td>
+                            </tr>
+                            {open ? (
+                              <tr role='row'>
+                                <td
+                                  role='cell'
+                                  colSpan={visible.length + 1}
+                                  className='classic-expanded'
+                                >
+                                  <div className='classic-detail-width'>
+                                    {vm.gemini ? (
+                                      <div
+                                        id={detailId}
+                                        role='region'
+                                        aria-label={`${vm.id} 明细`}
+                                        className='flex flex-wrap items-center gap-3 border-b p-3 text-xs'
+                                      >
+                                        <span>{vm.email || '未提供邮箱'}</span>
+                                        <span>
+                                          {vm.gemini.account?.plan ||
+                                            '未提供订阅'}
+                                        </span>
+                                        <span>宿主机 · CRAGAnti</span>
+                                        <ProxyChip vm={vm} compact />
+                                        <Button
+                                          size='sm'
+                                          variant='ghost'
+                                          onClick={() => actions.openDetail(vm)}
+                                        >
+                                          管理 Gemini 凭证
+                                        </Button>
+                                      </div>
+                                    ) : (
+                                      <VmRowDetail
+                                        id={detailId}
+                                        vm={vm}
+                                        accounts={accounts}
+                                        now={now}
+                                        onOpenDetail={() =>
+                                          actions.openDetail(vm)
+                                        }
+                                      />
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            ) : null}
+                          </Fragment>
+                        )
+                      })}
+                  </tbody>
+                )
+              })}
+            </table>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }
