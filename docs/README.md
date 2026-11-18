@@ -3,6 +3,7 @@
 - [DEPLOY.md](DEPLOY.md) — 安装与升级（含 `deploy/install.sh` 一键安装 / 更新）
 - [托管节点内核排障与验收](managed-kernel-troubleshooting.md) — CRAG 缺包、控制面连接、单槽重装、Claude 版本与账号状态的分层检查
 - [nginx-shell.md](nginx-shell.md) — 集群 / 槽运维终端 WebSocket 连不上时查 nginx Upgrade
+- [上游开发流程](DEVELOPMENT.md) — 官方仓库的分支与发布流程
 - [开发验证与 CI](../README.md#开发验证与-ci) — 手动核心集、指定测试文件与 fork 的定向回归 / Shard 镜像门禁
 - [CRAG 面板历史复用](performance/crag-panel-history-reuse.md) — 长会话回放、CPU 对照和缓存边界
 - [FORMAT.md](FORMAT.md) — 只格式化改动文件；Biome / gofmt / Prettier 的配置与手动检查（LF）

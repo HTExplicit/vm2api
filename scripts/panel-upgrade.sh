@@ -116,6 +116,8 @@ if [ -d .git ]; then
 else
   IMAGE_TAG=$TAG
   [ "$ARCH" != arm64 ] || IMAGE_TAG=$TAG-arm64
+  # Let Compose resolve the target for this pull before persisting the tag.
+  VM2API_IMAGE_TAG="$IMAGE_TAG" compose pull vm2api
   touch .env
   if grep -q '^VM2API_IMAGE_TAG=' .env; then
     sed -i.bak "s|^VM2API_IMAGE_TAG=.*|VM2API_IMAGE_TAG=$IMAGE_TAG|" .env
@@ -123,7 +125,6 @@ else
   else
     printf '\nVM2API_IMAGE_TAG=%s\n' "$IMAGE_TAG" >> .env
   fi
-  compose pull vm2api
   # Image upgrades do not refresh Compose files. Add only the bind missing
   # from the effective configuration; leave operator files and mounts alone.
   CONFIG=$(compose config --format json vm2api)
