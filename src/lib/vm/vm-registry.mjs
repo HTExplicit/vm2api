@@ -4,6 +4,7 @@
  * (lib/vm-db-sync.mjs) sees every change.
  */
 import fs from 'node:fs'
+import { isDeepStrictEqual } from 'node:util'
 import path from 'node:path'
 import { atomicWriteJson, invalidateReadCache, listVmRecordFiles, readJsonCached } from './vm-file.mjs'
 import {
@@ -52,7 +53,7 @@ import { isOpenaiCredentialCurrent } from '../oauth/openai-auth-state.mjs'
 import { evaluateCodexQuotaSchedule } from '../pool/codex-slot-pool.mjs'
 import { effectiveOpenAIPolicy, normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import { runtimeKind } from './runtime-kind.mjs'
-import { hasBoundExit } from './egress.mjs'
+import { boundProxyUrl, hasBoundExit } from './egress.mjs'
 import { ensureSlotSmbios } from './machine-spec.mjs'
 
 export { isCodexVm, normalizeVmKind } from './vm-kind.mjs'
@@ -639,6 +640,24 @@ export function clearScheduleHold(projectRoot, id, reason, { tag = null } = {}) 
     if (vm.schedule_hold?.reason !== reason) return false
     applyClearHold(vm, reason, { tag })
   })
+}
+
+/** A current proxy success may clear an obsolete hold, but only after verifying the live binding. */
+export function clearVerifiedProxyHold(projectRoot, id, { proxyId, proxyUrl, hold, status }) {
+  let cleared = false
+  const vm = writeSchedule(projectRoot, id, (record) => {
+    if (
+      record.proxy?.id !== proxyId ||
+      boundProxyUrl(record.proxy) !== proxyUrl ||
+      record.status !== status ||
+      record.schedule_hold?.reason !== HOLD_PROXY ||
+      !isDeepStrictEqual(record.schedule_hold, hold)
+    )
+      return false
+    applyClearHold(record, HOLD_PROXY)
+    cleared = true
+  })
+  return cleared ? vm : null
 }
 
 /**

@@ -45,9 +45,12 @@ import {
 import { applyClaudeSSELineToMessage, createClaudeMessageAssembler } from '../protocol/convert.mjs'
 import {
   clientCancelledResult,
+  ErrorCode,
+  isClaudeSlotOAuthError,
   isClientCancelledResult,
   isCompleteAssistantMessage,
   isWrapConnectionError,
+  mapUpstreamError,
 } from '../core/errors.mjs'
 import { extraHeadersFromLimitError } from '../pool/quota-window.mjs'
 import { createStreamTiming, isGeneratedContentEvent } from '../protocol/stream-timing.mjs'
@@ -823,7 +826,10 @@ function mockScenario(exec) {
   }
 }
 
-function restoreCragPolicyBlock(result) {
+function restoreInferenceFailure(result, requestPath = '/internal/v1/messages') {
+  if (requestPath === '/internal/v1/messages' && isClaudeSlotOAuthError(result?.body)) {
+    return slotOAuthUnavailable(result)
+  }
   if (!result || result.ok || result.committed || isClientCancelledResult(result)) return result
   const facts = result.providerResult
   if (
@@ -846,6 +852,24 @@ function restoreCragPolicyBlock(result) {
         code: 'crag_policy_blocked',
         message: 'Gateway kernel rejected the request cache controls before dispatch (CRAG_CACHE_CONTROL)',
         details: { retryable: false },
+      },
+    },
+  }
+}
+
+export function slotOAuthUnavailable(result = {}) {
+  return {
+    ...result,
+    ok: false,
+    status: 503,
+    transportError: false,
+    terminalState: result.committed ? 'incomplete' : 'rejected',
+    body: {
+      type: 'error',
+      error: {
+        type: 'worker_error',
+        code: ErrorCode.SLOT_OAUTH_UNAVAILABLE,
+        message: 'The VM slot could not load its Claude OAuth credential',
       },
     },
   }
@@ -1267,7 +1291,9 @@ async function streamGoWorkerRaw({
     const headers = mergeRateLimitHeaders(publicHeaders(response.headers))
     observedHeaders = headers
     handoff?.observeHeaders(response.headers)
-    if ((response.statusCode || 0) < 200 || (response.statusCode || 0) >= 300) {
+    const claudeMessages = requestPath === '/internal/v1/messages'
+    const jsonReply = claudeMessages && /^application\/json\b/i.test(response.headers['content-type'] || '')
+    if (jsonReply || (response.statusCode || 0) < 200 || (response.statusCode || 0) >= 300) {
       const data = await readAll(response, handoff ? MAX_BODY : 1024 * 1024)
       let parsedBody = await inferenceCodec.decode(data, { status: response.statusCode, signal })
       if (handoff) parsedBody = handoff.consumeBody(parsedBody)
@@ -1400,6 +1426,10 @@ async function streamGoWorkerRaw({
       if (!event) return event
       diagnostics.observe(event, receivedAt || Date.now())
       timing.observe(event, receivedAt)
+      if (claudeMessages && isClaudeSlotOAuthError(event)) {
+        lastError = slotOAuthUnavailable().body
+        return lastError
+      }
       if (event.type === 'response_headers' && event.headers && typeof event.headers === 'object') {
         sseRateHeaders = { ...sseRateHeaders, ...event.headers }
       }
@@ -1456,7 +1486,14 @@ async function streamGoWorkerRaw({
       if (stop) sseStop = stop
       return event
     }
-    const shouldCommit = (event) => isDownstreamCommitEvent(event) || (!!event && event === responsesTerminal)
+    const shouldCommit = (event) =>
+      lastError?.error?.code !== ErrorCode.SLOT_OAUTH_UNAVAILABLE &&
+      (isDownstreamCommitEvent(event) || (!!event && event === responsesTerminal))
+    const publicSseLine = (line, event) => {
+      if (event?.error?.code !== ErrorCode.SLOT_OAUTH_UNAVAILABLE) return line
+      const { body } = mapUpstreamError(503, event)
+      return `data: ${JSON.stringify({ type: 'error', ...body })}`
+    }
     const firstByteMs = Math.max(0, Number(timeoutMs) || 0)
     const idleMs = Math.max(0, Number(idleTimeoutMs) || 0)
     let lastChunkAt = Date.now()
@@ -1524,7 +1561,7 @@ async function streamGoWorkerRaw({
             const lines = sseRestorer
               ? [...sseRestorer.before(sourceLine), await sseRestorer.line(sourceLine)]
               : [sourceLine]
-            for (const line of lines) {
+            for (let line of lines) {
               if (line) {
                 sawChunk = true
                 lastChunkAt = Date.now()
@@ -1535,6 +1572,7 @@ async function streamGoWorkerRaw({
                 if (piece && piece !== '[DONE]') {
                   dataBuf = dataBuf ? `${dataBuf}\n${piece}` : piece
                   const event = observeSseEvent(takeSseEvent())
+                  line = publicSseLine(line, event)
                   if (shouldCommit(event)) await flushCommit()
                 }
               } else if (line === '') {
@@ -1579,6 +1617,7 @@ async function streamGoWorkerRaw({
           if (piece && piece !== '[DONE]') {
             dataBuf = dataBuf ? `${dataBuf}\n${piece}` : piece
             const event = observeSseEvent(takeSseEvent())
+            buffer = publicSseLine(buffer, event)
             if (shouldCommit(event)) await flushCommit()
           }
         }
@@ -2202,7 +2241,24 @@ export async function countTokensViaWorker(exec, { body, headers = {}, timeoutMs
   return runSlotOauth(exec, 'count-tokens', { body, headers, timeoutMs })
 }
 
-const EMPTY_CONTENT_VERDICT = 'native request completed without response content'
+export const EMPTY_CONTENT_VERDICT = 'native request completed without response content'
+
+export function isRecoverableThinkingOnly(result) {
+  const facts = result?.providerResult
+  return (
+    !!result &&
+    !result.ok &&
+    facts?.schema_version === 2 &&
+    facts.http_status === 200 &&
+    facts.provider_complete === true &&
+    facts.usage_complete === true &&
+    facts.stop_reason === 'max_tokens' &&
+    facts.validation_error?.message === EMPTY_CONTENT_VERDICT &&
+    /^msg_[A-Za-z0-9_-]+$/.test(facts.message_id || '') &&
+    typeof facts.model === 'string' &&
+    !!facts.usage
+  )
+}
 
 /**
  * Records which SSE events actually reached `onEvent`, so a recovered
@@ -2222,7 +2278,7 @@ function trackDownstreamEvents(onEvent) {
           if (event?.type === 'message_start') state.messageStarted = true
           else if (event?.type === 'content_block_start' && Number.isInteger(event.index)) state.open.add(event.index)
           else if (event?.type === 'content_block_stop') state.open.delete(event.index)
-          else if (['message_delta', 'message_stop', 'error'].includes(event?.type)) state.terminal = true
+          else if (['message_delta', 'message_stop'].includes(event?.type)) state.terminal = true
         } catch {}
       }
       return onEvent(line)
@@ -2248,20 +2304,7 @@ function trackDownstreamEvents(onEvent) {
 export function recoverThinkingOnlyMaxTokens(result, { onEvent, onCommit, downstream = null } = {}) {
   const facts = result?.providerResult
   const writer = typeof onEvent === 'function'
-  if (
-    !result ||
-    result.ok ||
-    (result.committed && writer && (!downstream || downstream.terminal)) ||
-    facts?.schema_version !== 2 ||
-    facts.http_status !== 200 ||
-    facts.provider_complete !== true ||
-    facts.usage_complete !== true ||
-    facts.stop_reason !== 'max_tokens' ||
-    facts.validation_error?.message !== EMPTY_CONTENT_VERDICT ||
-    !/^msg_[A-Za-z0-9_-]+$/.test(facts.message_id || '') ||
-    typeof facts.model !== 'string' ||
-    !facts.usage
-  )
+  if (!isRecoverableThinkingOnly(result) || (result.committed && writer && (!downstream || downstream.terminal)))
     return result
   const usage = facts.usage
   const body = {
@@ -2319,11 +2362,15 @@ export function recoverThinkingOnlyMaxTokens(result, { onEvent, onCommit, downst
 }
 
 export async function callGoWorker(opts = {}) {
-  return recoverThinkingOnlyMaxTokens(restoreCragPolicyBlock(await callGoWorkerRaw(opts)), {})
+  const result = restoreInferenceFailure(await callGoWorkerRaw(opts), opts.requestPath)
+  return recoverThinkingOnlyMaxTokens(result, {})
 }
 
 export async function streamGoWorker(opts = {}) {
   const tracked = trackDownstreamEvents(opts.onEvent)
-  const result = restoreCragPolicyBlock(await streamGoWorkerRaw({ ...opts, onEvent: tracked.onEvent }))
+  const result = restoreInferenceFailure(
+    await streamGoWorkerRaw({ ...opts, onEvent: tracked.onEvent }),
+    opts.requestPath,
+  )
   return recoverThinkingOnlyMaxTokens(result, { ...opts, onEvent: opts.onEvent, downstream: tracked.state })
 }

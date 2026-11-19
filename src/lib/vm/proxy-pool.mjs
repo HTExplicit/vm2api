@@ -204,8 +204,23 @@ export function proxyGeoV6Of(proxy) {
   }
 }
 
+const probeRevisions = new WeakMap()
+const proxyRevision = (proxy) => probeRevisions.get(proxy) || 0
+function invalidateProxyProbe(proxy) {
+  const revision = proxyRevision(proxy) + 1
+  probeRevisions.set(proxy, revision)
+  return revision
+}
+
+const MANUALLY_DISABLED = 'proxy_manually_disabled'
+function isManuallyDisabled(proxy) {
+  return !proxy.enabled && proxy.status === 'dead' && (!proxy.last_error || proxy.last_error === MANUALLY_DISABLED)
+}
+
 function setBoundVmIds(proxy, ids) {
   const next = parseBoundVmIds(ids)
+  const current = boundVmIdsOf(proxy)
+  if (next.length !== current.length || next.some((id, index) => id !== current[index])) invalidateProxyProbe(proxy)
   proxy.bound_vm_ids = next
   proxy.bound_vm_id = next[0] || null
   return next
@@ -417,6 +432,7 @@ export class ProxyPool extends EventEmitter {
     onDisableVm,
     onDisconnectVm,
     onEnableVm,
+    isVmProxyManuallyDisabled,
     egressCheck,
     repairEgress,
     geoLookup,
@@ -432,7 +448,8 @@ export class ProxyPool extends EventEmitter {
     this.repo = new ProxiesRepo(this.db)
     this.onDisableVm = onDisableVm // (vmId, reason, proxyId) => void
     this.onDisconnectVm = onDisconnectVm // (vmId, reason, proxyId) => void — experimental tear-down
-    this.onEnableVm = onEnableVm // (vmId, reason, proxyId) => void
+    this.onEnableVm = onEnableVm
+    this.isVmProxyManuallyDisabled = isVmProxyManuallyDisabled
     this.egressCheck = egressCheck
     this.repairEgress = repairEgress
     // Injectable so geo detection is testable without leaving the machine.
@@ -656,10 +673,7 @@ export class ProxyPool extends EventEmitter {
     const p = this.state.proxies.find((x) => x.id === localEgressIdForNode(nodeId) && localEgressNodeId(x.id))
     // An operator-disabled row stays out of automatic probes, as in probeAll.
     if (!p || !p.enabled) return null
-    const result = await this.probeOne(p)
-    this._applyProbeResult(p, result)
-    this.save()
-    return result
+    return this._probeAndApply(p)
   }
 
   /** The local row a slot must use: its own node's, else the control plane's. */
@@ -973,10 +987,12 @@ export class ProxyPool extends EventEmitter {
   setEnabled(proxyId, enabled) {
     const p = this.state.proxies.find((x) => x.id === proxyId)
     if (!p) return { ok: false, error: 'proxy_not_found' }
+    invalidateProxyProbe(p)
     p.enabled = !!enabled
     if (!enabled) {
       p.status = 'dead'
-      this._cascadeDisableVm(p, 'proxy_manually_disabled')
+      p.last_error = MANUALLY_DISABLED
+      this._cascadeDisableVm(p, MANUALLY_DISABLED)
     } else {
       p.status = 'unknown'
       p.consecutive_failures = 0
@@ -1036,6 +1052,7 @@ export class ProxyPool extends EventEmitter {
         }
       p.label = label
       p.domain_forward = domainForward
+      if (domainChanged) invalidateProxyProbe(p)
       this.save()
       return { ok: true, proxy: this.publicProxy(p), connection_changed: false, domain_forward_changed: domainChanged }
     }
@@ -1082,6 +1099,7 @@ export class ProxyPool extends EventEmitter {
     p.raw = socksEndpoint(next.host, next.port)
     p.label = label
     p.domain_forward = domainForward
+    if (changed || domainChanged) invalidateProxyProbe(p)
     if (changed) {
       // A row ID survives edits; its old exit location does not describe the new connection.
       for (const key of Object.keys(p)) if (key.startsWith('geo_')) p[key] = null
@@ -1163,6 +1181,7 @@ export class ProxyPool extends EventEmitter {
     if (!vmId) return { ok: false, error: 'vm_id_required' }
     const p = this.state.proxies.find((x) => proxyHasVm(x, vmId))
     if (!p) return { ok: false, error: 'no_bound_proxy' }
+    if (this._isManuallyDisabled(p)) return { ok: true, skipped: true, reason: MANUALLY_DISABLED }
     const blocked = proxyBlockedReason(p, this.state.config.ipv6_enabled)
     if (blocked) return { ok: true, skipped: true, reason: blocked }
     this._applyProbeResult(
@@ -1202,22 +1221,11 @@ export class ProxyPool extends EventEmitter {
     }
   }
 
-  _cascadeEnableVm(proxy, reason) {
-    if (typeof this.onEnableVm !== 'function') return
-    for (const vmId of boundVmIdsOf(proxy)) {
-      try {
-        this.onEnableVm(vmId, reason, proxy.id)
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-
   /**
    * SOCKS5 method-selection probe. TCP connect alone is not healthy:
    * an HTTP port that accepts the socket and never answers 0x05 is a failure.
    */
-  async probeOne(proxy) {
+  async probeOne(proxy, { isCurrent = () => true, repair = true } = {}) {
     const blocked = proxyBlockedReason(proxy, this.state.config.ipv6_enabled)
     if (blocked) return { ok: false, scope: 'policy', error: blocked, latency_ms: null }
     if (isLocalEgressProxy(proxy)) {
@@ -1240,17 +1248,19 @@ export class ProxyPool extends EventEmitter {
     }
     const socks = await this._probeSocks(proxy)
     if (socks.scope === 'policy') return socks
+    if (!isCurrent()) return { ok: false, scope: 'stale', error: 'proxy_probe_stale', latency_ms: null }
     if (!socks.ok) return { ...socks, scope: 'socks' }
     // Unused proxies need no egress network; probing must not consume Docker subnets.
     if (!boundVmIdsOf(proxy).length) return { ...socks, scope: 'socks' }
     if (typeof this.egressCheck !== 'function') return { ...socks, scope: 'socks' }
     let eg = this.egressCheck(proxy)
-    if (!eg?.ok && typeof this.repairEgress === 'function') {
+    if (!eg?.ok && repair && typeof this.repairEgress === 'function') {
       try {
         await this.repairEgress(proxy)
       } catch {
         /* keep egress failure */
       }
+      if (!isCurrent()) return { ok: false, scope: 'stale', error: 'proxy_probe_stale', latency_ms: null }
       eg = this.egressCheck(proxy)
     }
     if (eg?.ok) return { ...socks, scope: 'socks' }
@@ -1544,13 +1554,53 @@ export class ProxyPool extends EventEmitter {
     })
   }
 
-  async probeById(proxyId) {
+  _isManuallyDisabled(proxy) {
+    if (isManuallyDisabled(proxy)) return true
+    // Older writes left last_error behind when an operator disabled a failed row.
+    return (
+      !proxy.enabled &&
+      proxy.status === 'dead' &&
+      boundVmIdsOf(proxy).some((vmId) => this.isVmProxyManuallyDisabled?.(vmId, proxy.id))
+    )
+  }
+
+  async _probeAndApply(proxy, { reloadedVmIds = [] } = {}) {
+    let revision = invalidateProxyProbe(proxy)
+    const keys = ['ipv6_enabled', 'dns_primary', 'dns_disable_svcb_https']
+    const settings = keys.map((key) => this.state.config[key])
+    const isCurrent = () =>
+      this.state.proxies.includes(proxy) &&
+      proxyRevision(proxy) === revision &&
+      keys.every((key, index) => this.state.config[key] === settings[index])
+    const disabled = this._isManuallyDisabled(proxy)
+    const probe = await this.probeOne({ ...proxy }, { isCurrent, repair: !disabled })
+    if (probe.scope === 'policy' && proxyBlockedReason(proxy, this.state.config.ipv6_enabled)) return probe
+    if (!isCurrent()) return { ok: false, scope: 'stale', error: 'proxy_probe_stale', latency_ms: null }
+    if (disabled) return probe
+    revision = this._applyProbeResult(proxy, probe)
+    this.save()
+    if (probe.ok && proxy.enabled && probe.scope !== 'node' && typeof this.onEnableVm === 'function') {
+      for (const vmId of boundVmIdsOf(proxy)) {
+        if (!isCurrent()) break
+        try {
+          await this.onEnableVm(vmId, 'proxy_recovered', proxy.id, {
+            isCurrent,
+            proxy: this._withAuth(proxy),
+            reloaded: reloadedVmIds.includes(vmId),
+          })
+        } catch {
+          // A failed slot check leaves its hold for the next probe.
+        }
+      }
+    }
+    return probe
+  }
+
+  async probeById(proxyId, opts) {
     const p = this.state.proxies.find((x) => x.id === proxyId)
     if (!p) return { ok: false, error: 'proxy_not_found' }
-    const result = await this.probeOne(p)
-    this._applyProbeResult(p, result)
-    this.save()
-    return { ok: true, proxy: this.publicProxy(p), probe: result }
+    const probe = await this._probeAndApply(p, opts)
+    return { ok: true, proxy: this.publicProxy(p), probe }
   }
 
   async probeAll({ onlyEnabled = true } = {}) {
@@ -1561,12 +1611,13 @@ export class ProxyPool extends EventEmitter {
       const list = this.state.proxies.filter((p) => {
         if (proxyBlockedReason(p, this.state.config.ipv6_enabled)) return false
         if (!onlyEnabled) return true
+        if (this._isManuallyDisabled(p)) return false
         if (p.enabled) return true
         return p.status === 'fail' || (p.status === 'dead' && p.last_error)
       })
       for (const p of list) {
-        const result = await this.probeOne(p)
-        this._applyProbeResult(p, result)
+        if (!this.state.proxies.includes(p) || (onlyEnabled && this._isManuallyDisabled(p))) continue
+        const result = await this._probeAndApply(p)
         results.push({ id: p.id, ...result, status: p.status, enabled: p.enabled })
       }
       this.save()
@@ -1757,7 +1808,8 @@ export class ProxyPool extends EventEmitter {
 
   _applyProbeResultInner(p, result, { cascade = true } = {}) {
     // Disabled by policy is not a failed probe and must not damage health/history.
-    if (result.scope === 'policy' || proxyBlockedReason(p, this.state.config.ipv6_enabled)) return
+    if (result.scope === 'policy' || result.scope === 'stale' || proxyBlockedReason(p, this.state.config.ipv6_enabled))
+      return
     if (result.scope === 'pending') return
     p.last_probe_at = new Date().toISOString()
     p.latency_ms = result.latency_ms
@@ -1783,7 +1835,6 @@ export class ProxyPool extends EventEmitter {
       p.consecutive_failures = 0
       p.last_error = null
       if (resume && !p.enabled) p.enabled = true
-      if (cascade && resume) this._cascadeEnableVm(p, 'proxy_recovered')
       return
     }
     p.consecutive_failures = (p.consecutive_failures || 0) + 1
@@ -1798,8 +1849,10 @@ export class ProxyPool extends EventEmitter {
   }
 
   _applyProbeResult(p, result, opts = {}) {
+    const revision = invalidateProxyProbe(p)
     this._applyProbeResultInner(p, result, opts)
     this.emit('change')
+    return revision
   }
 
   startScheduler() {

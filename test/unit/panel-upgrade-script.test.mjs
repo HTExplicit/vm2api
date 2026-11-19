@@ -132,6 +132,7 @@ async function runUpgrade({ source = true, arch = 'amd64', override, env = {} } 
             BOOT_VERSION: bootVersion,
             PORT: String(server.address().port),
             VM2API_API_KEY: 'test-key',
+            KIN_RATE_REFILL: '500',
             ...env,
           },
           timeout: 20000,

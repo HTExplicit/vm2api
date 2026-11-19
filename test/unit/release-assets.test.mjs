@@ -23,13 +23,13 @@ const encryptedAsset = pinned.files.find(
 const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex')
 
 const upstream = JSON.parse(
-  fs.readFileSync(new URL('../../docs/releases/v1.4.146-binaries.json', import.meta.url), 'utf8'),
+  fs.readFileSync(new URL('../../docs/releases/v1.4.156-binaries.json', import.meta.url), 'utf8'),
 )
 const previous = JSON.parse(
-  fs.readFileSync(new URL('../../docs/releases/v1.4.142-binaries.json', import.meta.url), 'utf8'),
+  fs.readFileSync(new URL('../../docs/releases/v1.4.146-binaries.json', import.meta.url), 'utf8'),
 )
 
-test('current payload pins match the recorded 146 supplier release and original signed CRAG package', () => {
+test('current payload pins match the recorded 156 supplier release and original signed CRAG package', () => {
   const crag = upstream.native
   assert.equal(pinned.release, upstream.payload_release)
   assert.equal(pinned.crag_release, crag.release)
@@ -52,17 +52,20 @@ test('current payload pins match the recorded 146 supplier release and original 
   assert.equal(archive.sha256, crag.archive.sha256)
   assert.equal(crag.manifest_sha256, crag.assets[manifestAsset])
   assert.equal(upstream.payload_source.oauth_helper.sha256, assets.get('kin-oauth-auth').file.sha256)
-  assert.equal(crag.assets['crag-v2-amd64-crag-license-public.pem'], previous.native.authority_pem_sha256)
+  assert.equal(
+    crag.assets['crag-v2-amd64-crag-license-public.pem'],
+    previous.native.assets['crag-v2-amd64-crag-license-public.pem'],
+  )
   assert.equal(crag.variant, 'standard')
   assert.equal(crag.fork_rebuilt, false)
   assert.equal(upstream.recorded_by, 'HTExplicit/vm2api')
   assert.equal(upstream.record_type, 'supplier_release_observation')
-  assert.equal(upstream.application_commit, '8dd9a75902041883c4f07d4b5d5ef48e6e72dcd7')
+  assert.equal(upstream.application_commit, '4d598789c960d884c996adeeb4a8ef4928ec8269')
   assert.equal(crag.source_repository, 'dofastted/crag')
   assert.equal(upstream.official_release_workflow.conclusion, 'success')
 })
 
-test('the 146 payload updates the OAuth helper and signed CRAG bytes from the 142 release', () => {
+test('the 156 payload updates the OAuth helper and signed CRAG bytes from the 146 release', () => {
   const changed = []
   for (const [name, { file }] of imageAssets(pinned)) {
     if (!file) continue
@@ -71,9 +74,10 @@ test('the 146 payload updates the OAuth helper and signed CRAG bytes from the 14
   }
   assert.deepEqual(changed, [
     'kin-oauth-auth',
-    'crag-v2-amd64-v3.1.6-crag-v2',
-    'crag-v2-amd64-v3.1.6-crag-v2.payload.enc',
-    'crag-v2-amd64-v3.1.6-manifest.json',
+    'kin-worker',
+    'crag-v2-amd64-v3.1.7-crag-v2',
+    'crag-v2-amd64-v3.1.7-crag-v2.payload.enc',
+    'crag-v2-amd64-v3.1.7-manifest.json',
     'crag-v2-amd64-unpack-note.md',
     'crag-v2-licensed-amd64.tar.gz',
   ])
@@ -104,11 +108,11 @@ test('the complete release derives twenty-two pinned assets and image-built egre
   assert.equal(expected.length, 23)
   const digestOf = (name) => expected.find((asset) => asset.name === name).digest.slice('sha256:'.length)
   const upstreamBuild = {
-    application_release: 'v1.4.146',
+    application_release: 'v1.4.156',
     assets: expected.map((asset) => ({ name: asset.name, size: asset.size, sha256: digestOf(asset.name) })),
   }
   const cragBuild = {
-    application_release: 'v1.4.146',
+    application_release: 'v1.4.156',
     core_plaintext_sha256: 'core-commitment',
     assets: Object.fromEntries(
       expected.filter((asset) => asset.name.startsWith('crag-v2-')).map((asset) => [asset.name, digestOf(asset.name)]),
@@ -131,13 +135,13 @@ test('the complete release derives twenty-two pinned assets and image-built egre
   assert.equal(provenance.image, image)
   assert.equal(provenance.source_commit, 'fork-source')
   assert.equal(provenance.assets.length, 23)
-  assert.equal(provenance.upstream.build.application_release, 'v1.4.146')
+  assert.equal(provenance.upstream.build.application_release, 'v1.4.156')
   assert.equal(
     provenance.upstream.build.assets.some((asset) => asset.name === 'kin-egress'),
     false,
   )
   assert.equal(provenance.upstream.build.assets.length, 22)
-  assert.equal(provenance.upstream.build.source_record, 'docs/releases/v1.4.146-binaries.json')
+  assert.equal(provenance.upstream.build.source_record, 'docs/releases/v1.4.156-binaries.json')
   assert.deepEqual(provenance.upstream.crag, cragBuild)
   for (const name of ['kin-worker', 'cli-node']) {
     const recorded = upstreamBuild.assets.find((asset) => asset.name === name)

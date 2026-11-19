@@ -88,6 +88,20 @@ export async function finishOAuthImport(oauth, ok) {
   return attempt.record(ok ? 'success' : 'failure', ok ? undefined : 'credential_import_failed')
 }
 
+/**
+ * A controller-side exchange has no KERNEL_CONFIG env of its own: hand the
+ * helper the slot's kernel config so `kin-worker oauth session-code` picks the
+ * same exit (proxy, or transparent egress) the slot would use.
+ */
+function workerConfig(exec) {
+  try {
+    const configPath = rustKernelPaths(exec).configPath
+    return configPath && fs.existsSync(configPath) ? { worker_config_path: configPath } : {}
+  } catch {
+    return {}
+  }
+}
+
 export async function runGuestOAuthAuthService(
   payload,
   {
@@ -107,7 +121,7 @@ export async function runGuestOAuthAuthService(
   exec = context.exec
   // Native nodes and legacy kernels both exchange on the controller, through the
   // exit prepare resolved for this VM. Guest execution is below.
-  if (context.controlPlane) return runNative({ ...payload, proxy_url: context.proxyUrl })
+  if (context.controlPlane) return runNative({ ...payload, proxy_url: context.proxyUrl, ...workerConfig(exec) })
   const bin = host.bins.oauthAuth
   if (!bin) throw fail('oauth_auth_bin_missing', 'Target VM OAuth helper is not installed')
   const argv = slotExecArgv(exec.vm, [bin], {
@@ -163,9 +177,10 @@ export async function runGuestOAuthAuthService(
     // unreachable from inside the guest. The env above is cleared for the same reason.
     const result = await runDocker(argv, {
       env: host.dockerEnv(),
-      // Four hops at the per-request ceiling (the mint adds the Grove PATCH),
-      // plus helper startup: a slow hop must not read as an unresponsive guest.
-      timeoutMs: Math.max(timeoutMs * 5, 120_000),
+      // Token plus the native follow-ups (profile, two evals, roles,
+      // first-token date, bootstrap) at the per-request ceiling, plus the two
+      // browser-stage hops when the Chrome bridge runs and helper startup.
+      timeoutMs: Math.max(timeoutMs * 9, 120_000),
       stdin:
         JSON.stringify({
           ...payload,

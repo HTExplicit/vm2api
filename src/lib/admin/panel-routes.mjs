@@ -160,7 +160,6 @@ import {
   setScheduleOff,
   markUnschedulable,
   clearUnschedulable,
-  clearScheduleHold,
   markKernelRestartPending,
   clearKernelRestartPending,
   bindVmProxy,
@@ -219,7 +218,7 @@ import {
   startHostUpgrade,
 } from './release.mjs'
 import { downloadReleaseKernel, kernelReleaseHttpStatus, listKernelReleaseVersions } from './release-kernel.mjs'
-import { describeKernelCatalog, pullKernelRelease } from './kernel-catalog.mjs'
+import { describeKernelCatalog, listKernelReleases, pullKernelRelease, selectKernelRelease } from './kernel-catalog.mjs'
 import {
   hasKernelInstallSafetyHold,
   installKernelTargets,
@@ -754,6 +753,13 @@ export function createPanelHandler(ctx) {
   })
   // A checkout can change under a live Node process; report its boot version.
   const runningVersion = readLocalVersion(ctx.cfg?.paths?.project)
+  const kernelInstallJobs = new Map()
+  const pruneKernelInstallJobs = () => {
+    const now = Date.now()
+    for (const [id, job] of kernelInstallJobs) {
+      if (job.expiresAt <= now) kernelInstallJobs.delete(id)
+    }
+  }
   const json = (...args) => ctx.json(...args)
   const hostUnsupported = (res, vm, cap) => {
     if (slotHost(vm).supports(cap)) return false
@@ -892,6 +898,24 @@ export function createPanelHandler(ctx) {
       return
     }
     if (by) clearUnschedulable(cfg.paths.project, vmId, { by })
+  }
+
+  function recoveredProxyBinding(vm, worker) {
+    if (!worker?.ok || worker.skipped || !vm?.proxy?.id || vm.schedule_hold?.reason !== HOLD_PROXY) return null
+    const latest = getVm(cfg.paths.project, vm.id)
+    if (
+      latest?.status !== 'running' ||
+      latest.proxy?.id !== vm.proxy.id ||
+      boundProxyUrl(latest.proxy) !== boundProxyUrl(vm.proxy) ||
+      latest.schedule_hold?.reason !== HOLD_PROXY
+    )
+      return null
+    return vm.proxy.id
+  }
+
+  function probeReloadedProxy(proxyId, reloadedVmIds) {
+    if (!proxyId || process.env.KIN_CRS_MOCK === '1') return
+    void proxyPool.probeById(proxyId, { reloadedVmIds }).catch(() => {})
   }
 
   function fillTimezoneFromExit(id) {
@@ -3470,6 +3494,32 @@ export function createPanelHandler(ctx) {
           })
         }
       }
+      // Several cached releases side by side.
+      if (req.method === 'GET' && p === '/api/panel/kernels/cached') {
+        const result = listKernelReleases(cfg.paths.project, url.searchParams.get('kernel') || 'crag')
+        if (!result.ok)
+          return json(res, 400, {
+            ok: false,
+            error: { code: result.code, message: result.error },
+          })
+        return json(res, 200, panel.ok({ releases: result.releases }))
+      }
+      if (req.method === 'POST' && p === '/api/panel/kernels/select') {
+        const body = await readBody(req, 8 * 1024)
+        const result = selectKernelRelease(cfg.paths.project, {
+          kernel: body?.kernel,
+          tag: body?.tag,
+        })
+        if (!result.ok) {
+          const status =
+            result.code === 'kernel_pull_busy' ? 409 : result.code === 'kernel_release_not_cached' ? 404 : 400
+          return json(res, status, {
+            ok: false,
+            error: { code: result.code, message: result.error },
+          })
+        }
+        return json(res, 200, panel.ok({ kernel: result.kernel, release: result.release }))
+      }
       if (req.method === 'POST' && p === '/api/panel/kernels/pull') {
         const body = await readBody(req, 8 * 1024)
         if (
@@ -3528,25 +3578,48 @@ export function createPanelHandler(ctx) {
             releaseStoppedBinding: ctx.cragSubscription?.releaseStoppedBinding?.bind(ctx.cragSubscription),
           })
         if (body.background === true) {
-          // The request returns at once; progress is the VM record's kernel_operation and
-          // GET /api/panel/kernels/install, so a proxy timeout cannot strand the installer.
+          pruneKernelInstallJobs()
+          if (kernelInstallJobs.size >= 256)
+            return json(res, 429, {
+              ok: false,
+              error: { code: 'kernel_install_queue_full', message: '内核安装任务过多，请稍后再试。' },
+            })
+          const jobId = randomUUID()
+          const targets = body.targets.map(({ id, kernel }) => ({ id, kernel }))
+          const job = { targets, state: 'running', expiresAt: Infinity }
+          kernelInstallJobs.set(jobId, job)
           install()
             .then((report) => {
+              job.state = 'completed'
+              job.report = report
               for (const item of report.items || [])
                 console.log(
                   `[kernel-install] background ${item.id} ${item.kernel} ${item.ok ? 'ok' : `failed ${item.code || ''}`}`,
                 )
             })
-            .catch((error) => console.warn(`[kernel-install] background install crashed: ${error?.message || error}`))
-          return json(
-            res,
-            202,
-            panel.ok({ background: true, targets: body.targets.map(({ id, kernel }) => ({ id, kernel })) }),
-          )
+            .catch(() => {
+              job.state = 'unknown'
+              console.warn(`[kernel-install] background job ${jobId} did not return a result`)
+            })
+            .finally(() => {
+              job.expiresAt = Date.now() + 15 * 60_000
+            })
+          return json(res, 202, panel.ok({ background: true, job_id: jobId, targets }))
         }
         return json(res, 200, panel.ok(await install()))
       }
       if (req.method === 'GET' && p === '/api/panel/kernels/install') {
+        const jobId = url.searchParams.get('job_id')
+        if (jobId !== null) {
+          pruneKernelInstallJobs()
+          const job = kernelInstallJobs.get(jobId)
+          if (!job || job.targets.some(({ id }) => userMissesVmId(req, cfg.paths.project, id)))
+            return json(res, 404, {
+              ok: false,
+              error: { code: 'kernel_install_job_missing', message: '未找到安装结果，请核对槽位后再操作。' },
+            })
+          return json(res, 200, panel.ok({ state: job.state, ...(job.report && { report: job.report }) }))
+        }
         const items = listActiveKernelInstalls().filter((item) => !userMissesVmId(req, cfg.paths.project, item.id))
         return json(res, 200, panel.ok({ items }))
       }
@@ -6584,7 +6657,15 @@ export function createPanelHandler(ctx) {
               proxyPool,
             })
           }
-          if (looksLikeOfficialSetupToken(code) || oauth.flavor === SETUP_TOKEN_FLAVOR) {
+          // The paste-code mint is the CLI's own setup token: inference-only,
+          // one year, no refresh. That is `official-setup-token`; the converted
+          // setup-token mode is the one that still carries a refresh token.
+          const mintedSetupToken =
+            (normalizeOauthFlavor(flavor) === 'setup_token' ||
+              oauth.flavor === 'setup_token' ||
+              oauth.flavor === 'setup-token') &&
+            !String(oauth.refresh_token || '').trim()
+          if (looksLikeOfficialSetupToken(code) || oauth.flavor === SETUP_TOKEN_FLAVOR || mintedSetupToken) {
             oauth.type = 'official-setup-token'
             oauth.mode = 'official-setup-token'
           } else if (
@@ -6625,12 +6706,17 @@ export function createPanelHandler(ctx) {
             }),
           )
         } catch (e) {
-          const status =
-            e.code === 'session_expired' || e.code === 'session_vm_mismatch' || e.code === 'code_required' ? 400 : 502
-          return json(res, status, {
-            ok: false,
-            error: { code: e.code || 'exchange_code_failed', message: String(e.message || e).slice(0, 240) },
-          })
+          if (e.code === 'session_expired' || e.code === 'session_vm_mismatch' || e.code === 'code_required') {
+            return json(res, 400, {
+              ok: false,
+              error: { code: e.code, message: String(e.message || e).slice(0, 240) },
+            })
+          }
+          // An exchange failure carries an upstream class — throttled (429),
+          // blocked exit, refused origin — so report it like the cookie import
+          // does instead of flattening every one of them into a 502.
+          const failure = panelImportErrorPayload(e)
+          return json(res, failure.status === 500 ? 502 : failure.status, { ok: false, error: failure.error })
         }
       }
 
@@ -7586,6 +7672,7 @@ export function createPanelHandler(ctx) {
                 routing: ctx.routingConfig,
               })
               if (worker.ok) restoreSchedulableIfReady(bindVmId, { by: 'proxy_rebind' })
+              probeReloadedProxy(recoveredProxyBinding(vm, worker), [bindVmId])
             }
           }
         }
@@ -7698,6 +7785,7 @@ export function createPanelHandler(ctx) {
         // (pool -> vms/<id>.json -> worker.json). Without this the edit looks
         // like it worked while every bound slot keeps dialing the old proxy.
         const workers = []
+        const reloadedVmIds = []
         for (const vmId of result.proxy.bound_vm_ids || []) {
           const vm = getVm(cfg.paths.project, vmId)
           if (vm?.status === 'running' && process.env.KIN_CRS_MOCK !== '1') {
@@ -7705,6 +7793,7 @@ export function createPanelHandler(ctx) {
               routing: ctx.routingConfig,
             })
             if (reloaded.ok) restoreSchedulableIfReady(vmId, { by: 'proxy_rebind' })
+            if (recoveredProxyBinding(vm, reloaded)) reloadedVmIds.push(vmId)
             // A slot that fails to reload does not fail the request: the store
             // is already updated, so report per-slot and let ops retry.
             workers.push({ vm_id: vmId, ok: !!reloaded.ok, error: reloaded.ok ? null : reloaded.error || null })
@@ -7712,6 +7801,7 @@ export function createPanelHandler(ctx) {
             workers.push({ vm_id: vmId, ok: true, error: null })
           }
         }
+        if (reloadedVmIds.length) probeReloadedProxy(id, reloadedVmIds)
         return json(res, 200, panel.ok({ proxy: result.proxy, workers, egress }))
       }
       // The one endpoint allowed to return proxy credentials. Mirrors
@@ -7799,12 +7889,7 @@ export function createPanelHandler(ctx) {
             ok: false,
             error: { type: 'not_found_error', code: result.error, message: result.error },
           })
-        // re-enable bound VM scheduling if any
-        for (const vmId of result.proxy?.bound_vm_ids ||
-          (result.proxy?.bound_vm_id ? [result.proxy.bound_vm_id] : [])) {
-          // Only the hold this proxy put on the slot; 调度关 / 不可调度 stay.
-          clearScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: id })
-        }
+        if (result.proxy?.bound_vm_ids?.length) probeReloadedProxy(id, [])
         return json(res, 200, panel.ok(result.proxy))
       }
       if (req.method === 'POST' && /^\/api\/panel\/proxies\/[^/]+\/disable$/.test(p)) {
@@ -7874,6 +7959,7 @@ export function createPanelHandler(ctx) {
             routing: ctx.routingConfig,
           })
           if (worker.ok) restoreSchedulableIfReady(vmId, { by: 'proxy_rebind' })
+          probeReloadedProxy(recoveredProxyBinding(vm, worker), [vmId])
         }
         return json(res, 200, panel.ok({ proxy: result.proxy, worker, timezone }))
       }
@@ -7978,6 +8064,7 @@ export function createPanelHandler(ctx) {
             routing: ctx.routingConfig,
           })
           if (worker.ok) restoreSchedulableIfReady(vmId, { by: 'proxy_rebind' })
+          probeReloadedProxy(recoveredProxyBinding(vm, worker), [vmId])
         }
         return json(res, 200, panel.ok({ proxy: allocated, worker, timezone }))
       }

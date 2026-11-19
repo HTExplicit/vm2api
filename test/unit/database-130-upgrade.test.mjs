@@ -98,7 +98,7 @@ test('139 adds refusal session storage to the published 13601 ledger and allows 
     settings = db.prepare(settingsQuery).all()
     usage = db.prepare(usageQuery).get()
     assert.equal(ledger.at(-1).name, '065_crag_shop_order_dispatch.sql')
-    assert.deepEqual(applyMigrations(db), ['066_refusal_session_blocks.sql'])
+    assert.deepEqual(applyMigrations(db), ['066_refusal_session_blocks.sql', '067_crag_shop_order_closed.sql'])
     db.exec(`
       INSERT INTO refusal_session_blocks(session_id, first_seen_at, last_seen_at)
         VALUES ('fixture-session', '2026-11-18T00:00:00Z', '2026-11-18T00:00:00Z');
@@ -112,8 +112,9 @@ test('139 adds refusal session storage to the published 13601 ledger and allows 
     assert.deepEqual(applyMigrations(reopened), [])
     assert.deepEqual(applyMigrations(reopened, { migrationsDir: previous }), [])
     const upgradedLedger = reopened.prepare(ledgerQuery).all()
-    assert.deepEqual(upgradedLedger.slice(0, -1), ledger)
-    assert.equal(upgradedLedger.at(-1).name, '066_refusal_session_blocks.sql')
+    assert.deepEqual(upgradedLedger.slice(0, -2), ledger)
+    assert.equal(upgradedLedger.at(-2).name, '066_refusal_session_blocks.sql')
+    assert.equal(upgradedLedger.at(-1).name, '067_crag_shop_order_closed.sql')
     assert.deepEqual(reopened.prepare(settingsQuery).all(), settings)
     assert.deepEqual(reopened.prepare(usageQuery).get(), usage)
     assert.equal(reopened.prepare('SELECT session_id FROM refusal_session_blocks').get().session_id, 'fixture-session')

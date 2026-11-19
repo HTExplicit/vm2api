@@ -55,7 +55,7 @@ jobs:
           cat > release-notes.md <<'NOTES'
           HTExplicit/vm2api 维护版。本次变更与升级说明见下方对应版本的 CHANGELOG.md。
 
-          本轮仅支持 linux/amd64。从同一最终控制面镜像提取 23 个载荷附件。22 个按 deploy/payload.json 核验官方固定载荷 payload-2026.11.18-oauth-profiles，包含更新的换票助手与 CRAG 3.1.6 standard 原签名归档。kin-egress 由本 fork 源码构建。另附 build-provenance.json，共 24 个附件。升级仅在工厂缺失时预装 CRAG，按当前来源同步适用槽。
+          本轮仅支持 linux/amd64。从同一最终控制面镜像提取 23 个载荷附件。22 个按 deploy/payload.json 核验官方固定载荷 payload-2026.11.19-oauth-eval，包含更新的换票助手、worker 与 CRAG 3.1.7 standard 原签名归档。kin-egress 由本 fork 源码构建。另附 build-provenance.json，共 24 个附件。升级仅在工厂缺失时预装 CRAG，按当前来源同步适用槽。
           控制面镜像：`ghcr.io/htexplicit/vm2api:TAG` 和 `ghcr.io/htexplicit/vm2api:TAG-amd64`。
 
           变更与升级说明：[CHANGELOG.md](https://github.com/HTExplicit/vm2api/blob/TAG/CHANGELOG.md)。许可证与上游归属保留。
@@ -110,7 +110,7 @@ jobs:
             ${{ steps.meta.outputs.image }}:${{ github.ref_name }}
             ${{ steps.meta.outputs.image }}:${{ github.ref_name }}-amd64
           cache-from: type=gha,scope=vm2api-amd64
-          cache-to: type=gha,scope=vm2api-amd64,mode=max
+          cache-to: type=gha,scope=vm2api-amd64,mode=max,ignore-error=true
       - name: install release verification dependencies
         run: npm ci --omit=dev --ignore-scripts
       - name: extract and verify all 24 draft assets from that image

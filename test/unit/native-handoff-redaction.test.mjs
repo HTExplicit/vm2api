@@ -198,20 +198,20 @@ test('native EOF flushes a literal tail before rejecting the missing terminal', 
   response.headers = {}
   response.trailers = {}
   const lines = []
-  await assert.rejects(
-    consumeNativeHandoffStream(response, {
-      state: createNativeHandoffState(),
-      sseRestorer: createSseRestorer({
-        principal: 'native-principal',
-        session: 'native-session',
-        maxBodyBytes: 64 * 1024 * 1024,
-      }),
-      onEvent: (line) => lines.push(line),
-      isCommitEvent: (event) => event.type === 'content_block_delta' && !!event.delta?.text,
+  const result = await consumeNativeHandoffStream(response, {
+    state: createNativeHandoffState(),
+    sseRestorer: createSseRestorer({
+      principal: 'native-principal',
+      session: 'native-session',
+      maxBodyBytes: 64 * 1024 * 1024,
     }),
-    { code: 'native_handoff_missing' },
-  )
+    onEvent: (line) => lines.push(line),
+    isCommitEvent: (event) => event.type === 'content_block_delta' && !!event.delta?.text,
+  })
+  assert.equal(result.committed, true)
+  assert.equal(result.body.error?.code, 'native_handoff_missing')
   const events = eventsFrom(lines)
+  assert.equal(events.filter((event) => event.type === 'error').length, 1)
   assert.equal(
     events
       .filter((event) => event.type === 'content_block_delta')

@@ -157,6 +157,7 @@ jobs:
             test/unit/fleet-services.test.mjs \
             test/unit/proxy-http-scheme.test.mjs \
             test/unit/proxy-pool-bind.test.mjs \
+            test/unit/proxy-schedule-recovery.test.mjs \
             test/unit/proxy-pool-update.test.mjs \
             test/unit/panel-proxy-browser-boundary.test.mjs \
             test/unit/remote-slot-push-retry.test.mjs \
