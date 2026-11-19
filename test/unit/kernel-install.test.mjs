@@ -365,8 +365,14 @@ for (const health of [
   })
 }
 
-for (const authenticated of [true, false]) {
-  test(`failed pinned CRAG update reports rollback only after authenticated native health (${authenticated})`, async (t) => {
+for (const [label, health, recovered] of [
+  ['healthy idle pool', { internalTokenAuthenticated: true, ready_slots: 1, cli_pid: 0 }, true],
+  ['unauthenticated', { internalTokenAuthenticated: false, ready_slots: 1, cli_pid: 0 }, false],
+  ['not ready', { internalTokenAuthenticated: true, ready_slots: 0, cli_pid: 0 }, false],
+  ['license invalid', { internalTokenAuthenticated: true, ready_slots: 1, license_valid: false, cli_pid: 0 }, false],
+  ['recovering', { internalTokenAuthenticated: true, ready_slots: 1, recovering: true, cli_pid: 0 }, false],
+]) {
+  test(`failed pinned CRAG update verifies rollback readiness (${label})`, async (t) => {
     const previous = { kernel: 'crag', version: '3.1.2', installed_at: '2026-11-16T00:00:00Z' }
     const { root, vm, home } = fixture(t, {
       dataplane: 'crag',
@@ -406,13 +412,7 @@ for (const authenticated of [true, false]) {
       rustKernelHealth(exec, options) {
         assert.equal(exec.vmId, vm.id)
         assert.deepEqual(options, { requireInternalToken: true })
-        return {
-          ok: true,
-          healthy: true,
-          cli_pid: 0,
-          execution_mode: 'v2_process_pool',
-          internalTokenAuthenticated: authenticated,
-        }
+        return { ok: true, healthy: true, execution_mode: 'v2_process_pool', ...health }
       },
     })
     const result = await installKernelTargets({
@@ -423,17 +423,17 @@ for (const authenticated of [true, false]) {
     assert.equal(starts, 2, JSON.stringify(result))
     assert.equal(result.ok, false, 'the requested version never became ready')
     assert.equal(result.items[0].code, 'kernel_health_timeout')
-    assert.equal(result.items[0].rolled_back, authenticated)
-    assert.equal(result.items[0].stopped, !authenticated)
-    assert.equal(stops, authenticated ? 2 : 3)
+    assert.equal(result.items[0].rolled_back, recovered)
+    assert.equal(result.items[0].stopped, !recovered)
+    assert.equal(stops, recovered ? 2 : 3)
     assert.deepEqual(fs.readFileSync(registration), oldGrant)
     assert.deepEqual(fs.readFileSync(manifest), oldManifest)
     const saved = getVm(root, vm.id)
     assert.deepEqual(saved.kernel_installation, previous)
-    if (authenticated) assert.equal(saved.schedulable, true)
+    if (recovered) assert.equal(saved.schedulable, true)
     else assert.equal(saved.schedule_off, vm.schedule_off)
-    assert.equal(saved.status, authenticated ? 'running' : 'stopped')
-    if (authenticated) assert.equal(saved.kernel_operation, undefined)
+    assert.equal(saved.status, recovered ? 'running' : 'stopped')
+    if (recovered) assert.equal(saved.kernel_operation, undefined)
     else {
       assert.equal(saved.kernel_operation.phase, 'failed')
       const backup = path.join(root, 'vms', vm.id, saved.kernel_operation.rollback_package, 'package')

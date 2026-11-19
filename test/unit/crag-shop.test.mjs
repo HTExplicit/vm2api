@@ -29,7 +29,7 @@ import {
 } from '../fixtures/crag-license.mjs'
 
 const PANEL = 'https://panel.example.test'
-const SHOP = 'https://crag.fkcodex.com'
+const SHOP = 'https://www.vm2api.org'
 const BASE = '/api/panel/crag-shop'
 const INPUT = { sku: 'quarter', payment_method: 'alipay', request_id: 'same-client-key' }
 const PLAN = { sku: 'quarter', term: '3m', amount_minor: 59900, slot_limit: 10 }
@@ -43,6 +43,7 @@ const MIGRATION = new URL('060_crag_shop_orders.sql', MIGRATIONS)
 const COMMERCE_MIGRATION = new URL('061_crag_shop_commerce.sql', MIGRATIONS)
 const ACTIVATION_MIGRATION = new URL('062_crag_shop_activation.sql', MIGRATIONS)
 const DISPATCH_MIGRATION = new URL('065_crag_shop_order_dispatch.sql', MIGRATIONS)
+const CLOSED_MIGRATION = new URL('067_crag_shop_order_closed.sql', MIGRATIONS)
 const PILOT_TOKEN_FILE_ENV = 'VM2API_CRAG_SHOP_PILOT_TOKEN_FILE'
 
 test.beforeEach((t) => {
@@ -81,6 +82,7 @@ test('new shop migrations preserve existing orders and apply once after the publ
     '064_risk_audit_bans.sql',
     '065_crag_shop_order_dispatch.sql',
     '066_refusal_session_blocks.sql',
+    '067_crag_shop_order_closed.sql',
   ])
   assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '061' ORDER BY version").all(), ledger)
   for (const old of before) {
@@ -90,6 +92,7 @@ test('new shop migrations preserve existing orders and apply once after the publ
     assert.equal(saved.activation_phase, 'waiting')
     assert.equal(saved.activation_attempts, 0)
     assert.equal(saved.dispatch_state, 'submitted')
+    assert.equal(saved.closed_at, null)
   }
   const migrated = db.prepare('SELECT * FROM crag_shop_orders ORDER BY order_id').all()
   assert.deepEqual(applyMigrations(db), [])
@@ -99,6 +102,8 @@ test('new shop migrations preserve existing orders and apply once after the publ
 function order(id, status = 'pending') {
   return { ...PLAN, order_id: id, status, payment_method: 'alipay', created_at: 1_800_000_000, redemption_code: CODE }
 }
+
+const LEGACY_SHOP = 'https://crag.fkcodex.com'
 
 function fields(id) {
   return {
@@ -120,7 +125,7 @@ test('automatic activation polling without orders performs no supplier calls or 
   t.after(() => fs.rmSync(root, { recursive: true }))
   const db = new DatabaseSync(':memory:')
   t.after(() => db.close())
-  for (const migration of [MIGRATION, COMMERCE_MIGRATION, ACTIVATION_MIGRATION, DISPATCH_MIGRATION]) {
+  for (const migration of [MIGRATION, COMMERCE_MIGRATION, ACTIVATION_MIGRATION, DISPATCH_MIGRATION, CLOSED_MIGRATION]) {
     db.exec(fs.readFileSync(migration, 'utf8'))
   }
   const unexpected = () => assert.fail('empty startup must not contact the supplier or activate a slot')
@@ -211,6 +216,27 @@ test('supplier transport bounds, gateway pairing and response projection', async
   const kpay = 'https://api.kpay.cc/epay/submit.php'
   reply = { ...order(id), url: kpay, data: fields(id) }
   assert.deepEqual((await supplier.create(row, PROOF)).form, { url: kpay, data: fields(id) })
+  reply = {
+    ...order(id),
+    url: ACTION,
+    data: {
+      ...fields(id),
+      notify_url: `${LEGACY_SHOP}/shop/epay/notify`,
+      return_url: `${LEGACY_SHOP}/shop/return`,
+    },
+  }
+  assert.equal((await supplier.create(row, PROOF)).form.data.notify_url, `${LEGACY_SHOP}/shop/epay/notify`)
+  reply = {
+    ...order(id),
+    url: ACTION,
+    data: {
+      ...fields(id),
+      notify_url: `${LEGACY_SHOP}/shop/epay/notify`,
+      return_url: `${SHOP}/shop/return`,
+    },
+  }
+  await assert.rejects(supplier.create(row, PROOF), { code: 'shop_invalid_reply' })
+
   for (const url of [
     'http://gateway.example.test/submit.php',
     `${ACTION}?a=1`,
@@ -436,8 +462,13 @@ test('SQLite reservation survives restart; owners isolate retries, list, status 
   assert.equal(failed.http, 503)
   const [[id, firstReceipt]] = saved
   assert.equal(JSON.stringify(failed).includes(firstReceipt), false)
-  assert.equal((await call(PERSON, 'GET', '/orders')).data.orders[0].status, 'reserved')
-  assert.equal((await call(PERSON, 'POST', `/orders/${id}/cancel`, {})).error.code, 'shop_order_cannot_cancel')
+  const listed = (await call(PERSON, 'GET', '/orders')).data.orders[0]
+  assert.equal(listed.status, 'reserved')
+  // A create that never returned a checkout form leaves an orphaned reservation. The
+  // buyer never received a payment link, so it is offered as cancelable even while the
+  // supplier is unavailable. The replay below still needs this reservation, so only the
+  // offer is asserted here; `fulfilled` refusing a cancel is asserted further down.
+  assert.equal(listed.cancelable, true)
   db.close()
   db = createDatabase({ dbPath })
   handle = handler()
@@ -712,6 +743,7 @@ test('pinned fulfillment survives lost redeem and H2 bind replies without reappl
   )
   db.exec(fs.readFileSync(ACTIVATION_MIGRATION, 'utf8'))
   db.exec(fs.readFileSync(DISPATCH_MIGRATION, 'utf8'))
+  db.exec(fs.readFileSync(CLOSED_MIGRATION, 'utf8'))
   // The legacy row normally already has a receipt key from its original checkout.
   const receiptKey = loadOrderReceiptKey(root, () => false)
   const publicDir = cragSubscriptionPublicDirectory(root)
@@ -982,4 +1014,78 @@ test('pinned fulfillment survives lost redeem and H2 bind replies without reappl
   assert.equal(redeems, 2)
   assert.equal(bindAttempts, 2)
   assert.equal(checkCragLicense(root, slots[0]).ok, true)
+})
+
+test('an unpaid checkout link closes once its payment window passes, unless the supplier took the money', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crag-shop-expiry-'))
+  const db = createDatabase({ dbPath: path.join(root, 'kin.db') })
+  t.after(() => {
+    db.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+  let supplied = 'pending'
+  let reads = 0
+  const shop = createCragShopHandler({
+    getDb: () => db,
+    dataDir: root,
+    publicBaseUrl: PANEL,
+    json: (_, http, body) => ({ http, ...body }),
+    readRawBody: (req) => req.raw,
+    subscription: {},
+    supplier: {
+      async status(row) {
+        reads++
+        return order(row.order_id, supplied)
+      },
+    },
+  })
+  const now = Math.floor(Date.now() / 1000)
+  // The receipt key is only created while no order exists yet: a table with orders but
+  // no key means the key was lost, and minting a new one would strand their receipts.
+  // These rows are inserted straight into the table, so seed the key before them.
+  loadOrderReceiptKey(root, () => false)
+  // A reserved row carries no commerce columns; migration 057 requires them to be NULL.
+  const reserve = (id, age) =>
+    db
+      .prepare(`INSERT INTO crag_shop_orders
+        (order_id, owner, request_id, sku, payment_method, reserved_at, status, dispatch_state)
+        VALUES (?, ?, ?, 'quarter', 'alipay', ?, 'reserved', 'submitted')`)
+      .run(id, PERSON.panelBuyerOwner, `req-${id}`, now - age)
+  const pend = (id, age) =>
+    db
+      .prepare(`INSERT INTO crag_shop_orders
+        (order_id, owner, request_id, sku, payment_method, reserved_at, status, dispatch_state,
+         created_at, term, amount_minor, slot_limit)
+        VALUES (?, ?, ?, 'quarter', 'alipay', ?, 'pending', 'submitted', 1800000000, '3m', 59900, 10)`)
+      .run(id, PERSON.panelBuyerOwner, `req-${id}`, now - age)
+  const stored = (id) => db.prepare('SELECT closed_at, status FROM crag_shop_orders WHERE order_id = ?').get(id)
+
+  const fresh = randomUUID()
+  pend(fresh, 5 * 60)
+  await shop.pollOrderExpiry()
+  assert.equal(stored(fresh).closed_at, null, 'a link inside its payment window is left alone')
+  assert.equal(reads, 0, 'the supplier is not consulted for an order that cannot have expired yet')
+
+  const stale = randomUUID()
+  pend(stale, 31 * 60)
+  await shop.pollOrderExpiry()
+  assert.equal(reads, 1, 'a live payment link is re-read before it is closed')
+  assert.equal(typeof stored(stale).closed_at, 'number')
+
+  // A payment that landed late keeps the order: reflectOrder moves it to paid, which
+  // also drops it out of the expiry scan.
+  const paid = randomUUID()
+  supplied = 'paid'
+  pend(paid, 31 * 60)
+  await shop.pollOrderExpiry()
+  assert.equal(stored(paid).closed_at, null)
+  assert.equal(stored(paid).status, 'paid')
+
+  // No checkout form ever reached this buyer, so it closes without a supplier read.
+  const orphan = randomUUID()
+  reserve(orphan, 40 * 60)
+  const before = reads
+  await shop.pollOrderExpiry()
+  assert.equal(typeof stored(orphan).closed_at, 'number')
+  assert.equal(reads, before)
 })

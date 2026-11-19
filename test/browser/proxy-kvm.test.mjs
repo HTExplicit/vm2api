@@ -83,6 +83,22 @@ async function openFixture(t, { view = 'proxy', api, websocket }) {
   return { page, rejectedOrigins, errors }
 }
 
+function replyToKernelInstall(route, request, installs, resultForTarget) {
+  const jobId = 'offline-kernel-install'
+  if (request.method() === 'POST') {
+    const body = request.postDataJSON()
+    assert.equal(body.background, true)
+    installs.push(body)
+    return route.fulfill({ status: 202, json: { ok: true, data: { job_id: jobId } } })
+  }
+  assert.equal(request.method(), 'GET')
+  assert.equal(new URL(request.url()).searchParams.get('job_id'), jobId)
+  assert.equal(installs.length, 1, 'polling does not resubmit the installation')
+  const item = resultForTarget(installs[0].targets[0])
+  const report = { ok: true, total: 1, ok_count: 1, failed_count: 0, items: [item] }
+  return route.fulfill({ json: { ok: true, data: { state: 'completed', report } } })
+}
+
 test('proxy protocols are keyboard selectable and edits preserve stored credentials', {
   timeout: 60_000,
 }, async (t) => {
@@ -224,31 +240,16 @@ test('KVM CRAG reinstall confirms once and respects stopped slots and permission
         })
       }
       assert.equal(pathname, '/api/panel/kernels/install')
-      assert.equal(request.method(), 'POST')
-      const body = request.postDataJSON()
-      installs.push(body)
-      const target = body.targets[0]
-      const stopped = target.id === 'offline-stopped'
-      return route.fulfill({
-        json: {
+      return replyToKernelInstall(route, request, installs, (target) => {
+        const stopped = target.id === 'offline-stopped'
+        return {
+          ...target,
           ok: true,
-          data: {
-            ok: true,
-            total: 1,
-            ok_count: 1,
-            failed_count: 0,
-            items: [
-              {
-                ...target,
-                ok: true,
-                stopped,
-                restarted: !stopped,
-                status: stopped ? 'stopped' : 'running',
-                schedulable: false,
-              },
-            ],
-          },
-        },
+          stopped,
+          restarted: !stopped,
+          status: stopped ? 'stopped' : 'running',
+          schedulable: false,
+        }
       })
     },
   })
@@ -280,7 +281,9 @@ test('KVM CRAG reinstall confirms once and respects stopped slots and permission
   await installed
   await dialog.waitFor({ state: 'hidden' })
   await page.getByText('安装完成，保持停止', { exact: true }).waitFor()
-  assert.deepEqual(installs, [{ targets: [{ id: 'offline-stopped', kernel: 'crag', payload_tag: 'crag-3.1.1' }] }])
+  assert.deepEqual(installs, [
+    { background: true, targets: [{ id: 'offline-stopped', kernel: 'crag', payload_tag: 'crag-3.1.1' }] },
+  ])
   assert.equal(await page.getByText(/服务未确认安装后的启停状态|安装失败|重启完成/).count(), 0)
   assert.equal(await page.getByText('已完成：1 台成功', { exact: true }).count(), 1)
 
@@ -686,26 +689,14 @@ test(
             installations: {},
           });
         assert.equal(pathname, "/api/panel/kernels/install");
-        assert.equal(request.method(), "POST");
-        installs.push(request.postDataJSON());
-        return respond({
+        return replyToKernelInstall(route, request, installs, (target) => ({
+          ...target,
           ok: true,
-          total: 1,
-          ok_count: 1,
-          failed_count: 0,
-          items: [
-            {
-              id: vm.id,
-              kernel: "crag",
-              ok: true,
-              restarted: false,
-              stopped: true,
-              status: "stopped",
-              version: "3.1.2",
-              payload_tag: payloadTag,
-            },
-          ],
-        });
+          restarted: false,
+          stopped: true,
+          status: "stopped",
+          version: "3.1.2",
+        }));
       },
     });
     const trigger = page.getByRole("button", {
@@ -731,6 +722,7 @@ test(
     await page.getByText("安装完成，保持停止", { exact: true }).waitFor();
     assert.deepEqual(installs, [
       {
+        background: true,
         targets: [
           { id: vm.id, kernel: "crag", payload_tag: payloadTag },
         ],

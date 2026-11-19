@@ -74,7 +74,6 @@ import {
   getVm,
   getActiveVmId,
   setScheduleHold,
-  clearScheduleHold,
   isCodexVm,
   syncCodexQuotaSchedule,
 } from './lib/vm/vm-registry.mjs'
@@ -88,6 +87,7 @@ import { HOLD_PROXY } from './lib/pool/schedule-state.mjs'
 import * as panel from './lib/admin/panel-api.mjs'
 import { ProxyPool } from './lib/vm/proxy-pool.mjs'
 import { ensureProxyEgress, proxyEgressReady } from './lib/vm/egress.mjs'
+import { recoverProxyScheduleHold } from './lib/vm/proxy-schedule-recovery.mjs'
 import { syncIpv6ProxyEgress } from './lib/vm/proxy-policy-runtime.mjs'
 import { GATEWAY_CAPABILITIES } from './lib/vm/execution-context.mjs'
 import { isTelemetryPath, telemetryInterceptResponse } from './lib/identity/telemetry-rewrite.mjs'
@@ -457,6 +457,11 @@ requestLog.startCleanupScheduler()
 
 // Set once the cluster manager exists; node local rows probe through it.
 let localEgressCluster = null
+function holdBoundProxy(vmId, reason, proxyId) {
+  if (getVm(cfg.paths.project, vmId)?.proxy?.id === proxyId)
+    setScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: proxyId, message: reason })
+}
+
 proxyPool = new ProxyPool({
   dataDir,
   // null = control plane; undefined = no such slot.
@@ -475,17 +480,18 @@ proxyPool = new ProxyPool({
     if (state === 'idle' || state === 'connecting') return { pending: true, error: `node_link_${state}` }
     return { ok: false, error: `node_link_${state}` }
   },
-  onDisableVm: (vmId, reason, proxyId) => {
-    setScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: proxyId, message: reason })
-  },
-  onDisconnectVm: (vmId, reason, proxyId) => {
-    setScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: proxyId, message: reason })
-  },
-  // Lifts only the hold this proxy put on the slot (受限); 调度关 / 不可调度 stay.
-  onEnableVm: (vmId, _reason, proxyId) => {
-    const hold = getVm(cfg.paths.project, vmId)?.schedule_hold
-    if (hold?.reason !== HOLD_PROXY) return
-    clearScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: hold.detail?.tag == null ? null : proxyId })
+  onDisableVm: holdBoundProxy,
+  onDisconnectVm: holdBoundProxy,
+  onEnableVm: (vmId, _reason, _proxyId, proof) => recoverProxyScheduleHold(cfg.paths.project, vmId, proof),
+  isVmProxyManuallyDisabled: (vmId, proxyId) => {
+    const vm = getVm(cfg.paths.project, vmId)
+    const hold = vm?.schedule_hold
+    return (
+      vm?.proxy?.id === proxyId &&
+      hold?.reason === HOLD_PROXY &&
+      hold.detail?.tag === proxyId &&
+      hold.detail?.message === 'proxy_manually_disabled'
+    )
   },
   egressCheck: (proxy) => proxyEgressReady(proxy, cfg.paths.project),
   repairEgress: (proxy) => ensureProxyEgress(cfg.paths.project, proxy),
@@ -1632,6 +1638,16 @@ server.listen(cfg.port, cfg.host, () => {
     const timer = setInterval(poll, 2_000).unref()
     server.once('close', () => clearInterval(timer))
     poll()
+  }
+  // Keep the order-expiry policy independent from activation polling.
+  if (process.env.VM2API_CRAG_SHOP_AUTO_EXPIRY === '1') {
+    const expireOrders = () =>
+      void handleCragShop.pollOrderExpiry().catch(() => {
+        console.warn('[crag-shop] order expiry deferred')
+      })
+    const timer = setInterval(expireOrders, 60_000).unref()
+    server.once('close', () => clearInterval(timer))
+    expireOrders()
   }
   // Installation intent is durable; reconnecting nodes must not depend on a lost HTTP callback.
   if (process.env.KIN_CRS_MOCK !== '1') {

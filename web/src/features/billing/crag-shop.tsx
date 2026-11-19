@@ -8,6 +8,7 @@ import {
 import { Link } from '@tanstack/react-router'
 import { VIEW_TITLES } from '@/config/nav'
 import type { StatusTone } from '@/types/status'
+import { IconTelegram } from '@/assets/brand-icons'
 import {
   activateVmCragLicense,
   api,
@@ -742,6 +743,10 @@ function ShopOrders({
     manualActivationTrigger.current = trigger
     setManualCode(code)
   }
+  // A cancelled or expired checkout is history, not work. It stays reachable, but the
+  // order the buyer came for should not have to be found among closed ones.
+  const activeOrders = orders?.filter((order) => order.status !== 'cancelled')
+  const closedOrders = orders?.filter((order) => order.status === 'cancelled')
   const targets = useQuery({
     queryKey: ['panel', 'crag-shop', 'activation-targets', owner],
     queryFn: ({ signal }) =>
@@ -909,8 +914,12 @@ function ShopOrders({
       await action()
     } catch (error) {
       setProblem(
-        isApiError(error) && error.code === 'shop_order_cannot_cancel'
-          ? '商城可能已收到此订单，不能在面板取消。请刷新订单核对状态。'
+        isApiError(error) &&
+          (error.code === 'shop_order_paid' ||
+            error.code === 'shop_order_cannot_cancel')
+          ? error.code === 'shop_order_paid'
+            ? '此订单已完成支付，不能取消。请刷新查看交付状态。'
+            : '订单状态已变化，无法取消。请刷新订单核对状态。'
           : isApiError(error) && error.code === 'shop_device_package_unready'
             ? '本机缺少可用的 CRAG 发行包。请让管理员从内核页拉取后，重试应用原订单。'
             : isApiError(error) &&
@@ -1150,7 +1159,7 @@ function ShopOrders({
           item.order_id === updated.order_id ? updated : item
         )
       )
-      setNotice('已取消订单，释放本地预留。')
+      setNotice('已关闭该订单。')
     }, '未能确认取消，请刷新历史订单。')
   }
 
@@ -1223,7 +1232,17 @@ function ShopOrders({
             '查看订阅套餐和本人历史订单。付款、交付与激活状态分别确认。')
       }
       extra={
-        <div className='flex flex-wrap gap-2'>
+        <div className='flex flex-wrap items-center gap-2'>
+          <a
+            href='https://t.me/vm2api'
+            target='_blank'
+            rel='noreferrer'
+            title='Telegram 群 @vm2api'
+            className='inline-flex h-8 items-center gap-1.5 rounded-md border border-[#229ED9]/40 bg-[#229ED9]/10 px-2.5 text-sm font-medium text-[#229ED9] outline-hidden transition-colors hover:bg-[#229ED9]/18 focus-visible:ring-2 focus-visible:ring-ring'
+          >
+            <IconTelegram aria-hidden className='size-4 shrink-0' />
+            TG 群
+          </a>
           <Button
             size='sm'
             variant='outline'
@@ -1273,9 +1292,9 @@ function ShopOrders({
           onOpenChange={(open) => {
             if (!open && !busy) setCancelTarget(undefined)
           }}
-          title='取消预留订单？'
-          desc='仅取消尚未发送到商城的订单，释放本地预留。此操作不退款，也不会关闭已打开的收银台。'
-          confirmText='取消并释放'
+          title='取消这笔订单？'
+          desc='未支付的订单会在核对商城状态后关闭。已支付的订单不会被取消。此操作不退款，也不会关闭已打开的收银台。'
+          confirmText='取消订单'
           cancelBtnText='返回'
           destructive
           isLoading={busy}
@@ -1413,24 +1432,17 @@ function ShopOrders({
                   部分订单暂未同步，显示上次确认的状态。付款后请先刷新，不要重复支付。
                 </p>
               ) : null}
-              {orders?.some(
-                (order) =>
-                  !order.cancelable &&
-                  (order.status === 'pending' || order.status === 'reserved')
-              ) ? (
-                <p className='text-xs text-muted-foreground'>
-                  仅尚未发送至商城的预留订单可取消。已发送或状态未确认的订单不支持在面板关单。
-                </p>
-              ) : null}
-              {orders?.length === 0 ? (
+              {activeOrders?.length === 0 ? (
                 <p className='text-sm text-muted-foreground'>
-                  {presentation?.empty_orders_text ??
-                    '还没有订阅订单。下单后可以在这里查看支付和激活状态。'}
+                  {closedOrders?.length
+                    ? '没有进行中的订单。已关闭的订单在下方。'
+                    : (presentation?.empty_orders_text ??
+                      '还没有订阅订单。下单后可以在这里查看支付和激活状态。')}
                 </p>
               ) : null}
-              {orders?.length ? (
+              {activeOrders?.length ? (
                 <ul className='divide-y rounded-md border'>
-                  {orders.map((order) => (
+                  {activeOrders.map((order) => (
                     <li
                       key={order.order_id}
                       className='space-y-3 px-4 py-4 text-sm'
@@ -1462,7 +1474,7 @@ function ShopOrders({
                             disabled={busy || loading}
                             onClick={() => setCancelTarget(order)}
                           >
-                            取消预留订单
+                            取消订单
                           </Button>
                         ) : null}
                         {order.status === 'fulfilled' &&
@@ -1751,6 +1763,36 @@ function ShopOrders({
                     </li>
                   ))}
                 </ul>
+              ) : null}
+              {closedOrders?.length ? (
+                <details className='rounded-md border px-3 text-sm'>
+                  <summary className='cursor-pointer py-2 text-muted-foreground'>
+                    显示 {closedOrders.length} 笔已关闭订单
+                  </summary>
+                  <ul className='divide-y border-t text-muted-foreground'>
+                    {closedOrders.map((order) => (
+                      <li
+                        key={order.order_id}
+                        className='flex flex-wrap items-center gap-x-2 gap-y-1 py-2 text-xs'
+                      >
+                        <span className='font-medium'>
+                          {termLabel(order.term, order.sku, order.months)}
+                        </span>
+                        <span>· {methods[order.payment_method]}</span>
+                        <span>
+                          · 下单 <SubscriptionTime seconds={order.created_at} />
+                        </span>
+                        <StatusMark
+                          tone={orderTones[order.status]}
+                          variant='pill'
+                        />
+                        <span className='w-full truncate'>
+                          订单号 {order.order_id}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
               ) : null}
               {offset > 0 || typeof nextOffset === 'number' ? (
                 <div className='flex justify-end gap-2'>
