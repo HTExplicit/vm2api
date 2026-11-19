@@ -33,7 +33,7 @@
     "source_repository": "dofastted/crag",
     "source_commit": "60c8b7e6613b87a761fb058c829cd00e79873d82",
     "sources_sha256": "4eb1f2d65ed7772911fed72d7bfb44d9d7f96c4f27b166f634af0f4e4b26a5f3",
-    "core_plaintext_sha256": "9a8d45aeb5a246c7dde14eb8d14953f1149b35f4278d393b2e8f1326d9ff1b2c",
+    "core_plaintext_sha256": "363b490232e433f1024d1f51d2c1fd2f4b1ae54d6f3adcd3e209509305a519db",
     "archive": {
       "name": "crag-v2-licensed-amd64.tar.gz",
       "size": 171009876,
@@ -53,7 +53,9 @@
       "crag-v2-amd64-v3.1.7-manifest.json": "2bd7ce44f2dcabc6f0b08a4561966f5c5e17a8ae3b8c3e91c635b509c1573ec7",
       "crag-v2-amd64-unpack-note.md": "1f5cce1c9491f03ceeeffcafa80db4bcbff8f5042fa86ef344c97bcf3b62062d",
       "crag-v2-licensed-amd64.tar.gz": "9a2866473b0a8be9cd64be6f00dab41aa8e2b8310ab0899613cdfdd99cf34911"
-    }
+    },
+    "supplier_reported_core_sha256": "9a8d45aeb5a246c7dde14eb8d14953f1149b35f4278d393b2e8f1326d9ff1b2c",
+    "core_commitment_source": "Pinned original signed manifest. The supplier SOURCES.json core_sha256 matches the launcher asset instead."
   },
   "assets": [
     {
