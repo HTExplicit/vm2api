@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import vm from 'node:vm'
+import { setTimeout as delay } from 'node:timers/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { RequestLogStore } from '../../src/lib/admin/request-log.mjs'
 import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
@@ -183,6 +184,12 @@ for (const cleanupFails of [false, true]) {
         }),
       process: { exit: (code) => events.push(`exit:${code}`) },
       console: { warn() {} },
+      delay,
+      geminiTerminal: {
+        close: async () => {
+          events.push('gemini-terminal')
+        },
+      },
       installJevUsageRecorder() {
         events.push('jev-recorder-off')
       },
@@ -238,7 +245,7 @@ for (const cleanupFails of [false, true]) {
       })
       response.end()
       await pending
-      for (const service of ['oauth', 'browser', 'account-api', 'browser-runtime'])
+      for (const service of ['gemini-terminal', 'oauth', 'browser', 'account-api', 'browser-runtime'])
         assert.equal(events.filter((name) => name === service).length, 1)
       assert.ok(events.indexOf('database') > events.indexOf('account-api'))
       assert.ok(events.indexOf('database') > events.indexOf('browser-runtime'))

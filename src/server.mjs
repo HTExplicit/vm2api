@@ -11,8 +11,14 @@ import { spawnSync } from 'node:child_process'
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { loadConfig, reloadActiveVm, routingConfigFile } from './lib/core/config.mjs'
-import { geminiKeyAllowsPath, handleGeminiPublic, isGeminiPublicPath } from './lib/gemini/routes.mjs'
+import {
+  createGeminiTerminal,
+  geminiKeyAllowsPath,
+  handleGeminiPublic,
+  isGeminiPublicPath,
+} from './lib/gemini/routes.mjs'
 import {
   extractApiKey,
   timingSafeEqualStr,
@@ -202,7 +208,7 @@ const allowRate = createRateLimiter({
   refillPerSec: cfg.limits.rate_refill,
 })
 
-// --- Persistent store (SQLite, sub2api-inspired) ---
+// --- Persistent store (SQLite) ---
 const dataDir = cfg.paths.data || path.join(cfg.paths.root, 'data')
 openDatabase({ dataDir, pooled: true })
 armWriteBehind(getDb())
@@ -942,7 +948,7 @@ function requireAuth(req, res, { keyGate = true, buyer = false, optionalBuyer = 
     return true
   }
 
-  // Managed multi-keys (sub2api-style)
+  // Authenticate with the managed key store when the master key did not match.
   const managed = apiKeyStore.authenticate(token)
   if (!managed.ok) {
     return rejectAuth(
@@ -1235,6 +1241,7 @@ const handleCragShop = createCragShopHandler({
   activationEnabled: cragShopActivationEnabled,
 })
 
+const geminiTerminal = createGeminiTerminal({ proxyPool: () => proxyPool })
 const handlePanel = createPanelHandler({
   getDb,
   cragSubscription,
@@ -1315,12 +1322,15 @@ const handlePanel = createPanelHandler({
   clusterManager,
   slotShell,
   slotDesktop,
+  geminiTerminal,
 })
 
 let browserShutdownFailed = false
+let geminiTerminalDrain
 const gracefulShutdown = createGracefulShutdown({
   exit: (code) => process.exit(browserShutdownFailed ? 1 : code),
   beforeDrain: async () => {
+    geminiTerminalDrain = geminiTerminal.close()
     try {
       vmTestSchedule.stop()
     } catch {}
@@ -1357,6 +1367,8 @@ const gracefulShutdown = createGracefulShutdown({
     } catch {}
   },
   afterDrain: async () => {
+    // Let host cleanup finish without extending shutdown to the launch deadline.
+    await Promise.race([geminiTerminalDrain, delay(2000, undefined, { ref: false })])
     const browserStops = await Promise.allSettled([
       codexBrowserLogin.stop(),
       slotBrowserManager.stop(),
@@ -1446,7 +1458,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 404, { error: { message: 'console not found; run pnpm -C web build' } })
     }
 
-    // CLIProxyAPI-style liveness: no auth, no inference.
+    // Liveness check: no authentication or inference.
     if ((req.method === 'GET' || req.method === 'HEAD') && p === '/healthz') {
       if (req.method === 'HEAD') {
         res.writeHead(200)
@@ -1583,6 +1595,7 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy()
     return
   }
+  if (geminiTerminal.handleUpgrade(req, socket, head)) return
   if (responsesWs.handleUpgrade(req, socket, head)) return
   if (clusterRoutes.handleUpgrade(req, socket, head)) return
   if (slotBrowserManager.handleUpgrade(req, socket, head)) return

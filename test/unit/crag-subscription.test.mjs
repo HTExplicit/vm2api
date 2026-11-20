@@ -2038,7 +2038,7 @@ test('only an authenticated same-origin admin session can redeem without reveali
     headers: { host: 'localhost', origin: 'http://localhost', 'content-type': 'application/json' },
   }
   const res = { setHeader() {} }
-  assert.equal((await handler({ ...req, apiKeyKind: 'master' }, res, route)).status, 403)
+  assert.equal((await handler({ ...req, apiKeyKind: 'managed' }, res, route)).status, 403)
   assert.equal((await handler({ ...req, panelRole: 'user' }, res, route)).status, 403)
   assert.equal(
     (await handler({ ...req, headers: { ...req.headers, origin: 'https://example.invalid' } }, res, route)).status,
@@ -2050,6 +2050,13 @@ test('only an authenticated same-origin admin session can redeem without reveali
   assert.equal(response.body.error.code, 'redeem_unavailable')
   assert.equal(attempts, 1)
   assert.equal(JSON.stringify(response).includes(code), false)
+  const master = await handler(
+    { apiKeyKind: 'master', headers: { host: 'localhost', 'content-type': 'application/json' } },
+    res,
+    route,
+  )
+  assert.equal(master.status, 403)
+  assert.equal(attempts, 1)
 })
 
 test('failed authority syncs clear locks, new orders reconcile stale pins, and existing services stay active', async (t) => {

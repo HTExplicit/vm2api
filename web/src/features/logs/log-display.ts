@@ -22,21 +22,8 @@ export async function copyText(text: string) {
 // ---------- 状态码 ----------
 
 /** 状态 badge 配色（hub `getStatusBadgeClassName`）。null = 无状态码。 */
-const INCOMPLETE_SUCCESS_BADGE =
+const COMMITTED_FAILURE_BADGE =
   'bg-orange-100 text-orange-800 border-orange-300 dark:bg-orange-900/30 dark:text-orange-300 dark:border-orange-700'
-
-/** Downstream already committed HTTP 2xx, but the stream/body did not finish. */
-export function isIncompleteCommitted(
-  statusCode: number | null,
-  finalState: string | null | undefined
-): boolean {
-  return (
-    statusCode != null &&
-    statusCode >= 200 &&
-    statusCode < 300 &&
-    finalState === 'incomplete'
-  )
-}
 
 export function statusBadgeClass(
   statusCode: number | null,
@@ -50,7 +37,7 @@ export function statusBadgeClass(
     statusCode < 400 &&
     (errorClass || isFailedTerminal(finalState))
   )
-    return INCOMPLETE_SUCCESS_BADGE
+    return COMMITTED_FAILURE_BADGE
   if (statusCode != null) {
     if (statusCode >= 200 && statusCode < 300)
       return 'bg-green-100 text-green-700 border-green-300 dark:bg-green-900/30 dark:text-green-400 dark:border-green-700'
@@ -85,13 +72,9 @@ export function statusBadgeTooltip(
 function isFailedTerminal(state: string | null | undefined): boolean {
   return (
     !!state &&
-    [
-      'incomplete',
-      'transport_error',
-      'error',
-      'rejected',
-      'exhausted',
-    ].includes(state)
+    state !== 'verified' &&
+    state !== 'started' &&
+    state !== 'cancelled'
   )
 }
 
