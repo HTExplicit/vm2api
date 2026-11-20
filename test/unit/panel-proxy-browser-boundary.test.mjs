@@ -13,8 +13,7 @@ function fixture(t, { failClose = false } = {}) {
   fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
   const db = createDatabase({ dbPath: ':memory:' })
   const pool = new ProxyPool({ db })
-  pool.stopScheduler()
-  pool.updateConfig({ follow_proxy_timezone: false })
+  pool.updateConfig({ enabled: false, follow_proxy_timezone: false })
   pool.importLines('1.2.3.4:1080\n5.6.7.8:1080')
   const [first, second] = pool.state.proxies
   pool.bind(first.id, 'vm-a')
