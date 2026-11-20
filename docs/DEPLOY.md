@@ -64,11 +64,11 @@ sudo bash /opt/vm2api/deploy/install.sh crag-update
 
 需要包含 `scripts/seed-crag.mjs`、`scripts/update-crag.mjs` 的消费端源码/镜像；只下载一个新版 shell 到旧镜像不足以补齐 Node 更新器。支持已有 Docker 控制面和主机 Node 部署；读取进程环境或 `.env` 的 `VM2API_API_KEY` / `KIN_API_KEY`。无 `.env` 的主机 systemd 部署可由 root 从既有 `vm2api.service` 进程环境读取 key/port，不复制或打印完整环境；也可用进程环境 `PORT` 指定本地控制面端口。本 fork 的安装器与面板升级共用 `fleet-services.mjs` 收尾：全本地 Codex 直接跳过；其余槽按当前模板或已选缓存同步，再更新适用的服务与遥测策略，不主动下载新包或切换槽位内核选择。安装器的 `--no-start` / `--no-sync-wrap` 跳过收尾，显式 `crag-update --no-start` 报错。主机 Node 部署首次使用须带有发行配置固定的公钥摘要或可信出厂包。
 
-更新顺序：供应仓完整包下载和原信任锚签名/成员 SHA/ELF 校验 → 原子切换下载指针 → 全槽清点 → 检查已有 CRAG V2 槽 → 有变化时直接受管同步/必要时重载对应槽（不暂停调度、不等待在途请求） → 核验实际运行 memfd SHA 与签名 payload 承诺一致。安装目录哈希相同不能视为已更新运行进程。
+更新器先下载并验证签名包，再把指定版本交给运行中的控制面安装。控制面使用各槽的实际部署位置，通过现有安装流程逐槽更新，保留原启停和调度意图。本机槽确认安装文件与运行中的 memfd 都已是目标版本时，不会再次安装；集群运行槽须由节点健康接口确认空闲，再由控制面安装并报告结果。
 
-不改变内核选择：本机 Docker/KVM 的 CRAG V2 槽更新运行内核；已停止槽只更新磁盘，不开机；非 CRAG 本地槽若留有 `crag-v2` 缓存，仅原子更新该目录，不碰 wrapper、配置和进程；无副本的槽、Codex 槽不安装 CRAG。非 CRAG 集群槽标为 skip；选用 CRAG 的集群槽须通过内核页指定目标安装或重装，独立更新器在下载前拒绝处理。报告逐槽列出 `sync` / `cache` / `skip`，KVM 操作见 [CRAG KVM 部署](crag-kvm.md)。
+仅更新已选用 CRAG V2 的槽；已停止的槽只换包，不开机。非 CRAG 本地槽若留有 `crag-v2` 缓存，仅原子更新该目录，不碰 wrapper、配置和进程；非 CRAG 集群槽、无副本的槽和 Codex 槽标为 `skip`。macOS 原生节点不支持此安装方式。报告逐槽列出 `sync` / `cache` / `skip`。
 
-下载或信任校验失败不覆盖旧包、不停槽。更新锁为 `share/crag/kernels/v2/.update-lock`，并发更新失败；强杀后须先确认无更新进程再清理锁。断电/强杀不承诺自动恢复。失败返回非零，不伪装成功。回滚用保留的前一完整包，仍须验证原发行公钥并显式重载；禁止轮换授权身份、用 legacy ELF 降级或仅改指针后宣称已回滚。
+下载或信任校验失败不覆盖旧包、不停槽。更新锁为 `share/crag/kernels/v2/.update-lock`；强杀后须先确认后台安装和更新进程均已结束，再清理锁。失败返回非零，批量安装可能已更新其中部分槽；结果不明时先核对槽位状态，不要重复提交。回滚须选择保留的前一完整签名包并重新安装；仅改下载指针不会回滚槽内运行版本。
 
 内核安装接口先保留原启停意图和人工调度设置，再直接停止服务，替换所选内核；不暂停调度、不等待在途请求。原运行槽在实际健康核验后恢复运行和原调度设置；原停机槽安装后保持停止，下次显式启动生效。失败的槽保持停止；集群断连或控制面中断后的 pending 操作沿用已保存意图恢复，不把未健康的槽放回调度。重装保留家目录、凭据、指纹和工作区。
 
@@ -111,6 +111,9 @@ curl -sS --noproxy '*' http://127.0.0.1:8787/health
 ```
 
 `bin/` 与 `share/wrap-cli` 由镜像入口写入挂载目录，完整签名 CRAG 出厂包仅在缺少时预装到 `share/crag/kernels/v2/amd64`，已有工厂与下载缓存选择保留；`src/config` 缺文件时用镜像内默认值补齐。入口不再按 `KIN_AUTO_SYNC_WRAP` 后台启动旧同步。安装器/面板统一收尾按当前模板或已选缓存同步，运行槽有载荷差异或未完成重启时才按原生命周期重启，停止槽只同步文件；不额外重装 Codex。手工 Compose 更换镜像后，通过内核页显式拉取并安装所选槽，不能仅凭出厂文件变化认定槽内副本已更新。
+
+同一安装目录只能运行一个控制面，不要让宿主机 `vm2api.service` 和 Compose 控制面共用其 `data/` 同时运行。即使 HTTP 端口不同，槽位出口仍使用同一组监听端口。Linux 源码直跑需要 `flock`（`util-linux`，官方镜像已包含）；重复启动会报 `vm2api_control_plane_already_running`，不会接管已有出口。首次从未使用该锁的旧版本迁移时，先停旧控制面再启动新的；不要靠换 HTTP 端口做并行切换。
+
 KVM / Docker 槽位将宿主 `data/run/slot-guest-bin/`（仅含 `kin-worker`、`kin-kernel` 两个文件，**不会**挂载整个 `bin/`）只读挂进容器，避免单文件 bind mount 在升级替换二进制后仍粘旧 inode，也避免把 `kin-egress`、`kin-api-kernel` 等其它 helper 暴露进槽位 PATH。此后升级 worker/kernel **不必重建槽位**；若容器仍是旧版单文件挂载创建的，须 **重建该槽位容器一次** 才能切换到 staging 目录挂载。
 槽位系统镜像优先 `docker pull ghcr.io/dofastted/kin-os-*`，拉不到时在建槽阶段用仓内 Dockerfile 兜底构建（启动不阻塞）。
 
@@ -155,6 +158,12 @@ kin-<槽> 容器 → keg* 网桥 → 宿主机 kin-egress（网关 IP:端口）�
 升级时控制面会用 `docker update --restart no` 原地迁移已有本机代理槽位（包括暂停槽位的容器），不重建槽位、不改凭据。请先升级并确认控制面成功启动，再重启 Docker。迁移失败会阻止控制面启动并打印错误；不能仅凭版本号认定已启用保护。该保护针对 Docker 守护进程重启；不要手工 `docker start` 代理槽位或清除其防火墙规则，`live-restore` 场景也不在此启动顺序保证范围内。
 
 宿主机 `kin-egress` 的运行方式（v1.4.134 起）：控制面在 Docker 中运行（compose 设置 `VM2API_CONTAINER_NAME` 并挂载 `docker.sock`）时，每个代理的 `kin-egress` 作为独立的 host 网络容器 `kin-cp-egress-<代理>`（`--restart unless-stopped`）运行，控制面重启不会打断槽位 DNS；其他情况作为控制面子进程运行。可用 `KIN_EGRESS_RUNTIME=process|container` 强制指定。从容器方式切回进程方式时，控制面会先删除同一代理遗留的 `kin-cp-egress-*` 容器再占用端口；降级到 v1.4.133 及更早版本前，请先执行 `docker ps -aq --filter name=kin-cp-egress- | xargs -r docker rm -f`，否则旧版本看不到这些容器的进程，会一直等待端口释放。
+
+**代理故障与恢复（Unreleased）：** 单条宿主 `kin-egress` 故障只限制当前依赖该 helper 的本机运行或暂停槽位；同一代理上的远端槽和本机 GPT 槽不依赖这个 helper。代理端点自身连续探测失败仍按代理池阈值处理，影响绑定该代理的槽位。Docker inspect 或 `ss` 不可用不算已确认故障，不新增或清除槽位限制。
+
+定时探测（启用时）和面板「探测」使用同一恢复逻辑：代理协议探测成功，需要宿主 helper 的槽还须确认其 TCP 监听；随后只清除当前绑定代理留下的自动 `proxy_cooldown`，即使代理行此前已显示健康也会核对。手动禁用代理仍须点「启用」；手动调度关、维护锁、凭据或内核造成的不可调度不会被清除。监听检查不是 DNS 或真实推理验收；若恢复后请求仍失败，按下方步骤从槽内验证网络。
+
+故障期间不会改绑、换 IP、自动直连或放宽防火墙与 IPv6 策略。这是同一控制面内的出口隔离，不是跨宿主高可用；宿主或共享上游故障仍可能影响多个出口，进程模式下控制面进程树退出也可能同时停止多个 helper。
 
 控制面用 iptables 把容器的 TCP 和 DNS 重定向到宿主机上的 `kin-egress`。这一跳的目的地是宿主机本身，要经过宿主机 **INPUT** 链。UFW 默认入站 `DROP`，而 vm2api 不改你的 INPUT 规则，所以需要手动放行：
 

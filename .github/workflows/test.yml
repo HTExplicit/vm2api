@@ -79,6 +79,12 @@ jobs:
           for file in \
             test/unit/forced-tool-choice.test.mjs \
             test/unit/egress-container-runtime.test.mjs \
+            test/unit/egress-subnet-ports.test.mjs \
+            test/unit/node-egress-ports.test.mjs \
+            test/unit/egress-maintenance.test.mjs \
+            test/unit/egress-reprovision.test.mjs \
+            test/unit/slot-desktop.test.mjs \
+            test/unit/issued-tool-replay.test.mjs \
             test/unit/seed-policy.test.mjs \
             test/unit/remote-egress.test.mjs \
             test/unit/credential-weight.test.mjs \

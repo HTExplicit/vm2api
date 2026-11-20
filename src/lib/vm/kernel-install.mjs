@@ -363,6 +363,7 @@ export async function installKernelTargets({
         let operationId = null
         let operationPersisted = false
         let interrupted = false
+        let bootFailure = null
         let clusterVm = false
         let rollback
         let releaseCache
@@ -397,6 +398,18 @@ export async function installKernelTargets({
           }
           const unsupported = placementFailure(vm, target.kernel)
           if (unsupported) return failure(target, unsupported.code, unsupported.error)
+          const updateExisting = target.update_existing === true
+          if (
+            updateExisting &&
+            (target.kernel !== 'crag' ||
+              (!target.expected_tag && !target.payload_tag) ||
+              resolveKernelDataplane(vm, routing) !== 'crag' ||
+              !['running', 'stopped'].includes(vm.status))
+          ) {
+            return failure(target, 'crag_update_target_changed', '槽位不再是可更新的 CRAG 槽，请核对当前状态')
+          }
+          const keepStopped =
+            updateExisting && (resumeId ? vm.kernel_operation.keep_stopped === true : vm.status === 'stopped')
           if (target.expected_tag || target.payload_tag) {
             releaseCache = reserveKernelInstallCache(projectRoot, target.kernel)
             if (!releaseCache) {
@@ -459,6 +472,7 @@ export async function installKernelTargets({
                 kernel: target.kernel,
                 ...(target.expected_tag ? { expected_tag: target.expected_tag } : {}),
                 ...(target.payload_tag ? { payload_tag: target.payload_tag } : {}),
+                ...(updateExisting ? { update_existing: true, keep_stopped: keepStopped } : {}),
                 phase: 'pending',
                 recovery_attempts: resumeId ? (previous.recovery_attempts || 0) + 1 : 0,
                 was_running: resumeId
@@ -470,6 +484,21 @@ export async function installKernelTargets({
             })
             operationPersisted = true
             if (cancelled()) return cancelled()
+            if (updateExisting && clusterVm && vm.status === 'running') {
+              const health = vm.runtime?.kernel_socket
+                ? await (ops.rustKernelHealth || rustKernelHealth)(slotExec(projectRoot, vm), { timeoutMs: 3000 })
+                : null
+              if (
+                health?.healthy !== true ||
+                health.runtime_variant !== 'crag-v2' ||
+                health.license_valid !== true ||
+                health.active_requests !== 0 ||
+                health.continuations !== 0 ||
+                health.queued !== 0
+              ) {
+                return failure(target, 'crag_slot_not_idle', 'CRAG 未确认空闲，未重启内核')
+              }
+            }
 
             const currentProduct = () =>
               (ops.describeKernelCatalog || describeKernelCatalog)(projectRoot).find(
@@ -548,7 +577,10 @@ export async function installKernelTargets({
             if (!halted) return failure(target, 'vm_not_found', '虚拟机记录已移除', true)
             stoppedPersisted = true
             phase = 'kernel_restart_policy_failed'
-            const policy = await (ops.suspendVmRuntimeRestart || suspendVmRuntimeRestart)(halted)
+            // The node's stop operation already disables restart on its own daemon.
+            const policy = clusterVm
+              ? { ok: true }
+              : await (ops.suspendVmRuntimeRestart || suspendVmRuntimeRestart)(halted)
             if (!policy?.ok)
               return failure(target, policy?.code || phase, policy?.error || '无法关闭容器自动重启', true)
             restartSuspended = true
@@ -610,9 +642,11 @@ export async function installKernelTargets({
             if (target.kernel === 'crag' && !baked) prepareNativeDirectories(config.runDir, owner)
             phase = 'kernel_selection_persist_failed'
             const saved = patchVmRecord(projectRoot, target.id, (record) => {
-              record.dataplane = candidate.dataplane
-              if (target.kernel === 'crag') record.crag_kernel_version = 'v2'
-              else delete record.crag_kernel_version
+              if (!updateExisting) {
+                record.dataplane = candidate.dataplane
+                if (target.kernel === 'crag') record.crag_kernel_version = 'v2'
+                else delete record.crag_kernel_version
+              }
               record.kernel_installation = {
                 kernel: target.kernel,
                 version: installedProduct.version ?? null,
@@ -662,7 +696,15 @@ export async function installKernelTargets({
             }
             if (!healthy(boot) || (target.kernel === 'crag' && boot.rust?.skipped === true)) {
               interrupted = baked && INTERRUPTED_COMMAND.test(boot?.code || '')
-              return failure(target, boot?.code || phase, boot?.error || '内核重启或健康检查失败', true)
+              // A healthy container with a failed kernel carries its cause on boot.rust;
+              // keep it instead of collapsing every start failure into the generic phase.
+              bootFailure = {
+                code: boot?.code || boot?.rust?.code || phase,
+                error: boot?.error || boot?.rust?.error || '内核重启或健康检查失败',
+                reason: boot?.rust?.rust?.reason || boot?.rust?.reason || null,
+                at: new Date().toISOString(),
+              }
+              return failure(target, bootFailure.code, bootFailure.error, true)
             }
             phase = 'kernel_running_persist_failed'
             const running = patchVmRecord(projectRoot, target.id, (record) => markRunning(record, boot, projectRoot))
@@ -723,7 +765,9 @@ export async function installKernelTargets({
             if (thrown) throw thrown
             return result
           }
-          const result = await withCragRuntimeAdmission(desired, projectRoot, { routing, install: true }, run)
+          const result = keepStopped
+            ? await run()
+            : await withCragRuntimeAdmission(desired, projectRoot, { routing, install: true }, run)
           return result.id === target.id
             ? result
             : failure(
@@ -760,6 +804,7 @@ export async function installKernelTargets({
                 if (record.kernel_operation?.id !== operationId) return
                 record.kernel_operation.phase = interrupted ? 'pending' : 'failed'
                 record.kernel_operation.code = phase
+                if (bootFailure) record.kernel_operation.failure = bootFailure
                 if (control.cancelled && stopped && !record.schedule_off) {
                   applyScheduleOff(record, true, { reason: 'stopped' })
                 }
@@ -822,6 +867,7 @@ export async function resumePendingKernelInstalls({
           kernel: pending.kernel,
           ...(pending.expected_tag ? { expected_tag: pending.expected_tag } : {}),
           ...(pending.payload_tag ? { payload_tag: pending.payload_tag } : {}),
+          ...(pending.update_existing ? { update_existing: true } : {}),
         },
       ],
       routing,

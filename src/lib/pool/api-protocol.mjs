@@ -543,6 +543,7 @@ async function runApiAttemptBody({
   personaHideTokens,
   cacheTtl,
   converters,
+  onPublicLine = null,
   requestContext = null,
   forwardImpl = forwardApi,
   passthrough = false,
@@ -943,6 +944,7 @@ async function runApiAttemptBody({
     if (protocol === 'anthropic.messages') {
       if (!res.headersSent) converters.writeSSEHeaders(res)
       res.write(String(line).endsWith('\n') ? String(line) : `${line}\n`)
+      onPublicLine?.(line)
       return
     }
     const writeChunks = (chunks) => {
