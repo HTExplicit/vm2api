@@ -594,11 +594,11 @@ export function isVmScheduleReady(vm, { allowMissingCredential = false } = {}) {
 }
 
 /** Re-read vm.json, apply a schedule mutation, write. Returns the summary, or null when absent. */
-function writeSchedule(projectRoot, id, mutate) {
+function writeSchedule(projectRoot, id, mutate, { migrate = true } = {}) {
   const file = path.join(projectRoot, 'vms', `${id}.json`)
   if (!fs.existsSync(file)) return null
   const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
-  migrateScheduleRecord(vm)
+  if (migrate) migrateScheduleRecord(vm)
   if (mutate(vm) === false) return summarizeVm(vm)
   atomicWriteJson(file, vm, { mode: 0o600 })
   return summarizeVm(vm)
@@ -658,6 +658,42 @@ export function clearVerifiedProxyHold(projectRoot, id, { proxyId, proxyUrl, hol
     cleared = true
   })
   return cleared ? vm : null
+}
+
+/** Record a failed probe for its current binding without replacing an independent hold. */
+export function holdProxyFailure(projectRoot, id, proxyId, failure) {
+  return writeSchedule(projectRoot, id, (vm) => {
+    if (vm.proxy?.id !== proxyId) return false
+    const hold = vm.schedule_hold
+    if (hold && hold.reason !== HOLD_PROXY) return false
+    if (hold?.detail?.message === 'proxy_manually_disabled' && failure !== 'proxy_manually_disabled') return false
+    if (hold?.detail?.tag === proxyId && hold.detail.message === failure) return false
+    return applyHold(vm, HOLD_PROXY, { tag: proxyId, message: failure })
+  })
+}
+
+/**
+ * Lift a `slot-runtime:` maintenance hold older than minAgeMs. Only
+ * withSlotMaintenance owns that tag namespace (kernel installs use their
+ * operation id, migrations use `migration:`, proxies use their own reason),
+ * and a live cutover always has the watchdog held off the slot — so a stale
+ * hold here belongs to an operation whose process died (e.g. a control-plane
+ * restart mid-cutover) and would otherwise pin a healthy slot out of
+ * scheduling forever.
+ */
+export function clearStaleRuntimeMaintenanceHold(projectRoot, id, { tag, minAgeMs = 0, now = Date.now() } = {}) {
+  if (!String(tag || '').startsWith('slot-runtime:')) return false
+  let lifted = false
+  writeSchedule(projectRoot, id, (vm) => {
+    const hold = vm.schedule_hold
+    // Pin to the exact tag the caller saw stale: a newer cutover owns a new tag.
+    if (hold?.reason !== 'maintenance' || hold.detail?.tag !== tag) return false
+    const at = Date.parse(hold.at || '') || 0
+    if (at <= 0 || now - at < Math.max(0, minAgeMs)) return false
+    applyClearHold(vm, 'maintenance', { tag, now })
+    lifted = true
+  }, { migrate: false })
+  return lifted
 }
 
 /**

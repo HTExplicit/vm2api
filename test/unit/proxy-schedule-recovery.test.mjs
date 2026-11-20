@@ -66,6 +66,25 @@ test('a successful probe of an already healthy shared proxy reconciles stale and
   assert.deepEqual(wakes, ['vm-01', 'vm-04'])
 })
 
+test('concurrent periodic and manual probes share one recovery observation', async (t) => {
+  const { root, current, previous, pool, slot, probe, wakes } = fixture(t)
+  slot('vm-01', previous.id)
+  const pending = Promise.withResolvers()
+  let observations = 0
+  pool.probeOne = (proxy) => {
+    if (proxy.id !== current.id) return probe
+    observations++
+    return pending.promise
+  }
+  const periodic = pool.probeAll()
+  const manual = pool.probeById(current.id)
+  pending.resolve(probe)
+  await Promise.all([periodic, manual])
+  assert.equal(observations, 1)
+  assert.equal(getVm(root, 'vm-01').schedulable, true)
+  assert.deepEqual(wakes, ['vm-01'])
+})
+
 test('failed egress and an unverified rebind both leave the hold for a later probe', async (t) => {
   let ready = false
   const { root, current, previous, pool, slot, probe } = fixture(t, { verifyRuntime: async () => ready })

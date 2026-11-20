@@ -1144,6 +1144,92 @@ test('cluster Docker CRAG install is not rejected as a local-only slot', async (
   assert.equal(result.items[0].stopped, false)
 })
 
+test('CRAG update stages a stopped cluster slot without starting it, including after reconnect', async (t) => {
+  const { root, vm } = fixture(t, {
+    status: 'stopped',
+    node_id: 'remote-node',
+    dataplane: undefined,
+    crag_kernel_version: undefined,
+    schedule_off: true,
+    schedule_off_reason: 'stopped',
+  })
+  const routing = { inference: { dataplane: 'crag' } }
+  const payload_tag = 'payload-2026.11.20-crag-3.1.8'
+  const targets = [{ id: vm.id, kernel: 'crag', payload_tag, update_existing: true }]
+  let attempts = 0
+  const ops = {
+    describeKernelCatalog: () => [{ id: 'crag', ready: true, version: '3.1.8', payload_tag }],
+    checkCragLicense: () => ({ ok: true }),
+    nodeReady: () => true,
+    stopSlot: (candidate) => {
+      assert.equal(candidate.status, 'stopped')
+      return { ok: true }
+    },
+    suspendVmRuntimeRestart: () => assert.fail('不能对本机 Docker 操作集群槽'),
+    startSlotReady: () => assert.fail('更新不能启动已停止的槽'),
+    deployBakedKernel: async (_root, candidate) => {
+      assert.equal(candidate.node_id, 'remote-node')
+      return ++attempts === 1 ? { ok: false, code: 'ssh_closed' } : { ok: true }
+    },
+    initializeSlotSeedFiles: async () => {},
+    writeKernelConfig: () => ({ configPath: '/tmp/kernel.json' }),
+  }
+  const first = await installKernelTargets({ projectRoot: root, targets, routing, ops })
+  assert.equal(first.items[0].code, 'ssh_closed')
+  assert.equal(getVm(root, vm.id).kernel_operation.phase, 'pending')
+  const resumed = await resumePendingKernelInstalls({ projectRoot: root, routing, ops })
+  assert.equal(resumed.ok, true, JSON.stringify(resumed))
+  assert.equal(resumed.items[0].payload_tag, payload_tag)
+  assert.equal(resumed.items[0].restarted, false)
+  const saved = getVm(root, vm.id)
+  assert.equal(saved.status, 'stopped')
+  assert.equal(saved.schedule_off, true)
+  assert.equal(saved.kernel_operation, undefined)
+  assert.equal(saved.kernel_installation.payload_tag, payload_tag)
+  assert.equal(saved.dataplane, undefined)
+  assert.equal(saved.crag_kernel_version, undefined)
+})
+
+for (const field of ['active_requests', 'continuations', 'queued', 'missing_relay']) {
+  test(`CRAG update leaves a cluster slot with ${field} untouched`, async (t) => {
+    const relay = '/tmp/remote-kernel.sock'
+    const { root, vm } = fixture(t, {
+      node_id: 'remote-node',
+      dataplane: 'crag',
+      runtime: field === 'missing_relay' ? {} : { kernel_socket: relay },
+    })
+    const payload_tag = 'payload-2026.11.20-crag-3.1.8'
+    const result = await installKernelTargets({
+      projectRoot: root,
+      targets: [{ id: vm.id, kernel: 'crag', payload_tag, update_existing: true }],
+      ops: {
+        describeKernelCatalog: () => [{ id: 'crag', ready: true, payload_tag }],
+        checkCragLicense: () => ({ ok: true }),
+        stopSlot: () => assert.fail('不能停止仍有请求或续接的槽'),
+        rustKernelHealth: async (exec) => {
+          assert.notEqual(field, 'missing_relay', '缺少节点转发时不能探测本机套接字')
+          assert.equal(exec.vm.runtime.kernel_socket, relay)
+          assert.equal(getVm(root, vm.id).schedule_hold, undefined)
+          return {
+            healthy: true,
+            runtime_variant: 'crag-v2',
+            license_valid: true,
+            active_requests: 0,
+            continuations: 0,
+            queued: 0,
+            [field]: 1,
+          }
+        },
+      },
+    })
+    assert.equal(result.items[0].code, 'crag_slot_not_idle')
+    const saved = getVm(root, vm.id)
+    assert.equal(saved.status, 'running')
+    assert.equal(saved.schedule_hold, undefined)
+    assert.equal(saved.kernel_operation, undefined)
+  })
+}
+
 for (const stage of ['policy', 'materialize', 'seed', 'config']) {
   test(`post-stop ${stage} failure retains previous selection and remains durably stopped`, async (t) => {
     const { root, vm } = fixture(t, { dataplane: 'crag', crag_kernel_version: 'v2' })
@@ -1628,4 +1714,47 @@ test('a cancel racing an already-dispatched start stops the late process without
   const saved = getVm(root, vm.id)
   assert.equal(saved.status, 'stopped')
   assert.equal(saved.schedule_off_reason, 'manual')
+})
+
+test('a kernel start failure keeps the runtime cause on the result and the install record', async (t) => {
+  const { root, vm } = fixture(t)
+  const result = await installKernelTargets({
+    projectRoot: root,
+    targets: target('cli-node'),
+    ops: lifecycle(root, {
+      // Container came up; the kernel behind it did not. The cause lives on boot.rust.
+      startSlotReady: () => ({
+        ok: true,
+        rust_ok: false,
+        rust: {
+          ok: false,
+          code: 'kernel_health_timeout',
+          error: 'Legacy telemetry process did not stop',
+          rust: { ok: false, reason: 'legacy_telemetry_stop_failed' },
+        },
+      }),
+    }).ops,
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.items[0].code, 'kernel_health_timeout', JSON.stringify(result))
+  assert.equal(result.items[0].error, 'Legacy telemetry process did not stop')
+  const operation = getVm(root, vm.id).kernel_operation
+  assert.equal(operation.phase, 'failed')
+  assert.equal(operation.code, 'kernel_start_failed', 'the phase stays the record code')
+  assert.equal(operation.failure.code, 'kernel_health_timeout')
+  assert.equal(operation.failure.error, 'Legacy telemetry process did not stop')
+  assert.equal(operation.failure.reason, 'legacy_telemetry_stop_failed')
+  assert.ok(Date.parse(operation.failure.at) > 0)
+})
+
+test('a start failure without runtime detail still reports the generic phase', async (t) => {
+  const { root, vm } = fixture(t)
+  const result = await installKernelTargets({
+    projectRoot: root,
+    targets: target('cli-node'),
+    ops: lifecycle(root, { startSlotReady: () => ({ ok: true, rust_ok: false }) }).ops,
+  })
+  assert.equal(result.items[0].code, 'kernel_start_failed')
+  assert.equal(result.items[0].error, '内核重启或健康检查失败')
+  assert.equal(getVm(root, vm.id).kernel_operation.failure.reason, null)
 })

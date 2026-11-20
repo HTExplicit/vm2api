@@ -35,6 +35,7 @@ import { vmNodeId } from '../cluster/placement.mjs'
 import { hostProxyUrlForVm, slotHost } from './slot-host.mjs'
 import { checkCragLicense } from './crag-license.mjs'
 import { withCragRuntimeAdmission } from './slot-runtime-admission.mjs'
+import { destroySlotDesktop, followSlotDesktop, stopSlotDesktop } from './slot-desktop.mjs'
 
 export { runtimeKind }
 
@@ -71,6 +72,7 @@ async function startSlotReadyAdmitted(vm, projectRoot, opts) {
   const boot = await (opts.ops?.startSlot || startSlot)(vm, projectRoot, opts)
   if (!boot?.ok) return boot
   persistNodeRuntime(vm, projectRoot, boot)
+  followSlotDesktop(getVm(projectRoot, vm.id) || vm)
   if (codex) {
     const kernel = await ensureSlotInferenceRuntime(vm, projectRoot, opts)
     if (!kernel.ok) return kernel
@@ -81,6 +83,7 @@ async function startSlotReadyAdmitted(vm, projectRoot, opts) {
 
 export async function stopSlot(vm) {
   if (isCodexVm(vm)) stopCodexKernel(vm.id)
+  if (vm?.desktop?.enabled === true) await quietDesktop(vm, stopSlotDesktop)
   return slotHost(vm).stop(vm)
 }
 
@@ -95,7 +98,17 @@ export async function destroySlot(vm, projectRoot, opts = {}) {
       return { ok: false, code: 'codex_kernel_stop_failed', error: stopped.reason || 'Codex kernel did not stop' }
     }
   }
+  if (vm?.desktop) await quietDesktop(vm, destroySlotDesktop)
   return (opts.ops?.destroy || host.destroy)(vm, opts)
+}
+
+/** The desktop companion is best-effort: its cleanup never blocks a slot stop / destroy. */
+async function quietDesktop(vm, fn) {
+  try {
+    await fn(vm)
+  } catch (e) {
+    console.warn('[slot-desktop]', vm?.id, e?.message || e)
+  }
 }
 
 /** Reload guest worker so a new bind-mounted / virtiofs binary is picked up. Recreate only when the bound egress network moved; otherwise never docker rm. */
@@ -114,6 +127,7 @@ async function reloadSlotReadyAdmitted(vm, projectRoot, opts) {
   const boot = await (opts.ops?.reloadSlot || reloadSlot)(vm, projectRoot, opts)
   if (!boot?.ok || boot.skipped) return boot
   persistVmRuntime(projectRoot, vm.id, boot.runtime)
+  followSlotDesktop(getVm(projectRoot, vm.id) || vm)
   if (isCodexVm(vm)) {
     // The GPT container holds identity/egress; the actual inference process is
     // in the control plane. Reusing its health would keep the old proxy/client.

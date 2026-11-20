@@ -7,6 +7,7 @@
  * OAuth import it may spawn official Claude Code once (slot SOCKS5) to seed
  * ~/.claude.json and complete a plan turn.
  */
+import { spawnSync } from 'node:child_process'
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -73,7 +74,7 @@ import {
   listVms,
   getVm,
   getActiveVmId,
-  setScheduleHold,
+  holdProxyFailure,
   isCodexVm,
   syncCodexQuotaSchedule,
 } from './lib/vm/vm-registry.mjs'
@@ -83,7 +84,6 @@ import { configureCragRuntimeAdmission } from './lib/vm/slot-runtime-admission.m
 import { syncRemoteSlotRestartPolicy } from './lib/cluster/remote-slot.mjs'
 import { installedCragV2Root } from './lib/vm/wrap-cli-runtime.mjs'
 import { makeError, ErrorType, ErrorCode } from './lib/core/errors.mjs'
-import { HOLD_PROXY } from './lib/pool/schedule-state.mjs'
 import * as panel from './lib/admin/panel-api.mjs'
 import { ProxyPool } from './lib/vm/proxy-pool.mjs'
 import { ensureProxyEgress, proxyEgressReady } from './lib/vm/egress.mjs'
@@ -106,6 +106,7 @@ import { bindPlacement, isNativeNodeVm, nodeImageBuildRunning, warmNodeSlotImage
 import { ClusterError } from './lib/cluster/ssh-link.mjs'
 import { nodeEgressProxyUrl, startNodeEgressSocks } from './lib/cluster/node-egress-socks.mjs'
 import { createSlotShell } from './lib/vm/slot-shell.mjs'
+import { createSlotDesktop } from './lib/vm/slot-desktop.mjs'
 import { vmLockBusy } from './lib/vm/vm-file.mjs'
 import { isKvmRuntime } from './lib/vm/runtime-kind.mjs'
 import { resolveKernelDataplane } from './lib/vm/slot-engine.mjs'
@@ -166,6 +167,33 @@ const LIMITATIONS = {
 const cfg = loadConfig()
 if (!getPanelAdmin().password) {
   throw new Error('VM2API_ADMIN_PASSWORD must be set; insecure default panel credentials are disabled')
+}
+// Egress state lives under the project root even when SQLite uses KIN_DATA_DIR.
+const stateDir = path.join(cfg.paths.project, 'data')
+const inheritedLockFd = process.env.VM2API_BOOTSTRAP_LOCK_FD
+delete process.env.VM2API_BOOTSTRAP_LOCK_FD
+fs.mkdirSync(stateDir, { recursive: true })
+// Bootstrap passes the same open file description through exec, without releasing the lock.
+// Node marks inherited fds close-on-exec, so helpers do not extend the owner's lifetime.
+const controlPlaneFd =
+  inheritedLockFd === undefined
+    ? fs.openSync(stateDir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)
+    : Number(inheritedLockFd)
+if (inheritedLockFd !== undefined) {
+  const actual = fs.fstatSync(controlPlaneFd, { bigint: true })
+  const expected = fs.statSync(stateDir, { bigint: true })
+  if (actual.dev !== expected.dev || actual.ino !== expected.ino) {
+    throw new Error('vm2api_control_plane_lock_failed: bootstrap fd does not identify project data')
+  }
+}
+const lock = spawnSync('flock', ['-n', '-E', '75', '3'], {
+  stdio: ['ignore', 'ignore', 'pipe', controlPlaneFd],
+  encoding: 'utf8',
+})
+if (lock.status !== 0) {
+  fs.closeSync(controlPlaneFd)
+  if (lock.status === 75) throw new Error('vm2api_control_plane_already_running: stop the other controller first')
+  throw new Error(`vm2api_control_plane_lock_failed: ${lock.error?.message || lock.stderr?.trim() || lock.signal}`)
 }
 fs.mkdirSync(cfg.paths.captures, { recursive: true })
 
@@ -458,8 +486,7 @@ requestLog.startCleanupScheduler()
 // Set once the cluster manager exists; node local rows probe through it.
 let localEgressCluster = null
 function holdBoundProxy(vmId, reason, proxyId) {
-  if (getVm(cfg.paths.project, vmId)?.proxy?.id === proxyId)
-    setScheduleHold(cfg.paths.project, vmId, HOLD_PROXY, { tag: proxyId, message: reason })
+  holdProxyFailure(cfg.paths.project, vmId, proxyId, reason)
 }
 
 proxyPool = new ProxyPool({
@@ -493,8 +520,12 @@ proxyPool = new ProxyPool({
       hold.detail?.message === 'proxy_manually_disabled'
     )
   },
+  usesHostEgress: (vmId, proxyId) => {
+    const vm = getVm(cfg.paths.project, vmId)
+    return vm?.proxy?.id === proxyId && !vm.node_id && !isCodexVm(vm) && ['running', 'paused'].includes(vm.status)
+  },
   egressCheck: (proxy) => proxyEgressReady(proxy, cfg.paths.project),
-  repairEgress: (proxy) => ensureProxyEgress(cfg.paths.project, proxy),
+  repairEgress: (proxy, shouldStart) => ensureProxyEgress(cfg.paths.project, proxy, { shouldStart }),
 })
 // An upgrade replaces bin/ files; slots mounting data/run/slot-guest-bin must see the new ones.
 try {
@@ -1133,6 +1164,7 @@ const slotShell = createSlotShell({
   projectRoot: cfg.paths.project,
   importOauth: commitImportedOauth,
 })
+const slotDesktop = createSlotDesktop({ projectRoot: cfg.paths.project })
 for (const vm of listVms(cfg.paths.project)) {
   if (isCodexVm(vm)) continue
   try {
@@ -1281,6 +1313,7 @@ const handlePanel = createPanelHandler({
   clusterRoutes,
   clusterManager,
   slotShell,
+  slotDesktop,
 })
 
 let browserShutdownFailed = false
@@ -1552,6 +1585,7 @@ server.on('upgrade', (req, socket, head) => {
   if (responsesWs.handleUpgrade(req, socket, head)) return
   if (clusterRoutes.handleUpgrade(req, socket, head)) return
   if (slotBrowserManager.handleUpgrade(req, socket, head)) return
+  if (slotDesktop.handleUpgrade(req, socket, head)) return
   if (!slotShell.handleUpgrade(req, socket, head)) socket.destroy()
 })
 gracefulShutdown.setServer(server)

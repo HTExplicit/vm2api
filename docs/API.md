@@ -60,6 +60,16 @@ OpenAI 模型页的 Fast 开关只对已同步、已启用且目录明确声明 
 
 完整工具调用/结果、调用 ID、namespace 内的 function/custom、加密 reasoning 与 Responses Lite 继续支持。namespace 及 Lite `additional_tools` 中的实际工具同样校验；function/custom 的业务参数 schema 不作资源扫描。文件 ID、向量库、容器与远程 MCP 服务器等账户资源不能通过历史或 hosted tool 引用。本节不改变 OAuth Codex 的协议契约。
 
+## Anthropic 工具续接
+
+`/v1/messages` 返回的 `tool_use` 是下一轮工具历史的依据。同一认证主体、入站会话和模型下，网关在完整响应后短期保留公开的工具块（含 `id`、`name`、解析后的 `input`、`caller` 和扩展字段）。客户端应优先原样回传。命中记录时，网关用原块还原历史，不改工具结果正文或 `is_error`。
+
+即使调用 ID 未变，紧接的 user 消息也必须用 `tool_result.tool_use_id` 唯一回答整组调用。缺少、重复或引用其他调用的结果时，该组历史保持原样；并行结果可以按不同顺序返回。
+
+若客户端同步重编了 `tool_use.id` 和 `tool_result.tool_use_id`，只有历史前缀、调用顺序、工具名和参数能唯一对应时，网关才一起还原这两处 ID。截断流、歧义或无记录时不猜测。记录只在当前网关进程内有界保留；进程重启、记录被淘汰或未提供可识别的会话时，仍以客户端历史为准。
+
+历史匹配忽略消息内容块外层的 `cache_control`，因此客户端可以移动缓存断点。还原工具块时保留本轮指定的断点；`tool_use.input` 内的同名字段仍是业务参数，参与匹配。
+
 ## Responses WebSocket
 
 用相同 Bearer API key 对 `GET /v1/responses` 发起标准 WebSocket Upgrade，然后发送文本帧：
