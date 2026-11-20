@@ -435,23 +435,6 @@ openaiApiManager = new OpenaiApiManager({
   apiScheduler,
   getRouting: () => routingConfig,
 })
-const codexBrowserLogin = new CodexBrowserLoginService({
-  browserManager: slotBrowserManager,
-  getVm: (id) => getVm(cfg.paths.project, id),
-  getAccountIdentity: slotAccountIdentity,
-  commitCredentials: async ({ vmId, account }) => {
-    const existing = getVm(cfg.paths.project, vmId)
-    if (!existing) throw Object.assign(new Error('槽位已删除'), { code: 'vm_not_found' })
-    return commitImportedCodexVm({
-      cfg,
-      vmPath: path.join(cfg.paths.project, 'vms', `${vmId}.json`),
-      existing,
-      account,
-      routingConfig,
-      catalogClientVersion: routingConfig.codex?.catalog_client_version,
-    })
-  },
-})
 apiScheduler.resolveAccountKey = (key) => openaiApiManager.resolveAccountKey(key)
 apiScheduler.onAccountKeyError = (key, error) => openaiApiManager.recordKeyError(key, error)
 const panelUsers = new PanelUserStore({ dataDir: cfg.paths.data, projectRoot: cfg.paths.project })
@@ -526,6 +509,24 @@ proxyPool = new ProxyPool({
   },
   egressCheck: (proxy) => proxyEgressReady(proxy, cfg.paths.project),
   repairEgress: (proxy, shouldStart) => ensureProxyEgress(cfg.paths.project, proxy, { shouldStart }),
+})
+const codexBrowserLogin = new CodexBrowserLoginService({
+  browserManager: slotBrowserManager,
+  proxyPool,
+  getVm: (id) => getVm(cfg.paths.project, id),
+  getAccountIdentity: slotAccountIdentity,
+  commitCredentials: async ({ vmId, account }) => {
+    const existing = getVm(cfg.paths.project, vmId)
+    if (!existing) throw Object.assign(new Error('槽位已删除'), { code: 'vm_not_found' })
+    return commitImportedCodexVm({
+      cfg,
+      vmPath: path.join(cfg.paths.project, 'vms', `${vmId}.json`),
+      existing,
+      account,
+      routingConfig,
+      catalogClientVersion: routingConfig.codex?.catalog_client_version,
+    })
+  },
 })
 // An upgrade replaces bin/ files; slots mounting data/run/slot-guest-bin must see the new ones.
 try {
