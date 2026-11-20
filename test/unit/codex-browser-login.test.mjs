@@ -24,12 +24,18 @@ async function until(predicate) {
 }
 
 function fixture(t, options = {}) {
-  const vm = { id: 'vm-first', device_id: 'device-first', codex: { ...(options.identity || {}) } }
+  const vm = {
+    id: 'vm-first',
+    device_id: 'device-first',
+    proxy: { id: 'px-first', host: 'bound-proxy.test', port: 1080 },
+    codex: { ...(options.identity || {}) },
+  }
   const closeController = new AbortController()
   const calls = {
     acquired: [],
     generated: [],
     exchanged: [],
+    tokenExits: [],
     committed: [],
     bound: [],
     persisted: [],
@@ -124,6 +130,7 @@ function fixture(t, options = {}) {
   }
   const service = new CodexBrowserLoginService({
     browserManager: manager,
+    proxyPool: options.proxyPool,
     getVm: () => current,
     ...(options.tokenIdentity !== undefined ? { getAccountIdentity: () => tokenIdentity } : {}),
     ...(options.now ? { now: options.now } : {}),
@@ -144,7 +151,14 @@ function fixture(t, options = {}) {
     },
     async exchangeCode(args) {
       calls.exchanged.push(args)
-      return options.exchange ? options.exchange(args) : tokens()
+      if (options.exchange) return options.exchange(args)
+      return exchangeCodexAuthCode({
+        ...args,
+        exchange: async ({ proxyUrl }) => {
+          calls.tokenExits.push(proxyUrl)
+          return { ok: true, ...tokens() }
+        },
+      })
     },
     cancelAuthSession(id) {
       calls.cancelled.push(id)
@@ -210,13 +224,13 @@ test('first login commits through the shared chain, binds the slot profile and r
   await f.waiting()
   const replies = await f.callback()
   await until(() => !f.service.jobs.size)
+  const status = f.calls.statuses.at(-1)
+  assert.equal(status.status, 'oauth_complete', status.error)
   assert.equal(f.calls.committed.length, 1)
   assert.equal(f.calls.committed[0].vmId, f.vm.id)
-  assert.equal(f.calls.exchanged[0].proxyUrl, f.live.proxyUrl)
+  assert.deepEqual(f.calls.tokenExits, [f.live.proxyUrl])
   assert.deepEqual(f.calls.bound, ['account-first'])
   assert.equal(f.calls.persisted.length, 1)
-  const status = f.calls.statuses.at(-1)
-  assert.equal(status.status, 'oauth_complete')
   assert.equal(status.result.vm.id, f.vm.id)
   assert.match(status.message, /凭据已保存.*开机并完成.*开启调度/)
   assert.equal(replies[0].status, 200)
@@ -224,6 +238,20 @@ test('first login commits through the shared chain, binds the slot profile and r
   assert.equal(f.live.closeSignal.aborted, false)
   assert.equal(f.calls.disabled, true)
   assert.equal(f.calls.detached, true)
+})
+
+test('disabling the bound proxy while the browser is open stops the callback before token exchange', async (t) => {
+  const proxy = { id: 'px-first', enabled: true }
+  const f = fixture(t, { proxyPool: { snapshot: () => ({ proxies: [proxy] }) } })
+  f.service.start(f.vm.id)
+  await f.waiting()
+  proxy.enabled = false
+  const [reply] = await f.callback()
+  await until(() => !f.service.jobs.size)
+  assert.equal(f.calls.statuses.at(-1).error, 'proxy_unavailable')
+  assert.equal(reply.status, 400)
+  assert.deepEqual(f.calls.tokenExits, [])
+  assert.equal(f.calls.committed.length, 0)
 })
 
 test('OAuth intercepts only documents at the exact callback path and its query string', async (t) => {

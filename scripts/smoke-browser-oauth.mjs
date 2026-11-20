@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { createBrowserFixture } from './browser-fixture.mjs'
 import { SlotBrowserManager } from '../src/lib/browser/slot-browser-manager.mjs'
 import { CodexBrowserLoginService } from '../src/lib/oauth/codex-browser-login.mjs'
+import { resolveSlotOAuthProxy } from '../src/lib/vm/proxy-resolve.mjs'
 
 // Real production service and CDP callback interception, with local fake tokens.
 // No account login, token endpoint, model request or callback HTTP listener.
@@ -43,6 +44,7 @@ let exchanged = 0
 let committed = 0
 let releaseExchange
 const grants = new Map()
+const proxyPool = { getProxyForVm: (id) => (id === vm.id ? vm.proxy : null) }
 const tokens = (mismatch) => {
   const claims = {
     email: mismatch ? 'other@example.invalid' : vm.codex.email,
@@ -53,6 +55,7 @@ const tokens = (mismatch) => {
 }
 const service = new CodexBrowserLoginService({
   browserManager: manager,
+  proxyPool,
   getVm: (id) => (id === vm.id ? vm : null),
   generateAuthUrl() {
     const sessionId = `fixture-session-${++issued}`
@@ -62,11 +65,12 @@ const service = new CodexBrowserLoginService({
     auth.searchParams.set('authorize_url', `${origin}/authorize?state=${state}`)
     return { session_id: sessionId, auth_url: auth.href, expires_at: Date.now() + 60_000 }
   },
-  async exchangeCode({ sessionId, code, proxyUrl }) {
+  async exchangeCode({ sessionId, code, vm: currentVm, proxyPool: currentPool }) {
     exchanged++
     const callback = new URL(code)
     assert.equal(callback.searchParams.get('state'), grants.get(sessionId))
-    assert.equal(proxyUrl, vm.proxy.url)
+    assert.equal(currentPool, proxyPool)
+    assert.equal(resolveSlotOAuthProxy(currentVm, currentPool), vm.proxy.url)
     const fakeCode = callback.searchParams.get('code')
     if (fakeCode === 'valid')
       await new Promise((resolve) => {

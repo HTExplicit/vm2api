@@ -72,6 +72,7 @@ export function parseCodexBrowserCallback(raw, expectedState) {
 export class CodexBrowserLoginService {
   constructor({
     browserManager,
+    proxyPool,
     getVm,
     getAccountIdentity,
     commitCredentials,
@@ -82,6 +83,7 @@ export class CodexBrowserLoginService {
   } = {}) {
     Object.assign(this, {
       browserManager,
+      proxyPool,
       getVm,
       getAccountIdentity,
       commitCredentials,
@@ -256,13 +258,14 @@ export class CodexBrowserLoginService {
     job.exchanging = true
     job.live.stream?.sendNavigation()
     try {
-      this.assertCurrent(job)
+      const vm = this.assertCurrent(job)
       const callback = parseCodexBrowserCallback(request.url, job.state)
       const account = await this.exchangeCode({
         sessionId: job.sessionId,
         code: callback,
-        proxyUrl: job.live.proxyUrl,
         vmId: job.vmId,
+        vm,
+        proxyPool: this.proxyPool,
       })
       this.assertCurrent(job)
       const identity = openaiIdentityFromOauthTokens(account)
