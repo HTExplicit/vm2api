@@ -14,7 +14,7 @@ import { Label } from '@/components/ui/label'
 import { ThemeSwitch } from '@/components/theme-switch'
 import { onboardingQueryOptions } from '@/features/welcome/queries'
 
-/** Standalone sign-in page; layout follows the newapi /sign-in screen. */
+/** Standalone sign-in page. */
 export function LoginPage() {
   const search = useSearch({ from: '/login' })
   const navigate = useNavigate()

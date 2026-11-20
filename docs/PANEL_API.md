@@ -511,7 +511,7 @@ attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终
 
 仅 admin。POST/PATCH 字段：`name`（1–40）、`enabled`、`vm_ids`（整表替换；省略则不动成员）。槽不存在 400 `vm_pool_vm_unknown`；槽已在别的池 409 `vm_in_other_pool`；重名 409 `vm_pool_name_taken`。仍有密钥绑定时 DELETE 409 `vm_pool_in_use`，不会把这些密钥放开成全局。
 
-### 协议字段（对齐 Sub2API usage_logs）
+### 协议字段
 
 | 字段 | 说明 |
 |------|------|
@@ -564,7 +564,7 @@ attempts：每次选中的 VM/账号、错误域、cooldown、提交边界、终
 |------|------|------|
 | POST | `/api/messages`（旧 `/anthropic/messages` 保留） | admin 联调 Anthropic Messages 或 OpenAI Responses（由 `protocol` 选择）。成功 `{ ok: true, data }`；失败 `{ ok: false, error: { code, message } }` |
 
-**鉴权**：仅 `admin` 角色（含 master API key）；`user` / `super` 403。
+**鉴权**：需要 `admin` 面板会话。写操作要求同源 POST。
 
 **请求**（JSON，≤64 KiB）：
 

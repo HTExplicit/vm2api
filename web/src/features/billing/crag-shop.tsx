@@ -32,6 +32,7 @@ import { ConfirmDialog } from '@/components/confirm-dialog'
 import { PageHeader } from '@/components/page-header'
 import { StatusMark } from '@/components/status-mark'
 import { meQueryOptions } from '@/features/auth/queries'
+import { geminiInventoryOptions } from '@/features/import/gemini-environments'
 import { CragActivationForm } from '@/features/vm/crag-license-editor'
 import {
   cragHostStatusLabels,
@@ -63,6 +64,7 @@ import {
 } from './crag-commerce'
 import { normalizeLayout, ordersSideClass } from './crag-layout'
 import { CragPlanPicker } from './crag-plan-picker'
+import { GeminiRedeemDialog } from './gemini-redeem-dialog'
 
 export { formatPlanDetails, termLabel } from './crag-catalog'
 export type { CragPlan, Presentation } from './crag-catalog'
@@ -1288,6 +1290,15 @@ function ShopOrders({
             >
               手动激活
             </Button>
+          ) : null}
+          {isAdmin && !device ? (
+            <GeminiRedeemDialog
+              onRedeemed={() => {
+                void qc.invalidateQueries({
+                  queryKey: geminiInventoryOptions().queryKey,
+                })
+              }}
+            />
           ) : null}
         </div>
       }

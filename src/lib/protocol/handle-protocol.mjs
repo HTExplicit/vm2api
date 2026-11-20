@@ -1648,8 +1648,8 @@ export function createHandleProtocol(deps) {
       )
     }
     const isProbe = isParentSessionCompanion(inbound) || isParentSessionCompanion(ctx.body)
-    // One-shot test calls (sub2api account test, new-api channel test) keep their
-    // sticky identity but never hold a session seat the main conversation needs.
+    // One-shot account and channel tests keep their sticky identity without
+    // holding a session seat the main conversation needs.
     const seatless = isProbe || isShortProbeRequest(inbound)
     // Seat = this client session. Same device, other session = other slot.
     const seatKey = seatless
@@ -1984,6 +1984,10 @@ export function createHandleProtocol(deps) {
           }
           const entrypointNow = ccEntrypointFromRouting(routingNow)
           const repaired = extra.repaired === true
+          // An upstream that refused the sampling fields themselves gets a retry
+          // with none of them; the assembly rebuilds from caller input after the
+          // repairs replay, so the decision has to ride along to it.
+          const dropSampling = (extra.repairs || []).some((policy) => policy?.reason === 'sampling_repairable')
           const preserveThinkingBlocks =
             !repaired &&
             routingNow?.failover?.signature_repair !== true &&
@@ -2116,6 +2120,7 @@ export function createHandleProtocol(deps) {
                   transportRouting,
                   requestContext,
                   repaired,
+                  dropSampling,
                 },
               }
             }
@@ -2217,6 +2222,7 @@ export function createHandleProtocol(deps) {
                 transportRouting,
                 requestContext,
                 repaired,
+                dropSampling,
               },
             }
           }
@@ -2280,6 +2286,7 @@ export function createHandleProtocol(deps) {
             credentialMode: credMode,
             authScheme: isApiKeyMode(credMode) ? 'apikey' : 'oauth',
             want1m,
+            dropSampling,
           })
           const outbound = noteCachePrefix(selected, attemptSessionId, prepared.body)
           logBag.outbound_summary = summarizeBody(outbound)
@@ -2300,6 +2307,7 @@ export function createHandleProtocol(deps) {
               toolNames: composeToolNames(inboundToolReverse, prepared.toolNames),
               sessionId: attemptSessionId,
               repaired,
+              dropSampling,
             },
           }
         },
@@ -2322,6 +2330,7 @@ export function createHandleProtocol(deps) {
               callerCwd: attemptMeta?.callerCwd,
               preparedHop: attemptMeta?.preparedHop,
               repaired: attemptMeta?.repaired === true,
+              dropSampling: attemptMeta?.dropSampling === true,
               requestContext: attemptMeta?.requestContext || requestContext,
               want1m,
               routing: attemptMeta?.transportRouting ?? getRouting(),
@@ -2366,6 +2375,7 @@ export function createHandleProtocol(deps) {
               callerCwd: attemptMeta?.callerCwd,
               preparedHop: attemptMeta?.preparedHop,
               repaired: attemptMeta?.repaired === true,
+              dropSampling: attemptMeta?.dropSampling === true,
               requestContext: attemptMeta?.requestContext || requestContext,
               body,
               reqHeaders: req.headers,

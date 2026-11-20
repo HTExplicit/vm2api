@@ -111,7 +111,7 @@ func TestResolveDNSValidatesRepliesBeforeChoosingUpstream(t *testing.T) {
 			}))
 			defer upstream.Close()
 			srv := &Server{}
-			srv.cur.Store(&runtime{http: upstream.Client(), upstreams: []string{upstream.URL + "/first", upstream.URL + "/fallback"}})
+			srv.cur.Store(&runtime{def: &exit{http: upstream.Client(), upstreams: []string{upstream.URL + "/first", upstream.URL + "/fallback"}}})
 			got, err := srv.ResolveDNS(context.Background(), query)
 			if err != nil {
 				t.Fatal(err)
@@ -120,8 +120,8 @@ func TestResolveDNSValidatesRepliesBeforeChoosingUpstream(t *testing.T) {
 			if tc.fallback {
 				want, wantHits = valid, 1
 			}
-			if !bytes.Equal(got, want) || fallbackHits.Load() != wantHits || srv.rt().preferred.Load() != wantHits {
-				t.Fatalf("reply=%x fallback hits=%d preferred=%d; want reply=%x fallback=%d", got, fallbackHits.Load(), srv.rt().preferred.Load(), want, wantHits)
+			if !bytes.Equal(got, want) || fallbackHits.Load() != wantHits || srv.rt().def.preferred.Load() != wantHits {
+				t.Fatalf("reply=%x fallback hits=%d preferred=%d; want reply=%x fallback=%d", got, fallbackHits.Load(), srv.rt().def.preferred.Load(), want, wantHits)
 			}
 		})
 	}
@@ -169,11 +169,11 @@ func TestResolveDNSRejectsMalformedTCPReplyBeforeFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.rt().http = fallback.Client()
+	srv.rt().def.http = fallback.Client()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	got, err := srv.ResolveDNS(ctx, query)
-	if err != nil || !bytes.Equal(got, valid) || srv.rt().preferred.Load() != 1 {
-		t.Fatalf("reply=%x preferred=%d err=%v", got, srv.rt().preferred.Load(), err)
+	if err != nil || !bytes.Equal(got, valid) || srv.rt().def.preferred.Load() != 1 {
+		t.Fatalf("reply=%x preferred=%d err=%v", got, srv.rt().def.preferred.Load(), err)
 	}
 }

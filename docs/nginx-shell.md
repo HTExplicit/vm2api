@@ -1,6 +1,6 @@
 # 终端 WebSocket 排查
 
-集群页终端、VM 详情「运维」终端和 OpenAI OAuth／Platform 槽位浏览器都使用 WebSocket。nginx 没把 `Upgrade` 原样交给 Node 时，面板显示「已断开」或「连接失败」，页面资源本身可以是 200。
+集群页终端、VM 详情「运维」终端、Gemini 终端和 OpenAI OAuth／Platform 槽位浏览器都使用 WebSocket。nginx 没把 `Upgrade` 原样交给 Node 时，面板显示「已断开」或「连接失败」，页面资源本身可以是 200。
 
 面板交互路径：
 
@@ -10,8 +10,9 @@
 | 槽运维 | `/api/panel/vms/<id>/shell` |
 | OpenAI OAuth／Platform 槽位浏览器 | `/api/panel/vms/<id>/browser` |
 | Platform 旧连接路径（兼容） | `/api/panel/vms/<id>/openai-api/browser` |
+| Gemini | `/api/panel/gemini/environments/<id>/terminal/ws` |
 
-WebSocket 握手鉴权不走 `Authorization`。面板先 `POST` 对应的 `shell-ticket`（终端）或 `browser-ticket`（槽位浏览器，兼容 `openai-api/browser-ticket`），再把 30 秒、一次性的 `ticket` 放在 WebSocket 查询串上。ticket 用过或过期再握一次手，401 是正常的。
+WebSocket 握手鉴权不走 `Authorization`。面板先 `POST` 对应的 `shell-ticket`（终端）、`terminal-ticket`（Gemini）或 `browser-ticket`（槽位浏览器，兼容 `openai-api/browser-ticket`），再把 30 秒、一次性的 `ticket` 放在 WebSocket 查询串上。ticket 用过或过期再握一次手，401 是正常的。
 
 ## 正确反代
 
@@ -20,7 +21,7 @@ WebSocket 握手鉴权不走 `Authorization`。面板先 `POST` 对应的 `shell
 只有 Node、没有前门时，`proxy_pass` 指 Node（Compose 默认 `:8787`）：
 
 ```nginx
-location ~ ^/api/panel/((cluster/nodes|vms)/[^/]+/shell|vms/[^/]+/(openai-api/)?browser)$ {
+location ~ ^/api/panel/((cluster/nodes|vms)/[^/]+/shell|vms/[^/]+/(openai-api/)?browser|gemini/environments/[^/]+/terminal/ws)$ {
     proxy_pass http://127.0.0.1:8787;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
@@ -35,7 +36,7 @@ location ~ ^/api/panel/((cluster/nodes|vms)/[^/]+/shell|vms/[^/]+/(openai-api/)?
 生产机前面还有 Go 前门 `:8787`，Node 在 `:8788`。前门会丢掉 `Upgrade`。终端和账号浏览器必须直连 Node，不要指 `:8787`：
 
 ```nginx
-location ~ ^/api/panel/((cluster/nodes|vms)/[^/]+/shell|vms/[^/]+/(openai-api/)?browser)$ {
+location ~ ^/api/panel/((cluster/nodes|vms)/[^/]+/shell|vms/[^/]+/(openai-api/)?browser|gemini/environments/[^/]+/terminal/ws)$ {
     proxy_pass http://127.0.0.1:8788;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
@@ -69,7 +70,7 @@ curl -sk -D - -o /dev/null \
 |---|---|
 | `101 Switching Protocols` | nginx 已把 Upgrade 交给 Node |
 | `401`，`Connection: keep-alive`，正文 `missing_api_key` | 没进 WebSocket location，落到了普通 `/api/`。Go 前门或 Node 把它当成要登录的 HTTP 请求 |
-| `401`，且 location 已匹配 | ticket 空、过期或用过。重新 `POST .../shell-ticket` 或 `.../browser-ticket` |
+| `401`，且 location 已匹配 | ticket 空、过期或用过。向对应的票据接口重新发起 POST |
 | `502` / `504` | `proxy_pass` 指错端口，或 Node 没在听 |
 
 再确认实际生效的是哪一段：
