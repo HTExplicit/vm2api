@@ -1170,7 +1170,18 @@ export async function startEgressProcess({
   if (configMatches) {
     try {
       const old = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      if (egressConfigBody(old) === wantedBody && staleEgressPids(cfgPath, existing).length === 0) {
+      // Reuse legacy configs that omit the proxy ID and optional defaults.
+      const current = egressConfigFor({
+        proxyId,
+        proxyUrl: old.proxy_url,
+        listenTcp: old.listen_tcp,
+        listenDns: old.listen_dns,
+        dnsUpstream: old.dns_upstream,
+        dnsEmptyTypes: old.dns_empty_types || [],
+        domainForward: old.domain_forward,
+        routes: old.routes || [],
+      })
+      if (egressConfigBody(current) === wantedBody && staleEgressPids(cfgPath, existing).length === 0) {
         return { ok: true, pid: existing, reused: true, configPath: cfgPath }
       }
       // Same listeners and a reload-capable binary: swap proxy/DNS/policy by SIGHUP.
