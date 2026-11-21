@@ -203,6 +203,8 @@ describe('classic account table columns', () => {
     ).toEqual(CLASSIC_COLUMNS)
     expect(html).toContain('显示列')
     expect(html).toContain('列表统计')
+    expect(html).toContain('value="today">今日请求数</option>')
+    expect(html).toContain('value="spend">7 天窗口花费</option>')
     expect(html).toContain('data-pin="false"')
     for (const key of METRIC_COLUMNS) expect(html).toContain(`value="${key}"`)
   })

@@ -120,6 +120,10 @@ curl -sS http://127.0.0.1:8787/v1/messages \
 
 Claude 推理路径按配置选定的 persona system 清洗入站；**回包不带改写后的 system**。`persona_preset=official` 保留 billing、identity、调用方 agent prompt（若有）和调用方 system；`persona_preset=official_full` 才固定追加完整 Claude Code agent prompt。只有 `official_cc_passthrough=true` 才让官方 Claude Code 家族保留入站 system 和内容形状，关闭时同样按 persona 清洗。清洗后的 `usage` 按「没有 persona system、没有注入 tools」估算。OpenAI(apikey) 账号继续独立分流，不应用 Claude 专属 persona 或工具能力限制。
 
+上面这套改写对每个 Anthropic API 地址可单独关掉：地址的 `body_policy` 为 `persona`（缺省）时照上述执行；设为 `caller` 则原样转发调用方自带的 `system`、计费标记与工具身份，不注入人设、persona 隐藏用量记 0。只有运维能在面板「API 渠道」里改它，请求头和请求体都无法开启。它**只影响人设注入** —— 风控审查、Key 配额、模型映射、预算下限、代理与认证照旧，上游的拒绝也照旧透出。适用于上游自己读取这些块的地址（例如上游按调用方计费标记判断额度）。
+
+注意本页的「API 渠道测试」不走上述人设链路，它自建一个最简 Messages 请求。所以**面板测试通过不能推断托管 Key 正式入口的请求形状**；要比对两者，先确认该地址的 `body_policy`。
+
 支持的 Messages 字段原样进入清洗层：`system`、`tools`、`tool_choice`、`thinking`、`output_config`、`metadata`、`stop_sequences`、图片块、`cache_control`。非法 `role` 会洗掉。OpenAI 形态 tools 出现在本口时先转成 Anthropic tools，但仍判非官方。
 
 native cli-hop 开启官方家族透传时，调用方 `cache_control` 的位置、显式 TTL 与缺失 TTL 保留。超过四个 breakpoint、thinking 上打点、非法 TTL，或 `5m`（含缺失 TTL）之后出现 `1h`，返回 `400 invalid_cache_control`，不静默裁剪或降级、不执行上游。非透传仍按协议重写规则生成自产点；kernel 不再替前置层修复 TTL 顺序。

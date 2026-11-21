@@ -11,10 +11,18 @@ export const API_DEFAULTS = {
 
 export type AuthScheme = 'x_api_key' | 'authorization_bearer'
 
+/** 地址如何处理调用方正文：`persona` 套用配置的人设，`caller` 原样转发。 */
+export type BodyPolicy = 'persona' | 'caller'
+
+export function asBodyPolicy(value: unknown): BodyPolicy {
+  return value === 'caller' ? 'caller' : 'persona'
+}
+
 /** 载入时的服务端值；保存已存地址只发和它不同的字段。 */
 export type StoredSnapshot = {
   protocol?: ApiProtocol
   riskReviewEnabled?: boolean
+  bodyPolicy?: BodyPolicy
   baseUrl: string
   authScheme: AuthScheme
   proxyId: string
@@ -25,6 +33,7 @@ export type EndpointDraft = {
   protocol?: ApiProtocol
   riskReviewEnabled?: boolean
   existingModels?: string[]
+  bodyPolicy?: BodyPolicy
   fetchedModels?: string[]
   savedModels?: string[]
   id: string
@@ -41,6 +50,7 @@ type StoredItem = {
   id: string
   protocol?: ApiProtocol
   risk_review_enabled?: boolean
+  body_policy?: string
   base_url?: string
   auth_scheme?: string
   headers?: Record<string, string>
@@ -54,6 +64,7 @@ export function draftFromStored(item: StoredItem): EndpointDraft {
   const stored: StoredSnapshot = {
     protocol: item.protocol || 'anthropic',
     riskReviewEnabled: item.risk_review_enabled === true,
+    bodyPolicy: asBodyPolicy(item.body_policy),
     baseUrl:
       item.base_url || API_DEFAULTS[item.protocol || 'anthropic'].baseUrl,
     authScheme:
@@ -148,7 +159,10 @@ export function endpointSaveRequest(
         kind: kindOf(baseUrl, protocol),
         protocol,
         ...(protocol === 'anthropic'
-          ? { risk_review_enabled: item.riskReviewEnabled === true }
+          ? {
+              risk_review_enabled: item.riskReviewEnabled === true,
+              body_policy: asBodyPolicy(item.bodyPolicy),
+            }
           : {}),
         name: baseUrl,
         base_url: baseUrl,
@@ -170,6 +184,12 @@ export function endpointSaveRequest(
     (!was || item.riskReviewEnabled !== (was.riskReviewEnabled === true))
   )
     body.risk_review_enabled = item.riskReviewEnabled
+  if (
+    protocol === 'anthropic' &&
+    item.bodyPolicy !== undefined &&
+    (!was || asBodyPolicy(item.bodyPolicy) !== asBodyPolicy(was.bodyPolicy))
+  )
+    body.body_policy = asBodyPolicy(item.bodyPolicy)
   if (!was || item.proxyId !== was.proxyId) body.proxy_id = proxyId
   if (!was || item.authScheme !== was.authScheme)
     body.auth_scheme = item.authScheme

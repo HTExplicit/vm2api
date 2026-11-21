@@ -92,7 +92,7 @@ test('failed egress and an unverified rebind both leave the hold for a later pro
   pool.probeOne = async () => ({ ...probe, ok: false, scope: 'egress' })
   await pool.probeById(current.id)
   assert.equal(getVm(root, 'vm-01').schedule_hold.detail.tag, current.id)
-  setScheduleHold(root, 'vm-01', 'proxy_cooldown', { tag: previous.id })
+  setScheduleHold(root, 'vm-01', 'proxy_cooldown', { tag: previous.id, message: 'proxy_probe_failed' })
   pool.probeOne = async () => probe
   await pool.probeById(current.id)
   assert.equal(getVm(root, 'vm-01').schedulable, false)

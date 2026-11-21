@@ -10,6 +10,8 @@ import { slotExec } from './slot-runtime.mjs'
 import { clearVerifiedProxyHold, getVm, isCodexVm } from './vm-registry.mjs'
 import { inspectContainer } from './vm-runtime.mjs'
 
+const AUTOMATIC_PROXY_HOLD = /^(egress_down|proxy_probe_failed)(:|$)|\|proxy=/
+
 async function runtimeProxyMatches(projectRoot, vm) {
   if (isCodexVm(vm)) {
     const filename = path.join(projectRoot, 'vms', vm.id, 'run', 'codex-kernel.json')
@@ -36,7 +38,9 @@ export async function recoverProxyScheduleHold(
   if (hold?.reason !== HOLD_PROXY || vm.proxy?.id !== proxy.id) return false
   const proxyUrl = boundProxyUrl(proxy)
   if (boundProxyUrl(vm.proxy) !== proxyUrl) return false
-  if (hold.detail?.tag !== proxy.id && (!reloaded || isCodexVm(vm))) {
+  const stale = hold.detail?.tag !== proxy.id
+  if (stale && !AUTOMATIC_PROXY_HOLD.test(hold.detail?.message || '')) return false
+  if (stale && (!reloaded || isCodexVm(vm))) {
     if (!['running', 'paused'].includes(vm.status) || !(await verifyRuntime(projectRoot, vm))) return false
   }
   if (!isCurrent()) return false

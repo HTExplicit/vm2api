@@ -15,6 +15,7 @@ import { Route as CragPurchaseRouteImport } from './routes/crag-purchase'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as WelcomeRouteImport } from './routes/welcome'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
+import { Route as AuthenticatedAccountRouteImport } from './routes/_authenticated/account'
 import { Route as AuthenticatedAnthropicRouteImport } from './routes/_authenticated/anthropic'
 import { Route as AuthenticatedApiRouteImport } from './routes/_authenticated/api'
 import { Route as AuthenticatedBillingRouteImport } from './routes/_authenticated/billing'
@@ -67,6 +68,11 @@ const WelcomeRoute = WelcomeRouteImport.update({
 const AuthenticatedIndexRoute = AuthenticatedIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedAccountRoute = AuthenticatedAccountRouteImport.update({
+  id: '/account',
+  path: '/account',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedAnthropicRoute = AuthenticatedAnthropicRouteImport.update({
@@ -200,6 +206,7 @@ export interface FileRoutesByFullPath {
   '/crag-purchase': typeof CragPurchaseRoute
   '/login': typeof LoginRoute
   '/welcome': typeof WelcomeRoute
+  '/account': typeof AuthenticatedAccountRoute
   '/anthropic': typeof AuthenticatedAnthropicRoute
   '/api': typeof AuthenticatedApiRoute
   '/billing': typeof AuthenticatedBillingRoute
@@ -230,6 +237,7 @@ export interface FileRoutesByTo {
   '/crag-purchase': typeof CragPurchaseRoute
   '/login': typeof LoginRoute
   '/welcome': typeof WelcomeRoute
+  '/account': typeof AuthenticatedAccountRoute
   '/anthropic': typeof AuthenticatedAnthropicRoute
   '/api': typeof AuthenticatedApiRoute
   '/billing': typeof AuthenticatedBillingRoute
@@ -263,6 +271,7 @@ export interface FileRoutesById {
   '/crag-purchase': typeof CragPurchaseRoute
   '/login': typeof LoginRoute
   '/welcome': typeof WelcomeRoute
+  '/_authenticated/account': typeof AuthenticatedAccountRoute
   '/_authenticated/anthropic': typeof AuthenticatedAnthropicRoute
   '/_authenticated/api': typeof AuthenticatedApiRoute
   '/_authenticated/billing': typeof AuthenticatedBillingRoute
@@ -297,6 +306,7 @@ export interface FileRouteTypes {
     | '/crag-purchase'
     | '/login'
     | '/welcome'
+    | '/account'
     | '/anthropic'
     | '/api'
     | '/billing'
@@ -327,6 +337,7 @@ export interface FileRouteTypes {
     | '/crag-purchase'
     | '/login'
     | '/welcome'
+    | '/account'
     | '/anthropic'
     | '/api'
     | '/billing'
@@ -359,6 +370,7 @@ export interface FileRouteTypes {
     | '/crag-purchase'
     | '/login'
     | '/welcome'
+    | '/_authenticated/account'
     | '/_authenticated/anthropic'
     | '/_authenticated/api'
     | '/_authenticated/billing'
@@ -436,6 +448,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof AuthenticatedIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/account': {
+      id: '/_authenticated/account'
+      path: '/account'
+      fullPath: '/account'
+      preLoaderRoute: typeof AuthenticatedAccountRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/anthropic': {
@@ -610,6 +629,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthenticatedRouteRouteChildren {
+  AuthenticatedAccountRoute: typeof AuthenticatedAccountRoute
   AuthenticatedAnthropicRoute: typeof AuthenticatedAnthropicRoute
   AuthenticatedApiRoute: typeof AuthenticatedApiRoute
   AuthenticatedBillingRoute: typeof AuthenticatedBillingRoute
@@ -638,6 +658,7 @@ interface AuthenticatedRouteRouteChildren {
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+  AuthenticatedAccountRoute: AuthenticatedAccountRoute,
   AuthenticatedAnthropicRoute: AuthenticatedAnthropicRoute,
   AuthenticatedApiRoute: AuthenticatedApiRoute,
   AuthenticatedBillingRoute: AuthenticatedBillingRoute,
