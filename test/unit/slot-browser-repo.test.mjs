@@ -140,13 +140,12 @@ test('CloakBrowser migration clears Firefox web state once and preserves credent
     policy: { maxConcurrency: 3 },
   })
   const api = new OpenaiApiRepo(db)
-  const store = new ApiEndpointStore({ db })
-  const endpoint = store.create({ kind: 'openai', name: 'keep-endpoint' })
-  const key = store.addKey(endpoint.id, {
-    api_key: 'sk-platform-keep',
-    source_vm_id: 'slot-a',
-    source_account_id: 'account-a',
-  })
+  const endpoint = { id: 'keep-endpoint' }
+  const key = { id: 'keep-key' }
+  db.prepare(`INSERT INTO api_endpoints (id, name, base_url, kind, protocol)
+    VALUES (?, 'keep-endpoint', 'https://api.openai.com', 'openai', 'openai')`).run(endpoint.id)
+  db.prepare(`INSERT INTO api_endpoint_keys (id, endpoint_id, api_key, source_vm_id, source_account_id)
+    VALUES (?, ?, ?, 'slot-a', 'account-a')`).run(key.id, endpoint.id, maybeEncrypt('sk-platform-keep'))
   api.upsertOrg('org-a', {
     balance: '12.3456789',
     paid_balance: '10.0000001',
@@ -215,7 +214,10 @@ test('CloakBrowser migration clears Firefox web state once and preserves credent
   )
   assert.deepEqual(db.prepare('SELECT * FROM openai_api_orgs WHERE organization_id = ?').get('org-a'), beforeOrg)
   assert.deepEqual(db.prepare('SELECT * FROM api_endpoint_keys WHERE id = ?').get(key.id), beforeKey)
-  assert.deepEqual(db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get(endpoint.id), beforeEndpoint)
+  assert.deepEqual(
+    { ...db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get(endpoint.id) },
+    { ...beforeEndpoint, body_policy: 'persona' },
+  )
   assert.deepEqual(fs.readFileSync(credentialFile), credentialBytes)
   assert.equal(new OpenaiApiRepo(db).getKey(key.id).api_key, 'sk-platform-keep')
   const orphan = new OpenaiApiRepo(db).getAccount('account-orphan')

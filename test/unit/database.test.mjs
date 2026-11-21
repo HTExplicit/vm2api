@@ -265,6 +265,8 @@ test('migration 059 onward preserves the published 9102 ledger, browser state an
       '065_crag_shop_order_dispatch.sql',
       '066_refusal_session_blocks.sql',
       '067_crag_shop_order_closed.sql',
+      '068_api_endpoint_body_policy.sql',
+      '069_proxy_dns_disable_svcb_https.sql',
     ])
     assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '059' ORDER BY version").all(), ledger)
     for (const table of preservedTables)
@@ -579,9 +581,12 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       '065_crag_shop_order_dispatch.sql',
       '066_refusal_session_blocks.sql',
       '067_crag_shop_order_closed.sql',
+      '068_api_endpoint_body_policy.sql',
+      '069_proxy_dns_disable_svcb_https.sql',
     ])
-    const { risk_review_enabled, ...after } = db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy')
+    const { risk_review_enabled, body_policy, ...after } = db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy')
     assert.equal(risk_review_enabled, 0)
+    assert.equal(body_policy, 'persona')
     assert.deepEqual(after, before)
     assert.throws(() => db.prepare('UPDATE api_endpoints SET risk_review_enabled = 2').run(), /CHECK/)
     assert.throws(() => db.prepare('UPDATE api_endpoints SET risk_review_enabled = NULL').run(), /NOT NULL/)

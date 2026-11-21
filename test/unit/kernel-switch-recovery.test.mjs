@@ -745,12 +745,6 @@ test('the first request after CRAG cutover uses the new kernel capabilities, not
   assert.equal(switched.status, 200)
   const run = path.join(root, 'vms', vm.id, 'run')
   const socket = path.join(run, 'kernel.sock')
-  const claudeDir = path.join(root, 'vms', vm.id, 'cli-home', '.claude')
-  fs.writeFileSync(
-    path.join(claudeDir, 'credentials.json'),
-    JSON.stringify({ claudeAiOauth: { accessToken: 'fixture-access-token', refreshToken: 'fixture-refresh-token' } }),
-    { mode: 0o600 },
-  )
   let posted
   const server = http.createServer(async (req, res) => {
     if (req.url === '/internal/health') {
