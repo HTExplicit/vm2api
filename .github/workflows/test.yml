@@ -379,8 +379,8 @@ jobs:
         run: node --test --test-name-pattern='^generated API key lists configured models and calls both protocols through API endpoints$' test/e2e/api-channel.e2e.test.mjs
       - name: Managed keys read their own quota and usage
         run: node --test --test-name-pattern='^managed keys read their own quota and usage; expired keys still can, disabled cannot$' test/e2e/key-self.e2e.test.mjs
-      - name: OAuth exchange uses the VM egress
-        run: node --test --test-name-pattern='^OAuth exchange reuses VM egress without a host-side proxy hop$' test/e2e/panel-api.e2e.test.mjs
+      - name: Gateway proxy recovery and OAuth egress
+        run: node --test --test-name-pattern='^(OAuth exchange reuses VM egress without a host-side proxy hop|gateway startup re-probes an automatically disabled bound proxy)$' test/e2e/panel-api.e2e.test.mjs
       - name: synthetic billing benchmark
         shell: bash
         run: |
