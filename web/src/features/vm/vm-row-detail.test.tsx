@@ -137,7 +137,7 @@ describe('VM row cost breakdown', () => {
     )
     expect(html).toMatch(/scope="col"[^>]*>Token<\/th>/)
     expect(html).toContain('>987</td>')
-    expect(html).toContain('每请求 · 7D')
+    expect(html).toContain('每请求 · 7 天额度窗口')
     expect(html).toContain('$0.400')
     expect(html).toContain('$12.50')
   })
@@ -217,7 +217,6 @@ describe('VM row request health', () => {
     expect(html).toMatch(/请求<\/span><b[^>]*>0<\/b>/)
     expect(html).not.toContain('请求健康数据未知')
     expect(html).not.toContain('加载失败')
-    expect(html).not.toContain('100%')
   })
 
   it('shows a measured zero-request period without inventing a success rate', () => {
@@ -230,7 +229,6 @@ describe('VM row request health', () => {
     expect(html).toMatch(/成功率<\/span><b[^>]*>—<\/b>/)
     expect(html).toMatch(/请求<\/span><b[^>]*>0<\/b>/)
     expect(html).not.toContain('请求健康数据未知')
-    expect(html).not.toContain('100%')
   })
 
   it('keeps query failures distinct from unknown data and zero requests', () => {

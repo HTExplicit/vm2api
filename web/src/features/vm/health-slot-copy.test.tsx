@@ -13,6 +13,11 @@ vi.mock('@tanstack/react-query', async (importOriginal) => {
   return { ...actual, useQuery: () => healthState.current }
 })
 
+vi.mock('./vm-perms', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./vm-perms')>()
+  return { ...actual, useVmPerms: () => actual.vmPermsFor('admin') }
+})
+
 function renderDetail() {
   return renderToStaticMarkup(
     <QueryClientProvider client={new QueryClient()}>
