@@ -166,6 +166,7 @@ jobs:
             test/unit/fleet-services.test.mjs \
             test/unit/proxy-http-scheme.test.mjs \
             test/unit/proxy-pool-bind.test.mjs \
+            test/unit/proxy-dns-per-proxy-migration.test.mjs \
             test/unit/proxy-schedule-recovery.test.mjs \
             test/unit/proxy-pool-update.test.mjs \
             test/unit/panel-proxy-browser-boundary.test.mjs \
@@ -317,6 +318,8 @@ jobs:
             test/unit/slot-engine.test.mjs \
             test/unit/key-self.test.mjs \
             test/unit/panel-acl.test.mjs \
+            test/unit/panel-2fa.test.mjs \
+            test/unit/totp.test.mjs \
             test/unit/panel-users.test.mjs \
             test/unit/statistics-repo.test.mjs \
             test/unit/official-cache-breakpoints.test.mjs \

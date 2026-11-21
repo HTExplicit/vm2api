@@ -158,7 +158,7 @@ describe('account API source history display', () => {
     expect(html).toContain('The key is no longer valid')
     expect(html).toContain('ek_old')
     expect(html).toContain('上游 key ID')
-    expect(html).toContain('2 个供应商')
+    expect(html).toContain('2 个账号')
     expect(finalProviderName(row)).toBe('other@example.test')
   })
 })

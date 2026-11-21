@@ -223,7 +223,8 @@ export function LogicTraceTab({
   const chain = row.providerChain
   const base = Date.parse(chain[0]?.startedAt ?? '')
   const sticky = chain[0]?.selectionReason === 'sticky'
-  const vmCount = new Set(
+  const hasAccountSource = chain.some((item) => item.sourceAccountId)
+  const sourceCount = new Set(
     chain
       .map((item) => item.sourceAccountId || item.vmId || item.accountId)
       .filter(Boolean)
@@ -271,7 +272,7 @@ export function LogicTraceTab({
                 </Badge>
               ) : null}
               <Badge variant='outline' className='text-[10px]'>
-                {vmCount} 个供应商
+                {sourceCount} {hasAccountSource ? '个账号' : '台虚拟机'}
               </Badge>
             </div>
           </div>

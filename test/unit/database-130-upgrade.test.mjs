@@ -75,8 +75,14 @@ test('136 appends migrations to the published 121 ledger and preserves business 
   }
 })
 
-test('139 adds refusal session storage to the published 13601 ledger and allows rollback', (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-139-migrations-'))
+test('the fork appends migrations to the 13601 ledger and allows rollback', (t) => {
+  const appended = [
+    '066_refusal_session_blocks.sql',
+    '067_crag_shop_order_closed.sql',
+    '068_api_endpoint_body_policy.sql',
+    '069_proxy_dns_disable_svcb_https.sql',
+  ]
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-fork-migrations-'))
   t.after(() => fs.rmSync(root, { recursive: true }))
   const previous = copyMigrationSet(root, '13601', '066')
   const file = path.join(root, 'upgrade.db')
@@ -98,7 +104,7 @@ test('139 adds refusal session storage to the published 13601 ledger and allows 
     settings = db.prepare(settingsQuery).all()
     usage = db.prepare(usageQuery).get()
     assert.equal(ledger.at(-1).name, '065_crag_shop_order_dispatch.sql')
-    assert.deepEqual(applyMigrations(db), ['066_refusal_session_blocks.sql', '067_crag_shop_order_closed.sql'])
+    assert.deepEqual(applyMigrations(db), appended)
     db.exec(`
       INSERT INTO refusal_session_blocks(session_id, first_seen_at, last_seen_at)
         VALUES ('fixture-session', '2026-11-18T00:00:00Z', '2026-11-18T00:00:00Z');
@@ -112,9 +118,8 @@ test('139 adds refusal session storage to the published 13601 ledger and allows 
     assert.deepEqual(applyMigrations(reopened), [])
     assert.deepEqual(applyMigrations(reopened, { migrationsDir: previous }), [])
     const upgradedLedger = reopened.prepare(ledgerQuery).all()
-    assert.deepEqual(upgradedLedger.slice(0, -2), ledger)
-    assert.equal(upgradedLedger.at(-2).name, '066_refusal_session_blocks.sql')
-    assert.equal(upgradedLedger.at(-1).name, '067_crag_shop_order_closed.sql')
+    assert.deepEqual(upgradedLedger.slice(0, ledger.length), ledger)
+    assert.deepEqual(upgradedLedger.slice(ledger.length).map((row) => row.name), appended)
     assert.deepEqual(reopened.prepare(settingsQuery).all(), settings)
     assert.deepEqual(reopened.prepare(usageQuery).get(), usage)
     assert.equal(reopened.prepare('SELECT session_id FROM refusal_session_blocks').get().session_id, 'fixture-session')

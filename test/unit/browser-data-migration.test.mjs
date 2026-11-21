@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url'
 import { createDatabase } from '../../src/lib/db/database.mjs'
 import { SettingsRepo } from '../../src/lib/db/repos/settings-repo.mjs'
 import { OpenaiApiRepo } from '../../src/lib/db/repos/openai-api-repo.mjs'
-import { ApiEndpointStore } from '../../src/lib/admin/api-endpoints.mjs'
 import { migrateBrowserData, SHARD_BROWSER_MIGRATION_SETTING } from '../../src/lib/browser/browser-data-migration.mjs'
 
 function fixture(t) {
@@ -116,13 +115,12 @@ test('SQL migration clears only old web state and license, preserving credential
   }
   let db = createDatabase({ dataDir: f.dataDir, migrationsDir: oldMigrations })
   f.beforeCleanup.push(() => db.close())
-  const store = new ApiEndpointStore({ db })
-  const endpoint = store.create({ kind: 'openai', name: 'keep-endpoint' })
-  const key = store.addKey(endpoint.id, {
-    api_key: 'sk-fixture-keep',
-    source_vm_id: 'slot-a',
-    source_account_id: 'account-a',
-  })
+  const endpoint = { id: 'keep-endpoint' }
+  const key = { id: 'keep-key' }
+  db.prepare(`INSERT INTO api_endpoints (id, name, base_url, kind, protocol)
+    VALUES (?, 'keep-endpoint', 'https://api.openai.com', 'openai', 'openai')`).run(endpoint.id)
+  db.prepare(`INSERT INTO api_endpoint_keys (id, endpoint_id, api_key, source_vm_id, source_account_id)
+    VALUES (?, ?, ?, 'slot-a', 'account-a')`).run(key.id, endpoint.id, 'sk-fixture-keep')
   const api = new OpenaiApiRepo(db)
   api.upsertAccount('account-a', {
     vm_id: 'slot-a',

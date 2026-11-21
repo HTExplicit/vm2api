@@ -657,6 +657,10 @@ export async function buildDashboard({
   const poolSnap = snapshotPool(proxyPool)
   const listed = listVms(cfg.paths.project, routingConfig)
   const liveById = await collectLivePanelCredentials(cfg.paths.project, listed)
+  // One snapshot for the whole response: the slot rows and the account summary
+  // below must agree anyway, and re-reading per slot scales the account SQL by
+  // the number of slots (#1043).
+  const snap = accountQuota.snapshot()
   const vms = listed.map((v) =>
     enrichVm(v, accountQuota, active, {
       routingConfig,
@@ -667,9 +671,9 @@ export async function buildDashboard({
       clusterNodes,
       role: 'admin',
       openaiApiManager,
+      accountSnap: snap,
     }),
   )
-  const snap = accountQuota.snapshot()
   const accounts = liveAccounts(snap.accounts, listed)
   const peak5 = Math.max(0, ...accounts.map((a) => Number(a.unified?.['5h']?.utilization || 0)), 0)
   const peak7 = Math.max(0, ...accounts.map((a) => Number(a.unified?.['7d']?.utilization || 0)), 0)
@@ -690,7 +694,7 @@ export async function buildDashboard({
   ).length
   const proxy_pool = summarizeProxyPool(proxyPool)
 
-  const billing = stampVmBilling(vms, await panelBillingStats(requestLog, accountQuota, vms), snap.accounts || [])
+  const billing = stampVmBilling(vms, await panelBillingStats(requestLog, accountQuota, vms, snap), snap.accounts || [])
 
   const opsSince = new Date(Date.now() - 3600_000).toISOString()
   const [totalsRead, windowRead] = await Promise.allSettled([
@@ -775,6 +779,7 @@ export async function buildVmList({
   const poolSnap = snapshotPool(proxyPool)
   const listed = filterVmsForPanel(listVms(cfg.paths.project, routingConfig), { role, userId: ownerUserId })
   const liveById = await collectLivePanelCredentials(cfg.paths.project, listed)
+  const snap = readAccountSnapshot(accountQuota)
   const vms = listed.map((v) =>
     enrichVm(v, accountQuota, active, {
       routingConfig,
@@ -785,16 +790,11 @@ export async function buildVmList({
       clusterNodes,
       role,
       openaiApiManager,
+      accountSnap: snap,
     }),
   )
-  const accounts = (() => {
-    try {
-      return accountQuota?.snapshot?.().accounts || []
-    } catch {
-      return []
-    }
-  })()
-  stampVmBilling(vms, await panelBillingStats(requestLog, accountQuota, vms), accounts)
+  const accounts = snap?.accounts || []
+  stampVmBilling(vms, await panelBillingStats(requestLog, accountQuota, vms, snap), accounts)
   return ok({
     items: vms,
     active_vm: active,
@@ -837,6 +837,7 @@ export async function buildVmDetail({
   const poolSnap = snapshotPool(proxyPool)
   const listed = [summarizeVm(vm, cfg.paths.project, routingConfig)]
   const liveById = await collectLivePanelCredentials(cfg.paths.project, listed, { cacheMs: 0 })
+  const snap = readAccountSnapshot(accountQuota)
   const summary = enrichVm(listed[0], accountQuota, active, {
     routingConfig,
     pool,
@@ -846,9 +847,10 @@ export async function buildVmDetail({
     clusterNodes,
     role,
     openaiApiManager,
+    accountSnap: snap,
   })
-  const acc = findAccount(accountQuota, summary)
-  const billing = await panelBillingStats(requestLog, accountQuota, [summary])
+  const acc = findAccount(accountQuota, summary, snap)
+  const billing = await panelBillingStats(requestLog, accountQuota, [summary], snap)
   const cost = lookupBilling(indexBillingAccounts(billing), acc || summary)
   const gpt = isCodexVm(vm)
   applyCostFields(summary, cost, { coveredSince: billing?.log_coverage_start })
@@ -1387,7 +1389,7 @@ export async function buildProbeAll({ cfg, accountQuota, hop = true, force = tru
 export async function buildUsage({ accountQuota, cfg, requestLog = null }) {
   const snap = accountQuota.snapshot()
   const listed = listVms(cfg?.paths?.project)
-  const billing = await panelBillingStats(requestLog, accountQuota, listed)
+  const billing = await panelBillingStats(requestLog, accountQuota, listed, snap)
   const costByKey = indexBillingAccounts(billing)
   const listedById = new Map(listed.map((vm) => [vm.id, vm]))
   const accounts = liveAccounts(snap.accounts, listed).map((a) => {
@@ -1548,6 +1550,7 @@ export async function snapshotAccountPool({
   } catch {
     liveById = null
   }
+  const snap = readAccountSnapshot(accountQuota)
   const vms = listed.map((v) =>
     enrichVm(v, accountQuota, active, {
       routingConfig,
@@ -1555,16 +1558,11 @@ export async function snapshotAccountPool({
       poolSnap,
       liveById,
       projectRoot: cfg.paths.project,
+      accountSnap: snap,
     }),
   )
-  const accounts = (() => {
-    try {
-      return accountQuota?.snapshot?.().accounts || []
-    } catch {
-      return []
-    }
-  })()
-  const billing = stampVmBilling(vms, await panelBillingStats(requestLog, accountQuota, vms), accounts)
+  const accounts = snap?.accounts || []
+  const billing = stampVmBilling(vms, await panelBillingStats(requestLog, accountQuota, vms, snap), accounts)
   let today = null
   try {
     today = (await requestLog?.windowStatsAsync?.({ since: shanghaiDayStartIso() })) || null
@@ -1818,8 +1816,8 @@ function enrichVm(v, accountQuota, active, extras = {}) {
       }
     }
   }
-  const acc = findAccount(accountQuota, v)
-  const runtime = findRuntime(accountQuota, v)
+  const acc = findAccount(accountQuota, v, extras.accountSnap || null)
+  const runtime = findRuntime(accountQuota, v, extras.accountSnap || null)
   const liveCred = extras.liveById instanceof Map ? extras.liveById.get(v.id) : extras.liveById?.[v.id]
   const workerCred = liveCred || runtime?.worker_status?.credential || null
   const quotaOverride = isCodexVm(v) ? null : v.quota_override || null
@@ -2232,10 +2230,31 @@ export function isSeedAccountRow(account) {
   return util === 0 && (status === 'active' || !w5.status) && !unified.official
 }
 
-export function findAccount(accountQuota, vm) {
-  if (!accountQuota || typeof accountQuota.snapshot !== 'function') return null
-  const snap = accountQuota.snapshot()
-  const accounts = snap.accounts || []
+/**
+ * One account snapshot for a single response, or null when the pool cannot answer.
+ *
+ * Callers pass the result down explicitly rather than letting each slot take its
+ * own; nothing is kept between responses, so a panel read still sees current state.
+ */
+export function readAccountSnapshot(accountQuota) {
+  try {
+    return accountQuota?.snapshot?.() || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The account row a slot belongs to.
+ *
+ * `snap` lets one response share a single `accountQuota.snapshot()`. That call
+ * reads the whole account table and then runs per-account queries for each row,
+ * so a list that resolved every slot on its own re-ran all of it N times (#1043).
+ * Matching is unchanged either way, and nothing is cached across responses.
+ */
+export function findAccount(accountQuota, vm, snap = null) {
+  if (!snap && typeof accountQuota?.snapshot !== 'function') return null
+  const accounts = (snap || accountQuota.snapshot()).accounts || []
   const uuid = vm.account_uuid || vm.claude?.account_uuid || null
   if (uuid) {
     const byUuid = accounts.find((a) => a.account_id === uuid)
@@ -2248,11 +2267,11 @@ export function findAccount(accountQuota, vm) {
   )
 }
 
-function findRuntime(accountQuota, vm) {
+function findRuntime(accountQuota, vm, snap = null) {
   try {
     const repo = accountQuota?.runtimeRepo
     if (!repo?.get) return null
-    const acc = findAccount(accountQuota, vm)
+    const acc = findAccount(accountQuota, vm, snap)
     const keys = [vm.account_uuid, acc?.account_id, vm.id].filter(Boolean)
     for (const key of keys) {
       const state = repo.get(key)
@@ -2427,16 +2446,11 @@ function attachBillingMeta(billing, accounts = []) {
   }
 }
 
-function accountWindowsForBilling(accountQuota, vms = []) {
+function accountWindowsForBilling(accountQuota, vms = [], snap = null) {
   const listed = Array.isArray(vms) ? vms : []
   const byVm = new Map(listed.map((vm) => [vm.id, vm]))
-  const accounts = (() => {
-    try {
-      return accountQuota?.snapshot?.().accounts || []
-    } catch {
-      return []
-    }
-  })()
+  const shared = snap || readAccountSnapshot(accountQuota)
+  const accounts = shared?.accounts || []
   const windows = []
   const seen = new Set()
   for (const acc of accounts) {
@@ -2449,7 +2463,7 @@ function accountWindowsForBilling(accountQuota, vms = []) {
   for (const vm of listed) {
     const key = `${vm.account_uuid || vm.id}\0${vm.id}`
     if (seen.has(key) || seen.has(`${vm.account_uuid || ''}\0${vm.id}`)) continue
-    const acc = findAccount(accountQuota, vm)
+    const acc = findAccount(accountQuota, vm, shared)
     windows.push(billingWindowOf(acc?.account_id || vm.account_uuid || vm.id, vm.id, vm, quotaFromAccount(acc)))
   }
   return windows
@@ -2468,10 +2482,10 @@ function billingWindowOf(accountId, vmId, vm, q) {
   }
 }
 
-async function panelBillingStats(requestLog, accountQuota, vms) {
+async function panelBillingStats(requestLog, accountQuota, vms, snap) {
   if (!requestLog) return null
   try {
-    return await requestLog.billingStatsAsync({ accountWindows: accountWindowsForBilling(accountQuota, vms) })
+    return await requestLog.billingStatsAsync({ accountWindows: accountWindowsForBilling(accountQuota, vms, snap) })
   } catch {
     return null
   }

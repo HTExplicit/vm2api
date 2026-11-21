@@ -416,11 +416,11 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
     '5H 用量',
     '7D 用量',
     'Fable 用量',
-    '今日请求',
+    '今日请求数',
     '席位占用',
     '排队',
     '请求中',
-    '7D 费用',
+    '7 天窗口花费',
     '7D Token',
     '每请求费用',
     '累计费用',
@@ -543,7 +543,7 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
   assert.match(await costDetail.innerText(), /57\.1M/)
   assert.match(await costDetail.innerText(), /\$0\.130/)
   rejectHealth = true
-  await detail.getByRole('button', { name: '7D', exact: true }).click()
+  await detail.getByRole('button', { name: '近 7 天', exact: true }).click()
   await detail.getByText('加载失败：离线健康查询失败', { exact: true }).waitFor()
   await detail.getByRole('button', { name: '24h', exact: true }).click()
   await detail.getByText('99.0%', { exact: true }).waitFor()

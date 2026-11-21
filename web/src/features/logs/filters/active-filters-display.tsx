@@ -42,7 +42,7 @@ export function ActiveFiltersDisplay({
   if (isAdmin && filters.vmId)
     chips.push({
       key: 'vmId',
-      label: '供应商',
+      label: '虚拟机',
       value: nameOf(options?.vms, filters.vmId),
     })
   if (isAdmin && filters.sourceAccountId)
@@ -71,6 +71,21 @@ export function ActiveFiltersDisplay({
       label: '日期范围',
       value: start === end ? start : `${start} - ${end}`,
     })
+  } else if (filters.startTime != null) {
+    chips.push({
+      key: 'time',
+      label: '起始时间',
+      value: format(new Date(filters.startTime), 'yyyy-MM-dd HH:mm:ss'),
+    })
+  } else if (filters.endTime != null) {
+    chips.push({
+      key: 'time',
+      label: '截止时间',
+      value: format(
+        new Date(inclusiveEndFromExclusive(filters.endTime)),
+        'yyyy-MM-dd HH:mm:ss'
+      ),
+    })
   }
   if (filters.model)
     chips.push({ key: 'model', label: '模型', value: filters.model })
@@ -87,7 +102,7 @@ export function ActiveFiltersDisplay({
   if (filters.errorsOnly)
     chips.push({ key: 'errorsOnly', label: '仅错误', value: '含流式错误' })
   if (filters.excludeStatus200)
-    chips.push({ key: 'status', label: '状态码', value: '!200' })
+    chips.push({ key: 'status', label: '状态码', value: '仅非 2xx' })
   else if (filters.statusCode != null)
     chips.push({
       key: 'status',
@@ -128,7 +143,7 @@ export function ActiveFiltersDisplay({
   return (
     <div className='-mb-1 flex [scrollbar-width:none] flex-wrap items-center gap-2 overflow-x-auto pb-1'>
       <span className='shrink-0 text-xs font-medium text-muted-foreground'>
-        已激活筛选:
+        筛选条件:
       </span>
       {chips.map((chip) => (
         <Badge

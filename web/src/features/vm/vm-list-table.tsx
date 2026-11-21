@@ -227,11 +227,11 @@ const SORT_LABEL: Record<SortKey, string> = {
   '5h': '5H 用量',
   '7d': '7D 用量',
   fable: 'Fable 用量',
-  today: '今日请求',
+  today: '今日请求数',
   seats: '席位占用',
   queue: '排队',
   inflight: '请求中',
-  spend: '7D 费用',
+  spend: '7 天窗口花费',
   tokens: '7D Token',
   perReq: '每请求费用',
   total: '累计费用',
@@ -688,9 +688,13 @@ function SummaryBar({ a }: { a: Agg }) {
         x={`失败 ${fmtNum(a.req - a.ok)}`}
         tone={HEALTH_FG[healthTone(pct)]}
       />
-      <Kpi k='24h 请求' v={fmtNum(a.req)} x={`今日 ${fmtNum(a.today)}`} />
       <Kpi
-        k='7D 花费'
+        k='近 24h 请求'
+        v={fmtNum(a.req)}
+        x={`北京时间今日 ${fmtNum(a.today)}`}
+      />
+      <Kpi
+        k='7 天窗口花费'
         v={a.spend ? fmtUsd(a.spend, 2) : '—'}
         x={a.top ? `最高 ${a.top.vm.id} ${fmtUsd(a.top.spend, 0)}` : ''}
       />
@@ -1108,8 +1112,8 @@ export function VmTable({
                             {zone.label} · {sec.rows.length} 台
                           </button>
                           <span>成功率 {fmtHealthPct(aggPct(sec.agg))}</span>
-                          <span>24h 请求 {fmtNum(sec.agg.req)}</span>
-                          <span>7D 花费 {fmtUsd(sec.agg.spend, 2)}</span>
+                          <span>近 24h 请求 {fmtNum(sec.agg.req)}</span>
+                          <span>7 天窗口花费 {fmtUsd(sec.agg.spend, 2)}</span>
                           <span>
                             席位 {sec.agg.used}/{sec.agg.cap}
                           </span>
