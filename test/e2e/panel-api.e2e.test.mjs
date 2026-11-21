@@ -4,6 +4,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import net from 'node:net'
 import os from 'node:os'
+import { setTimeout as delay } from 'node:timers/promises'
+import { createDatabase } from '../../src/lib/db/database.mjs'
+import { ProxiesRepo } from '../../src/lib/db/repos/proxies-repo.mjs'
 import { REPO_ROOT, startGateway, api, seedVm } from '../harness.mjs'
 
 test('panel login → cookie → /api/panel/me', async () => {
@@ -224,6 +227,61 @@ test('sessionKey import rejected when bound proxy is dead', async () => {
     assert.match(String(imp.json?.error?.message || ''), /SOCKS5/)
   } finally {
     await gw.stop()
+  }
+})
+
+test('gateway startup re-probes an automatically disabled bound proxy', async (t) => {
+  const mockProxy = net.createServer((socket) => {
+    socket.once('data', () => socket.end('HTTP/1.1 200 Connection Established\r\n\r\n'))
+  })
+  await new Promise((resolve) => mockProxy.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise((resolve) => mockProxy.close(resolve)))
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-auto-proxy-'))
+  const vm = seedVm({ project, oauth: false })
+  const endpoint = {
+    ...vm.proxy,
+    scheme: 'http',
+    port: mockProxy.address().port,
+    url: `http://127.0.0.1:${mockProxy.address().port}`,
+  }
+  Object.assign(vm, {
+    family: 'codex',
+    proxy: endpoint,
+    schedulable: false,
+    schedule_off: true,
+    schedule_hold: {
+      reason: 'proxy_cooldown',
+      detail: { tag: endpoint.id, message: 'proxy_probe_failed:connection_closed' },
+    },
+  })
+  const vmFile = path.join(project, 'vms', `${vm.id}.json`)
+  fs.writeFileSync(vmFile, JSON.stringify(vm))
+  const db = createDatabase({ dataDir: path.join(project, 'data') })
+  const repo = new ProxiesRepo(db)
+  repo.setConfig({ enabled: true })
+  repo.replaceAll([
+    { ...endpoint, status: 'dead', enabled: false, bound_vm_id: vm.id, last_error: 'connection_closed' },
+  ])
+  db.close()
+  const gw = await startGateway({ project, oauth: false })
+  try {
+    let row
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const response = await api(gw, 'GET', '/api/panel/proxies')
+      assert.equal(response.status, 200, response.text)
+      row = (response.json.data || response.json).proxies.find(({ id }) => id === endpoint.id)
+      if (row?.enabled && row?.last_probe_at) break
+      await delay(100)
+    }
+    assert.equal(row?.enabled, true)
+    assert.equal(row?.status, 'ok')
+    const saved = JSON.parse(fs.readFileSync(vmFile, 'utf8'))
+    assert.equal(saved.schedule_hold, undefined)
+    assert.equal(saved.schedule_off, true)
+    assert.equal(saved.schedulable, false)
+  } finally {
+    await gw.stop()
+    if (fs.existsSync(project)) fs.rmSync(project, { recursive: true })
   }
 })
 
