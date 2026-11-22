@@ -315,6 +315,16 @@ export function pickScheduleFields(vm = {}) {
 /** Account availability keys (evaluateAccount) that mean 受限. */
 const AVAILABILITY_RESTRICTED = new Set(['quota', 'cool', 'rest'])
 
+/** A hold for a previous binding while the current exit awaits verification. */
+function staleProxyHoldText(vm) {
+  const hold = vm.schedule_hold
+  if (hold?.reason !== HOLD_PROXY) return null
+  const tag = String(hold.detail?.tag || '').trim()
+  const bound = String(vm.proxy?.id || '').trim()
+  if (!tag || !bound || tag === bound) return null
+  return '历史代理遗留'
+}
+
 /**
  * The single verdict for one slot.
  *
@@ -385,7 +395,11 @@ export function resolveSlotState({
     restriction_scope: scope,
     restriction_soft: soft,
   })
-  if (vm.schedule_hold?.reason) return restricted(vm.schedule_hold.reason, null)
+  if (vm.schedule_hold?.reason) {
+    const stale = staleProxyHoldText(vm)
+    const held = restricted(vm.schedule_hold.reason, null)
+    return stale ? { ...held, restriction_text: stale } : held
+  }
   const until = Number(restrictionUntil) || Number(availability?.until) || 0
   const live = until > now
   if (!live && availability?.key === 'rest') {

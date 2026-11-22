@@ -41,6 +41,23 @@ test('session slots default to native capacity and clamp persisted values', () =
   assert.equal(normalizeInferenceConfig({}).session_slots, 20)
   assert.equal(normalizeInferenceConfig({}).prewarm_enabled, false)
   assert.equal(normalizeInferenceConfig({ prewarm_enabled: true }).prewarm_enabled, true)
+  // health_timeout_ms is consumed by rustHealthTimeoutMs; normalization must
+  // keep it or the panel can never configure it (silent dead key).
+  assert.equal(normalizeInferenceConfig({}).health_timeout_ms, 800)
+  assert.equal(normalizeInferenceConfig({ health_timeout_ms: 5000 }).health_timeout_ms, 5000)
+  assert.equal(normalizeInferenceConfig({ health_timeout_ms: -1 }).health_timeout_ms, 800)
+  // kernel_down_reprobe_ms (rustDownReprobeMs) must survive a panel save; 0 means "off".
+  assert.equal(normalizeInferenceConfig({}).kernel_down_reprobe_ms, 2500)
+  assert.equal(normalizeInferenceConfig({ kernel_down_reprobe_ms: 0 }).kernel_down_reprobe_ms, 0)
+  assert.equal(normalizeInferenceConfig({ kernel_down_reprobe_ms: 4000 }).kernel_down_reprobe_ms, 4000)
+  assert.equal(normalizeInferenceConfig({ kernel_down_reprobe_ms: 99999 }).kernel_down_reprobe_ms, 10000)
+  assert.equal(normalizeInferenceConfig({ kernel_down_reprobe_ms: -5 }).kernel_down_reprobe_ms, 2500)
+  // Saving an unrelated inference field keeps a configured re-probe window.
+  assert.equal(
+    normalizeInferenceConfig({ ...normalizeInferenceConfig({ kernel_down_reprobe_ms: 0 }), health_ttl_ms: 1500 })
+      .kernel_down_reprobe_ms,
+    0,
+  )
   assert.deepEqual(validateInferenceRoutingPatch({ inference: { prewarm_enabled: false } }), [])
   assert.ok(validateInferenceRoutingPatch({ inference: { prewarm_enabled: 'false' } }).length)
 })

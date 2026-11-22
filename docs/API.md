@@ -34,6 +34,7 @@ x-api-key: sk-vm-…
 | 方法 | 路径 | 入站 | 出站给客户端 |
 |------|------|------|--------------|
 | `POST` | `/v1/messages` 或 `/messages` | Anthropic Messages | Anthropic Messages / SSE |
+| `POST` | `/v1/messages/count_tokens` 或 `/messages/count_tokens` | Anthropic count_tokens | Setup/API Key → `{ input_tokens }`；OAuth → 5H/7D（同 `/v1/usage`）。**默认关**，见下 |
 | `GET` | `/v1/usage` | — | 当前账户 5H/7D，Claude 与 GPT 均可（`unit=percent_used`） |
 | `GET` | `/v1/me/quota` | — | 本 Key 的额度、窗口、RPM、并发，以及现在会不会被拦（只限托管 Key） |
 | `GET` | `/v1/me/usage` | — | 本 Key 今天 / 近 7 天 / 近 30 天用量（按模型）和最近请求（只限托管 Key） |
@@ -130,9 +131,15 @@ native cli-hop 开启官方家族透传时，调用方 `cache_control` 的位置
 
 ### Sonnet 5.5 兼容边界
 
-`claude-sonnet-5-5` 与 Opus 5.5 要求 adaptive thinking，不支持强制工具调用。Claude 入口遇到不兼容的 `tool_choice=any/tool` 返回 `400 tool_choice_incompatible`，格式、工具列表或名称不合法时返回 `400 invalid_tool_choice`；不再静默改成 `auto` 或补 `strict:true`。兼容模型保留调用方的 `tool_choice` 与 `strict`；强制选择不能与 enabled/adaptive thinking 同时使用。OpenAI(apikey) 账号沿用所选 API 模型的工具与推理参数。
+`claude-sonnet-5-5` 不支持原生强制工具调用，请求**直接拒绝，不做自动改写**：`tool_choice` 为 `any` 或 `tool` 时返回 `400 tool_choice_incompatible`。同一规则适用于其他只支持 adaptive thinking 的模型——`claude-opus-5-5`、`claude-fable-5`、`claude-fable-5-1`、`claude-fable-5-2`、`claude-mythos-5-2`，以及路由别名 `auto`。校验在模型与 persona 重写之前执行，且与 `thinking` 无关：**没有传 `thinking` 同样会被拒，移除它不能绕过**。
 
-规则覆盖 Messages、Chat Completions、Responses 的出站清洗。`auto` / `none` 保持；不支持的 disabled/enabled thinking 转为 adaptive，保留 display。结构化输出转换保留 `output_config.effort`，已有 `output_config.format` 优先，否则从 `response_format` / `text.format` 合并，cli-hop 与普通出站路径均补齐对象 schema 的 `additionalProperties:false`（不覆盖显式值）。
+格式、工具列表或名称不合法时返回 `400 invalid_tool_choice`。OpenAI(apikey) 账号沿用所选 API 模型的工具与推理参数。
+
+允许模型自行选择时显式传 `tool_choice={type:auto}` 或 `{type:none}`；必须强制指定工具时改用支持该能力的模型，例如 `claude-sonnet-5`、`claude-opus-5`、`claude-opus-4-8`、`claude-haiku-5-5`。客户端工具的 `strict` 按调用方所传原样透传，不再自动注入。
+
+强制工具调用另有两条与模型无关的限制，同样返回 `400 tool_choice_incompatible`：与 `thinking.type` 为 `enabled` 或 `adaptive` 同时出现；在 Haiku 5.5 上 effort 高于 `high`，或带 `thinking.budget_tokens`。
+
+出站清洗覆盖 Messages、Chat Completions、Responses。`auto` / `none` 保持；不支持的 disabled/enabled thinking 转为 adaptive，保留 display。结构化输出转换保留 `output_config.effort`，已有 `output_config.format` 优先，否则从 `response_format` / `text.format` 合并，cli-hop 与普通出站路径均补齐对象 schema 的 `additionalProperties:false`（不覆盖显式值）。
 
 
 ## Chat Completions
@@ -204,7 +211,22 @@ curl -sS http://127.0.0.1:8787/v1/models -H "Authorization: Bearer $KEY"
 
 读面板持久化的 `model_policy`，**不** hop 槽位 `/v1/models`。列表按密钥 `group_type` 过滤：`openai` 只列 GPT，`anthropic` 只列 Claude，`all` 与 master 两者都列。`POST /admin/models/refresh` 仍回完整目录。未入库的 id → `400`，请求被拒，不上游。别名如 `claude-haiku-4-5` 可解析到带日期的目录项。出站 `model` 去掉 `[1m]` 后缀。
 
-## usage
+## count_tokens / usage
+
+`POST /v1/messages/count_tokens` 受 `routing.compatibility.count_tokens` 控制，**默认关时返回 404**（面板「设置 → 协议 → 入站准入 → 开放 count_tokens 入口」）。开启后：选当前会用的账户（sticky 仍可调度则用 sticky，否则下一张）。**不写、不拆 sticky。** 按该 VM 凭证分叉：
+
+- Setup Token / Console API Key：hop 官方 Token Counting，`{ input_tokens }`
+- 完整 OAuth：不 hop count_tokens，返回与 `GET /v1/usage` 相同的 5H/7D
+
+```bash
+curl -sS http://127.0.0.1:8787/v1/messages/count_tokens \
+  -H "Authorization: Bearer $KEY" \
+  -H "content-type: application/json" \
+  -d '{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"}]}'
+```
+
+`GET /v1/usage` 不受该开关影响。
+
 ```bash
 curl -sS http://127.0.0.1:8787/v1/usage -H "Authorization: Bearer $KEY"
 ```
@@ -376,7 +398,7 @@ curl -sS "http://127.0.0.1:8787/v1/me/usage?limit=20&tz=Asia/Shanghai" -H "Autho
 curl -sS http://127.0.0.1:8787/health
 ```
 
-无鉴权。含 `features`、`limitations`、`stats`。能力字面量：`passthrough`、`stream`、`verified-stream`、`protocol-convert`、`go-slot-worker`、`account-pool-failover`、`tools`、`client-workspace`、`account_usage`。
+无鉴权。含 `features`、`limitations`、`stats`。能力字面量：`passthrough`、`stream`、`verified-stream`、`protocol-convert`、`go-slot-worker`、`account-pool-failover`、`tools`、`client-workspace`、`account_usage`。`count_tokens` 开关打开时，`features` 多一项 `count_tokens`；启动时写出的 `config/gateway-v2.public.json` 不随运行期开关变化，始终是静态清单。
 
 ## 错误
 
@@ -426,6 +448,14 @@ Claude Code Usage Policy `API Error`（含内核报成 400 的）返回 400 `pol
 
 客户端断开不计 SLA、不处罚账号。
 
+### 新号隔离窗口
+
+`PUT /api/panel/routing` 可设置 `routing.pool.fresh_account_isolation_ms`（默认 `0` 关闭）。开启后，账号入池 N 毫秒内不承接**已绑定其他 VM 的续入会话**：把另一个账号的完整对话历史重放到一个全新账号，是供应商侧的强风控信号（同一段转写近期出现在不同账号上=换号关联）。这类请求继续等待老号或按常规回落。
+
+**判据是会话归属，不是请求尺寸**：用户离开对话数小时后回来、缓存已过期、整段历史冷提交，与开一个全新长会话，都是正常流量、照常落到新号——把「大冷前缀」当信号会误伤这两类合法行为。真正区分正常 resume 与跨号续入的是前缀归属关系，而 sticky 行绑在哪个 VM 正是这一事实的本地记录。
+
+新号调度资格不受影响（不写冷却、不摘调度）。**全新部署豁免**：池内全部账号都在窗口内时（全新池），续入会话没有窗口外的 home 可等待，直接放行保证首日可用。建议新号入池后开启 24–48 小时。
+
 ### CLI / kernel 故障与取消
 
 已知原因不会再被统一改成 `incomplete_response`。流式与非流式都保留错误码、真实 HTTP 状态和 `retry-after`；已写出业务 SSE 时只结束当前流，不重放。
@@ -451,7 +481,9 @@ Claude Code Usage Policy `API Error`（含内核报成 400 的）返回 400 `pol
 4. 内核不可达或 CLI 恢复已耗尽：Node watchdog 才重启容器，1 小时内最多 3 次，每次先等待 1 / 5 / 15 分钟。
 5. 容器恢复仍失败：停止自动重启，排除该 VM（粘性与诊断 pin 都不能绕过），经配置的通知渠道告警。观察到内核恢复健康后解除故障；运行中的 cc-node/crag 保留原有不重启例外。
 
-VM / 节点下线通知由「设置 → 通知」的 `notify.events.vm_down` 控制，默认开启，并遵循通知总开关及各通道开关。通知监控按 `notify.interval_sec`（默认 60 秒）读取调度器使用的节点 SSH 连通状态、watchdog 终止故障及 VM 运行状态；节点失联、内核恢复预算耗尽，或运行中的 VM 变为 stopped/dead/error 时，经已配置的 Telegram、企业微信群机器人及邮件通道发送 VM ID、节点 ID 和原因。它不额外发起模型推理探测。
+VM / 节点下线通知由「设置 → 通知」的 `notify.events.vm_down` 控制，默认开启，并遵循通知总开关及各通道开关。通知监控按 `notify.interval_sec`（默认 60 秒）读取调度器使用的节点 SSH 连通状态、watchdog 终止故障及 VM 运行状态；节点失联、内核恢复预算耗尽，或运行中的 VM 变为 stopped/dead/error 时，经已配置的 Telegram、企业微信群机器人、飞书群自定义机器人及邮件通道发送 VM ID、节点 ID 和原因。它不额外发起模型推理探测。
+
+管理员可在「设置 → 通知 → 飞书 / Lark 群自定义机器人」填写完整 HTTPS Webhook，支持飞书 `open.feishu.cn` 和 Lark `open.larksuite.com` 的群机器人 v2 地址。保存和发送时均校验地址。机器人启用签名校验时填写签名密钥。「发送测试」可使用尚未保存的配置发送简版卡片。启用并保存后，群机器人会接收已开启的通知事件，卡片包含颜色、事件详情、用量及健康表格。面板仅显示凭据是否已保存。
 
 同一次下线只通知一次，不同 VM 不共享告警冷却；发送失败在后续检查中仅重试失败通道，VM 恢复、删除、进入人工停调或维护状态后取消待发告警。投递状态保存在内存中；控制面重启后重新建立基线，已失联的节点和内核终止故障会重新告警，原已停止的 VM 不补发。此事件独立于按凭证可用性判断的 `account_down`；额度冷却、人工停调、维护及未知运行状态不直接触发下线通知。
 

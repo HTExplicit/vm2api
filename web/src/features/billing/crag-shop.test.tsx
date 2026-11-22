@@ -6,6 +6,7 @@ import type {
   InputHTMLAttributes,
   ReactNode,
 } from 'react'
+import { useEffect } from 'react'
 import type * as JsxDevRuntime from 'react/jsx-dev-runtime'
 import type * as JsxRuntime from 'react/jsx-runtime'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -31,11 +32,13 @@ const state = vi.hoisted(() => ({
   hostStatus: undefined as CragHostStatus | undefined,
   hostRefetch: vi.fn(),
   upgradeConfirm: undefined as ConfirmProps | undefined,
+  recoveryConfirm: undefined as ConfirmProps | undefined,
   setQueryData: vi.fn(),
   invalidateQueries: vi.fn(),
   hostForm: undefined as FormHTMLAttributes<HTMLFormElement> | undefined,
   hostInput: undefined as InputHTMLAttributes<HTMLInputElement> | undefined,
   confirmCancel: undefined as (() => void) | undefined,
+  recoverConfirm: undefined as ConfirmProps | undefined,
   queries: [] as Array<{
     queryKey: readonly unknown[]
     enabled?: boolean
@@ -135,7 +138,9 @@ vi.mock('@tanstack/react-query', async (importOriginal) => ({
   },
 }))
 vi.mock('@tanstack/react-router', () => ({
-  Link: ({ children }: { children: ReactNode }) => <a>{children}</a>,
+  Link: ({ children, to }: { children: ReactNode; to: string }) => (
+    <a href={to}>{children}</a>
+  ),
 }))
 vi.mock('@/components/page-header', () => ({
   PageHeader: ({
@@ -160,8 +165,11 @@ vi.mock('@/components/page-header', () => ({
 vi.mock('@/components/confirm-dialog', () => ({
   ConfirmDialog: (props: ConfirmProps) => {
     if (props.title === '启用本机槽位回收？') state.upgradeConfirm = props
+    if (props.title === '使用当前发行包恢复原兑换？')
+      state.recoveryConfirm = props
     if (props.open && props.confirmText === '取消订单')
       state.confirmCancel = props.handleConfirm
+    if (props.title === '用订单号找回订单') state.recoverConfirm = props
     return null
   },
 }))
@@ -217,7 +225,9 @@ function render(device = false) {
   state.hostForm = undefined
   state.hostInput = undefined
   state.upgradeConfirm = undefined
+  state.recoveryConfirm = undefined
   state.confirmCancel = undefined
+  state.recoverConfirm = undefined
   return renderToStaticMarkup(
     device ? <CragDevicePurchasePage /> : <CragSubscriptionPage />
   )
@@ -249,9 +259,11 @@ async function settle() {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
 beforeEach(() => {
+  vi.mocked(useEffect).mockClear()
   state.role = 'admin'
   state.user = 'alice'
   state.authenticated = true
@@ -288,6 +300,7 @@ beforeEach(() => {
     undefined,
   ]
   vi.mocked(api).mockReset()
+  vi.mocked(cragDeviceApi).mockReset()
   vi.mocked(api).mockResolvedValue({ ...order, status: 'paid' })
 })
 
@@ -349,10 +362,308 @@ describe('CRAG buyer presentation and activation wire', () => {
     await settle()
     expect(cragDeviceApi).toHaveBeenCalledExactlyOnceWith(
       '/orders/order-1/apply',
-      { method: 'POST', body: '{}' }
+      expect.objectContaining({
+        method: 'POST',
+        body: '{}',
+        signal: expect.any(AbortSignal),
+      })
     )
     expect(api).not.toHaveBeenCalled()
     expect(render(true)).toContain('订阅额度已加入本机')
+    expect(render(true)).toContain('href="/wrap"')
+    expect(state.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ['crag-host-subscription'],
+    })
+  })
+
+  it('shows applying beside the order and rejects repeated clicks while the request is pending', async () => {
+    state.values[3] = [{ ...order, activation: { state: 'ready_to_apply' } }]
+    let finish: (value: unknown) => void = () => undefined
+    vi.mocked(cragDeviceApi).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    render(true)
+    click('应用到本机')
+    click('应用到本机')
+    expect(cragDeviceApi).toHaveBeenCalledTimes(1)
+    const html = render(true)
+    expect(html).toContain('正在应用…')
+    expect(html).toContain('正在将订阅额度充入此服务器')
+    expect(
+      state.buttons.find((button) => button.children === '正在应用…')?.disabled
+    ).toBe(true)
+    finish({ ...order, activation: { state: 'active' } })
+    await settle()
+  })
+
+  it('offers recovery by order id and explains why this browser may list nothing', async () => {
+    // An order bought in another browser leaves this listing empty, and the old copy read
+    // like "you never ordered anything" — so a paid order looked lost instead of findable.
+    state.values[3] = []
+    const empty = render(true)
+    expect(empty).toContain('这个浏览器没有订单记录')
+    expect(empty).toContain('已付款的订单不会丢')
+    expect(empty).toContain('找回订单')
+    // A panel buyer's orders are owned by the account, so recovery is not theirs to use.
+    expect(render(false)).not.toContain('找回订单')
+
+    render(true)
+    click('找回订单')
+    render(true)
+    expect(state.recoverConfirm?.open).toBe(true)
+    // A malformed id is refused before the request: the server could only answer 404,
+    // which reads as "no such order" and would send the buyer looking for a lost order.
+    expect(state.recoverConfirm?.disabled).toBe(true)
+
+    const id = '6945109e-80be-4d23-9793-68ba195765ce'
+    const field = state.recoverConfirm?.children as {
+      props?: { onChange?: (event: unknown) => void }
+    }
+    field?.props?.onChange?.({ target: { value: id } })
+    render(true)
+    expect(state.recoverConfirm?.disabled).toBe(false)
+
+    vi.mocked(cragDeviceApi).mockResolvedValue({ ...order, order_id: id })
+    state.recoverConfirm?.handleConfirm?.()
+    await settle()
+    expect(cragDeviceApi).toHaveBeenCalledWith(
+      `/orders/${id}/recover`,
+      expect.objectContaining({ method: 'POST' })
+    )
+  })
+
+  it('says which recovery failure is worth acting on when one order id is already held', async () => {
+    const id = '6945109e-80be-4d23-9793-68ba195765ce'
+    state.values[3] = []
+    render(true)
+    click('找回订单')
+    render(true)
+    const field = state.recoverConfirm?.children as {
+      props?: { onChange?: (event: unknown) => void }
+    }
+    field?.props?.onChange?.({ target: { value: id } })
+    render(true)
+    vi.mocked(cragDeviceApi).mockRejectedValue(
+      new ApiError('refused', 409, { code: 'shop_order_recover_conflict' })
+    )
+    state.recoverConfirm?.handleConfirm?.()
+    await settle()
+    // The UNIQUE(owner, request_id) collision is the one recovery refusal left, and
+    // retrying in this browser never clears it — the actionable part is saying so.
+    expect(render(true)).toContain('本浏览器已有一笔来自同一次结账的订单')
+  })
+
+  it('keeps a safe actionable package error beside its order, including the authority request id', async () => {
+    state.values[3] = [{ ...order, activation: { state: 'ready_to_apply' } }]
+    const id = '6945109e-80be-4d23-9793-68ba195765ce'
+    vi.mocked(cragDeviceApi).mockRejectedValue(
+      new ApiError('private supplier payload', 409, {
+        code: 'crag_subscription_host_package_changed',
+        details: { authority_request_id: id },
+      })
+    )
+    render(true)
+    click('应用到本机')
+    await settle()
+    const html = render(true)
+    const history = html.slice(html.indexOf('id="crag-order-history"'))
+    expect(history).toContain('role="alert"')
+    expect(history).toContain('另一版 CRAG 发行包')
+    expect(history).toContain(id)
+    expect(history).toContain('href="/crag-subscription"')
+    expect(history).toContain('核对原订单')
+    expect(html).not.toContain('private supplier payload')
+    expect(cragDeviceApi).toHaveBeenCalledTimes(1)
+  })
+
+  it('confirms a lost application response by reading the same order without repeating the POST', async () => {
+    state.values[3] = [{ ...order, activation: { state: 'ready_to_apply' } }]
+    vi.mocked(cragDeviceApi)
+      .mockRejectedValueOnce(new TypeError('network lost'))
+      .mockResolvedValueOnce({ ...order, activation: { state: 'active' } })
+    render(true)
+    click('应用到本机')
+    await settle()
+    await settle()
+    expect(cragDeviceApi).toHaveBeenCalledTimes(2)
+    expect(cragDeviceApi).toHaveBeenNthCalledWith(
+      2,
+      '/orders/order-1',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(render(true)).toContain('订阅额度已加入此服务器')
+    expect(render(true)).not.toContain('未能确认本机订阅到账')
+  })
+
+  it.each([
+    ['crag_subscription_invalid_redemption_receipt', '兑换确认记录未通过校验'],
+    ['host_redeem_conflict', '使用券与本机订阅不匹配'],
+    ['redeem_unavailable', '授权服务未接受原订单的使用券'],
+    ['shop_redemption_changed', '同一订单返回了不同的使用券'],
+  ])(
+    'explains application error %s beside the original order',
+    async (code, expected) => {
+      state.values[3] = [{ ...order, activation: { state: 'ready_to_apply' } }]
+      vi.mocked(cragDeviceApi).mockRejectedValue(
+        new ApiError('private supplier payload', 409, code)
+      )
+      render(true)
+      click('应用到本机')
+      await settle()
+      const html = render(true)
+      const history = html.slice(html.indexOf('id="crag-order-history"'))
+      expect(history).toContain(expected)
+      expect(history).toContain('重新购买')
+      expect(history).not.toContain('private supplier payload')
+      expect(cragDeviceApi).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it.each(['error', 'unconfirmed'] as const)(
+    'hides obsolete %s feedback when refreshed history confirms the order is active',
+    async (status) => {
+      state.values[3] = [{ ...order, activation: { state: 'ready_to_apply' } }]
+      vi.mocked(cragDeviceApi).mockRejectedValue(
+        status === 'error'
+          ? new ApiError(
+              'package changed',
+              409,
+              'crag_subscription_host_package_changed'
+            )
+          : new TypeError('network lost')
+      )
+      render(true)
+      click('应用到本机')
+      await settle()
+      await settle()
+      expect(render(true)).toContain('核对原订单')
+      click('刷新订单')
+      // The existing SSR harness does not run effects. Supply the confirmed list
+      // response here, as the history fetch or successful host recovery would.
+      state.values[3] = [{ ...order, activation: { state: 'active' } }]
+      const html = render(true)
+      expect(html).toContain('额度已到账')
+      expect(html).toContain('前往内核页启用槽位')
+      expect(html).not.toContain('本订单应用结果')
+      expect(html).not.toContain('核对原订单')
+      expect(html).not.toContain('另一版 CRAG 发行包')
+      expect(html).not.toContain('未能确认本机订阅到账')
+    }
+  )
+
+  it('times out an application, then preserves an unconfirmed result until the original order confirms it', async () => {
+    vi.useFakeTimers()
+    state.values[3] = [{ ...order, activation: { state: 'ready_to_apply' } }]
+    vi.mocked(cragDeviceApi)
+      .mockImplementationOnce(
+        (_path, opts) =>
+          new Promise((_resolve, reject) => {
+            opts?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('timeout', 'AbortError'))
+            )
+          })
+      )
+      .mockRejectedValueOnce(new TypeError('offline'))
+    render(true)
+    click('应用到本机')
+    await vi.advanceTimersByTimeAsync(15_000)
+    const html = render(true)
+    expect(html).toContain('未能确认本机订阅到账')
+    expect(html).toContain('核对原订单')
+    expect(html).not.toContain('订阅额度已加入此服务器')
+    vi.mocked(cragDeviceApi).mockResolvedValueOnce({
+      ...order,
+      activation: { state: 'active' },
+    })
+    click('核对原订单')
+    await settle()
+    await settle()
+    expect(
+      vi
+        .mocked(cragDeviceApi)
+        .mock.calls.filter(([, opts]) => opts?.method === 'POST')
+    ).toHaveLength(1)
+    expect(render(true)).toContain('订阅额度已加入此服务器')
+  })
+
+  it('explains an unverifiable receipt when history reconciliation fails closed', async () => {
+    vi.mocked(cragDeviceApi).mockRejectedValue(
+      new ApiError(
+        'private supplier path',
+        409,
+        'crag_subscription_invalid_redemption_receipt'
+      )
+    )
+    render(true)
+    // Run the history loading effect in the otherwise static render harness.
+    const effects = vi.mocked(useEffect).mock.calls
+    const cleanup = effects[effects.length - 1]?.[0]()
+    await settle()
+    const html = render(true)
+    expect(html).toContain('兑换确认记录未通过校验')
+    expect(html).toContain('核对原订单和订阅数据')
+    expect(html).not.toContain('private supplier path')
+    expect(cragDeviceApi).toHaveBeenCalledExactlyOnceWith(
+      '/orders?offset=0',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    if (typeof cleanup === 'function') cleanup()
+  })
+
+  it('does not accept a different order response as proof of redemption', async () => {
+    state.values[3] = [{ ...order, activation: { state: 'ready_to_apply' } }]
+    vi.mocked(cragDeviceApi).mockResolvedValue({
+      ...order,
+      order_id: 'different-order',
+      activation: { state: 'active' },
+    })
+    render(true)
+    click('应用到本机')
+    await settle()
+    await settle()
+    const html = render(true)
+    expect(html).not.toContain('订阅额度已加入此服务器')
+    expect(html).toContain('未能确认本机订阅到账')
+    expect(state.invalidateQueries).not.toHaveBeenCalled()
+  })
+
+  it('requires explicit confirmation before recovering the original voucher with the current package', async () => {
+    state.hostStatus = { state: 'sync_pending', ready: false }
+    vi.mocked(api).mockRejectedValueOnce(
+      new ApiError(
+        'package changed',
+        409,
+        'crag_subscription_host_package_changed'
+      )
+    )
+    render()
+    click('继续同步')
+    await settle()
+    expect(render()).toContain('使用当前发行包恢复原兑换')
+    click('使用当前发行包恢复原兑换')
+    render()
+    expect(state.recoveryConfirm?.open).toBe(true)
+    expect(api).toHaveBeenCalledTimes(1)
+    vi.mocked(api).mockResolvedValueOnce({
+      state: 'active',
+      ready: true,
+      slot_limit: 1,
+    })
+    state.recoveryConfirm?.handleConfirm?.()
+    await settle()
+    expect(api).toHaveBeenLastCalledWith(
+      '/api/panel/crag-subscription/recover',
+      {
+        method: 'POST',
+        body: JSON.stringify({ use_current_package: true }),
+      }
+    )
+    expect(render()).toContain('订阅状态已同步')
+    expect(render()).not.toContain('使用当前发行包恢复原兑换')
+    expect(state.values[9]).toBe(1)
   })
 
   it('shows the slot probe failure without hiding the signed entitlement', () => {

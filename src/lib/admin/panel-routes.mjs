@@ -232,7 +232,13 @@ import {
   startHostUpgrade,
 } from './release.mjs'
 import { downloadReleaseKernel, kernelReleaseHttpStatus, listKernelReleaseVersions } from './release-kernel.mjs'
-import { describeKernelCatalog, listKernelReleases, pullKernelRelease, selectKernelRelease } from './kernel-catalog.mjs'
+import {
+  cragReleasePin,
+  describeKernelCatalog,
+  listKernelReleases,
+  pullKernelRelease,
+  selectKernelRelease,
+} from './kernel-catalog.mjs'
 import {
   hasKernelInstallSafetyHold,
   installKernelTargets,
@@ -337,6 +343,7 @@ import { restartRustKernel, syncClaudeKernelConfigs, writeKernelConfig } from '.
 
 import { countTokensViaWorker, syncClaudeClientCredentials } from '../transport/go-worker-client.mjs'
 import { apiKeyBetaHeader, setupTokenBetaHeader } from '../protocol/claude-code-betas.mjs'
+import { countTokensEnabled } from '../protocol/user-count-tokens.mjs'
 import { rustKernelHealth, toPublicKernelHealth } from '../transport/rust-kernel-client.mjs'
 import {
   activateCragLicense,
@@ -352,7 +359,14 @@ import { applyNativeTelemetry } from '../vm/fleet-update.mjs'
 import { codexKernelHealth } from '../transport/codex-kernel-client.mjs'
 import { normalizeHealthProbeConfig } from './health-probe.mjs'
 import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
-import { mergeNotifyConfig, publicNotifyConfig, publicRoutingNotify, sendNotifyTest } from './notify.mjs'
+import {
+  isNotifyChannel,
+  mergeNotifyConfig,
+  publicNotifyConfig,
+  publicRoutingNotify,
+  sendNotifyTest,
+  validateNotifyRoutingPatch,
+} from './notify.mjs'
 import { UsageLogsView } from '../db/repos/usage-logs-view.mjs'
 import {
   applyOnboardingAction,
@@ -3637,6 +3651,7 @@ export function createPanelHandler(ctx) {
           200,
           panel.ok({
             kernels: describeKernelCatalog(cfg.paths.project),
+            crag_pin: cragReleasePin(cfg.paths.project),
             licenses,
             install_licenses: installLicenses,
             installations,
@@ -3685,7 +3700,8 @@ export function createPanelHandler(ctx) {
         if (
           !body ||
           !['cli-node', 'crag'].includes(body.kernel) ||
-          (body.tag != null && typeof body.tag !== 'string')
+          (body.tag != null && typeof body.tag !== 'string') ||
+          (body.latest != null && typeof body.latest !== 'boolean')
         ) {
           return json(res, 400, {
             ok: false,
@@ -3694,7 +3710,9 @@ export function createPanelHandler(ctx) {
         }
         const result = await pullKernelRelease(
           cfg.paths.project,
-          { kernel: body.kernel, tag: body.tag || '', latest: true },
+          // The manual two-step flow still tracks the newest release. Only a
+          // caller that explicitly asks for `latest: false` gets the pin.
+          { kernel: body.kernel, tag: body.tag || '', latest: body.latest !== false },
           { fetchImpl: ctx.fetchImpl },
         )
         if (!result.ok)
@@ -5109,7 +5127,69 @@ export function createPanelHandler(ctx) {
         return json(res, 200, panel.ok(result))
       }
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/count-tokens$/.test(p)) {
-        return json(res, 404, { ok: false, error: { code: 'not_found', message: 'not found' } })
+        // Same switch as the public entry. `ctx.routingConfig` is a getter on the live
+        // object, so flipping it in the panel takes effect without a restart.
+        if (!countTokensEnabled(ctx.routingConfig))
+          return json(res, 404, { ok: false, error: { code: 'not_found', message: 'not found' } })
+        const id = p.split('/')[4]
+        const vm = getVm(cfg.paths.project, id)
+        if (!vm) return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'vm not found' } })
+        const mode = credentialModeOfVm(vm)
+        if (!isAnySetupTokenMode(mode) && !isApiKeyMode(mode)) {
+          return json(res, 400, {
+            ok: false,
+            error: {
+              code: 'count_tokens_unsupported',
+              message: 'count_tokens 只支持 Setup Token / Console API Key，完整 OAuth 走 Claude Code Messages usage',
+            },
+          })
+        }
+        const exec = workerExecForVm(id)
+        if (!exec) return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'vm not found' } })
+        const reqBody = await readBody(req, 256 * 1024).catch(() => ({}))
+        const model = String(reqBody.model || reqBody.model_id || '').trim()
+        const messages = Array.isArray(reqBody.messages) ? reqBody.messages : null
+        if (!model || !messages?.length) {
+          return json(res, 400, {
+            ok: false,
+            error: { code: 'invalid_request', message: 'model 与 messages 必填' },
+          })
+        }
+        const anthropicBody = { model, messages }
+        if (reqBody.system != null) anthropicBody.system = reqBody.system
+        if (Array.isArray(reqBody.tools)) anthropicBody.tools = reqBody.tools
+        const hop = await countTokensViaWorker(exec, {
+          body: anthropicBody,
+          headers: {
+            'user-agent': 'kin-inference/1.0',
+            'anthropic-version': '2023-06-01',
+            'anthropic-beta': isApiKeyMode(mode) ? apiKeyBetaHeader('') : setupTokenBetaHeader(model),
+          },
+          timeoutMs: Math.min(Math.max(Number(reqBody.timeout_ms || reqBody.timeoutMs) || 45000, 5000), 120000),
+        })
+        if (!hop.ok) {
+          const err = hop.body?.error || {}
+          return json(res, hop.status || 502, {
+            ok: false,
+            error: {
+              code: err.code || 'count_tokens_failed',
+              message: err.message || 'count_tokens 失败',
+              type: err.type || undefined,
+            },
+          })
+        }
+        return json(
+          res,
+          200,
+          panel.ok({
+            vm_id: id,
+            model,
+            credential_mode: mode,
+            input_tokens: Number(hop.body?.input_tokens) || 0,
+            usage: hop.body || null,
+            via: hop.via,
+          }),
+        )
       }
       // GET /api/panel/test-models — models available for test dropdown
       if (req.method === 'GET' && p === '/api/panel/test-models') {
@@ -7449,6 +7529,7 @@ export function createPanelHandler(ctx) {
         if (body?.compatibility) body.compatibility = canonicalPersonaCompat(body.compatibility)
         const previousRoutingConfig = structuredClone(ctx.routingConfig)
         try {
+          validateNotifyRoutingPatch(body)
           if (body?.codex && Object.prototype.hasOwnProperty.call(body.codex, 'quota')) {
             validateOpenAIQuotaPatch(body.codex.quota)
           }
@@ -7767,22 +7848,18 @@ export function createPanelHandler(ctx) {
       if (req.method === 'POST' && p === '/api/panel/notify/test') {
         const body = await readBody(req, 64 * 1024)
         const channel = String(body.channel || '').toLowerCase()
-        if (channel !== 'email' && channel !== 'telegram' && channel !== 'wecom') {
+        if (!isNotifyChannel(channel)) {
           return json(res, 400, {
             ok: false,
             error: {
               type: 'invalid_request_error',
               code: 'missing_field',
-              message: 'channel must be email, telegram or wecom',
+              message: '请选择有效的通知渠道',
               param: 'channel',
             },
           })
         }
-        const trial = mergeNotifyConfig(ctx.routingConfig.notify, {
-          email: body.email,
-          telegram: body.telegram,
-          wecom: body.wecom,
-        })
+        const trial = mergeNotifyConfig(ctx.routingConfig.notify, { [channel]: body[channel] })
         try {
           const result = await sendNotifyTest(trial, channel, {
             baseUrl: cfg.base_url,
