@@ -395,10 +395,8 @@ test('a proxy hold left by a proxy the slot no longer uses says so (#1395)', () 
   })
   const textOf = (vm) => resolveSlotState({ vm, availability: { key: 'off' } }).restriction_text
 
-  // Re-binding and a probe each reconcile an automatic hold away, so a tag that
-  // is not the current exit means no automatic path will lift this one: a manual
-  // disable, or a message the reconcile does not recognise. Blaming "代理异常"
-  // there points the operator at an exit that is fine.
+  // An old binding remains visible until a probe verifies the replacement.
+  assert.equal(textOf(held('px-old', 'px-new')), '历史代理遗留')
   assert.equal(textOf(held('px-old', 'px-new', 'proxy_manually_disabled')), '历史代理遗留')
   assert.equal(textOf(held('px-old', 'px-new', 'something_else')), '历史代理遗留')
 
@@ -409,7 +407,7 @@ test('a proxy hold left by a proxy the slot no longer uses says so (#1395)', () 
   assert.equal(textOf(held('px-old', null)), '代理异常')
 
   // Another subsystem's hold is untouched.
-  const maint = held('px-old', 'px-new')
-  maint.schedule_hold.reason = 'maintenance'
-  assert.equal(textOf(maint), '维护中')
+  const worker = held('px-old', 'px-new')
+  worker.schedule_hold.reason = 'worker_unhealthy'
+  assert.equal(textOf(worker), '槽服务异常')
 })

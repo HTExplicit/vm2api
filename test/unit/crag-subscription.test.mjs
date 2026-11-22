@@ -582,6 +582,7 @@ test('cluster binding retries only one explicit payload-key conflict and preserv
       const { root, connect } = standaloneHost(t, async (url, { body }) => {
         const request = JSON.parse(body)
         if (url.endsWith('/redeem')) entitlement = issueHostEntitlement(root, request.host_id)
+        if (url.endsWith('/recover')) return Response.json({ ok: false, error: { code: 'auth_forbidden' } }, { status: 403 })
         if (!url.endsWith('/bind'))
           return Response.json({ ok: true, data: { entitlement: entitlement.code, ...entitlement.claims } })
         requests.push(request)
