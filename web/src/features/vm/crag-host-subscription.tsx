@@ -2,8 +2,14 @@ import { useId, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, isApiError } from '@/lib/api'
 import { Button } from '@/components/ui/button'
+import { CragDeviceIdentity } from './crag-device-identity'
+import { CragQuotaGrants } from './crag-quota-grants'
 import { CragRuntimeCounts } from './crag-runtime-counts'
-import { cragSubscriptionErrors } from './crag-subscription-errors'
+import {
+  cragCredentialRecoveryFaults,
+  cragOrderClaimErrors,
+  cragSubscriptionErrors,
+} from './crag-subscription-errors'
 import {
   cragHostStatusQueryOptions,
   vmCragLicenseQueryOptions,
@@ -23,7 +29,10 @@ export function CragHostSubscription({ vmId }: { vmId: string }) {
   const pending = status?.state === 'sync_pending'
   const busy = host.isFetching || working
 
-  async function perform(action: 'bind' | 'recover') {
+  async function perform(
+    action: 'bind' | 'recover' | 'unbind' | 'claim-by-order',
+    payload?: Record<string, unknown>
+  ) {
     if (busy) return
     setWorking(true)
     setNotice(undefined)
@@ -40,16 +49,37 @@ export function CragHostSubscription({ vmId }: { vmId: string }) {
           text: '本槽已绑定，开始运行调度后计入使用中的槽位。如内核尚未加载授权，请重启本槽。',
         })
       } else {
-        const next = await api<CragHostStatus>(`${root}/${action}`, {
+        const next = await api<
+          CragHostStatus & { released?: { released_codes?: string[] } }
+        >(`${root}/${action}`, {
           method: 'POST',
-          body: '{}',
+          body: JSON.stringify(payload ?? {}),
         })
         qc.setQueryData(options.queryKey, next)
+        if (action === 'unbind') {
+          // 说清被释放的张数，因为能迁走的恰好是这些。
+          const count = next.released?.released_codes?.length ?? 0
+          setNotice({
+            text: count
+              ? `本机订阅已注销，${count} 张兑换券已释放并保留剩余时长。在新机器上用购买时的订单号（或原券码）迁移即可继承。`
+              : '本机订阅已注销。没有仍在有效期内的兑换券可供转移。',
+          })
+        }
+        if (action === 'claim-by-order') {
+          setNotice({
+            text: '已把该订单的兑换券迁到本机，剩余时长照旧。原机器上这张券的额度已同时失效。',
+          })
+        }
       }
     } catch (error) {
       setNotice({
         text:
-          (isApiError(error) && cragSubscriptionErrors[error.code]) ||
+          (isApiError(error) &&
+            // 迁移路径下 not_found / redeem_unavailable 的含义与别处不同，
+            // 先查它独有的文案，再回落到按码索引的通用表。
+            ((action === 'claim-by-order' &&
+              cragOrderClaimErrors[error.code]) ||
+              cragSubscriptionErrors[error.code])) ||
           '无法确认订阅操作，请检查连接后重试。',
         error: true,
       })
@@ -86,6 +116,12 @@ export function CragHostSubscription({ vmId }: { vmId: string }) {
         </Button>
       </div>
       <CragRuntimeCounts status={host.isError ? undefined : status} />
+      {status?.credential_recovery ? (
+        <p role='alert' className='text-sm text-destructive'>
+          {cragCredentialRecoveryFaults[status.credential_recovery] ??
+            cragSubscriptionErrors.auth_forbidden}
+        </p>
+      ) : null}
       {host.isError ? (
         <p role='alert' className='text-sm text-destructive'>
           读取失败。请刷新订阅后重试。
@@ -104,6 +140,15 @@ export function CragHostSubscription({ vmId }: { vmId: string }) {
           ? '上次订阅变更尚未同步。已在运行的槽不受影响；请点「继续同步」完成后，再进行新的绑定或兑换。'
           : '切换到 CRAG 内核不占槽位。只有绑定订阅且正在运行调度的 CRAG 槽计入使用中的槽位；本机与集群的 Docker、KVM 槽共用同一份充值可用槽位，用满后继续充值即可。绑定不会自动启动或重启槽位。'}
       </p>
+      <CragQuotaGrants status={host.isError ? undefined : status} />
+      <CragDeviceIdentity
+        status={host.isError ? undefined : status}
+        busy={busy}
+        onUnbind={() => void perform('unbind')}
+        onClaim={(orderId) =>
+          void perform('claim-by-order', { order_id: orderId })
+        }
+      />
       {status?.state === 'active' ? (
         <Button
           type='button'

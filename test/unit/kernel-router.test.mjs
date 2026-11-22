@@ -18,6 +18,7 @@ import {
   rememberRustHealth,
   peekRustHealth,
 } from '../../src/lib/transport/kernel-router.mjs'
+import { bindPlacement, unbindPlacement } from '../../src/lib/cluster/placement.mjs'
 import { rustKernelBusy, rustKernelHealth, rustKernelReachable } from '../../src/lib/transport/rust-kernel-client.mjs'
 import { inferenceCodec } from '../../src/lib/transport/inference-codec.mjs'
 import {
@@ -3099,4 +3100,157 @@ test('live-only policy reload ignores idle prewarm processes and preserves manua
   assert.deepEqual(await request.done, { ok: true })
   assert.equal(restarts, 1)
   assert.deepEqual(JSON.parse(fs.readFileSync(file)), vm)
+})
+
+// One health probe that is neither ready nor busy is re-probed briefly before the
+// request fails; a kernel that really stays down still fails and is logged.
+
+function withFakeKernelBin(t) {
+  const previous = process.env.KIN_KERNEL_BIN
+  process.env.KIN_KERNEL_BIN = '/bin/true'
+  t.after(() => {
+    if (previous == null) delete process.env.KIN_KERNEL_BIN
+    else process.env.KIN_KERNEL_BIN = previous
+  })
+}
+
+unixTest('a local kernel that is briefly neither ready nor busy is re-probed before failing', async (t) => {
+  withFakeKernelBin(t)
+  let probes = 0
+  const fx = await kernelFixture((req, res) => {
+    if (req.url !== '/internal/health') {
+      res.writeHead(500)
+      return res.end()
+    }
+    probes++
+    res.end(JSON.stringify({ ok: true, engine: 'rust', ready_slots: probes < 3 ? 0 : 1 }))
+  })
+  t.after(() => fx.close())
+  const prepared = await prepareInferenceHop({
+    exec: fx.exec,
+    body: { model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hi' }] },
+    routing: { inference: { health_ttl_ms: 0, kernel_down_reprobe_ms: 2000 } },
+  })
+  assert.equal(prepared.ready?.ok, true)
+  assert.equal(prepared.ready?.reason, 'ready_after_reprobe')
+  assert.equal(probes, 3)
+})
+
+unixTest('a local kernel that stays down still fails, and what it reported is logged', async (t) => {
+  withFakeKernelBin(t)
+  const fx = await kernelFixture((req, res) => {
+    if (req.url !== '/internal/health') {
+      res.writeHead(500)
+      return res.end()
+    }
+    res.end(JSON.stringify({ ok: true, engine: 'rust', ready_slots: 0 }))
+  })
+  t.after(() => fx.close())
+  const warn = t.mock.method(console, 'warn', () => {})
+  const started = Date.now()
+  const prepared = await prepareInferenceHop({
+    exec: fx.exec,
+    body: { model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hi' }] },
+    routing: { inference: { health_ttl_ms: 0, kernel_down_reprobe_ms: 700 } },
+  })
+  assert.equal(prepared.ready?.ok, false)
+  assert.equal(prepared.ready?.reason, 'kernel_unavailable')
+  assert.match(prepared.ready?.error || '', /rust kernel is down/)
+  assert.ok(Date.now() - started < 3000)
+  const logged = warn.mock.calls
+    .map((call) => String(call.arguments[0]))
+    .find((line) => line.includes('rust_kernel_down'))
+  assert.ok(logged, 'outage logged')
+  assert.match(logged, /"ready_slots":0/)
+  assert.match(logged, /"probes":[1-9]/)
+})
+
+unixTest('re-probe off (kernel_down_reprobe_ms: 0) keeps the immediate failure', async (t) => {
+  withFakeKernelBin(t)
+  let probes = 0
+  const fx = await kernelFixture((req, res) => {
+    if (req.url !== '/internal/health') {
+      res.writeHead(500)
+      return res.end()
+    }
+    probes++
+    res.end(JSON.stringify({ ok: true, engine: 'rust', ready_slots: 0 }))
+  })
+  t.after(() => fx.close())
+  const warn = t.mock.method(console, 'warn', () => {})
+  const prepared = await prepareInferenceHop({
+    exec: fx.exec,
+    body: { model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hi' }] },
+    routing: { inference: { health_ttl_ms: 0, kernel_down_reprobe_ms: 0 } },
+  })
+  assert.equal(prepared.ready?.reason, 'kernel_unavailable')
+  assert.equal(probes, 1)
+  // Off really is the old behaviour: no re-probe ran, so no down-kernel line either.
+  const logged = warn.mock.calls
+    .map((call) => String(call.arguments[0]))
+    .filter((line) => line.includes('rust_kernel_down'))
+  assert.deepEqual(logged, [])
+})
+
+unixTest('a slot that goes offline during the re-probe reports reconnecting, not a down kernel', async (t) => {
+  withFakeKernelBin(t)
+  bindPlacement({ manager: { slotDataPath: () => 'offline' } })
+  t.after(() => unbindPlacement())
+  let probes = 0
+  let fx = null
+  fx = await kernelFixture((req, res) => {
+    if (req.url !== '/internal/health') {
+      res.writeHead(500)
+      return res.end()
+    }
+    probes++
+    // The first probe sees a local slot that is not ready yet; while the second
+    // probe is in flight the slot moves onto a node whose link is down.
+    if (probes === 2) fx.exec.vm.node_id = 'node-gone'
+    res.end(JSON.stringify({ ok: true, engine: 'rust', ready_slots: 0 }))
+  })
+  t.after(() => fx.close())
+  const warn = t.mock.method(console, 'warn', () => {})
+  const prepared = await prepareInferenceHop({
+    exec: fx.exec,
+    body: { model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hi' }] },
+    routing: { inference: { health_ttl_ms: 0, kernel_down_reprobe_ms: 2000 } },
+  })
+  assert.equal(prepared.ready?.ok, false)
+  assert.equal(prepared.ready?.reason, 'cluster_slot_reconnecting')
+  assert.equal(probes, 2)
+  const logged = warn.mock.calls
+    .map((call) => String(call.arguments[0]))
+    .filter((line) => line.includes('rust_kernel_down'))
+  assert.deepEqual(logged, [])
+})
+
+unixTest('a re-probe of a kernel that stops answering stays inside the window it was given', async (t) => {
+  withFakeKernelBin(t)
+  let probes = 0
+  const fx = await kernelFixture((req, res) => {
+    if (req.url !== '/internal/health') {
+      res.writeHead(500)
+      return res.end()
+    }
+    probes++
+    // The first probe answers at once, so what this measures is the re-probe loop
+    // and not the health check that precedes it. Every later probe never answers,
+    // which is what a kernel too wedged to reply looks like from here.
+    if (probes === 1) res.end(JSON.stringify({ ok: true, engine: 'rust', ready_slots: 0 }))
+  })
+  t.after(() => fx.close())
+  t.mock.method(console, 'warn', () => {})
+  const started = Date.now()
+  const prepared = await prepareInferenceHop({
+    exec: fx.exec,
+    body: { model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hi' }] },
+    // A health timeout far wider than the re-probe window. The loop condition only
+    // reserves the 250ms gap, so an unclamped probe spends the whole 8s here and
+    // hands 8s of latency to a request that was told it could wait 700ms.
+    routing: { inference: { health_ttl_ms: 0, kernel_down_reprobe_ms: 700, health_timeout_ms: 8000 } },
+  })
+  const elapsed = Date.now() - started
+  assert.equal(prepared.ready?.reason, 'kernel_unavailable')
+  assert.ok(elapsed < 2000, `re-probe overran its window: ${elapsed}ms`)
 })

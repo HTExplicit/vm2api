@@ -59,12 +59,15 @@ export const ErrorCode = {
   VM_POOL_UNAVAILABLE: 'vm_pool_unavailable',
   API_BACKEND_FORBIDDEN: 'api_backend_forbidden',
   CLAUDE_CODE_ONLY: 'claude_code_only',
+  CLIENT_BLOCKED: 'client_blocked',
   // upstream
   UPSTREAM_AUTH: 'upstream_auth_error',
   UPSTREAM_RATE_LIMIT: 'upstream_rate_limit',
   UPSTREAM_INVALID: 'upstream_invalid_request',
   UPSTREAM_OVERLOADED: 'upstream_overloaded',
   UPSTREAM_TIMEOUT: 'upstream_timeout',
+  REQUEST_QUARANTINED: 'request_quarantined',
+  REQUEST_TOO_LARGE_FOR_SLOT: 'request_too_large_for_slot',
   UPSTREAM_ERROR: 'upstream_error',
   UPSTREAM_NETWORK: 'upstream_network_error',
   UPSTREAM_STREAM_INTERRUPTED: 'upstream_stream_interrupted',
@@ -504,7 +507,13 @@ function terminalRelayDetails(status, body) {
   // 410 Gone is terminal by definition. An expired tool continuation cannot be
   // revived, so every retry of the same hop can only answer 410 again; saying so
   // does not infer *why* it expired, which stays the kernel's to report.
-  return status === 410 ? { retryable: false } : {}
+  if (status === 410) return { retryable: false }
+  // CRAG names a submission whose partial output cannot be replayed with this
+  // exact type. The verdict is the kernel's own, so the 409 carrying it is as
+  // terminal as a 410 even when the body omits the flag (#1518). Other 409s stay
+  // untouched: a conflict the panel has not declared terminal may well clear.
+  if (status === 409 && body?.error?.type === 'partial_provider_output_nonretryable') return { retryable: false }
+  return {}
 }
 
 export function mapUpstreamError(status, body, headers = {}) {

@@ -36,4 +36,41 @@ export const cragSubscriptionErrors: Record<string, string> = {
   host_redeem_conflict: '此订阅兑换码已在其他宿主机兑换，不能用于本机。',
   not_found: '授权服务找不到当前宿主机的订阅或槽位。',
   auth_forbidden: '授权服务不接受当前宿主机的订阅凭据。',
+  host_transfer_cooldown:
+    '本机上次注销的时间太近，兑换券还不能再次转移。请等冷却期结束后重试。',
+}
+
+/**
+ * 「从其他设备迁移」这条路径独有的文案。
+ *
+ * 和上表分开，是因为同一个码在这里含义不同：`not_found` 在状态刷新时是「找不到
+ * 本机订阅」，在这里却是「这个订单号没有登记过兑换券」；`redeem_unavailable` 在
+ * 兑换时是「券码无效」，在这里是「这张券与同机其他券共享合并额度、不能单独迁」。
+ * 上表按码索引、没有动作维度，装不下这种分歧 —— 覆盖它会让另一条路径说错话。
+ *
+ * 查不到就回落到上表，所以这里只写确实有分歧的码。
+ */
+export const cragOrderClaimErrors: Record<string, string> = {
+  not_found:
+    '没有找到这个订单号对应的兑换券。请核对原订单上的订单号；若这张券是在「按订单号迁移」上线前兑换的，请改用原券码迁移。',
+  redeem_unavailable:
+    '这张券与原机器上的其他兑换券共享一个合并额度窗口，不能单独迁移。请在原机器上注销整台订阅。',
+  request_conflict:
+    '这个订单号已登记到另一张兑换券。请保留原订单并联系管理员核对，不要重复兑换。',
+}
+
+/**
+ * 自助恢复凭据失败后的成因说明（`CragHostStatus.credential_recovery`）。
+ *
+ * 和上表分开：这些不是某次请求的错误码，而是一个持续存在、只能由运维清除的
+ * 状态 —— 授权服务不认本机凭据，而本机又没能自行换回来。不说明的话，面板会
+ * 一直显示正常，直到某次兑换莫名失败。
+ *
+ * 按同一条约定：只陈述事实与可查的线索，不提及当前不存在的用户动作。
+ */
+export const cragCredentialRecoveryFaults: Record<string, string> = {
+  host_id_collision:
+    '本机的设备标识与另一台设备相同，授权服务因此不接受本机凭据。常见于从同一镜像克隆、未重置 /etc/machine-id 的 VPS。',
+  failed: '本机凭据未能自动换回，授权服务仍不接受。已运行的槽不受影响。',
+  not_activated: '本机没有可用于证明归属的授权记录，请先完成兑换。',
 }
