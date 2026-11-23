@@ -78,6 +78,29 @@ AGY_SHA256 = "39816d49d5ab92229952987225c23ea3fed7580699dcb4a444e0388e0ac1ce43"
 INFERENCE_MODULE = ROOT / "scripts/gemini_host_inference.py"
 MODEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,99}\Z")
 RUN_TTL = 150
+# Fixed categories only: process output and exception details are not inventory data.
+INFERENCE_ERROR_CODES = frozenset(
+    {
+        "gemini_api_key_invalid",
+        "gemini_inference_bad_input",
+        "gemini_inference_cancelled",
+        "gemini_inference_failed",
+        "gemini_inference_invalid_output",
+        "gemini_inference_output_limit",
+        "gemini_inference_start_failed",
+        "gemini_inference_timeout",
+        "gemini_inference_tool_blocked",
+        "gemini_location_unsupported",
+        "gemini_model_unavailable",
+        "gemini_models_empty",
+        "gemini_native_bridge_timeout",
+        "gemini_native_tty_unavailable",
+        "gemini_native_worker_unavailable",
+        "gemini_oauth_required",
+        "gemini_proxy_error",
+        "gemini_quota_exhausted",
+    }
+)
 
 
 def invocation_module():
@@ -839,17 +862,20 @@ class NativeAgy(Agy):
         finally:
             os.close(lock)
         self.pid = self.native_tui_pid
-        self.native_invocation = native_module_impl.NativeInvocation(
-            {
-                "socket": str(self.native_dir / "kernel.sock"),
-                "token": self.native_token,
-                "model": self.model,
-                "request_id": self.attempt,
-                "prompt": self.prompt,
-                "startup_timeout": 45,
-            },
-            secrets=self.credentials,
-        )
+        try:
+            self.native_invocation = native_module_impl.NativeInvocation(
+                {
+                    "socket": str(self.native_dir / "kernel.sock"),
+                    "token": self.native_token,
+                    "model": self.model,
+                    "request_id": self.attempt,
+                    "prompt": self.prompt,
+                    "startup_timeout": 45,
+                },
+                secrets=self.credentials,
+            )
+        except native_module_impl.NativeFailure as error:
+            raise Failure(503, error.code) from None
         self.prompt = None
         self.credentials = ()
 
@@ -1235,6 +1261,7 @@ class Host:
         self.pending = {}
         self.terminals = {}
         self.runs = {}
+        self.last_inference = {}
         self.network_scope = os.stat("/proc/self/ns/net").st_ino
         self.environments = (
             json.loads(self.state_file.read_bytes()) if self.state_file.exists() else {}
@@ -1425,7 +1452,7 @@ class Host:
                 self.payload_state = "install_on_create"
             else:
                 raise Failure(503, "gemini_payload_not_installed")
-            self.payload_version = version
+            self.set_payload_version(version)
             self.payload_issue = None
             return verifier
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
@@ -1453,8 +1480,13 @@ class Host:
             )
             else "invalid"
         )
-        self.payload_version = None
+        self.set_payload_version(None)
         self.verified_payload = None
+
+    def set_payload_version(self, version):
+        if version != self.payload_version:
+            self.last_inference.clear()
+            self.payload_version = version
 
     def inspect_payload(self):
         try:
@@ -1655,9 +1687,51 @@ class Host:
         if terminal:
             terminal.close()
 
+    def inference_binding(self, env):
+        return (
+            env["proxy_id"],
+            env.get("profile"),
+            env.get("auth_method", "oauth"),
+            env.get("oauth_imported", False),
+            env["auth_state"],
+            env.get("updated_at"),
+            self.payload_version,
+        )
+
+    def last_inference_view(self, env):
+        entry = self.last_inference.get(env["id"])
+        if entry and entry[0] == self.inference_binding(env):
+            return {
+                "last_inference": entry[1].copy(),
+                "last_inference_proxy_sha256": entry[2],
+            }
+        return {"last_inference": None}
+
+    @staticmethod
+    def finish_inference(evidence, state, code=None):
+        if state == "failed" and code == "gemini_inference_cancelled":
+            state = "cancelled"
+        evidence.update(
+            state=state,
+            finished_at=now(),
+            error_code=(
+                code
+                if isinstance(code, str) and code in INFERENCE_ERROR_CODES
+                else None
+            ),
+        )
+
+    def touch_environment(self, env):
+        # Explicit invalidation also handles multiple mutations in one second.
+        self.last_inference.pop(env["id"], None)
+        env["updated_at"] = now()
+
     def stop_run(self, identifier):
         entry = self.runs.pop(identifier, None)
         if entry and entry["process"] is not None:
+            self.finish_inference(
+                entry["evidence"], "cancelled", "gemini_inference_cancelled"
+            )
             entry["process"].close()
 
     def running(self, identifier):
@@ -1669,9 +1743,7 @@ class Host:
             return entry["result"]
         result = entry["process"].poll()
         if result["state"] != "running" or time.monotonic() >= entry["deadline"]:
-            entry["process"].close()
-            entry["process"] = None
-            entry["result"] = (
+            result = (
                 result
                 if result["state"] != "running"
                 else {
@@ -1683,6 +1755,15 @@ class Host:
                     },
                 }
             )
+            error = result.get("error") if result["state"] == "failed" else None
+            self.finish_inference(
+                entry["evidence"],
+                result["state"],
+                error.get("code") if isinstance(error, dict) else None,
+            )
+            entry["process"].close()
+            entry["process"] = None
+            entry["result"] = result
             entry["deadline"] = time.monotonic() + RUN_TTL
             return entry["result"]
         return result
@@ -1768,27 +1849,53 @@ class Host:
             raise Failure(409, "gemini_model_unavailable")
         identifier = env["id"]
         self.stop_run(identifier)
-        if key:
-            process = invocation_module().Invocation(
-                account_command(uid, "api-key-chat"),
-                SYSTEM_ENV,
-                prompt,
-                input_bytes=json.dumps(
-                    {
-                        "api_key": key,
-                        "proxy_url": proxy_url,
-                        "prompt": prompt,
-                        "model": model,
-                    }
-                ).encode(),
-                secrets=(key,),
+        evidence = {
+            "state": "running",
+            "model": model,
+            "started_at": now(),
+            "finished_at": None,
+            "error_code": None,
+        }
+        # Runs may outlive a binding change. Updating their own evidence object
+        # must not put an invalidated record back into inventory.
+        # Keep the proxy identity on the trusted control socket only. A proxy
+        # pool edit can change the endpoint or credentials without a new ID.
+        self.last_inference[identifier] = (
+            self.inference_binding(env),
+            evidence,
+            hashlib.sha256(proxy_url.encode()).hexdigest(),
+        )
+        try:
+            if key:
+                process = invocation_module().Invocation(
+                    account_command(uid, "api-key-chat"),
+                    SYSTEM_ENV,
+                    prompt,
+                    input_bytes=json.dumps(
+                        {
+                            "api_key": key,
+                            "proxy_url": proxy_url,
+                            "prompt": prompt,
+                            "model": model,
+                        }
+                    ).encode(),
+                    secrets=(key,),
+                )
+            else:
+                process = NativeAgy(self, env, proxy_url, auth, model, prompt)
+        except Failure as error:
+            self.finish_inference(
+                evidence, "failed", error.code or "gemini_inference_start_failed"
             )
-        else:
-            process = NativeAgy(self, env, proxy_url, auth, model, prompt)
+            raise
+        except (OSError, subprocess.SubprocessError, ValueError, RuntimeError):
+            self.finish_inference(evidence, "failed", "gemini_inference_start_failed")
+            raise
         run_id = secrets.token_hex(16)
         self.runs[identifier] = {
             "id": run_id,
             "process": process,
+            "evidence": evidence,
             "deadline": time.monotonic() + RUN_TTL,
         }
         return {"run_id": run_id}
@@ -1817,6 +1924,7 @@ class Host:
 
     def save_environment(self, env, updated):
         private_json(self.state_file, {**self.environments, env["id"]: updated})
+        self.last_inference.pop(env["id"], None)
         env.clear()
         env.update(updated)
 
@@ -1911,7 +2019,8 @@ class Host:
             )
         except Failure as error:
             if error.code == TERMINAL_OAUTH:
-                env.update(auth_state="reauth_required", updated_at=now())
+                env["auth_state"] = "reauth_required"
+                self.touch_environment(env)
                 self.save()
                 raise
             raise Failure(503, "gemini_terminal_unavailable") from error
@@ -1950,9 +2059,9 @@ class Host:
                     self.stop_terminal(identifier)
                 for identifier in list(self.pending):
                     self.cancel(identifier)
-                    self.environments[identifier].update(
-                        auth_state="reauth_required", updated_at=now()
-                    )
+                    env = self.environments[identifier]
+                    env["auth_state"] = "reauth_required"
+                    self.touch_environment(env)
                     self.save()
                 return
         for identifier, terminal in list(self.terminals.items()):
@@ -1977,9 +2086,8 @@ class Host:
                 old_profile = env.get("profile")
                 imported = env.pop("oauth_imported", False)
                 login.close(preserve=True)
-                env.update(
-                    auth_state="authorized", profile=login.attempt, updated_at=now()
-                )
+                env.update(auth_state="authorized", profile=login.attempt)
+                self.touch_environment(env)
                 env.pop("account", None)
                 env.pop("call_models", None)
                 self.save()
@@ -1994,7 +2102,7 @@ class Host:
             except Failure:
                 self.cancel(identifier)
                 env["auth_state"] = "reauth_required"
-                env["updated_at"] = now()
+                self.touch_environment(env)
                 self.save()
 
     def view(self, env):
@@ -2013,6 +2121,7 @@ class Host:
             "account": account,
             "created_at": env.get("created_at"),
             "updated_at": env.get("updated_at"),
+            **self.last_inference_view(env),
         }
 
     def probe_imported_account(self, slot, proxy_url, credential):
@@ -2057,11 +2166,55 @@ class Host:
             env["auth_state"] = "reauth_required"
         elif account.get("state") in ("ok", "partial"):
             env["auth_state"] = "authorized"
-        env["updated_at"] = now()
+        self.touch_environment(env)
         self.save()
         return self.view(env)
 
     def request(self, operation, body):
+        if operation in {
+            "list",
+            "get",
+            "maintenance-status",
+            "test-chat-status",
+            "test-chat-cancel",
+            "terminal-io",
+            "terminal-stop",
+        }:
+            return self._request(operation, body)
+        descriptor = os.open(
+            self.directory / "maintenance.lock",
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            0o600,
+        )
+        try:
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0
+                or info.st_nlink != 1
+                or info.st_mode & 0o077
+            ):
+                raise Failure(503, "gemini_maintenance_lock_invalid")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise Failure(409, "gemini_operation_busy") from None
+            pending = self.directory / "maintenance.pending"
+            if pending.exists() or pending.is_symlink():
+                raise Failure(409, "gemini_operation_busy")
+            return self._request(operation, body)
+        finally:
+            os.close(descriptor)
+
+    def _request(self, operation, body):
+        if operation == "maintenance-status":
+            return {
+                "busy": bool(
+                    self.pending
+                    or self.terminals
+                    or any(self.running(key) for key in self.runs)
+                )
+            }
         if operation == "install-payload":
             self.load_payload(materialize=True, verify_again=True)
             return {
@@ -2199,7 +2352,7 @@ class Host:
             env.pop("call_models", None)
             if env["auth_state"] != "disabled":
                 env["auth_state"] = "reauth_required"
-            env["updated_at"] = now()
+            self.touch_environment(env)
             self.save()
             return {}
         if operation in ("delete", "disable"):
@@ -2208,7 +2361,7 @@ class Host:
             self.cancel(identifier)
             self.recover_network(self.directory / identifier, env["slot"])
             env["auth_state"] = "disabled"
-            env["updated_at"] = now()
+            self.touch_environment(env)
             self.save()
             if operation == "delete":
                 shutil.rmtree(self.directory / identifier)
@@ -2242,7 +2395,7 @@ class Host:
             self.cancel(identifier)
             self.stop_run(identifier)
             env["auth_state"] = "authorizing"
-            env["updated_at"] = now()
+            self.touch_environment(env)
             self.save()
             try:
                 login = Login(self, env, proxy_url)
@@ -2251,7 +2404,7 @@ class Host:
             except (Failure, OSError, subprocess.SubprocessError) as error:
                 self.cancel(identifier)
                 env["auth_state"] = "reauth_required"
-                env["updated_at"] = now()
+                self.touch_environment(env)
                 self.save()
                 print("Gemini CLI authorization did not start", file=sys.stderr)
                 raise Failure(503, "gemini_authorization_unavailable") from error
@@ -2306,6 +2459,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 "terminal-io",
                 "terminal-stop",
                 "install-payload",
+                "maintenance-status",
                 "proxy-probe",
                 "proxy-bind",
                 "models",
@@ -2317,7 +2471,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
                 raise Failure(400)
-            if operation == "install-payload":
+            if operation in ("install-payload", "maintenance-status"):
                 _, uid, _ = struct.unpack(
                     "3i",
                     self.request.getsockopt(

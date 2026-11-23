@@ -1,6 +1,7 @@
 import { useId, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { isGeminiHostIssue } from '@/lib/gemini-recovery'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
@@ -12,6 +13,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import { GeminiMaintenanceLink } from '@/features/settings/gemini-maintenance-link'
 import type { GeminiEnvironment } from './gemini-environments'
 import {
   GEMINI_INVENTORY_KEY,
@@ -43,10 +45,13 @@ const resultLabels = {
 
 function ErrorMessage({ error }: { error: GeminiError }) {
   return (
-    <p role='alert' className='text-sm text-destructive'>
-      {error.message}
-      {error.code ? ` (${error.code})` : ''}
-    </p>
+    <div className='space-y-1'>
+      <p role='alert' className='text-sm text-destructive'>
+        {error.message}
+        {error.code ? ` (${error.code})` : ''}
+      </p>
+      {isGeminiHostIssue(error.code) ? <GeminiMaintenanceLink /> : null}
+    </div>
   )
 }
 
@@ -70,9 +75,11 @@ export function GeminiTestPanel({
   const unavailable =
     environment.auth_state !== 'authorized'
       ? authorizationHint
-      : !environment.proxy_id || environment.proxy_ready === false
-        ? '请在「代理」绑定可用的 IPv4 SOCKS5 代理。'
-        : null
+      : isOAuth && environment.oauth_imported
+        ? '已导入 OAuth 凭据，仍需在「账号」完成官方 Google 授权后再测试。'
+        : !environment.proxy_id || environment.proxy_ready === false
+          ? '请在「代理」绑定可用的 IPv4 SOCKS5 代理。'
+          : null
   const pull = useGeminiMutation({
     mutationFn: () =>
       api<GeminiEnvironment>(`${resource}/models`, { method: 'POST' }),

@@ -2,6 +2,12 @@ import { useRef, useState } from 'react'
 import { queryOptions, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { api } from '@/lib/api'
+import {
+  geminiAuthorizationLabel,
+  geminiInferenceLabel,
+  geminiInferenceErrorLabel,
+} from '@/lib/gemini-account-status'
+import { isGeminiHostIssue } from '@/lib/gemini-recovery'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -9,10 +15,12 @@ import { Progress } from '@/components/ui/progress'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { WsTerminal } from '@/components/ws-terminal-lazy'
 import { GeminiRedeemDialog } from '@/features/billing/gemini-redeem-dialog'
+import { GeminiMaintenanceLink } from '@/features/settings/gemini-maintenance-link'
 import {
   GEMINI_INVENTORY_KEY as QUERY_KEY,
   GEMINI_ROOT as ROOT,
   geminiProxyOptions,
+  geminiError,
   isGeminiProxy,
   useGeminiBusy,
   useGeminiMutation,
@@ -63,6 +71,14 @@ type QuotaReading = {
   reset_at: string | null
 }
 
+export type GeminiInferenceStatus = {
+  state: 'running' | 'completed' | 'failed' | 'cancelled'
+  model: string
+  started_at: string
+  finished_at: string | null
+  error_code: string | null
+}
+
 export type GeminiEnvironment = {
   id: string
   name: string
@@ -79,6 +95,7 @@ export type GeminiEnvironment = {
   updated_at: string | null
   models: string[]
   models_discovered?: boolean
+  last_inference?: GeminiInferenceStatus | null
   account: {
     state: 'ok' | 'partial' | 'error' | 'reauth_required'
     checked_at: string | null
@@ -113,14 +130,6 @@ export type GeminiInventory = {
   environments: GeminiEnvironment[]
 }
 type Authorization = { url: string; attempt_id: string }
-
-const AUTH_LABELS: Record<GeminiEnvironment['auth_state'], string> = {
-  unverified: '未授权',
-  authorizing: '等待 Google 授权',
-  authorized: '已授权',
-  reauth_required: '需要重新授权',
-  disabled: '已停用',
-}
 
 const PAYLOAD_ISSUES = {
   gemini_public_key_missing: '缺少 Gemini 发行公钥。',
@@ -160,11 +169,12 @@ export function GeminiStartupStatus({
 }) {
   if (!inventory.available)
     return (
-      <p role='status' className='text-sm'>
-        {inventory.host_message || '未检测到可用的 Gemini 宿主服务。'}{' '}
-        请在宿主检查 <code>systemctl status vm2api-gemini</code>；未安装时运行{' '}
-        <code>deploy/install.sh prepare-gemini</code>。
-      </p>
+      <div className='space-y-2'>
+        <p role='status' className='text-sm'>
+          {inventory.host_message || '未检测到可用的 Gemini 宿主服务。'}
+        </p>
+        <GeminiMaintenanceLink />
+      </div>
     )
   const payloadIssue = geminiPayloadIssue(inventory)
   return (
@@ -184,6 +194,9 @@ export function GeminiStartupStatus({
       ) : null}
       {inventory.oauth_runtime_issue ? (
         <p role='status'>{OAUTH_ISSUES[inventory.oauth_runtime_issue]}</p>
+      ) : null}
+      {payloadIssue || inventory.oauth_runtime_issue ? (
+        <GeminiMaintenanceLink />
       ) : null}
     </div>
   )
@@ -330,7 +343,7 @@ function EnvironmentData({ environment }: { environment: GeminiEnvironment }) {
     <dl className='grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-3'>
       <div>
         <dt className='text-muted-foreground'>凭证</dt>
-        <dd>{AUTH_LABELS[environment.auth_state]}</dd>
+        <dd>{geminiAuthorizationLabel(environment)}</dd>
       </div>
       <div>
         <dt className='text-muted-foreground'>绑定代理</dt>
@@ -340,13 +353,39 @@ function EnvironmentData({ environment }: { environment: GeminiEnvironment }) {
         </dd>
       </div>
       <div>
-        <dt className='text-muted-foreground'>公共 API 推理</dt>
-        <dd>{environment.models_discovered ? '可调度' : '先拉取模型'}</dd>
+        <dt className='text-muted-foreground'>模型发现</dt>
+        <dd>
+          {environment.models_discovered
+            ? `已发现 ${environment.models.length} 个模型`
+            : '尚未拉取模型'}
+        </dd>
       </div>
       <div>
-        <dt className='text-muted-foreground'>付费调用</dt>
+        <dt className='text-muted-foreground'>最近宿主推理</dt>
+        <dd>{geminiInferenceLabel(environment)}</dd>
+        {environment.last_inference ? (
+          <dd className='text-xs [overflow-wrap:anywhere] text-muted-foreground'>
+            {environment.last_inference.model} ·{' '}
+            {localTime(
+              environment.last_inference.finished_at ||
+                environment.last_inference.started_at
+            )}
+            {environment.last_inference.state === 'failed'
+              ? ` · ${geminiInferenceErrorLabel(environment.last_inference.error_code)}`
+              : ''}
+          </dd>
+        ) : null}
+      </div>
+      <div>
+        <dt className='text-muted-foreground'>公共 API 端到端验证</dt>
+        <dd>未上报；宿主推理记录不等同于公共 API 成功</dd>
+      </div>
+      <div>
+        <dt className='text-muted-foreground'>逐回合结算数据</dt>
         <dd>
-          {environment.billing_ready ? '可用' : '关闭 · 缺少官方逐回合结算'}
+          {environment.billing_ready
+            ? '已上报'
+            : '未上报，不作为推理可用性结论'}
         </dd>
       </div>
       <div>
@@ -393,6 +432,12 @@ function EnvironmentData({ environment }: { environment: GeminiEnvironment }) {
           {environment.models?.join('、') || '未提供'}
         </dd>
       </div>
+      <div className='text-sm text-muted-foreground sm:col-span-2 lg:col-span-3'>
+        <dt className='sr-only'>状态含义</dt>
+        <dd>
+          授权和模型发现是前置状态，不代表推理已验证。宿主记录只来自已执行回合；配置不匹配或服务重启后不再显示旧记录，当前状态需重新验证。
+        </dd>
+      </div>
     </dl>
   )
 }
@@ -424,6 +469,7 @@ function GeminiTerminal({
         <p className='text-sm text-muted-foreground'>
           通过绑定代理以 Plan 模式运行 Antigravity CLI，不启用 API 推理。
         </p>
+        <GeminiMaintenanceLink />
       </div>
       {open ? (
         <div
@@ -447,12 +493,17 @@ export function geminiInventoryOptions() {
     queryKey: QUERY_KEY,
     queryFn: ({ signal }) => api<GeminiInventory>(ROOT, { signal }),
     retry: false,
-    refetchInterval: (query) =>
-      query.state.data?.environments.some(
-        (environment) => environment.auth_state === 'authorizing'
+    refetchInterval: (query) => {
+      const inventory = query.state.data
+      if (!inventory?.available || query.state.status === 'error') return false
+      return inventory.environments.some(
+        (environment) =>
+          environment.auth_state === 'authorizing' ||
+          environment.last_inference?.state === 'running'
       )
         ? 1500
-        : false,
+        : 5000
+    },
   })
 }
 
@@ -601,7 +652,12 @@ export function GeminiEnvironments({
   if (inventory.isPending)
     return <p role='status'>正在检测 Gemini 宿主机服务…</p>
   if (inventory.isError && !inventory.data)
-    return <p role='alert'>读取 Gemini 环境失败。</p>
+    return (
+      <div className='space-y-2'>
+        <p role='alert'>读取 Gemini 环境失败。</p>
+        <GeminiMaintenanceLink />
+      </div>
+    )
   if (!inventory.data) return null
   if (!inventory.data.available)
     return <GeminiStartupStatus inventory={inventory.data} />
@@ -616,8 +672,9 @@ export function GeminiEnvironments({
   const environment = inventory.data.environments.find(
     (item) => item.id === selectedId
   )
-  const terminalUnavailable =
-    environment?.proxy_ready === false
+  const terminalUnavailable = environment?.oauth_imported
+    ? '已导入 OAuth 凭据，仍需完成官方 Google 授权。'
+    : environment?.proxy_ready === false
       ? '绑定的 IPv4 SOCKS5 代理不可用。'
       : geminiPayloadIssue(inventory.data) ||
         (inventory.data.oauth_runtime_issue
@@ -646,9 +703,11 @@ export function GeminiEnvironments({
               operation.mutate({ type: 'authorize', id: environment.id })
             }
           >
-            {environment.auth_state === 'authorized'
-              ? '重新授权'
-              : 'Google 授权'}
+            {environment.oauth_imported
+              ? '完成官方 Google 授权'
+              : environment.auth_state === 'authorized'
+                ? '重新授权'
+                : 'Google 授权'}
           </Button>
         ) : null}
         {environment.auth_state === 'authorized' ||
@@ -927,9 +986,14 @@ export function GeminiEnvironments({
         </p>
       ) : null}
       {operation.isError ? (
-        <p role='alert' className='text-sm text-destructive'>
-          {operation.error.message}
-        </p>
+        <div className='space-y-1'>
+          <p role='alert' className='text-sm text-destructive'>
+            {operation.error.message}
+          </p>
+          {isGeminiHostIssue(geminiError(operation.error, '').code) ? (
+            <GeminiMaintenanceLink />
+          ) : null}
+        </div>
       ) : null}
       {environment && !isImport ? (
         <GeminiDetails environment={environment}>{account}</GeminiDetails>

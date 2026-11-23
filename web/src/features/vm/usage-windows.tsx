@@ -186,6 +186,7 @@ export function VmCostLedger({
             )}
           >
             <span
+              title={r.note}
               className={cn(
                 'text-xs font-medium',
                 total ? 'text-foreground' : 'text-muted-foreground'
