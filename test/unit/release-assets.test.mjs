@@ -23,13 +23,13 @@ const encryptedAsset = pinned.files.find(
 const sha256 = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex')
 
 const upstream = JSON.parse(
-  fs.readFileSync(new URL('../../docs/releases/v1.4.176-binaries.json', import.meta.url), 'utf8'),
+  fs.readFileSync(new URL('../../docs/releases/v1.4.179-binaries.json', import.meta.url), 'utf8'),
 )
 const previous = JSON.parse(
-  fs.readFileSync(new URL('../../docs/releases/v1.4.170-binaries.json', import.meta.url), 'utf8'),
+  fs.readFileSync(new URL('../../docs/releases/v1.4.176-binaries.json', import.meta.url), 'utf8'),
 )
 
-test('current payload pins match the recorded 176 supplier releases and signed CRAG factory', () => {
+test('current payload pins match the recorded 179 supplier releases and signed CRAG factory', () => {
   const crag = upstream.native
   assert.equal(pinned.release, upstream.payload_release)
   assert.equal(pinned.crag_release, crag.release)
@@ -62,26 +62,13 @@ test('current payload pins match the recorded 176 supplier releases and signed C
   assert.equal(crag.fork_rebuilt, false)
   assert.equal(upstream.recorded_by, 'HTExplicit/vm2api')
   assert.equal(upstream.record_type, 'supplier_release_observation')
-  assert.equal(upstream.application_commit, '710cd6ef6d9481716cf618743924cb0b2037d8eb')
+  assert.equal(upstream.application_commit, '0065ef314b13baf4b4c643fe2a4d4a2e258aa1d2')
   assert.equal(crag.source_repository, 'dofastted/crag')
   assert.equal(upstream.official_release_workflow.conclusion, 'success')
 })
 
-test('the 176 payload updates OAuth, the worker, and the pinned CRAG package', () => {
-  const changed = []
-  for (const [name, { file }] of imageAssets(pinned)) {
-    if (!file) continue
-    const original = previous.assets.find((asset) => asset.name === name)
-    if (file.sha256 !== original?.sha256) changed.push(name)
-  }
-  assert.deepEqual(changed, [
-    'kin-oauth-auth',
-    'crag-v2-amd64-v3.1.12-crag-v2',
-    'crag-v2-amd64-v3.1.12-crag-v2.payload.enc',
-    'crag-v2-amd64-v3.1.12-manifest.json',
-    'crag-v2-amd64-unpack-note.md',
-    'crag-v2-licensed-amd64.tar.gz',
-  ])
+test('the 179 release retains the 176 supplier assets', () => {
+  assert.deepEqual(upstream.assets, previous.assets)
 })
 
 test('the complete release derives twenty-two pinned assets and image-built egress from the image', (t) => {
@@ -109,11 +96,11 @@ test('the complete release derives twenty-two pinned assets and image-built egre
   assert.equal(expected.length, 23)
   const digestOf = (name) => expected.find((asset) => asset.name === name).digest.slice('sha256:'.length)
   const upstreamBuild = {
-    application_release: 'v1.4.176',
+    application_release: 'v1.4.179',
     assets: expected.map((asset) => ({ name: asset.name, size: asset.size, sha256: digestOf(asset.name) })),
   }
   const cragBuild = {
-    application_release: 'v1.4.176',
+    application_release: 'v1.4.179',
     core_plaintext_sha256: 'core-commitment',
     assets: Object.fromEntries(
       expected.filter((asset) => asset.name.startsWith('crag-v2-')).map((asset) => [asset.name, digestOf(asset.name)]),
@@ -136,13 +123,13 @@ test('the complete release derives twenty-two pinned assets and image-built egre
   assert.equal(provenance.image, image)
   assert.equal(provenance.source_commit, 'fork-source')
   assert.equal(provenance.assets.length, 23)
-  assert.equal(provenance.upstream.build.application_release, 'v1.4.176')
+  assert.equal(provenance.upstream.build.application_release, 'v1.4.179')
   assert.equal(
     provenance.upstream.build.assets.some((asset) => asset.name === 'kin-egress'),
     false,
   )
   assert.equal(provenance.upstream.build.assets.length, 22)
-  assert.equal(provenance.upstream.build.source_record, 'docs/releases/v1.4.176-binaries.json')
+  assert.equal(provenance.upstream.build.source_record, 'docs/releases/v1.4.179-binaries.json')
   assert.deepEqual(provenance.upstream.crag, cragBuild)
   for (const name of ['kin-worker', 'cli-node']) {
     const recorded = upstreamBuild.assets.find((asset) => asset.name === name)

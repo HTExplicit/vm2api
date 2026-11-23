@@ -14,6 +14,8 @@ import {
 } from '@/components/ui/tooltip'
 import {
   ZONES,
+  GEMINI_EVIDENCE_ZONES,
+  emptyZoneCounts,
   zoneOf,
   type VmZone,
   type VmZoneFilter,
@@ -50,13 +52,7 @@ function computePulse(
   accounts: UsageAccountRow[] | undefined,
   measuredHeadroom: boolean
 ): Pulse {
-  const counts: Record<VmZone, number> = {
-    pool: 0,
-    restricted: 0,
-    off: 0,
-    none: 0,
-    dead: 0,
-  }
+  const counts = emptyZoneCounts()
   const headroom = [0, 0, 0, 0, 0]
   const remains: number[] = []
   let todayCost = 0
@@ -173,7 +169,11 @@ export function FleetPulse({
     () => computePulse(vms, accounts, classicList),
     [vms, accounts, classicList]
   )
+  const hasGemini = vms.some((vm) => !!vm.gemini)
   const segments = ZONES.filter((z) => pulse.counts[z.key] > 0)
+  const legendZones = hasGemini
+    ? segments
+    : ZONES.filter((zone) => !GEMINI_EVIDENCE_ZONES.some((g) => g.key === zone.key))
   const focused = filter !== 'all'
   const headroomMax = Math.max(...pulse.headroom, 1)
   const weekTotal = pulse.weekSuccess + pulse.weekFail
@@ -194,11 +194,11 @@ export function FleetPulse({
           meta={
             <span className='text-[13px] leading-none font-[590] tracking-[-0.01em] tabular-nums'>
               <span className='text-[color:var(--status-ok)]'>
-                {pulse.counts.pool}
+                {hasGemini ? pulse.total : pulse.counts.pool}
               </span>
               <span className='text-muted-foreground'>
                 {' '}
-                / {pulse.total} 在池
+                {hasGemini ? '个账号' : `/ ${pulse.total} 在池`}
               </span>
             </span>
           }
@@ -244,7 +244,7 @@ export function FleetPulse({
               全部{' '}
               <span className='font-medium tabular-nums'>{pulse.total}</span>
             </button>
-            {ZONES.map((g) => (
+            {legendZones.map((g) => (
               <button
                 key={g.key}
                 type='button'
@@ -330,7 +330,7 @@ export function FleetPulse({
       )}
 
       <Cell
-        title='7 天窗口余量'
+        title={hasGemini ? '普通槽 7 天窗口余量' : '7 天窗口余量'}
         className='xl:col-span-2'
         meta={
           <span className='text-[13px] leading-none font-[590] tracking-[-0.01em] tabular-nums'>
@@ -387,7 +387,7 @@ export function FleetPulse({
       </Cell>
 
       <Cell
-        title='今日消耗 · 北京时间'
+        title={hasGemini ? '普通槽今日消耗 · 北京时间' : '今日消耗 · 北京时间'}
         className='xl:col-span-2'
         meta={
           <span className='text-[11px] text-muted-foreground tabular-nums'>
@@ -415,7 +415,7 @@ export function FleetPulse({
       </Cell>
 
       <Cell
-        title='7 天窗口成败'
+        title={hasGemini ? '普通槽 7 天窗口成败' : '7 天窗口成败'}
         className='sm:col-span-2 xl:col-span-2'
         meta={
           <span className='text-[11px] text-muted-foreground tabular-nums'>
@@ -483,7 +483,7 @@ export function FleetPulse({
       >
         账号总览{' '}
         <small>
-          {pulse.counts.pool} / {pulse.total} 在池
+          {hasGemini ? `${pulse.total} 个账号` : `${pulse.counts.pool} / ${pulse.total} 在池`}
           {filter !== 'all'
             ? ` · ${ZONES.find((z) => z.key === filter)?.label}`
             : ''}
