@@ -64,6 +64,12 @@ function addKeyUsage(into, row) {
 const PRUNED_THROUGH_KEY = 'usage_logs_pruned_through'
 const BILLING_STATS_CACHE_TTL_MS = 10_000
 const BILLING_BACKFILL_INTERVAL_MS = 60_000
+// Most clean HTTP rows have no error or terminal-state metadata. Avoid the full
+// cancellation/error classification for those rows when aggregating billing health.
+const CLEAN_HTTP_SUCCESS = '(status < 400 AND error_code IS NULL AND final_state IS NULL)'
+const BILLING_SLA_COUNTS = `
+        COUNT(*) FILTER (WHERE ${CLEAN_HTTP_SUCCESS} OR ${SLA_SUCCESS_PRED}) AS success,
+        COUNT(*) FILTER (WHERE CASE WHEN ${CLEAN_HTTP_SUCCESS} THEN 0 ELSE ${SLA_ERROR_PRED} END) AS errors`
 const LIFETIME_ACCOUNT_SQL = `COALESCE(NULLIF(usage_account_id, ''),
   NULLIF(NULLIF(COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, '')), COALESCE(vm_id, '')), '—'))`
 
@@ -891,8 +897,7 @@ export class UsageLogsRepo {
         vm_id,
         ${withLifetime ? `${LIFETIME_ACCOUNT_SQL} AS lifetime_account_id,` : ''}
         COUNT(*) AS requests,
-        SUM(CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END) AS success,
-        SUM(CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
+        ${BILLING_SLA_COUNTS},
         COALESCE(SUM(input_tokens), 0) AS input_tokens,
         COALESCE(SUM(output_tokens), 0) AS output_tokens,
         COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
@@ -1442,7 +1447,6 @@ export class UsageLogsRepo {
     const where = [
       account.vm_id ? 'vm_id = ?' : "(vm_id IS NULL OR vm_id = '')",
       'created_at >= ?',
-      "unixepoch(created_at, 'subsec') IS NOT NULL",
       "COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, ''), vm_id, '—') = ?",
     ]
     const params = account.vm_id ? [account.vm_id] : []
@@ -1454,23 +1458,25 @@ export class UsageLogsRepo {
       where.push("INSTR(LOWER(COALESCE(NULLIF(TRIM(upstream_model, ?), ''), TRIM(model, ?))), 'fable') > 0")
       params.push(whitespace, whitespace)
     }
+    where.push("unixepoch(created_at, 'subsec') IS NOT NULL")
     const statements = (this._costBucketStatements ??= new Map())
     const key = `${account.vm_id ? 'vm' : 'empty'}:${fable}`
     let statement = statements.get(key)
     if (!statement) {
-      statement = this.db.prepare(`
-      SELECT COUNT(*) AS requests,
-        SUM(CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END) AS success,
-        SUM(CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END) AS errors,
-        COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
-        COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
-        COALESCE(SUM(MAX(COALESCE(cache_read_tokens, 0), 0)), 0) AS cache_read_tokens,
-        COALESCE(SUM(MAX(COALESCE(cache_creation_tokens, 0), 0)), 0) AS cache_creation_tokens,
+      // The Fable window only returns requests, tokens, total cost and unpriced rows.
+      const breakdown = fable ? '' : `
+        ${BILLING_SLA_COUNTS},
         COALESCE(SUM(${PROMPT_TOKENS_SQL}), 0) AS prompt_tokens,
         COALESCE(SUM(MAX(COALESCE(input_cost, 0), 0)), 0) AS input_cost,
         COALESCE(SUM(MAX(COALESCE(output_cost, 0), 0)), 0) AS output_cost,
         COALESCE(SUM(MAX(COALESCE(cache_read_cost, 0), 0)), 0) AS cache_read_cost,
-        COALESCE(SUM(MAX(COALESCE(cache_creation_cost, 0), 0)), 0) AS cache_creation_cost,
+        COALESCE(SUM(MAX(COALESCE(cache_creation_cost, 0), 0)), 0) AS cache_creation_cost,`
+      statement = this.db.prepare(`
+      SELECT COUNT(*) AS requests, ${breakdown}
+        COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
+        COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
+        COALESCE(SUM(MAX(COALESCE(cache_read_tokens, 0), 0)), 0) AS cache_read_tokens,
+        COALESCE(SUM(MAX(COALESCE(cache_creation_tokens, 0), 0)), 0) AS cache_creation_tokens,
         COALESCE(SUM(MAX(COALESCE(total_cost, 0), 0)), 0) AS total_cost,
         COALESCE(SUM(CASE WHEN pricing_model = '${UNPRICED_MODEL}' AND (${TOTAL_TOKENS_SQL}) > 0 THEN 1 ELSE 0 END), 0) AS unpriced
       FROM usage_logs WHERE ${where.join(' AND ')}
@@ -1480,7 +1486,10 @@ export class UsageLogsRepo {
     const row = statement.get(...params)
     if (!row.requests) return { ...emptyCostBucket(), unpriced: 0 }
     const out = { ...row }
-    for (const field of ['input_cost', 'output_cost', 'cache_read_cost', 'cache_creation_cost', 'total_cost']) {
+    const costFields = fable
+      ? ['total_cost']
+      : ['input_cost', 'output_cost', 'cache_read_cost', 'cache_creation_cost', 'total_cost']
+    for (const field of costFields) {
       out[field] = Math.round(out[field] * 1e8) / 1e8
     }
     return out
@@ -1505,8 +1514,7 @@ export class UsageLogsRepo {
         COALESCE(NULLIF(final_account_id, ''), NULLIF(account_id, ''), vm_id, '—') AS account_id,
         COALESCE(vm_id, '') AS vm_id,
         MIN(?, CAST((ROUND(unixepoch(created_at, 'subsec') * 1000) - ?) / ? AS INTEGER)) AS bucket,
-        SUM(CASE WHEN ${SLA_SUCCESS_PRED} THEN 1 ELSE 0 END) AS success,
-        SUM(CASE WHEN ${SLA_ERROR_PRED} THEN 1 ELSE 0 END) AS errors
+        ${BILLING_SLA_COUNTS}
       FROM usage_logs
       WHERE created_at >= ? AND created_at <= ?${vmId ? ' AND vm_id = ?' : ''}
       GROUP BY 1, 2, 3
