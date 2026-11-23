@@ -272,9 +272,9 @@ def copy_file(source, target, mode, *, pin=None, trusted=True):
         Path(name).unlink(missing_ok=True)
 
 
-def hash_pin(path, pin):
+def hash_pin(path, pin, *, trusted=True):
     digest = hashlib.sha256()
-    with open_regular(path, pin["size"]) as source:
+    with open_regular(path, pin["size"], trusted=trusted) as source:
         remaining = pin["size"]
         while remaining:
             chunk = source.read(min(remaining, 1024 * 1024))
@@ -1208,10 +1208,14 @@ class Maintenance:
         if exists(self.pending):
             return
         try:
-            egress_ok = hash_pin(self.runtime / "bin/kin-egress", self.egress_pin)
-            if egress_ok:
-                egress_ok = os.access(self.runtime / "bin/kin-egress", os.X_OK)
-        except (OSError, ValueError):
+            # Bootstrap uses the app helper; the first repair installs the private runtime copy.
+            installed, private = self.install / "bin/kin-egress", self.runtime / "bin/kin-egress"
+            selected = self.unit_args(self.unit_bytes()).get("--egress")
+            egress = Path(selected) if selected else private
+            egress_ok = egress in (installed, private) and hash_pin(
+                egress, self.egress_pin, trusted=egress == private
+            ) and os.access(egress, os.X_OK)
+        except (Failure, OSError, ValueError):
             egress_ok = False
         with self.guard:
             self.egress_ok = egress_ok

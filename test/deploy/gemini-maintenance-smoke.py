@@ -522,6 +522,13 @@ def smoke(root, broker):
         assert fixture.status()["payload"]["state"] == "installed"
         old_unit = fixture.unit.read_bytes()
         original_manifest = fixture.manifest()
+        private_egress = fixture.runtime / "bin/kin-egress"
+        private_egress.unlink()
+        fixture.egress.chmod(0o755)
+        fixture.unit.write_bytes(old_unit.replace(os.fsencode(private_egress), os.fsencode(fixture.egress)))
+        old_daemon.inspect()
+        assert old_daemon.egress_ok, "bootstrap diagnostics must check the helper selected by the unit"
+        fixture.unit.write_bytes(old_unit)
 
         fixture.service.busy = True
         fixture.job("recover", error="busy")
