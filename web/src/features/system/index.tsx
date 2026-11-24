@@ -14,10 +14,15 @@ import { inheritProtocolOnSlots } from '@/features/settings/protocol-authority'
 import { routingQueryOptions } from '@/features/settings/queries'
 import { SaveBar } from '@/features/settings/save-bar'
 import { SettingsSkeleton } from '@/features/settings/settings-skeleton'
-import { CragGeminiPanel } from '@/features/system/craggemini-panel'
 import { CragPrintPanel } from '@/features/system/crag-print-panel'
+import { CragGeminiPanel } from '@/features/system/craggemini-panel'
 import { SystemPromptWorkspace } from '@/features/system/prompt-workspace'
-import { compatibilityPatch } from './compat-patch'
+import { compatibilityPatch, isOpenAiPromptOnlyPatch } from './compat-patch'
+import {
+  DEFAULT_OPENAI_SYSTEM_PROMPT,
+  OpenAiPromptPanel,
+  type OpenAiSystemPrompt,
+} from './openai-prompt-panel'
 
 type RoutingSaveResult = {
   compatibility?: Record<string, unknown>
@@ -37,24 +42,30 @@ export function SystemPromptPage() {
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [personaProblems, setPersonaProblems] = useState<string[]>([])
   const [discardKey, setDiscardKey] = useState(0)
-  const [kernelSet, setKernelSet] = useState<'cli-node' | 'crag' | 'craggemini'>('cli-node')
+  const [kernelSet, setKernelSet] = useState<
+    'cli-node' | 'crag' | 'craggemini' | 'openai'
+  >('cli-node')
+  const compatibility = (draft.compatibility as Record<string, unknown>) || {}
+  const serverCompatibility = routing.data?.compatibility as
+    Record<string, unknown> | undefined
 
   useEffect(() => {
     if (routing.data) setDraft(routing.data)
   }, [routing.data])
 
   const save = useMutation({
-    mutationFn: () => {
-      const body = compatibilityPatch(
-        (draft.compatibility as Record<string, unknown>) || {},
-        routing.data?.compatibility as Record<string, unknown> | undefined
-      )
+    mutationFn: (body: ReturnType<typeof compatibilityPatch>) => {
       return api<RoutingSaveResult>('/api/panel/routing', {
         method: 'PUT',
         body: JSON.stringify(body),
       })
     },
-    onSuccess: async (saved) => {
+    onSuccess: async (saved, body) => {
+      if (isOpenAiPromptOnlyPatch(body.compatibility)) {
+        toast.success('OpenAI 系统提示词已保存')
+        await qc.invalidateQueries({ queryKey: routingQueryOptions().queryKey })
+        return
+      }
       const compat =
         saved?.compatibility ||
         (draft.compatibility as Record<string, unknown> | undefined)
@@ -98,6 +109,8 @@ export function SystemPromptPage() {
     Object.keys(draft).length > 0 &&
     JSON.stringify(draft) !== serverJson
   const blocked = personaProblems.length > 0
+  const saveDraft = () =>
+    save.mutate(compatibilityPatch(compatibility, serverCompatibility))
 
   const discard = () => {
     setDraft(routing.data ?? {})
@@ -114,7 +127,7 @@ export function SystemPromptPage() {
         toast.error(personaProblems[0])
         return
       }
-      save.mutate()
+      saveDraft()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -130,14 +143,19 @@ export function SystemPromptPage() {
         >
           <div
             role='tablist'
-            aria-label='提示词内核'
-            className='mb-4 grid gap-2 sm:grid-cols-3'
+            aria-label='系统提示词配置'
+            className='mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4'
           >
             {(
               [
                 ['cli-node', 'cli-node 原生内核', '模板注入，写入 kernel.json'],
                 ['crag', 'CRAG v2 print', '不读 persona_preset，不是 TUI'],
-                ['craggemini', 'CRAGGemini (Antigravity)', 'agy 官方 / 0 提示词'],
+                [
+                  'craggemini',
+                  'CRAGGemini (Antigravity)',
+                  'agy 官方 / 0 提示词',
+                ],
+                ['openai', 'OpenAI', '订阅和 API 提示词追加'],
               ] as const
             ).map(([value, label, detail]) => {
               const selected = kernelSet === value
@@ -196,13 +214,31 @@ export function SystemPromptPage() {
               onChange={(next) => setDraft({ ...draft, compatibility: next })}
             />
           </div>
+          <div hidden={kernelSet !== 'openai'}>
+            <OpenAiPromptPanel
+              value={
+                (compatibility.openai_system_prompt as
+                  OpenAiSystemPrompt | undefined) ??
+                DEFAULT_OPENAI_SYSTEM_PROMPT
+              }
+              onChange={(value) =>
+                setDraft((current) => ({
+                  ...current,
+                  compatibility: {
+                    ...(current.compatibility as Record<string, unknown>),
+                    openai_system_prompt: value,
+                  },
+                }))
+              }
+            />
+          </div>
         </QueryGate>
       </div>
       {dirty ? (
         <SaveBar
           blockedReason={blocked ? personaProblems[0] : undefined}
           saving={save.isPending}
-          onSave={() => save.mutate()}
+          onSave={saveDraft}
           onDiscard={discard}
         />
       ) : null}

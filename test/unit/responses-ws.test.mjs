@@ -566,13 +566,72 @@ test('two response.create rounds replay full output including reasoning and tool
     assert.equal(hops[1].previous_response_id, undefined)
     const types = hops[1].input.map((item) => item.type)
     assert.deepEqual(types, ['message', 'reasoning', 'function_call', 'message', 'message'])
-    assert.equal(hops[1].input[0].content, 'hi')
+    assert.deepEqual(hops[1].input[0].content, [{ type: 'input_text', text: 'hi' }])
     assert.equal(hops[1].input[1].id, 'rs_1')
     assert.equal(hops[1].input[2].name, 'lookup')
-    assert.equal(hops[1].input[4].content, 'again')
+    assert.deepEqual(hops[1].input[4].content, [{ type: 'input_text', text: 'again' }])
     ws.close()
     await once(ws, 'close')
   } finally {
+    await live.close()
+  }
+})
+
+test('OpenAI prompt and the first string input keep their positions during WebSocket replay', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-ws-openai-prompt-'))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  writeGptVm(root, 'vm-gpt-a')
+  const hops = []
+  const live = await listenWithHandleProtocol(root, {
+    requestLog: { start: () => ({ request_id: 'ws-prompt', t0: Date.now() }), finish() {} },
+    apiKeyStore: { acquire: () => ({ ok: true }), recordUsage() {}, release() {} },
+    routing: {
+      ...ENABLED,
+      sticky: { outbound_session: 'passthrough' },
+      compatibility: { openai_system_prompt: { enabled: true, text: 'Gateway prompt' } },
+    },
+    codexOps: {
+      streamCodexKernel: async ({ body, onEvent }) => {
+        hops.push(body)
+        const response = {
+          id: `resp_prompt_${hops.length}`,
+          status: 'completed',
+          output: [
+            { type: 'reasoning', id: 'rs_1', encrypted_content: 'opaque' },
+            { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'pong' }] },
+          ],
+        }
+        await onEvent(`data: ${JSON.stringify({ type: 'response.completed', response })}\n\n`)
+        return { ok: true, status: 200, terminalState: 'verified' }
+      },
+    },
+  })
+  const opened = await openWs(live.url, { authorization: 'Bearer sk-test', 'session-id': 'ws-prompt-session' })
+  try {
+    assert.equal(opened.ok, true)
+    async function send(body) {
+      const result = nextFrame(opened.ws, (frame) => frame.type === 'response.completed' || frame.type === 'error')
+      opened.ws.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.4', ...body }))
+      const frame = await result
+      assert.equal(frame.type, 'response.completed', JSON.stringify(frame.error))
+      return frame.response.id
+    }
+    const previous_response_id = await send({ input: 'first' })
+    await send({ previous_response_id, input: 'second' })
+    assert.equal(hops[0].input[0].content[0].text, 'Gateway prompt')
+    assert.deepEqual(hops[1].input.slice(0, 2), hops[0].input)
+    assert.deepEqual(
+      hops[1].input.map((item) => item.role || item.type),
+      ['developer', 'user', 'reasoning', 'assistant', 'user'],
+    )
+    assert.equal(hops[1].input[2].encrypted_content, 'opaque')
+    assert.equal(hops[1].previous_response_id, undefined)
+    assert.equal(hops[1].prompt_cache_key, hops[0].prompt_cache_key)
+  } finally {
+    if (opened.ws?.readyState === WebSocket.OPEN) {
+      opened.ws.close()
+      await once(opened.ws, 'close')
+    }
     await live.close()
   }
 })
@@ -761,8 +820,8 @@ test('generate=false warmup id continues on the same connection (#1358)', async 
       hops[1].input.map((item) => item.type),
       ['message', 'message'],
     )
-    assert.equal(hops[1].input[0].content, 'This is a protocol test.')
-    assert.equal(hops[1].input[1].content, 'Reply with exactly the word OK.')
+    assert.deepEqual(hops[1].input[0].content, [{ type: 'input_text', text: 'This is a protocol test.' }])
+    assert.deepEqual(hops[1].input[1].content, [{ type: 'input_text', text: 'Reply with exactly the word OK.' }])
   } finally {
     // Close the socket first: server.close() never settles while one is open.
     if (ws && ws.readyState === ws.OPEN) {
@@ -1013,7 +1072,7 @@ test('response.interrupt after response.completed still remembers replay for pre
     await secondDone
     assert.equal(hops.length, 2)
     assert.equal(hops[1].previous_response_id, undefined)
-    assert.equal(hops[1].input.at(-1).content, 'second')
+    assert.deepEqual(hops[1].input.at(-1).content, [{ type: 'input_text', text: 'second' }])
     assert.equal(hops[1].input.at(-2).content[0].text, 'done')
     opened.ws.close()
   } finally {

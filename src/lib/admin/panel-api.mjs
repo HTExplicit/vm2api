@@ -105,6 +105,7 @@ import {
 import { PERSONA_STANDING_MAX } from '../identity/crs-persona.mjs'
 import { MESSAGES_BREAKPOINT_MODES } from '../protocol/cache-ttl.mjs'
 import { normalizeCodexRouting, normalizeInferenceWebsocket } from '../protocol/codex-route.mjs'
+import { normalizeOpenAiSystemPrompt } from '../protocol/openai-system-prompt.mjs'
 import { normalizeOpenaiApiConfig } from '../openai-api/config.mjs'
 import { effectiveOpenAIPolicy, normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import { openAIRuntimeSignals } from '../pool/openai-account-runtime.mjs'
@@ -466,6 +467,12 @@ export function validatePersonaRoutingPatch(body = {}) {
       problems.push('craggemini_system_prompt 必须是字符串')
     } else if (compat.craggemini_system_prompt.length > 32_768) {
       problems.push('craggemini_system_prompt 超过 32768 字符')
+    }
+  }
+  if (Object.hasOwn(compat, 'openai_system_prompt')) {
+    const prompt = compat.openai_system_prompt
+    if (typeof prompt?.enabled !== 'boolean' || typeof prompt.text !== 'string') {
+      problems.push('openai_system_prompt 需要布尔型 enabled 和字符串 text')
     }
   }
   if (compat.overlay_preset != null && String(compat.overlay_preset).trim() !== '') {
@@ -1520,6 +1527,7 @@ export async function buildUsage({ accountQuota, cfg, requestLog = null }) {
 
 function presentCompatibility(compat) {
   const out = compat && typeof compat === 'object' && !Array.isArray(compat) ? { ...compat } : {}
+  out.openai_system_prompt = normalizeOpenAiSystemPrompt(out.openai_system_prompt)
   out.cch_enabled = out.cch_enabled !== false
   const display = String(out.thinking_display ?? '')
     .trim()

@@ -222,6 +222,7 @@ jobs:
             test/unit/headed-display.test.mjs \
             test/unit/panel-openai-api.test.mjs \
             test/unit/api-account-routing.test.mjs \
+            test/unit/openai-system-prompt.test.mjs \
             test/unit/api-scheduler.test.mjs \
             test/unit/failover-runner.test.mjs \
             test/unit/pool-scheduler.test.mjs \

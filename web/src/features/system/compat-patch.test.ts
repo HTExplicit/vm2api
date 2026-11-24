@@ -24,4 +24,16 @@ describe('system prompt save body', () => {
       persona_inject: 'zero',
     })
   })
+
+  it('saves an OpenAI-only edit without scheduling kernel persona changes', () => {
+    const server = { persona_templates: { a: 1 }, cache_ttl: '1h' }
+    const prompt = {
+      enabled: true,
+      text: 'Gateway prompt',
+    }
+    const draft = { ...server, openai_system_prompt: prompt }
+    expect(compatibilityPatch(draft, server)).toEqual({
+      compatibility: { openai_system_prompt: prompt },
+    })
+  })
 })

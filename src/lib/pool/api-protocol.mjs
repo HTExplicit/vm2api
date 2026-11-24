@@ -41,6 +41,7 @@ import { BETA_CONTEXT_1M } from '../protocol/claude-code-betas.mjs'
 import { shouldPassContext1mByPolicy } from '../protocol/model-policy.mjs'
 import { createStreamTiming } from '../protocol/stream-timing.mjs'
 import { mergeUsage } from '../protocol/openai-usage.mjs'
+import { appendOpenAiSystemPrompt } from '../protocol/openai-system-prompt.mjs'
 import { fromClaudeToOpenAICompletions } from '../protocol/convert.mjs'
 import { keyScopeFromRequest } from '../admin/key-scope.mjs'
 import { ensureRedaction, maskJson, restoreJsonValue, createSseRestorer } from '../redaction/runtime.mjs'
@@ -394,7 +395,8 @@ function accountRetryLimits(routing = {}) {
 /** Account API retries are only for explicit HTTP rejections before any output. */
 export async function runApiInference(options = {}) {
   const scope = options.scope || apiScheduleScope(options.req)
-  if (scope.group_type !== 'openai_apikey') return runApiAttempt(options)
+  const attemptOptions = { ...options, openAiSystemPrompt: options.routing?.compatibility?.openai_system_prompt }
+  if (scope.group_type !== 'openai_apikey') return runApiAttempt(attemptOptions)
   const model = (options.nativeResponsesBody || options.convertedBody)?.model || options.inbound?.model
   const routing = options.getRouting?.() || options.cfg?.routing || {}
   const limits = accountRetryLimits(routing)
@@ -412,7 +414,7 @@ export async function runApiInference(options = {}) {
         : options.scheduler.pick(model, Date.now(), scope, { excludedAccountIds, excludedKeyIds })
     if (!picked.ok) {
       if (lastResult) break
-      return { ...(await runApiAttempt({ ...options, picked })), attemptCount }
+      return { ...(await runApiAttempt({ ...attemptOptions, picked })), attemptCount }
     }
     // One account gets at most one attempt, including a transport-unknown result.
     excludedAccountIds.add(picked.key.source_account_id)
@@ -424,7 +426,7 @@ export async function runApiInference(options = {}) {
     let result
     try {
       result = await runApiAttempt({
-        ...options,
+        ...attemptOptions,
         picked,
         onModels(value) {
           models = value
@@ -569,6 +571,7 @@ async function runApiAttemptBody({
   onDispatch = null,
   onModels = null,
   routing = null,
+  openAiSystemPrompt,
   redactionPrincipal = '',
   redactionSession = '',
   scope = apiScheduleScope(req),
@@ -665,6 +668,7 @@ async function runApiAttemptBody({
       delete body.reasoning_effort
     }
   }
+  if (isOpenAI) body = appendOpenAiSystemPrompt(body, openAiSystemPrompt)
   if (requestContext) Object.assign(body, prepareClassifierBody(body))
   const redactionState = await ensureRedaction(routing || {}, { projectRoot: cfg?.paths?.project })
   const redaction = redactionState.enabled

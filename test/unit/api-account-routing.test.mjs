@@ -8,8 +8,12 @@ function upstream(status, body, headers = {}) {
   return Object.assign(Readable.from([Buffer.from(body)]), { statusCode: status, headers })
 }
 
-function fixture({ resolver, onError } = {}) {
-  const key = { id: 'ek-a', api_key: 'sk-test-a', source_vm_id: 'vm-a', source_account_id: 'acct-a' }
+function fixture({ resolver, onError, channel = false } = {}) {
+  const key = {
+    id: 'ek-a',
+    api_key: 'sk-test-a',
+    ...(channel ? {} : { source_vm_id: 'vm-a', source_account_id: 'acct-a' }),
+  }
   const endpoint = {
     id: 'ep-openai',
     kind: 'openai',
@@ -59,6 +63,7 @@ const completed = `data: ${JSON.stringify({
   response: {
     id: 'resp-fixture',
     model: 'gpt-fixture',
+    status: 'completed',
     output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'hello' }] }],
     usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
   },
@@ -106,6 +111,35 @@ test('proxy disappearance between pick and send does not dispatch a direct reque
   assert.equal(forwarded, false)
   assert.equal(result.status, 503)
   assert.equal(result.body.error.code, 'api_account_unavailable')
+})
+
+test('OpenAI API channels and account keys append the prompt to the actual Responses request', async () => {
+  const openai_system_prompt = { enabled: true, text: 'Gateway prompt' }
+  const caller = { type: 'message', role: 'developer', content: 'Caller developer' }
+  const question = { type: 'message', role: 'user', content: 'Question' }
+  const input = [caller, question]
+  const nativeResponsesBody = { model: 'gpt-fixture', instructions: 'Caller instructions', input }
+  for (const scope of [undefined, { group_type: 'all', endpointId: 'ep-openai' }]) {
+    const f = fixture({ channel: !!scope })
+    let sent
+    const result = await runApiInference({
+      ...f.options,
+      scope,
+      nativeResponsesBody,
+      routing: { compatibility: { openai_system_prompt } },
+      forwardImpl: async ({ body }) => {
+        sent = body
+        return upstream(200, completed)
+      },
+    })
+    assert.equal(result.ok, true, JSON.stringify(result.body))
+    assert.deepEqual(sent.input, [
+      caller,
+      { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'Gateway prompt' }] },
+      question,
+    ])
+    assert.equal(sent.instructions, 'Caller instructions')
+  }
 })
 
 test('HTTP balance exhaustion remains blocked until administrator recovery', async () => {

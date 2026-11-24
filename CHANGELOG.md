@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.19602 — 2026-11-24
+
+- 「system提示词」新增 OpenAI 配置，默认关闭。启用后在 GPT/Codex 订阅与 OpenAI API 文本请求的开头指令块后追加独立的 `developer` 消息。
+- WebSocket 的字符串输入首轮和续轮使用相同的文本块格式，保持共享前缀一致。
+
 ## 1.4.19601 — 2026-11-24
 
 - 合入[上游 v1.4.196](https://github.com/dofastted/vm2api/releases/tag/v1.4.196)，在 Gemini 设置中提供初、中、高三档性能配置，兼容既有保存值。

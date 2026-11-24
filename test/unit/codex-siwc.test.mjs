@@ -372,13 +372,17 @@ test('Responses, Chat and Messages use SIWC over the bound exit in streaming and
     ['openai.chat', { messages: [{ role: 'user', content: 'hello' }] }, /\[DONE\]/],
     ['anthropic.messages', { messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 }, /message_stop/],
   ]
+  const extraRouting = {
+    ...routing,
+    compatibility: { openai_system_prompt: { enabled: true, text: 'Gateway prompt' } },
+  }
   for (const [protocol, body, terminal] of inputs) {
-    const json = await infer(f, protocol, { ...body, stream: false })
+    const json = await infer(f, protocol, { ...body, stream: false }, { extraRouting })
     assert.equal(json.status, 200, JSON.stringify(json.payload))
     assert.match(JSON.stringify(json.payload), /你好/)
     assert.equal(json.logBag.via, 'codex-siwc')
     assert.equal(json.logBag.failure_diagnostics.upstreamRequestId, 'mock-request-1')
-    const stream = await infer(f, protocol, { ...body, stream: true })
+    const stream = await infer(f, protocol, { ...body, stream: true }, { extraRouting })
     assert.match(stream.text, terminal)
     assert.match(stream.text, /你好/)
   }
@@ -391,6 +395,8 @@ test('Responses, Chat and Messages use SIWC over the bound exit in streaming and
     assert.equal(body.stream, true)
     assert.equal(body.store, false)
     assert.ok(Array.isArray(body.input))
+    assert.equal(body.input[0].role, 'developer')
+    assert.equal(body.input[0].content[0].text, 'Gateway prompt')
   }
 })
 

@@ -86,6 +86,7 @@ import {
   retryAfterSeconds,
 } from '../core/errors.mjs'
 import { applyOpenaiWashLog } from './openai-wash.mjs'
+import { appendOpenAiSystemPrompt } from './openai-system-prompt.mjs'
 import { canonicalImageToolModel, imageGenerationTools } from './image-tool-models.mjs'
 import { isImageToolModelEnabled } from './gpt-model-policy.mjs'
 import { sessionIdForLog } from './log-fields.mjs'
@@ -919,6 +920,7 @@ export async function handleCodexProtocol({
   // Chat→Responses conversion can surface a session key the raw inbound lacked.
   if (!logBag.session_id) logBag.session_id = sessionIdForLog(callerSession)
   const firstUserIdentity = firstUserIdentityFromCodex(converted.body)
+  const promptedBody = appendOpenAiSystemPrompt(converted.body, routing.compatibility?.openai_system_prompt)
   const hop = ops.streamCodexKernel || streamCodexKernel
   const writeCfg = ops.writeCodexKernelConfig || writeCodexKernelConfig
   const ensure = ops.ensureCodexKernel || ensureCodexKernel
@@ -1103,7 +1105,7 @@ export async function handleCodexProtocol({
           previous_response_id: inboundSession.previous_response_id,
         }
         logBag.outbound_session_id = sessionIdForLog(outboundSessionId)
-        const outboundBody = applyCodexRebuildBody({ ...converted.body, stream: true }, outboundSessionId, sessionMode)
+        const outboundBody = applyCodexRebuildBody({ ...promptedBody, stream: true }, outboundSessionId, sessionMode)
         const outboundHeaders = useSiwc ? {} : codexKernelHeaders(req.headers, outboundBody, session)
         if (captureOutbound) logBag.outbound_body = useSiwc ? formatSiwcBody(outboundBody) : outboundBody
         logBag.outbound_headers = redactHeaders(outboundHeaders)

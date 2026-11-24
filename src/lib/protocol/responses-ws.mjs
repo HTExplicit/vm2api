@@ -10,6 +10,7 @@ import http from 'node:http'
 import { Readable } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import { computedUpstreamTransport, inferenceWebsocketEnabled } from './codex-route.mjs'
+import { codexTextInput } from './codex-convert.mjs'
 import { DEFAULT_MAX_REQUEST_BYTES, inboundBodyLimit } from '../core/config.mjs'
 
 export const RESPONSES_WS_QUEUE_LIMIT = 32
@@ -167,7 +168,7 @@ function cloneJson(value) {
 
 export function normalizeResponsesInput(input) {
   if (typeof input === 'string') {
-    return input ? [{ type: 'message', role: 'user', content: input }] : []
+    return input ? codexTextInput(input) : []
   }
   if (Array.isArray(input)) return cloneJson(input)
   return []
