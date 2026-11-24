@@ -69,7 +69,11 @@ async function openFixture(t, { view = 'proxy', api, websocket }) {
       return route.abort()
     }
     if (!url.pathname.startsWith('/api/')) return route.continue()
-    if (view === 'kvm' && request.method() === 'GET' && url.pathname === '/api/panel/gemini/maintenance') {
+    if (
+      view === 'kvm' &&
+      request.method() === 'GET' &&
+      ['/api/panel/gemini/maintenance', '/api/panel/gemini'].includes(url.pathname)
+    ) {
       return route.fulfill({ json: { ok: true, data: { available: false } } })
     }
     return api(route, request, url.pathname)
