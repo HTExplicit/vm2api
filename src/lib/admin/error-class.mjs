@@ -97,6 +97,11 @@ const CODE_MAP = {
   worker_transport_error: 'transport',
   upstream_transport: 'transport',
   aborted: 'transport',
+  client_cancelled: 'timeout',
+  request_cancelled: 'timeout',
+  client_aborted: 'timeout',
+  selection_cancelled: 'timeout',
+  gemini_inference_cancelled: 'timeout',
   upstream_auth_error: 'credential',
   oauth_need_reimport: 'credential',
   oauth_refresh_failed: 'credential',
@@ -114,6 +119,7 @@ export const IGNORED_ERROR_CODES = new Set([
   'request_cancelled',
   'client_aborted',
   'selection_cancelled',
+  'gemini_inference_cancelled',
 ])
 
 export const FAILED_REQUEST_STATES = ['incomplete', 'transport_error', 'error', 'rejected', 'exhausted']

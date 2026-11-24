@@ -17,6 +17,17 @@ export const MAX_CRAG_V2_DOWNLOAD_BYTES = 512 * 1024 * 1024
 const CRAG_PAYLOAD_TAG_PATTERN = 'payload-\\d{4}\\.\\d{2}\\.\\d{2}-crag-(\\d+\\.\\d+\\.\\d+)(-legacy)?'
 const CRAG_PAYLOAD_TAG = new RegExp(`^${CRAG_PAYLOAD_TAG_PATTERN}$`)
 export const isCragPayloadTag = (tag) => typeof tag === 'string' && CRAG_PAYLOAD_TAG.test(tag)
+const GEMINI_PAYLOAD_TAG_PATTERN = 'payload-\\d{4}\\.\\d{2}\\.\\d{2}-gemini-(\\d+\\.\\d+\\.\\d+(?:-rc\\.\\d+)?)'
+const GEMINI_PAYLOAD_TAG = new RegExp(`^${GEMINI_PAYLOAD_TAG_PATTERN}$`)
+export const isGeminiPayloadTag = (tag) => typeof tag === 'string' && GEMINI_PAYLOAD_TAG.test(tag)
+export const geminiPayloadVersion = (tag) => (typeof tag === 'string' ? GEMINI_PAYLOAD_TAG.exec(tag)?.[1] || '' : '')
+export const GEMINI_REQUIRED_ASSETS = Object.freeze([
+  'craggemini',
+  'craggemini.payload.enc',
+  'libagy_bridge.so',
+  'crag-license-public.pem',
+  'manifest.json',
+])
 const CRAG_RELEASES_PAGE_SIZE = 30
 const CRAG_RELEASES_MAX_PAGES = 10
 const KERNEL_VERSION_LIST_MAX_PAGES = 3
@@ -293,14 +304,33 @@ function hasUniqueAssets(row, specs) {
   return specs.every((spec) => spec.ok && row.assets.filter((asset) => asset?.name === spec.asset).length === 1)
 }
 
+function hasValidGeminiReleaseAssets(row, tag) {
+  return GEMINI_REQUIRED_ASSETS.every((name) => {
+    const matches = row.assets.filter((asset) => asset?.name === name)
+    if (matches.length !== 1) return false
+    const asset = matches[0]
+    const size = Number(asset.size)
+    if (Number.isFinite(size) && size > MAX_CRAG_V2_DOWNLOAD_BYTES) return false
+    const expected = `https://github.com/${CRAG_RELEASE_REPO}/releases/download/${tag}/${name}`
+    const browserUrl = typeof asset.browser_download_url === 'string' ? asset.browser_download_url : ''
+    const apiUrl = typeof asset.url === 'string' ? asset.url : ''
+    if (browserUrl) return browserUrl === expected
+    return isAllowedKernelUrl(apiUrl)
+  })
+}
+
 export async function listKernelReleaseVersions({ fetchImpl = globalThis.fetch } = {}) {
-  const versions = { 'cli-node': new Set(), crag: new Set() }
+  const versions = { 'cli-node': new Set(), crag: new Set(), craggemini: new Set() }
   for (const kernel of ['cli-node', 'crag']) {
     const repo = kernel === 'crag' ? CRAG_RELEASE_REPO : GITHUB_REPO
     for await (const rows of kernelReleasePages(repo, fetchImpl, KERNEL_VERSION_LIST_MAX_PAGES)) {
       for (const row of rows) {
         if (row?.draft !== false || !Array.isArray(row.assets)) continue
         if (kernel === 'crag') {
+          if (isGeminiPayloadTag(row.tag_name || '')) {
+            if (hasValidGeminiReleaseAssets(row, row.tag_name)) versions.craggemini.add(row.tag_name)
+            continue
+          }
           const component = CRAG_PAYLOAD_TAG.exec(row.tag_name || '')
           if (!component || component[2]) continue
           const release = { ...row, tag_name: `v${component[1]}`, payload_tag: row.tag_name }
@@ -315,7 +345,11 @@ export async function listKernelReleaseVersions({ fetchImpl = globalThis.fetch }
       }
     }
   }
-  return { 'cli-node': [...versions['cli-node']], crag: [...versions.crag] }
+  return {
+    'cli-node': [...versions['cli-node']],
+    crag: [...versions.crag],
+    craggemini: [...versions.craggemini],
+  }
 }
 
 async function fetchCragPayloadRelease(version, fetchImpl) {
