@@ -23,6 +23,7 @@ const controls = vi.hoisted(() => ({
   saved: vi.fn(),
   changeOpen: vi.fn(),
   purpose: 'platform' as 'oauth' | 'platform',
+  siwcSession: undefined as string | undefined,
   vmId: 'slot-a',
   open: true,
   dialogChange: null as null | ((open: boolean) => void),
@@ -166,7 +167,8 @@ class Socket {
     status: string,
     message?: string,
     result?: Record<string, unknown>,
-    purpose = controls.purpose
+    purpose = controls.purpose,
+    siwcSessionId?: string
   ) {
     this.onmessage?.({
       data: JSON.stringify({
@@ -175,6 +177,7 @@ class Socket {
         message,
         purpose,
         result,
+        siwc_session_id: siwcSessionId,
       }),
     })
   }
@@ -196,6 +199,7 @@ function render() {
       <SlotBrowserDialog
         vmId={controls.vmId}
         purpose='oauth'
+        siwcSession={controls.siwcSession}
         open={controls.open}
         onOpenChange={controls.changeOpen}
         onCredentialsSaved={controls.saved}
@@ -244,6 +248,7 @@ beforeEach(() => {
   controls.toastError.mockReset()
   controls.toastWarning.mockReset()
   controls.purpose = 'platform'
+  controls.siwcSession = undefined
   controls.vmId = 'slot-a'
   controls.open = true
   Socket.instances = []
@@ -393,6 +398,40 @@ describe('OAuth browser login completion', () => {
   beforeEach(() => {
     controls.purpose = 'oauth'
     controls.api.mockImplementation(async (path: string) => loginRequests(path))
+  })
+
+  it('accepts only an SIWC completion for the active session and leaves slot power alone', async () => {
+    controls.siwcSession = 'current-siwc-session'
+    const socket = await mount()
+    socket.status('oauth_complete', 'ordinary OAuth')
+    socket.status(
+      'oauth_complete',
+      'older SIWC',
+      undefined,
+      'oauth',
+      'older-session'
+    )
+    expect(controls.complete).not.toHaveBeenCalled()
+    expect(controls.saved).not.toHaveBeenCalled()
+    socket.status(
+      'oauth_complete',
+      'SIWC 已绑定并启用。',
+      undefined,
+      'oauth',
+      'current-siwc-session'
+    )
+    socket.status(
+      'oauth_complete',
+      'SIWC 已绑定并启用。',
+      undefined,
+      'oauth',
+      'current-siwc-session'
+    )
+    expect(controls.complete).toHaveBeenCalledTimes(1)
+    expect(controls.saved).not.toHaveBeenCalled()
+    expect(
+      controls.api.mock.calls.some(([path]) => path.endsWith('/start'))
+    ).toBe(false)
   })
 
   it('saves credentials first and completes only after a successful boot and an explicit final click', async () => {

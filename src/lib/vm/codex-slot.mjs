@@ -4,6 +4,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { atomicWriteJson, readJsonCached } from './vm-file.mjs'
+import {
+  codexSiwcOwner,
+  readCodexSiwc,
+  sameSiwcOwner,
+  summarizeCodexSiwc,
+  writeCodexSiwc,
+} from './codex-siwc-store.mjs'
 import { isCodexVm } from '../protocol/codex-route.mjs'
 import {
   buildCodexUsageView,
@@ -351,6 +358,14 @@ export function upsertCodexAccount(projectRoot, vmId, patch = {}, { replaceCrede
   writeCodexAccounts(projectRoot, vmId, accounts)
   resetOpenaiAuth(projectRoot, vmId)
   if (replaceCredentials) {
+    const siwc = readCodexSiwc(projectRoot, vmId)
+    if (siwc?.owner && !sameSiwcOwner(siwc.owner, codexSiwcOwner(cur))) {
+      writeCodexSiwc(projectRoot, vmId, {
+        host_id: siwc.host_id,
+        enabled: siwc.enabled,
+        state: 'reauth_required',
+      })
+    }
     const file = path.join(projectRoot, 'vms', `${vmId}.json`)
     const vm = readJsonCached(file)
     if (vm?.codex) {
@@ -458,6 +473,7 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
     chatgpt_plan_type: first.chatgpt_plan_type || null,
     subscription,
     auth_block: openaiAuthBlock(vm, first),
+    siwc: summarizeCodexSiwc(readCodexSiwc(projectRoot, vm.id), codexSiwcOwner(first)),
     account_count: accounts.length,
     usage,
     reset_credits: vm.codex?.reset_credits || null,

@@ -16,6 +16,7 @@ import { readAll } from '../../src/lib/db/sqlite-pool.mjs'
 import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
 import { stopVmWatch, initVmDbSync } from '../../src/lib/vm/vm-db-sync.mjs'
 import { setVmWriteHook } from '../../src/lib/vm/vm-file.mjs'
+import { codexSiwcPath, readCodexSiwc, writeCodexSiwc } from '../../src/lib/vm/codex-siwc-store.mjs'
 
 let root, dataDir, configDir, svc
 
@@ -210,6 +211,34 @@ test('backup and restore include nested Codex credentials without guest caches',
   await svc.restoreBackup(rec.id)
   assert.equal(fs.readFileSync(credentialFile, 'utf8'), credential)
   assert.equal(fs.readFileSync(path.join(slotDir, 'cli-home', 'cache.json'), 'utf8'), 'keep-current-cache')
+})
+
+test('SIWC restore retains local renewal and refuses to replay a snapshot-only refresh grant', async () => {
+  const id = 'vm-codex'
+  seedVm(id)
+  fs.mkdirSync(path.join(root, 'vms', id))
+  const saved = writeCodexSiwc(root, id, {
+    owner: { subject: 'mock-subject', workspace: 'mock-workspace' },
+    host_id: 'urn:uuid:mock',
+    client_id: 'oaiapp_mock',
+    enabled: true,
+    state: 'ready',
+    access_token: 'archived-access',
+    refresh_token: 'archived-refresh',
+    expires_at: Date.now() + 60_000,
+  })
+  const backup = await svc.createBackup()
+  const rotated = writeCodexSiwc(root, id, {
+    ...saved,
+    access_token: 'current-access',
+    refresh_token: 'current-refresh',
+  })
+  await svc.restoreBackup(backup.id)
+  assert.deepEqual(readCodexSiwc(root, id), rotated)
+
+  fs.unlinkSync(codexSiwcPath(root, id))
+  await svc.restoreBackup(backup.id)
+  assert.deepEqual(readCodexSiwc(root, id), { ...saved, state: 'refresh_outcome_unknown' })
 })
 
 test('corrupt nested credentials fail validation before changing the live database', async () => {

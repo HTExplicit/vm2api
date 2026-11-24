@@ -252,6 +252,7 @@ jobs:
             test/unit/codex-usage.test.mjs \
             test/unit/codex-credits.test.mjs \
             test/unit/codex-slot-pool.test.mjs \
+            test/unit/codex-siwc.test.mjs \
             test/unit/openai-account-selector.test.mjs \
             test/unit/codex-admission-records.test.mjs \
             test/unit/codex-slot.test.mjs \

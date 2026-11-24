@@ -8,6 +8,7 @@ import path from 'node:path'
 import { validTimezone } from '../core/timezone.mjs'
 import { hasBoundExit } from './egress.mjs'
 import { atomicWriteJson, invalidateVmSlotReadCache } from './vm-file.mjs'
+import { SIWC_CREDENTIAL_FILE } from './codex-siwc-store.mjs'
 import { defaultSeedPolicy } from '../protocol/seed-policy.mjs'
 import { writeSlotSeedFiles } from './slot-seed.mjs'
 import { manualScheduleLevelOf } from '../pool/credential-weight.mjs'
@@ -51,6 +52,7 @@ const KEEP_HOME = [
   'cli-home/.claude/.credentials.json',
   'cli-home/.codex/auth.json',
   'codex-credentials.json',
+  SIWC_CREDENTIAL_FILE,
   'machine-id',
   'kvm/fingerprint',
 ]

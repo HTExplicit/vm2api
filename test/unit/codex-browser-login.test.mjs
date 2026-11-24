@@ -131,6 +131,7 @@ function fixture(t, options = {}) {
   const service = new CodexBrowserLoginService({
     browserManager: manager,
     proxyPool: options.proxyPool,
+    siwc: options.siwc,
     getVm: () => current,
     ...(options.tokenIdentity !== undefined ? { getAccountIdentity: () => tokenIdentity } : {}),
     ...(options.now ? { now: options.now } : {}),
@@ -179,14 +180,18 @@ function fixture(t, options = {}) {
       await until(() => callbackHandler && calls.navigation)
     },
     async callback(parameters = {}) {
-      const authorize = new URL(new URL(calls.navigation).searchParams.get('authorize_url'))
-      const url = new URL('http://localhost:1455/auth/callback')
-      url.searchParams.set('code', parameters.code ?? 'private-code')
-      url.searchParams.set('state', parameters.state ?? authorize.searchParams.get('state'))
+      let url = parameters.url
+      if (!url) {
+        const authorize = new URL(new URL(calls.navigation).searchParams.get('authorize_url'))
+        const callback = new URL('http://localhost:1455/auth/callback')
+        callback.searchParams.set('code', parameters.code ?? 'private-code')
+        callback.searchParams.set('state', parameters.state ?? authorize.searchParams.get('state'))
+        url = callback.href
+      }
       const requestId = `callback-${++callbackNumber}`
       await callbackHandler({
         requestId,
-        request: { url: url.href },
+        request: { url },
       })
       return calls.replies
         .filter((reply) => reply.requestId === requestId)
@@ -198,6 +203,37 @@ function fixture(t, options = {}) {
     },
   }
 }
+
+test('the SIWC browser intercepts the SIWC redirect and commits through its shared callback', async (t) => {
+  const authUrl = 'https://auth.openai.com/api/accounts/authorize?state=attempt'
+  const callbackUrl = 'http://127.0.0.1:1455/auth/callback?state=attempt&code=hello&client_id=oaiapp_example'
+  const accepted = []
+  const f = fixture(t, {
+    siwc: {
+      authorization(vmId, sessionId) {
+        assert.equal(vmId, 'vm-first')
+        assert.equal(sessionId, 'attempt')
+        return { session_id: sessionId, auth_url: authUrl, expires_at: Date.now() + 10_000 }
+      },
+      async finish(vmId, sessionId, url, { assertCurrent }) {
+        assertCurrent()
+        accepted.push({ vmId, sessionId, url })
+        return { enabled: true }
+      },
+    },
+  })
+  f.service.start(f.vm.id, { siwcSession: 'attempt' })
+  await f.waiting()
+  assert.equal(f.calls.navigation, authUrl)
+  assert.equal(f.calls.enabled.patterns[0].urlPattern, 'http://127.0.0.1:1455/auth/callback')
+  assert.equal((await f.callback({ url: callbackUrl }))[0].status, 200)
+  await until(() => f.calls.detached)
+  assert.deepEqual(accepted, [{ vmId: f.vm.id, sessionId: 'attempt', url: callbackUrl }])
+  assert.equal(f.calls.exchanged.length, 0)
+  assert.equal(f.calls.committed.length, 0)
+  assert.equal(f.calls.statuses.at(-1).status, 'oauth_complete')
+  assert.equal(f.calls.statuses.at(-1).siwc_session_id, 'attempt')
+})
 
 test('browser callback accepts only the exact redirect with a present matching state and code', () => {
   const url = 'http://localhost:1455/auth/callback?code=private&state=expected'

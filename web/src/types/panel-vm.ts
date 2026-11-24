@@ -331,7 +331,18 @@ export type SeatOccupant = {
 
 export type ScheduleState = 'on' | 'off' | 'unschedulable' | 'restricted'
 
+export type CodexSiwcState = {
+  enabled: boolean
+  bound: boolean
+  status: string
+  has_token: boolean
+  expires_at: number | null
+  next_refresh_at: number | null
+  models: { id: string; name: string; visible: boolean }[] | null
+}
+
 export type Vm = {
+  codex_siwc?: CodexSiwcState | null
   id: string
   gemini?: GeminiEnvironment
   name?: string

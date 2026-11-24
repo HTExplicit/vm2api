@@ -46,7 +46,8 @@ import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { BackupRepo } from '../db/repos/backup-repo.mjs'
 import { reconcileVms } from '../vm/vm-db-sync.mjs'
 import { migrateScheduleFields, repairSlotSmbios, repairVmProxyCliEnabled } from '../vm/vm-registry.mjs'
-import { invalidateReadCache, isVmRecordFile } from '../vm/vm-file.mjs'
+import { atomicWriteJson, invalidateReadCache, isVmRecordFile } from '../vm/vm-file.mjs'
+import { sameSiwcOwner, SIWC_CREDENTIAL_FILE } from '../vm/codex-siwc-store.mjs'
 
 // tarAvailability / sha256File / the runnable pipeline live in backup-core.mjs;
 // keep the historical export surface for tests and callers.
@@ -357,6 +358,7 @@ export class BackupService {
       let dbFile
       let manifest = null
       let files = []
+      const siwcRecords = new Map()
       if (rec.file_name?.endsWith('.tar.gz')) {
         validateArchiveEntries(rec.file_path)
         const r = spawnSync('tar', ['-xzf', rec.file_path, '-C', tmp], { stdio: 'pipe' })
@@ -380,7 +382,18 @@ export class BackupService {
           ) {
             throw corruptBackup('file sha256 mismatch inside backup archive')
           }
-          if (key.startsWith('vms/') && this.projectRoot) validateRestoreTarget(this.projectRoot, key)
+          if (key.startsWith('vms/') && this.projectRoot) {
+            validateRestoreTarget(this.projectRoot, key)
+            if (path.posix.basename(key) === SIWC_CREDENTIAL_FILE) {
+              try {
+                const record = JSON.parse(fs.readFileSync(path.join(tmp, key), 'utf8'))
+                if (typeof record?.host_id !== 'string') throw new Error('missing host ID')
+                siwcRecords.set(key, record)
+              } catch {
+                throw corruptBackup('invalid SIWC credential record')
+              }
+            }
+          }
           if (key.startsWith('config/') && this.configDir) validateRestoreTarget(this.configDir, key.slice(7))
         }
       } else {
@@ -426,6 +439,16 @@ export class BackupService {
         for (const key of files.filter((name) => name.startsWith('vms/'))) {
           const dest = path.join(this.projectRoot, key)
           fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 })
+          const saved = siwcRecords.get(key)
+          if (saved) {
+            const current = fs.existsSync(dest) ? JSON.parse(fs.readFileSync(dest, 'utf8')) : null
+            // Keep the newer local record, including an explicit local unbind.
+            if (current && (!saved.owner || !current.owner || sameSiwcOwner(current.owner, saved.owner))) continue
+            // A snapshot by itself cannot prove the grant did not rotate later.
+            if (saved.refresh_token) saved.state = 'refresh_outcome_unknown'
+            atomicWriteJson(dest, saved, { mode: 0o600, durable: true })
+            continue
+          }
           fs.copyFileSync(path.join(tmp, key), dest)
           try {
             fs.chmodSync(dest, 0o600)

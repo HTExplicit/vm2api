@@ -17,6 +17,8 @@ import { readRoutingConfigFile } from '../core/config.mjs'
 import { getVm, vmHasClaudeCredential } from '../vm/vm-registry.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { summarizeCodexSlot, readCodexAccounts, writeCodexAccounts } from '../vm/codex-slot.mjs'
+import { siwcModelAvailable } from '../vm/codex-siwc-store.mjs'
+import { modelMatchesAllowlist } from '../pool/slot-model-gate.mjs'
 import { isLocalEgressProxy } from '../vm/egress.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
 import { loadVmIdentity } from '../identity/vm-identity.mjs'
@@ -350,10 +352,27 @@ export async function resolveTestModels({
   refresh = false,
   fetchImpl,
   catalogClientVersion = 'auto',
+  siwc = null,
 } = {}) {
   const vm = vmId && projectRoot ? getVm(projectRoot, vmId) : null
   const kind = vm ? (isCodexVm(vm) ? 'openai' : 'anthropic') : normalizeTestPlatform(platform)
   let source = 'policy'
+  const binding = vm && kind === 'openai' ? summarizeCodexSlot(projectRoot, vm).siwc : null
+  if (binding?.enabled) {
+    const models = refresh && siwc ? await siwc.refreshModels(vm.id).catch(() => binding.models) : binding.models
+    const view = testModelsView(kind)
+    const visible = models?.filter((entry) => entry.visible) || []
+    return {
+      ...view,
+      items: view.items
+        .filter(
+          (entry) =>
+            siwcModelAvailable(visible, entry.id) && modelMatchesAllowlist(entry.id, vm.policy?.allowed_models),
+        )
+        .map((entry) => ({ ...entry, label: visible.find((model) => model.id === entry.id)?.name || entry.label })),
+      source: 'codex-siwc',
+    }
+  }
   if (refresh && kind === 'openai' && projectRoot) {
     const live = await refreshCodexCatalogFromSlot({
       projectRoot,
@@ -940,6 +959,8 @@ export async function runVmTestChat(opts = {}) {
   push('info', `状态 running=${vm.status === 'running'} schedulable=${vm.schedulable !== false}`)
   const routing = loadRouting(projectRoot)
   const codex = isCodexVm(vm)
+  const codexSlot = codex ? summarizeCodexSlot(projectRoot, vm) : null
+  const siwc = codexSlot?.siwc?.enabled ? codexSlot.siwc : null
   const inferenceEngine = codex ? null : resolveInferenceEngine(vm, routing)
   const cliHop = !codex && resolveOfficialCcInference(vm, routing) === 'cli-hop'
   const dataplane = codex ? null : resolveKernelDataplane(vm, routing) || 'wrap'
@@ -955,7 +976,9 @@ export async function runVmTestChat(opts = {}) {
   push(
     'info',
     codex
-      ? '推理 codex-kernel / ChatGPT'
+      ? siwc
+        ? '推理 SIWC / ChatGPT'
+        : '推理 codex-kernel / ChatGPT'
       : cliHop
         ? `推理 ${inferenceEngine} / ${kernelRoute}`
         : `推理 ${inferenceEngine} / http hop`,
@@ -963,13 +986,14 @@ export async function runVmTestChat(opts = {}) {
 
   const credMode = testChatCredentialMode(vm)
   if (codex) {
-    const slot = summarizeCodexSlot(projectRoot, vm)
-    if (!slot.has_token) {
+    if (!(siwc || codexSlot).has_token) {
       push('error', '无 Codex OAuth')
       return done({
         ok: false,
         vm_id: vmId,
-        error: { code: 'no_credential', message: 'VM has no Codex credential' },
+        error: siwc
+          ? { code: 'siwc_reauth_required', message: '请重新绑定 SIWC，或手动切回普通 Codex。' }
+          : { code: 'no_credential', message: 'VM has no Codex credential' },
         log,
         duration_ms: Date.now() - started,
       })
@@ -1025,7 +1049,18 @@ export async function runVmTestChat(opts = {}) {
   let model = String(opts.model || '').trim()
   let serviceTier = null
   if (!model) {
-    const models = listTestableModels(codex ? 'openai' : 'anthropic')
+    const models = siwc
+      ? (await resolveTestModels({ projectRoot, vmId })).items
+      : listTestableModels(codex ? 'openai' : 'anthropic')
+    if (siwc && !models.length) {
+      return done({
+        ok: false,
+        vm_id: vmId,
+        error: { code: 'model_not_allowed', message: '当前 SIWC 槽没有可供试聊的模型，请刷新账号模型。' },
+        log,
+        duration_ms: Date.now() - started,
+      })
+    }
     model = models[0]?.id || (codex ? 'gpt-5.4' : 'claude-haiku-4-5-20251001')
   }
   push('info', `模型 ${model}`)
@@ -1192,7 +1227,7 @@ export async function runVmTestChat(opts = {}) {
       signal: opts.signal,
       extraHeaders: opts.extraHeaders || {},
     })
-    if (codex && !result?.ok && looksLikeCodexUnauthorized(result)) {
+    if (codex && !siwc && !result?.ok && looksLikeCodexUnauthorized(result)) {
       const first = readCodexAccounts(projectRoot, vmId)[0] || {}
       const auth = captureOpenaiAuth(projectRoot, vmId, first)
       const refreshToken = String(first.refresh_token || '').trim()
@@ -1301,7 +1336,7 @@ export async function runVmTestChat(opts = {}) {
   } else {
     push('error', `失败 status=${result?.status || 0}: ${errObj.message}`)
     if (errObj.request_id) push('info', `request_id=${errObj.request_id}`)
-    if (result?.status === 401 && /revoked/i.test(String(errObj.message || errObj.upstream_message || ''))) {
+    if (!siwc && result?.status === 401 && /revoked/i.test(String(errObj.message || errObj.upstream_message || ''))) {
       try {
         opts.accountQuota?.recordLastProbe?.(vm.claude?.account_uuid || vm.account_uuid || vmId, {
           ok: false,
