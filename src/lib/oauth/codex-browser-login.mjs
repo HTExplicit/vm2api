@@ -1,5 +1,6 @@
 import { cancelCodexAuthSession, exchangeCodexAuthCode, generateCodexAuthUrl } from './codex-oauth.mjs'
 import { openaiIdentityFromOauthTokens } from './openai-jwt.mjs'
+import { SIWC_REDIRECT_URI } from './codex-siwc.mjs'
 import { CODEX_OAUTH_REDIRECT_URI } from '../protocol/codex-models.mjs'
 
 const REDIRECT = new URL(CODEX_OAUTH_REDIRECT_URI)
@@ -79,6 +80,7 @@ export class CodexBrowserLoginService {
     generateAuthUrl = generateCodexAuthUrl,
     exchangeCode = exchangeCodexAuthCode,
     cancelAuthSession = cancelCodexAuthSession,
+    siwc = null,
     now = Date.now,
   } = {}) {
     Object.assign(this, {
@@ -90,6 +92,7 @@ export class CodexBrowserLoginService {
       generateAuthUrl,
       exchangeCode,
       cancelAuthSession,
+      siwc,
       now,
     })
     this.jobs = new Map()
@@ -106,12 +109,18 @@ export class CodexBrowserLoginService {
     }
   }
 
-  start(vmId) {
+  start(vmId, { siwcSession = null } = {}) {
     const vm = this.getVm(vmId)
     if (!vm) throw problem('vm_not_found', '账号槽位不存在。')
-    if (this.jobs.has(vmId)) return this.browserManager.state(vmId)
+    const current = this.jobs.get(vmId)
+    if (current) {
+      if (current.siwcSession !== siwcSession) throw problem('browser_busy', '请先关闭当前授权浏览器。')
+      return this.browserManager.state(vmId)
+    }
+    if (siwcSession) this.siwc.authorization(vmId, siwcSession)
     const job = {
       vmId,
+      siwcSession,
       expected: this.resolveIdentity(vmId, vm),
       abort: new AbortController(),
       completed: deferred(),
@@ -142,14 +151,18 @@ export class CodexBrowserLoginService {
       job.live.closeSignal?.addEventListener('abort', onClosed, { once: true })
       if (job.live.closeSignal?.aborted) onClosed()
       this.assertCurrent(job)
-      const generated = this.generateAuthUrl({
-        vmId: job.vmId,
-        proxyUrl: job.live.proxyUrl,
-        installationId: job.installationId,
-      })
+      const generated = job.siwcSession
+        ? this.siwc.authorization(job.vmId, job.siwcSession)
+        : this.generateAuthUrl({
+            vmId: job.vmId,
+            proxyUrl: job.live.proxyUrl,
+            installationId: job.installationId,
+          })
       job.sessionId = generated.session_id
-      const authorize = new URL(new URL(generated.auth_url).searchParams.get('authorize_url'))
-      job.state = authorize.searchParams.get('state')
+      if (!job.siwcSession) {
+        const authorize = new URL(new URL(generated.auth_url).searchParams.get('authorize_url'))
+        job.state = authorize.searchParams.get('state')
+      }
       job.callbackSession = await job.live.page.createCDPSession()
       job.callbackHandler = (event) => {
         const callback = this.acceptCallback(job, event)
@@ -157,7 +170,7 @@ export class CodexBrowserLoginService {
         return callback
       }
       job.callbackSession.on('Fetch.requestPaused', job.callbackHandler)
-      const callbackUrl = `${REDIRECT.origin}${REDIRECT.pathname}`
+      const callbackUrl = job.siwcSession ? SIWC_REDIRECT_URI : REDIRECT.origin + REDIRECT.pathname
       await job.callbackSession.send('Fetch.enable', {
         patterns: [callbackUrl, `${callbackUrl}\\?*`].map((urlPattern) => ({
           urlPattern,
@@ -227,7 +240,7 @@ export class CodexBrowserLoginService {
         navigationChanged = true
       }
       if (navigationChanged) job.live.stream?.sendNavigation()
-      if (job.sessionId) this.cancelAuthSession(job.sessionId)
+      if (job.sessionId && !job.siwcSession) this.cancelAuthSession(job.sessionId)
       job.live?.closeSignal?.removeEventListener('abort', onClosed)
       // A callback can still be awaiting the shared credential commit after the
       // browser closes. Deletion must wait until it can no longer write state.
@@ -259,6 +272,20 @@ export class CodexBrowserLoginService {
     job.live.stream?.sendNavigation()
     try {
       const vm = this.assertCurrent(job)
+      if (job.siwcSession) {
+        const result = await this.siwc.finish(job.vmId, job.siwcSession, request.url, {
+          assertCurrent: () => this.assertCurrent(job),
+        })
+        job.saved = true
+        await respond(200, 'SIWC 已绑定并启用。请返回 vm2api 面板。')
+        if (!job.live.closeSignal?.aborted) {
+          this.browserManager.setStatus(job.live, 'oauth_complete', 'SIWC 已绑定并启用。', {
+            siwc_session_id: job.siwcSession,
+          })
+        }
+        job.completed.resolve(result)
+        return
+      }
       const callback = parseCodexBrowserCallback(request.url, job.state)
       const account = await this.exchangeCode({
         sessionId: job.sessionId,
@@ -314,6 +341,7 @@ export class CodexBrowserLoginService {
       }
       job.completed.resolve(result)
     } catch (error) {
+      if (error.code === 'siwc_account_mismatch') job.live.persistable = false
       await respond(400, error.publicMessage || 'OpenAI 授权处理失败，请返回面板重新登录。')
       job.completed.reject(error)
     }

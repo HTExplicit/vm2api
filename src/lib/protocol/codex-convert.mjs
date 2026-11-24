@@ -109,14 +109,15 @@ function toolArguments(call) {
  * which reaches here after claude→chat normalization). Changes to the
  * `call_id` fallbacks or the empty-content drop affect both.
  */
-export function chatMessageToItems(message) {
+export function chatMessageToItems(message, customCalls = new Set()) {
   if (!message || typeof message !== 'object') return []
   if (message.role === 'tool') {
     const output = typeof message.content === 'string' ? message.content : textParts(message.content)
+    const callId = message.tool_call_id || message.id || 'call_unknown'
     return [
       {
-        type: 'function_call_output',
-        call_id: message.tool_call_id || message.id || 'call_unknown',
+        type: customCalls.has(callId) ? 'custom_tool_call_output' : 'function_call_output',
+        call_id: callId,
         output: output || '',
       },
     ]
@@ -132,6 +133,17 @@ export function chatMessageToItems(message) {
       })
     }
     for (const call of message.tool_calls || []) {
+      if (call?.type === 'custom' && call.custom?.name) {
+        const callId = call.id || call.call_id || 'call_' + call.custom.name
+        customCalls.add(callId)
+        items.push({
+          type: 'custom_tool_call',
+          call_id: callId,
+          name: call.custom.name,
+          input: call.custom.input || '',
+        })
+        continue
+      }
       const name = call?.function?.name || call?.name
       if (!name) continue
       items.push({
@@ -163,13 +175,14 @@ export function responsesToolChoice(choice) {
   if (typeof choice !== 'object' || Array.isArray(choice)) return undefined
 
   const type = String(choice.type || '').toLowerCase()
-  const name = String(choice.name || choice.function?.name || '').trim()
+  const name = String(choice.name || choice.function?.name || choice.custom?.name || '').trim()
 
   if (type === 'none' || type === 'auto' || type === 'required') return type
   if (type === 'any') return 'required'
 
   if (type === 'allowed_tools') {
-    const tools = (Array.isArray(choice.tools) ? choice.tools : [])
+    const allowed = choice.allowed_tools || choice
+    const tools = (Array.isArray(allowed.tools) ? allowed.tools : [])
       .map((tool) => {
         if (!tool || typeof tool !== 'object') return null
         const toolName = String(tool.name || tool.function?.name || '').trim()
@@ -178,10 +191,11 @@ export function responsesToolChoice(choice) {
             ? { type: 'function', name: toolName, ...(tool.namespace ? { namespace: tool.namespace } : {}) }
             : null
         }
+        if (tool.type === 'custom' && tool.custom?.name) return { type: 'custom', name: tool.custom.name }
         return tool
       })
       .filter(Boolean)
-    const mode = String(choice.mode || 'auto').toLowerCase() === 'required' ? 'required' : 'auto'
+    const mode = String(allowed.mode || 'auto').toLowerCase() === 'required' ? 'required' : 'auto'
     return tools.length ? { type: 'allowed_tools', mode, tools } : mode
   }
 
@@ -214,7 +228,14 @@ function toolsToCodex(tools) {
         name: tool.function.name,
         description: tool.function.description || '',
         parameters: tool.function.parameters || { type: 'object', properties: {} },
+        ...(tool.function.strict === undefined ? {} : { strict: tool.function.strict }),
       }
+    }
+    if (tool?.type === 'custom') {
+      if (!tool.custom) return tool
+      const { format, ...definition } = tool.custom
+      const shape = format?.type === 'grammar' ? { type: 'grammar', ...format.grammar } : format
+      return { type: 'custom', ...definition, ...(shape ? { format: shape } : {}) }
     }
     if (tool?.name) {
       return {
@@ -230,7 +251,8 @@ function toolsToCodex(tools) {
 
 export function chatToCodexResponses(body = {}) {
   const messages = Array.isArray(body.messages) ? body.messages : []
-  const input = messages.flatMap(chatMessageToItems)
+  const customCalls = new Set()
+  const input = messages.flatMap((message) => chatMessageToItems(message, customCalls))
   const out = {
     model: body.model,
     input,
@@ -426,6 +448,7 @@ function bindTool(state, keys, fields = {}) {
   const slot = existing || { index: state.seq++, id: '', name: '', header: false, args: '' }
   if (fields.id) slot.id = fields.id
   if (fields.name) slot.name = fields.name
+  if (fields.custom && state.nativeCustomTools) slot.chatCustom = true
   for (const key of names) state.tools.set(key, slot)
   state.sawTool = true
   return slot
@@ -434,12 +457,19 @@ function bindTool(state, keys, fields = {}) {
 function toolHeaderDelta(slot) {
   if (slot.header) return null
   slot.header = true
+  const type = slot.chatCustom ? 'custom' : 'function'
   return {
     index: slot.index,
     id: slot.id,
-    type: 'function',
-    function: { name: slot.name, arguments: '' },
+    type,
+    [type]: { name: slot.name, [slot.chatCustom ? 'input' : 'arguments']: '' },
   }
+}
+
+function chatToolInputDelta(slot, value) {
+  return slot.chatCustom
+    ? { index: slot.index, custom: { input: value } }
+    : { index: slot.index, function: { arguments: value } }
 }
 
 function toolDoneDeltas(slot, full) {
@@ -454,7 +484,7 @@ function toolDoneDeltas(slot, full) {
   }
   const piece = full.slice(slot.args.length)
   slot.args = full
-  if (piece) calls.push({ index: slot.index, function: { arguments: piece } })
+  if (piece) calls.push(chatToolInputDelta(slot, piece))
   return calls
 }
 
@@ -469,6 +499,7 @@ function incompleteStopReason(response) {
 function responsesSseError(event) {
   if (
     event.type !== 'response.failed' &&
+    event.type !== 'response.error' &&
     event.type !== 'error' &&
     !(event.type === 'response.done' && event.response?.status !== 'completed') &&
     !(event.type === 'response.incomplete' && event.response?.status !== 'incomplete')
@@ -503,23 +534,29 @@ export function responsesSseToChatChunk(line, id = 'codex', state = null) {
     const slot = bindTool(session, [event.output_index, event.item_id, item.call_id, item.id], {
       id: item.call_id || item.id,
       name: item.name,
+      custom: item.type === 'custom_tool_call',
     })
     const calls = toolDoneDeltas(slot, item.arguments ?? item.input)
     return calls.length ? chatChunk(session.id, { tool_calls: calls }) : null
   }
   if (type === 'response.function_call_arguments.delta' || type === 'response.custom_tool_call_input.delta') {
-    const slot = bindTool(session, [event.output_index, event.item_id])
+    const slot = bindTool(session, [event.output_index, event.item_id], {
+      custom: type === 'response.custom_tool_call_input.delta',
+    })
     const calls = []
     const header = toolHeaderDelta(slot)
     if (header) calls.push(header)
     if (typeof event.delta === 'string' && event.delta) {
       slot.args += event.delta
-      calls.push({ index: slot.index, function: { arguments: event.delta } })
+      calls.push(chatToolInputDelta(slot, event.delta))
     }
     return calls.length ? chatChunk(session.id, { tool_calls: calls }) : null
   }
   if (type === 'response.function_call_arguments.done' || type === 'response.custom_tool_call_input.done') {
-    const slot = bindTool(session, [event.output_index, event.item_id], { name: event.name })
+    const slot = bindTool(session, [event.output_index, event.item_id], {
+      name: event.name,
+      custom: type === 'response.custom_tool_call_input.done',
+    })
     const calls = toolDoneDeltas(slot, event.arguments ?? event.input)
     return calls.length ? chatChunk(session.id, { tool_calls: calls }) : null
   }
@@ -536,7 +573,11 @@ export function responsesSseToChatChunk(line, id = 'codex', state = null) {
     const calls = []
     for (const [index, item] of (event.response?.output || []).entries()) {
       if (item?.type !== 'function_call' && item?.type !== 'custom_tool_call') continue
-      const slot = bindTool(session, [index, item.call_id, item.id], { id: item.call_id || item.id, name: item.name })
+      const slot = bindTool(session, [index, item.call_id, item.id], {
+        id: item.call_id || item.id,
+        name: item.name,
+        custom: item.type === 'custom_tool_call',
+      })
       calls.push(...toolDoneDeltas(slot, item.arguments ?? item.input))
     }
     const usage = openaiChatUsageFromExtract(extractOpenaiUsage(event.response?.usage || event.usage))
@@ -844,6 +885,21 @@ function toolUseInput(item) {
   const error = new Error(`Codex tool ${item.name || item.call_id || ''} arguments are not a JSON object`)
   error.code = 'tool_arguments_invalid'
   throw error
+}
+
+export function restoreCodexChatCustomTools(chat, response) {
+  const message = chat.choices?.[0]?.message
+  if (!message?.tool_calls?.length) return chat
+  const custom = new Map(
+    (response.output || [])
+      .filter((item) => item.type === 'custom_tool_call')
+      .map((item) => [item.call_id || item.id, item]),
+  )
+  message.tool_calls = message.tool_calls.map((call) => {
+    const item = custom.get(call.id)
+    return item ? { id: call.id, type: 'custom', custom: { name: item.name, input: item.input } } : call
+  })
+  return chat
 }
 
 export function codexBodyToAnthropicMessage(body = {}, model = '') {

@@ -1439,6 +1439,7 @@ export function createHandleProtocol(deps) {
     if (platform.platform === 'openai' && inferenceBackend !== 'api') {
       const routing = getRouting() || {}
       const codexSticky = {
+        siwc: deps.codexSiwc,
         cfg,
         requestStartedAt: logCtx.t0,
         stickyRouter,

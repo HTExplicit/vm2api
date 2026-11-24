@@ -223,9 +223,13 @@ function mergeCallerProtocolHeaders(base = {}, caller = {}, configured = {}, mod
   return out
 }
 
-async function readLines(stream, onLine, restorer = null) {
+export async function readApiSseLines(stream, onLine, restorer = null) {
   let buf = ''
   let receivedAt = null
+  const emit = async (line) => {
+    if (restorer) for (const pending of restorer.before(line)) await onLine(pending, receivedAt)
+    return onLine(restorer ? await restorer.line(line) : line, receivedAt)
+  }
   for await (const chunk of stream) {
     receivedAt = Date.now()
     buf += chunk.toString('utf8')
@@ -233,14 +237,10 @@ async function readLines(stream, onLine, restorer = null) {
     while ((idx = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, idx)
       buf = buf.slice(idx + 1)
-      if (restorer) for (const pending of restorer.before(line)) await onLine(pending, receivedAt)
-      await onLine(restorer ? await restorer.line(line) : line, receivedAt)
+      if ((await emit(line)) === false) return
     }
   }
-  if (buf) {
-    if (restorer) for (const pending of restorer.before(buf)) await onLine(pending, receivedAt)
-    await onLine(restorer ? await restorer.line(buf) : buf, receivedAt)
-  }
+  if (buf && (await emit(buf)) === false) return
   if (restorer) for (const line of await restorer.finish()) await onLine(line, receivedAt)
 }
 
@@ -848,7 +848,7 @@ async function runApiAttemptBody({
   let streamedUsage = null
   const readUpstreamLines = async (onLine) => {
     try {
-      await readLines(
+      await readApiSseLines(
         upstream,
         async (line, receivedAt) => {
           line = restoreToolNamesInSSELine(line, toolNames)
@@ -1116,7 +1116,7 @@ async function runOpenAIResponsesUpstream({
   }
 
   try {
-    await readLines(
+    await readApiSseLines(
       upstream,
       async (line, receivedAt) => {
         if (conversionError) return

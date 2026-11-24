@@ -82,6 +82,8 @@ export function getVm(projectRoot, id) {
 export function summarizeVm(vm, projectRoot = null, routing = null) {
   const kind = normalizeVmKind(vm)
   const codex = kind.kind === 'codex' ? summarizeCodexSlot(projectRoot, vm) : null
+  const siwc = codex?.siwc?.enabled ? codex.siwc : null
+  const credential = siwc || codex
   const quota = codex?.usage?.quota || {}
   const globalOpenAI = normalizeOpenAIQuotaPolicy(routing?.codex?.quota)
   const openAIPolicy = kind.kind === 'codex' ? effectiveOpenAIPolicy(vm, globalOpenAI) : null
@@ -116,8 +118,8 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     email: kind.kind === 'codex' ? codex?.email || null : vm.claude?.email || null,
     account_uuid: kind.kind === 'codex' ? null : vm.claude?.account_uuid || null,
     org_uuid: kind.kind === 'codex' ? codex?.chatgpt_account_id || null : vm.claude?.org_uuid || null,
-    has_token: kind.kind === 'codex' ? !!codex?.has_token : hasAccessPresence(vm.claude),
-    expires_at: kind.kind === 'codex' ? codex?.expires_at || null : vm.claude?.expires_at || null,
+    has_token: kind.kind === 'codex' ? !!credential?.has_token : hasAccessPresence(vm.claude),
+    expires_at: kind.kind === 'codex' ? credential?.expires_at || null : vm.claude?.expires_at || null,
     refreshed_at:
       kind.kind === 'codex' ? vm.codex?.usage?.snapshot?.updated_at || null : vm.claude?.refreshed_at || null,
     oauth_source: kind.kind === 'codex' ? 'codex-credentials' : vm.claude?.source || null,
@@ -133,7 +135,7 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     }),
     auth_scheme: kind.kind === 'codex' ? null : vm.claude?.auth_scheme || null,
     account_tier_source: kind.kind === 'codex' ? null : vm.claude?.account_tier_source || null,
-    has_refresh: kind.kind === 'codex' ? !!codex?.has_refresh : hasRefreshPresence(vm.claude),
+    has_refresh: kind.kind === 'codex' ? !!credential?.has_refresh : hasRefreshPresence(vm.claude),
     refresh_error: kind.kind === 'codex' ? null : vm.claude?.refresh_error || null,
     account_tier:
       kind.kind === 'codex' ? 'codex' : vm.claude?.account_tier || (hasAccessPresence(vm.claude) ? 'pro' : null),
@@ -218,7 +220,8 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     chatgpt_subscription_active_until: kind.kind === 'codex' ? codex?.chatgpt_subscription_active_until || null : null,
     chatgpt_plan_type: kind.kind === 'codex' ? codex?.chatgpt_plan_type || null : null,
     subscription: kind.kind === 'codex' ? codex?.subscription || null : null,
-    auth_block: kind.kind === 'codex' ? codex?.auth_block || null : null,
+    auth_block: siwc ? null : codex?.auth_block || null,
+    ...(codex?.siwc ? { codex_siwc: codex.siwc } : {}),
     claude_reset_credits: kind.kind === 'codex' ? null : vm.claude_reset_credits || null,
   }
 }
@@ -581,7 +584,8 @@ export function vmHasSchedulableCredential(vm, projectRoot = null) {
     return !isCredentialRefreshFailed({ vm, now: Date.now() })
   }
   const codex = summarizeCodexSlot(projectRoot, vm)
-  return !!(codex?.has_token || codex?.has_refresh)
+  const credential = codex?.siwc?.enabled ? codex.siwc : codex
+  return !!(credential?.has_token || credential?.has_refresh)
 }
 
 /**
@@ -689,15 +693,20 @@ export function holdProxyFailure(projectRoot, id, proxyId, failure) {
 export function clearStaleRuntimeMaintenanceHold(projectRoot, id, { tag, minAgeMs = 0, now = Date.now() } = {}) {
   if (!String(tag || '').startsWith('slot-runtime:')) return false
   let lifted = false
-  writeSchedule(projectRoot, id, (vm) => {
-    const hold = vm.schedule_hold
-    // Pin to the exact tag the caller saw stale: a newer cutover owns a new tag.
-    if (hold?.reason !== 'maintenance' || hold.detail?.tag !== tag) return false
-    const at = Date.parse(hold.at || '') || 0
-    if (at <= 0 || now - at < Math.max(0, minAgeMs)) return false
-    applyClearHold(vm, 'maintenance', { tag, now })
-    lifted = true
-  }, { migrate: false })
+  writeSchedule(
+    projectRoot,
+    id,
+    (vm) => {
+      const hold = vm.schedule_hold
+      // Pin to the exact tag the caller saw stale: a newer cutover owns a new tag.
+      if (hold?.reason !== 'maintenance' || hold.detail?.tag !== tag) return false
+      const at = Date.parse(hold.at || '') || 0
+      if (at <= 0 || now - at < Math.max(0, minAgeMs)) return false
+      applyClearHold(vm, 'maintenance', { tag, now })
+      lifted = true
+    },
+    { migrate: false },
+  )
   return lifted
 }
 

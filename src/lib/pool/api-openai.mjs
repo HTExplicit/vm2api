@@ -46,7 +46,8 @@ export function claudeToOpenAIResponsesRequest(claude = {}) {
   // function_call_output items. The previous plain-text map silently dropped
   // both, so a Claude-protocol caller looping tools against an OpenAI endpoint
   // re-issued the same call forever (the model never saw the tool output).
-  const input = (chat.messages || []).flatMap(chatMessageToItems)
+  const customCalls = new Set()
+  const input = (chat.messages || []).flatMap((message) => chatMessageToItems(message, customCalls))
   const out = {
     model: chat.model,
     input,

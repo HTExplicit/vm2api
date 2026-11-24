@@ -59,6 +59,7 @@ import { generateAuthUrl, exchangeAuthCode, normalizeOauthFlavor } from '../oaut
 import { sessionKeyToOAuth, panelImportErrorPayload } from '../oauth/cookie-auth.mjs'
 import { enrichOauthIdentity } from '../oauth/oauth-identity.mjs'
 import { generateCodexAuthUrl, exchangeCodexAuthCode } from '../oauth/codex-oauth.mjs'
+import { SIWC_CREDENTIAL_FILE } from '../vm/codex-siwc-store.mjs'
 import { cleanupVmFiles } from '../vm/slot-cleanup.mjs'
 import {
   completeClaudeSetupToken,
@@ -847,6 +848,7 @@ export function createPanelHandler(ctx) {
   const slotBrowserManager = ctx.slotBrowserManager
   const accountBrowserRuntime = ctx.accountBrowserRuntime
   const codexBrowserLogin = ctx.codexBrowserLogin
+  const codexSiwc = ctx.codexSiwc
   const changingProxies = new Set()
   const applyProxyChange = async (res, vmIds, change, proxyIds = []) => {
     const previous = vmIds.length
@@ -2294,6 +2296,53 @@ export function createPanelHandler(ctx) {
           error: { code: 'migration_busy', message: '槽位迁移中或待人工恢复，暂不能修改' },
         })
       }
+      const siwcRoute = p.match(/^\/api\/panel\/vms\/([^/]+)\/siwc(?:\/(bind|callback|cancel|models))?$/)
+      if (siwcRoute) {
+        const [, vmId, action] = siwcRoute
+        if (panelIdentity(req).role !== 'admin') {
+          return json(res, 403, { ok: false, error: { code: 'forbidden', message: '只有管理员可以管理 SIWC 绑定。' } })
+        }
+        if (!isValidVmId(vmId) || !codexSiwc) {
+          return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'GPT 槽位不存在。' } })
+        }
+        const method = req.method
+        try {
+          let result
+          if (!action && method === 'GET') result = codexSiwc.view(vmId)
+          else if (!action && method === 'DELETE') result = await codexSiwc.unbind(vmId)
+          else if (!action && method === 'PATCH') {
+            const { enabled } = await readBody(req, 4096)
+            if (typeof enabled !== 'boolean') {
+              return json(res, 400, {
+                ok: false,
+                error: { code: 'invalid_siwc_mode', message: '请选择是否启用 SIWC。' },
+              })
+            }
+            result = await codexSiwc.setEnabled(vmId, enabled)
+          } else if (method === 'POST' && action === 'bind') result = await codexSiwc.start(vmId)
+          else if (method === 'POST' && action === 'callback') {
+            const { session_id, callback_url } = await readBody(req, 16 * 1024)
+            result = await codexSiwc.finish(vmId, session_id, callback_url)
+          } else if (method === 'POST' && action === 'cancel') {
+            const { session_id } = await readBody(req, 4096)
+            result = { cancelled: codexSiwc.cancel(vmId, session_id) }
+          } else if (method === 'POST' && action === 'models') {
+            await codexSiwc.refreshModels(vmId)
+            result = codexSiwc.view(vmId)
+          } else {
+            return json(res, 404, { ok: false, error: { code: 'not_found', message: '接口不存在。' } })
+          }
+          return json(res, 200, panel.ok(result))
+        } catch (error) {
+          return json(res, error.status || 502, {
+            ok: false,
+            error: {
+              code: error.publicMessage ? error.code : 'siwc_request_failed',
+              message: error.publicMessage || 'SIWC 操作失败，请检查槽位出口后重试。',
+            },
+          })
+        }
+      }
       const slotBrowserRoute = p.match(/^\/api\/panel\/vms\/([^/]+)\/(browser(?:\/(open|close))?|browser-ticket)$/)
       if (slotBrowserRoute) {
         if (panelIdentity(req).role !== 'admin')
@@ -2316,14 +2365,21 @@ export function createPanelHandler(ctx) {
           } else if (req.method === 'POST' && action === 'open') {
             const body = await readBody(req, 4096)
             const purpose = body?.purpose || 'oauth'
-            if (purpose === 'oauth' || purpose === 'platform') {
+            if (purpose === 'oauth' || purpose === 'platform' || purpose === 'siwc') {
               const currentBrowser = slotBrowserManager.state(vmId)
               if (['closing', 'close_failed'].includes(currentBrowser.status))
                 return json(res, 200, panel.ok(currentBrowser))
             }
-            if (purpose === 'oauth') {
+            if (purpose === 'oauth' || purpose === 'siwc') {
+              const siwcSession = purpose === 'siwc' ? body?.session_id : null
+              if (purpose === 'siwc' && (!codexSiwc || typeof siwcSession !== 'string' || !siwcSession)) {
+                return json(res, 400, {
+                  ok: false,
+                  error: { code: 'siwc_session_required', message: '请先开始 SIWC 绑定。' },
+                })
+              }
               await openaiApiManager.cancel(vmId, { closeBrowser: false })
-              result = codexBrowserLogin.start(vmId)
+              result = codexBrowserLogin.start(vmId, { siwcSession })
             } else if (purpose === 'platform') {
               if (body?.account_id != null) openaiApiManager.assertAccountIdentity(vmId, body.account_id)
               await codexBrowserLogin.cancel(vmId)
@@ -3533,6 +3589,7 @@ export function createPanelHandler(ctx) {
           })
         }
         try {
+          codexSiwc?.cancelBindings()
           await codexBrowserLogin?.stop()
           await slotBrowserManager?.stop()
           await openaiApiManager?.stop()
@@ -5263,6 +5320,7 @@ export function createPanelHandler(ctx) {
           vmId,
           platform,
           refresh,
+          siwc: codexSiwc,
         })
         return json(res, 200, panel.ok(payload))
       }
@@ -5563,9 +5621,17 @@ export function createPanelHandler(ctx) {
           await openaiApiManager?.cancel(id)
           await slotBrowserManager?.close(id, { forget: true })
           openaiApiRepo?.cleanupForVm(id)
-          if (isCodexVm(prev)) resetOpenaiAuth(cfg.paths.project, id)
+          if (isCodexVm(prev)) {
+            resetOpenaiAuth(cfg.paths.project, id)
+            codexSiwc?.cancel(id)
+          }
           const slotDir = path.join(cfg.paths.project, 'vms', id)
           const removed = []
+          const siwcFile = path.join(slotDir, SIWC_CREDENTIAL_FILE)
+          if (fs.existsSync(siwcFile)) {
+            fs.unlinkSync(siwcFile)
+            removed.push(path.relative(cfg.paths.project, siwcFile))
+          }
           for (const file of [
             path.join(slotDir, 'codex-credentials.json'),
             path.join(slotDir, 'cli-home', '.codex', 'auth.json'),

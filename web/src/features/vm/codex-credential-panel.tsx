@@ -10,9 +10,14 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { dashboardQueryOptions } from '@/features/overview/queries'
+import { CodexSiwcPanel } from '@/features/vm/codex-siwc-panel'
 import type { CommitResult } from '@/features/vm/credential-panel'
 import { SlotBrowserDialog } from '@/features/vm/openai-platform-browser-dialog'
-import { vmQueryOptions, vmsListQueryOptions } from '@/features/vm/queries'
+import {
+  testModelsQueryOptions,
+  vmQueryOptions,
+  vmsListQueryOptions,
+} from '@/features/vm/queries'
 import { useVmPerms } from '@/features/vm/vm-perms'
 
 type CodexImportMode = 'oauth' | 'access_token' | 'refresh_token' | 'json'
@@ -421,6 +426,20 @@ export function CodexCredentialPanel({
           </Button>
         </div>
       )}
+      {perms.admin && (vm.has_token || vm.codex_siwc) ? (
+        <CodexSiwcPanel
+          key={vm.id}
+          vm={vm}
+          onChanged={() =>
+            Promise.all([
+              invalidate(),
+              qc.invalidateQueries({
+                queryKey: testModelsQueryOptions(vm.id).queryKey,
+              }),
+            ])
+          }
+        />
+      ) : null}
       {browserOpen ? (
         <SlotBrowserDialog
           vmId={vm.id}

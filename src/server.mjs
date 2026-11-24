@@ -97,6 +97,7 @@ import { SlotBrowserManager } from './lib/browser/slot-browser-manager.mjs'
 import { AccountBrowserRuntime } from './lib/browser/account-browser-runtime.mjs'
 import { migrateBrowserData, SHARD_BROWSER_MIGRATION_SETTING } from './lib/browser/browser-data-migration.mjs'
 import { CodexBrowserLoginService } from './lib/oauth/codex-browser-login.mjs'
+import { CodexSiwcService } from './lib/oauth/codex-siwc.mjs'
 import { commitImportedCodexVm } from './lib/admin/panel-routes.mjs'
 import { apiScheduleScope, resolveInferenceBackend } from './lib/pool/api-protocol.mjs'
 import { bootApiKernel, apiKernelPaths, apiKernelSnapshot } from './lib/transport/api-kernel-client.mjs'
@@ -644,7 +645,13 @@ proxyPool = new ProxyPool({
   egressCheck: (proxy) => proxyEgressReady(proxy, cfg.paths.project),
   repairEgress: (proxy, shouldStart) => ensureProxyEgress(cfg.paths.project, proxy, { shouldStart }),
 })
+const codexSiwc = new CodexSiwcService({
+  projectRoot: cfg.paths.project,
+  getVm: (id) => getVm(cfg.paths.project, id),
+  proxyPool,
+})
 const codexBrowserLogin = new CodexBrowserLoginService({
+  siwc: codexSiwc,
   browserManager: slotBrowserManager,
   proxyPool,
   getVm: (id) => getVm(cfg.paths.project, id),
@@ -1238,6 +1245,7 @@ const handleKeySelf = createKeySelfHandler({
 })
 
 const { handleProtocol, handleSearch, handleImages } = createHandleProtocol({
+  codexSiwc,
   // The public handler routes `/v1/messages` itself and answers in the Anthropic
   // shape. Rewriting req.url into the session path made the response carry
   // `id: "messages"` and changed the path the request log attributes.
@@ -1551,6 +1559,7 @@ const handlePanel = createPanelHandler({
   slotBrowserManager,
   accountBrowserRuntime,
   codexBrowserLogin,
+  codexSiwc,
   requestLog,
   vmTestSchedule,
   backupService,
@@ -2334,6 +2343,8 @@ server.listen(cfg.port, cfg.host, () => {
     // The KIN_CRS_MOCK harness promises no outbound network; catalogs stay on builtin data there.
     if (process.env.KIN_CRS_MOCK !== '1') {
       openaiApiManager.start()
+      codexSiwc.startMaintenance(() => (backupService.isRestoring ? [] : listVms(cfg.paths.project)))
+      onLeaderStop(() => codexSiwc.stopMaintenance())
       try {
         catalogMonitor?.start?.()
       } catch (e) {

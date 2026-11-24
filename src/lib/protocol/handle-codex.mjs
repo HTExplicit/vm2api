@@ -9,6 +9,8 @@ import { buildAnthropicSseError } from './stream-truncation.mjs'
 import { isClientStream, fromClaudeToOpenAIChat, fromClaudeToOpenAICompletions } from './convert.mjs'
 import { getVm, listVms, persistCodexUsage, summarizeVm, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { listVmRecordFiles, readJsonCached } from '../vm/vm-file.mjs'
+import { readCodexSiwc } from '../vm/codex-siwc-store.mjs'
+import { formatSiwcBody, siwcRequestProblem, streamSiwcResponses } from '../transport/siwc-responses.mjs'
 import { isCodexProtocolAllowed, isCodexVm, normalizeCodexRouting } from './codex-route.mjs'
 import { keyAllowsVm, keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
 import { ownerScopeFromRequest, pinnedVmIdFromRequest, vmMatchesOwnerScope } from '../admin/resource-owner.mjs'
@@ -21,6 +23,7 @@ import {
   createResponsesSseEventNamer,
   assembleCodexBodyFromSse,
   codexBodyToAnthropicMessage,
+  restoreCodexChatCustomTools,
   isToolArgumentsError,
   toCodexResponses,
 } from './codex-convert.mjs'
@@ -274,12 +277,16 @@ function pickCodexCandidatesWithPool(
     ownerScope = null,
     keyScope = null,
     pinVmId = undefined,
+    siwcBody = body,
+    nativeOnly = false,
   } = {},
 ) {
   // The caller resolves the pin when it knows the key owner's role; alone, only the master key pins.
   const pin = pinVmId === undefined ? pinnedVmIdFromRequest(req) : pinVmId
   const owner = ownerScope || ownerScopeFromRequest(req)
   const model = body?.model || null
+  const unsupported = siwcRequestProblem(siwcBody, nativeOnly)
+  const unsupportedPick = { error: 'siwc_unsupported_capability', ...unsupported, ids: [], candidates: [] }
   const routingPolicy = normalizeCodexRouting(routing.codex || routing).quota
   const scope = keyScope || keyScopeFromRequest(req)
   const poolDenial = vmPoolDenial(scope)
@@ -295,13 +302,18 @@ function pickCodexCandidatesWithPool(
   if (pin) {
     if (isPelicanTestRequest(req)) {
       const blocked = pelicanTestAdmission({ projectRoot, vmId: pin, model, routing })
-      if (blocked) return { error: blocked.code, message: blocked.message, pin, ids: [], candidates: [] }
+      if (blocked) {
+        return { picked: { error: blocked.code, message: blocked.message, pin, ids: [], candidates: [] }, poolVms: [] }
+      }
     }
     const vm = getVm(projectRoot, pin)
     if (!vm || !isCodexVm(vm)) return { picked: { error: 'platform_mismatch', pin, ids: [] }, poolVms: [] }
     if (!keyAllowsVm(scope, vm)) return { picked: { error: 'key_group_mismatch', pin, ids: [] }, poolVms: [] }
-    if (!codexSlotAllowsModel(vm, model)) return { picked: { error: 'model_not_allowed', pin, ids: [] }, poolVms: [] }
-    const ordered = orderCodexSessionSlots([vm], {
+    const enabled = readCodexSiwc(projectRoot, vm.id)?.enabled
+    if (enabled && unsupported) return { picked: { ...unsupportedPick, pin }, poolVms: [] }
+    const slot = enabled ? summarizeVm(vm, projectRoot, routing) : vm
+    if (!codexSlotAllowsModel(slot, model)) return { picked: { error: 'model_not_allowed', pin, ids: [] }, poolVms: [] }
+    const ordered = orderCodexSessionSlots([slot], {
       pin,
       excluded,
       quotaPolicy: routingPolicy,
@@ -339,8 +351,12 @@ function pickCodexCandidatesWithPool(
       poolVms: [],
     }
   }
+  const compatible = unsupported ? scopedVms.filter((vm) => !vm.codex_siwc?.enabled) : scopedVms
+  if (unsupported && scopedVms.some((vm) => vm.codex_siwc?.enabled) && !compatible.some(isCodexVm)) {
+    return { picked: unsupportedPick, poolVms: [] }
+  }
   const ordered = orderCodexSessionSlots(
-    continuesResponse ? scopedVms.filter((vm) => vm.id === bound.vmId) : scopedVms,
+    continuesResponse ? compatible.filter((vm) => vm.id === bound.vmId) : compatible,
     {
       boundVmId: bound?.vmId || null,
       sessionKey,
@@ -780,13 +796,14 @@ export function reasoningHistoryFallback(args, result) {
   }
 }
 
-export async function runCodexKernelHop({ hop, args = {}, onEvent, onReasoningFallback } = {}) {
+export async function runCodexKernelHop({ hop, args = {}, onEvent, onReasoningFallback, direct = false } = {}) {
   let emitted = false
   const wrapped = async (line) => {
     emitted = true
     if (onEvent) await onEvent(line)
   }
   let result = await hop({ ...args, onEvent: wrapped })
+  if (direct) return result
   if (!result?.ok && !emitted && isRetryableCodexTransport(result)) {
     result = { ...(await hop({ ...args, onEvent: wrapped })), transport_retried: true }
   }
@@ -828,6 +845,7 @@ export async function handleCodexProtocol({
   ownerScope = null,
   pinVmId = undefined,
   cfg = null,
+  siwc = null,
 }) {
   const codex = normalizeCodexRouting(routing.codex)
   const allowed = isCodexProtocolAllowed(protocol, { codex })
@@ -913,6 +931,7 @@ export async function handleCodexProtocol({
     stickyRouter,
     sessions,
     body: body || converted.body || inbound,
+    siwcBody: converted.body,
     keyScope,
     excluded: new Set(),
     routing,
@@ -1004,13 +1023,18 @@ export async function handleCodexProtocol({
       }
       let attemptKind = 'failed'
       try {
+        const useSiwc = readCodexSiwc(projectRoot, vm.id)?.enabled === true
+        logBag.via = useSiwc ? 'codex-siwc' : 'codex-kernel'
+        if (chatSse) chatSse.nativeCustomTools = useSiwc
         const localExit = isLocalEgressProxy(vm.proxy)
         const pelicanTest = isPelicanTestRequest(req)
         // This page can inspect an existing kernel, but must never boot or recycle it.
-        const existingKernel = pelicanTest
-          ? await (ops.codexKernelHealth || codexKernelHealth)(execFor(projectRoot, vm), { timeoutMs: 2500 })
-          : null
+        const existingKernel =
+          !useSiwc && pelicanTest
+            ? await (ops.codexKernelHealth || codexKernelHealth)(execFor(projectRoot, vm), { timeoutMs: 2500 })
+            : null
         const written =
+          !useSiwc &&
           (!pelicanTest || existingKernel?.ok) &&
           writeCfg(projectRoot, vm, {
             // Same rule as slot start: a node on local egress must leave through
@@ -1019,7 +1043,7 @@ export async function handleCodexProtocol({
             proxyRequired: true,
             routing,
           })
-        const ready = pelicanTest ? existingKernel : await ensure(execFor(projectRoot, vm))
+        const ready = useSiwc ? { ok: !!siwc } : pelicanTest ? existingKernel : await ensure(execFor(projectRoot, vm))
         if (!ready?.ok) {
           // Kernel init failed: this seat goes back and the next candidate is re-admitted.
           last = {
@@ -1029,7 +1053,7 @@ export async function handleCodexProtocol({
             body: {
               error: {
                 type: 'api_error',
-                code: 'codex_kernel_unavailable',
+                code: useSiwc ? 'siwc_unavailable' : 'codex_kernel_unavailable',
                 message: `Codex kernel 未就绪（${ready?.reason || 'not_ready'}）。GPT 槽走独立 kernel，不是 wrap cli-hop。`,
               },
             },
@@ -1041,7 +1065,7 @@ export async function handleCodexProtocol({
             continue
           }
           stats.errors++
-          logBag.error_code = 'codex_kernel_unavailable'
+          logBag.error_code = last.body.error.code
           return json(res, 503, last.body)
         }
         hops += 1
@@ -1056,7 +1080,7 @@ export async function handleCodexProtocol({
         let conversionError = null
         let errorEmitted = false
         const attemptStartedAt = Date.now()
-        const kernelRunId = codexKernelRunId(vm.id)
+        const kernelRunId = useSiwc ? null : codexKernelRunId(vm.id)
         const sessionOptions = {
           boundSessionId: stickyBound?.sessionId || '',
           boundVmId: stickyBound?.vmId || '',
@@ -1080,22 +1104,35 @@ export async function handleCodexProtocol({
         }
         logBag.outbound_session_id = sessionIdForLog(outboundSessionId)
         const outboundBody = applyCodexRebuildBody({ ...converted.body, stream: true }, outboundSessionId, sessionMode)
-        const outboundHeaders = codexKernelHeaders(req.headers, outboundBody, session)
-        if (captureOutbound) logBag.outbound_body = outboundBody
+        const outboundHeaders = useSiwc ? {} : codexKernelHeaders(req.headers, outboundBody, session)
+        if (captureOutbound) logBag.outbound_body = useSiwc ? formatSiwcBody(outboundBody) : outboundBody
         logBag.outbound_headers = redactHeaders(outboundHeaders)
         let hopEmitted = false
         let hopAuth = null
         const guardedHop = async (args) => {
           hopAuth = null
+          if ((readCodexSiwc(projectRoot, vm.id)?.enabled === true) !== useSiwc) {
+            return blockedCodexResult({ error: 'siwc_mode_changed' })
+          }
           if (isPelicanTestRequest(req)) {
             const blocked = pelicanTestAdmission({ projectRoot, vmId: vm.id, model: outboundBody.model, routing })
             if (blocked) return blockedCodexResult({ error: blocked.code })
           }
           const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
           if (blocked) return blockedCodexResult(blocked)
-          const auth = captureOpenaiAuth(projectRoot, vm.id)
           logBag.sent_model = args.body.model || null
           logBag.upstream_response_model = null
+          if (useSiwc) {
+            const unsupported = siwcRequestProblem(args.body)
+            if (unsupported) {
+              return {
+                status: 400,
+                body: { error: { type: 'invalid_request_error', code: 'siwc_unsupported_capability', ...unsupported } },
+              }
+            }
+            return (ops.streamSiwcResponses || streamSiwcResponses)({ ...args, siwc })
+          }
+          const auth = captureOpenaiAuth(projectRoot, vm.id)
           const result = await hop(args)
           recordOpenaiAuthResult(auth, {
             status: result?.status,
@@ -1111,6 +1148,7 @@ export async function handleCodexProtocol({
         const runHop = () =>
           runCodexKernelHop({
             hop: guardedHop,
+            direct: useSiwc,
             args: {
               exec: execFor(projectRoot, vm),
               signal: gone.signal,
@@ -1126,7 +1164,9 @@ export async function handleCodexProtocol({
                 headers: outboundHeaders,
                 stream: true,
                 session,
-                options: { ...codexKernelRequestOptions(routing, vm), installation_id: written?.installationId },
+                options: useSiwc
+                  ? {}
+                  : { ...codexKernelRequestOptions(routing, vm), installation_id: written?.installationId },
               },
             },
             onReasoningFallback: ({ body: retryBody }) => {
@@ -1142,6 +1182,7 @@ export async function handleCodexProtocol({
                   stream &&
                   (event?.type === 'error' ||
                     event?.type === 'response.failed' ||
+                    event?.type === 'response.error' ||
                     (event?.type === 'response.incomplete' && event.response?.status !== 'incomplete') ||
                     (event?.type === 'response.done' && event.response?.status !== 'completed'))
                 )
@@ -1220,8 +1261,13 @@ export async function handleCodexProtocol({
           : (result?.firstByteMs ?? null)
         logBag.generation_ms = result?.generationMs ?? null
         logBag.failure_diagnostics = result?.failureDiagnostics ? { ...result.failureDiagnostics, kernelRunId } : null
+        const upstreamRequestId = useSiwc ? result.headers?.['x-request-id'] : null
+        if (upstreamRequestId) {
+          logBag.failure_diagnostics = { ...logBag.failure_diagnostics, upstreamRequestId }
+        }
         if (Number(result?.status) === 400 && protocol === 'openai.responses') {
           logBag.failure_diagnostics = {
+            ...logBag.failure_diagnostics,
             ...logBag.failure_diagnostics,
             kernelRunId,
             responsesHistory: codexToolHistorySummary(outboundBody, req),
@@ -1239,6 +1285,13 @@ export async function handleCodexProtocol({
           logBag.reasoning_history_retried = true
         }
         last = result
+        const currentCredential = useSiwc
+          ? !!result.siwcRevision && siwc?.inUse(vm.id, result.siwcRevision)
+          : isOpenaiCredentialCurrent(hopAuth)
+        if (useSiwc && currentCredential && Number(result.status) === 429) {
+          const hold = codexFailureHold({ ...result, committed: false })
+          if (hold) holdOpenAIAccount(vm.id, { ...hold, reason: 'siwc_rate_limited' })
+        }
         const hopUsage = result.usage || result.body?.usage || result.body?.response?.usage || null
         const preferredUsage = preferUsage(hopUsage, streamedUsage)
         const usage = mergeUsage(preferredUsage === hopUsage ? streamedUsage : hopUsage, preferredUsage)
@@ -1258,7 +1311,7 @@ export async function handleCodexProtocol({
         if (delivered) {
           attemptKind = 'succeeded'
           bindSticky(outboundSessionId)
-          if (isOpenaiCredentialCurrent(hopAuth)) reportOpenAIAttempt(vm.id, 'succeeded', result.ttftMs ?? null)
+          if (currentCredential) reportOpenAIAttempt(vm.id, 'succeeded', result.ttftMs ?? null)
           logBag.final_state = result.terminalState || 'verified'
           logBag.stop_reason = result.body?.incomplete_details?.reason || null
           logBag.upstream_model = converted.body.model
@@ -1278,6 +1331,7 @@ export async function handleCodexProtocol({
                     : protocol === 'openai.completions'
                       ? fromClaudeToOpenAICompletions(message, converted.body.model)
                       : message
+                if (useSiwc && protocol === 'openai.chat') body = restoreCodexChatCustomTools(body, assembled)
               }
             } catch (error) {
               if (!isToolArgumentsError(error)) throw error
@@ -1293,7 +1347,7 @@ export async function handleCodexProtocol({
           if (!res.headersSent) writeSSEHeaders(res)
           return res.end()
         }
-        if (isOpenaiCredentialCurrent(hopAuth)) reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
+        if (currentCredential) reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
         if (
           !policyRefusal &&
           isOpenaiCredentialCurrent(hopAuth) &&
@@ -1349,6 +1403,7 @@ export async function handleCodexProtocol({
   logBag.error_message ||= last?.body?.error?.message || ''
   logBag.final_state = last?.terminalState || 'error'
   logBag.upstream_status = last?.status || 0
+  if (last?.siwcRevision && last.headers?.['retry-after']) res.setHeader?.('retry-after', last.headers['retry-after'])
   return json(res, last?.status || 502, last?.body || { error: { type: 'api_error', code: 'codex_upstream' } })
 }
 
@@ -1357,6 +1412,20 @@ function rejectCodexAdmission({ res, json, stats, logBag, picked, model }) {
   stats.errors++
   logBag.error_code = picked.error || 'no_codex_vm'
   if (picked.error === 'credential_blocked') return json(res, 503, blockedCodexResult().body)
+  if (picked.error === 'vm_stopped') {
+    return json(res, 409, { error: { type: 'api_error', code: 'vm_stopped', message: '槽位已停止。' } })
+  }
+  if (picked.error === 'siwc_unsupported_capability' || picked.error === 'siwc_reauth_required') {
+    const auth = picked.error === 'siwc_reauth_required'
+    return json(res, auth ? 401 : 400, {
+      error: {
+        type: auth ? 'authentication_error' : 'invalid_request_error',
+        code: picked.error,
+        message: picked.message || '请重新绑定 SIWC，或手动切回普通 Codex。',
+        ...(picked.param ? { param: picked.param } : {}),
+      },
+    })
+  }
   if (picked.error === 'platform_mismatch') {
     return json(res, 400, {
       error: {
@@ -1649,7 +1718,15 @@ export async function handleCodexSearch({
     : null
   if (redaction) Object.assign(outbound, await maskJson(outbound, redaction))
   const post = ops.postCodexSearch || postCodexSearch
-  const pickOpts = { stickyRouter, sessions: null, body: outbound, excluded: new Set(), ownerScope, routing }
+  const pickOpts = {
+    stickyRouter,
+    sessions: null,
+    body: outbound,
+    excluded: new Set(),
+    ownerScope,
+    routing,
+    nativeOnly: true,
+  }
   const deadline = Date.now() + codexWaitTimeoutMs(routing)
   const gone = clientGoneSignal(req, res)
   let last = null
@@ -1673,7 +1750,7 @@ export async function handleCodexSearch({
       try {
         const vm = getVm(projectRoot, admitted.vmId)
         pickOpts.excluded.add(admitted.vmId)
-        if (!vm || !isCodexVm(vm)) continue
+        if (!vm || !isCodexVm(vm) || readCodexSiwc(projectRoot, vm.id)?.enabled) continue
         const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
         if (blocked) {
           const result = blockedCodexResult(blocked)
@@ -1811,11 +1888,12 @@ export async function handleCodexImages({
   const excluded = new Set()
   let usable = 0
   for (const item of listVms(projectRoot)) {
-    if (!isCodexVm(item)) continue
+    if (!isCodexVm(item) || item.codex_siwc?.enabled) continue
     if (isFreePlanSlot(projectRoot, getVm(projectRoot, item.id) || item)) excluded.add(item.id)
     else usable += 1
   }
-  if (!usable && excluded.size) {
+  const pinned = pinnedVmIdFromRequest(req)
+  if (!usable && excluded.size && !(pinned && readCodexSiwc(projectRoot, pinned)?.enabled)) {
     return reject(
       403,
       'permission_error',
@@ -1838,7 +1916,7 @@ export async function handleCodexImages({
   const post = ops.postCodexJson || postCodexJson
   // Selection-only body: the turn id becomes the sticky session; the upstream body is untouched.
   const pickBody = { model: model || null, ...(imageTurnId ? { session_id: `codex-image-turn:${imageTurnId}` } : {}) }
-  const pickOpts = { stickyRouter, sessions: null, body: pickBody, excluded, ownerScope, routing }
+  const pickOpts = { stickyRouter, sessions: null, body: pickBody, excluded, ownerScope, routing, nativeOnly: true }
   const deadline = Date.now() + codexWaitTimeoutMs(routing)
   const gone = clientGoneSignal(req, res)
   let last = null
@@ -1862,7 +1940,7 @@ export async function handleCodexImages({
       try {
         const vm = getVm(projectRoot, admitted.vmId)
         excluded.add(admitted.vmId)
-        if (!vm || !isCodexVm(vm)) continue
+        if (!vm || !isCodexVm(vm) || readCodexSiwc(projectRoot, vm.id)?.enabled) continue
         const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
         if (blocked) {
           const result = blockedCodexResult(blocked)

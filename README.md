@@ -63,6 +63,8 @@ Claude Code 默认使用槽内原生授权终端生成链接并处理回调。CA
 
 GPT 登录与 OpenAI Platform 共用 [ShardBrowser](https://github.com/ProxyShard/ShardBrowser) 和 Puppeteer Core。管理员在「设置 → OpenAI → 账号浏览器」安装内核，无需浏览器授权 key；公开镜像只含控制组件、独立安装助手和系统依赖，内核在部署端从官方获取。采用有头浏览器、虚拟显示和软件图形渲染，全局一次一个窗口。每槽首次选择 Linux 指纹模板并保留原生 profile，固定英文，时区跟随绑定代理的已检测位置；关闭时仅导出 Billing 所需的 Cookie。面板独立检查和更新内核及组件，更新前关闭当前窗口；安装仅核对文件和实际版本，不运行页面自检，失败由管理员重试。升级到 1.4.8402 会清除旧 CloakBrowser 网页状态及其授权 key，保留 OAuth 凭据、Platform API key、账号和业务记录，相关网页按需重新登录；后续应用升级保留新内核缓存与 profile。
 
+已登录的 GPT 槽位可在凭据面板绑定 [Sign in with ChatGPT（SIWC）](https://developers.openai.com/siwc/token-sharing-open-source)。管理员选择槽位浏览器或手动回调，成功后立即用该槽的 ChatGPT 计划。这条路径支持 Responses、Chat Completions、Messages 和 Responses WebSocket，按槽位出口调用并沿用额度调度。停用 SIWC 可切回普通 Codex，本地解绑会清除 SIWC 令牌。需要从历史归档恢复且缺少在线凭据时，应在访问令牌到期前重新绑定。
+
 ## 目录
 - [💡 项目概览](#-项目概览)
 - [🆕 近期更新](#-近期更新)

@@ -2065,6 +2065,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     platform: isCodex ? 'openai' : v.platform || 'anthropic',
     family: isCodex ? 'codex' : v.family || 'claude',
     codex_kernel: !!isCodex,
+    ...(isCodex && v.codex_siwc ? { codex_siwc: v.codex_siwc } : {}),
     email: v.email || acc?.email || workerCred?.email || null,
     account_uuid: v.account_uuid || (acc?.account_id && acc.account_id !== v.id ? acc.account_id : null),
     org_uuid: v.org_uuid || null,
