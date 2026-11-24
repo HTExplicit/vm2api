@@ -51,7 +51,6 @@ export class OpenaiApiManager {
       credits,
       apiEndpointStore,
       apiScheduler,
-      createSession,
       Adapter,
       fetchBalance,
       getRouting,
@@ -117,15 +116,16 @@ export class OpenaiApiManager {
     if (record?.setup_status === 'needs_login')
       return { status: 'needs_login', message: record.last_error || 'Platform 会话需要补充登录，请连接 Platform' }
     if (error) return { status: 'error', message: error }
-    const profile = this.profileRepo.get(vmId)
-    const session = profile?.billing_session
-    if (
-      profile?.account_id === accountId &&
-      session?.organization_id === record?.organization_id &&
-      session?.recovery_attempted &&
-      !session.headers
-    )
-      return { status: 'error', message: 'Billing 会话恢复尚未完成，请手动刷新或连接 Platform' }
+    if (view.has_key) {
+      const profile = this.profileRepo.get(vmId)
+      const session = profile?.billing_session
+      if (
+        !session?.headers ||
+        session.organization_id !== record?.organization_id ||
+        (profile.account_id && profile.account_id !== accountId)
+      )
+        return { status: 'needs_login', message: '尚未保存 Billing 会话，请连接 Platform' }
+    }
     return { status: 'idle', message: null }
   }
 
@@ -285,20 +285,18 @@ export class OpenaiApiManager {
     })
   }
 
-  setup(vmId) {
-    const context = this.credits.accountForVm(vmId)
-    if (!['claimed', 'pending'].includes(context.record?.claim_status))
+  setup(vmId, accountId) {
+    const context = this.assertAccountIdentity(vmId, accountId)
+    if (!context.record?.key_id && !['claimed', 'pending'].includes(context.record?.claim_status))
       throw problem('api_promo_link_required', '请先查询并领取 API 赠额')
     this.enqueue(context, 'setup', true)
     return this.view(context.vm)
   }
 
   async refresh(vmId) {
-    let context = this.credits.accountForVm(vmId)
-    if (context.record?.claim_status === 'pending') await this.credits.refreshClaim(vmId)
-    context = this.credits.accountForVm(vmId)
+    const context = this.credits.accountForVm(vmId)
     if (context.record?.key_id) this.enqueue(context, 'balance', true)
-    else if (context.record?.claim_status === 'claimed') this.enqueue(context, 'setup', true)
+    else if (context.record?.claim_status === 'pending') await this.credits.refreshClaim(vmId)
     return this.view(context.vm)
   }
 
@@ -306,35 +304,27 @@ export class OpenaiApiManager {
     const vmId = context.vm.id
     const existing = this.jobs.get(vmId)
     if (existing) {
-      if (interactive && (!existing.interactive || (kind === 'setup' && existing.kind === 'balance'))) {
-        if (existing.promoted) {
-          if (kind === 'setup') existing.promoted.kind = 'setup'
-          return existing
-        }
-        existing.promoted = { kind }
-        // Background work can be waiting for this very manual window to close.
-        // Cancel only that work, retain the window, then reuse it interactively.
-        const live = this.sessions.get(vmId)
-        if (live?.job === existing) live.retained = true
+      if (existing.kind === 'balance' && kind === 'setup' && !existing.promoted) {
+        existing.promoted = true
+        // The HTTP refresh may be waiting for the same browser window.
         existing.abort.abort()
-        live?.cancel?.()
         void existing.finished.then(() => {
-          const requested = existing.promoted
-          existing.promoted = null
-          if (!requested || this.stopped) return
+          if (!existing.promoted || this.stopped) return
           try {
             const current = this.credits.accountForVm(vmId)
-            if (current.accountId === existing.accountId) this.enqueue(current, requested.kind, true)
+            if (current.accountId === existing.accountId) this.enqueue(current, 'setup', true)
           } catch {
             /* A deleted slot has no task to promote. */
           }
         })
+      } else if (kind === 'balance' && interactive && existing.kind === 'balance') {
+        existing.interactive = true
       }
       return existing
     }
     if (!hasBoundExit(context.vm.proxy) || !hostProxyUrlForVm(context.vm))
       throw problem('proxy_required', '账号未绑定可用代理')
-    let ready, finished
+    let finished
     const job = {
       abort: new AbortController(),
       finished: new Promise((resolve) => {
@@ -347,12 +337,8 @@ export class OpenaiApiManager {
       interactive,
       phase: 'queued',
       phaseMessage: kind === 'setup' ? 'API 配置任务已排队' : '余额刷新已排队',
-      ready: new Promise((resolve) => {
-        ready = resolve
-      }),
-      resolveReady: (value) => ready(value),
     }
-    if (kind === 'setup' || interactive)
+    if (kind === 'setup')
       this.repo.upsertAccount(context.accountId, { vm_id: vmId, setup_status: 'configuring', last_error: null })
     this.jobs.set(vmId, job)
     if (interactive) this.queue.unshift(job)
@@ -418,7 +404,6 @@ export class OpenaiApiManager {
         console.warn('[openai-api] browser release failed', error.code || 'browser_cleanup_failed')
       } finally {
         if (live?.job === job && this.sessions.get(job.vmId) === live) this.sessions.delete(job.vmId)
-        job.resolveReady(null)
         if (this.jobs.get(job.vmId) === job) this.jobs.delete(job.vmId)
         job.resolveFinished()
         this.running = this.jobs.size > 0
@@ -446,8 +431,6 @@ export class OpenaiApiManager {
   }
 
   async runBalance(job) {
-    const ownBrowser = this.browserManager.jobs.get(job.vmId)
-    if (job.interactive && ownBrowser?.retained && ownBrowser.purpose === 'platform') return this.runBrowser(job)
     // HTTP jobs share one queue without reserving or launching a browser.
     const previous = this.balanceTail
     let release
@@ -476,51 +459,26 @@ export class OpenaiApiManager {
       if (profile?.account_id && profile.account_id !== job.accountId)
         throw problem('platform_account_mismatch', '保存的 Platform 会话与当前账号不一致', 409)
       const session = profile?.billing_session
-      const matching = session?.organization_id === record.organization_id
-      let authenticationError
-      if (matching && session.headers) {
-        try {
-          job.phase = 'refreshing'
-          job.phaseMessage = '正在通过 Billing 会话刷新余额'
-          const { summary, cookies } = await this.fetchBalance({
-            session,
-            storageState: profile.storage_state,
-            proxyUrl: job.proxyUrl,
-            organizationId: record.organization_id,
-            signal: job.abort.signal,
-          })
-          this.assertCurrent(job)
-          if (this.browserManager.jobs.get(job.vmId)?.retained)
-            throw problem('platform_browser_busy', '账号浏览器正在操作，请关闭后刷新余额', 409)
-          const currentProfile = this.profileRepo.get(job.vmId)
-          this.profileRepo.upsert(job.vmId, {
-            storage_state: { ...currentProfile.storage_state, cookies, cookies_pending: true },
-          })
-          this.saveBalance(job, record.organization_id, summary)
-          this.repo.upsertAccount(job.accountId, { setup_status: 'ready', last_error: null })
-          return
-        } catch (error) {
-          if (error.code !== 'platform_login_required') throw error
-          authenticationError = error
-        }
-      }
-      this.assertCurrent(job)
-      if (!job.interactive && !balanceRefreshIntervalMinutes(this.getRouting())) {
-        if (authenticationError) throw authenticationError
-        return
-      }
-      if (!job.interactive && matching && session.recovery_attempted)
-        throw problem('platform_recovery_required', 'Billing 会话自动恢复未完成，请连接 Platform 或手动重试', 409)
-      this.profileRepo.upsert(job.vmId, {
-        account_id: job.accountId,
-        billing_session: {
-          ...(matching ? session : {}),
-          organization_id: record.organization_id,
-          headers: null,
-          recovery_attempted: true,
-        },
+      if (!session?.headers || session.organization_id !== record.organization_id)
+        throw problem('platform_login_required', '尚未保存 Billing 会话，请连接 Platform')
+      job.phase = 'refreshing'
+      job.phaseMessage = '正在通过 Billing 会话刷新余额'
+      const { summary, cookies } = await this.fetchBalance({
+        session,
+        storageState: profile.storage_state,
+        proxyUrl: job.proxyUrl,
+        organizationId: record.organization_id,
+        signal: job.abort.signal,
       })
-      return await this.runBrowser(job)
+      this.assertCurrent(job)
+      if (this.browserManager.jobs.get(job.vmId)?.retained)
+        throw problem('platform_browser_busy', '账号浏览器正在操作，请关闭后刷新余额', 409)
+      const currentProfile = this.profileRepo.get(job.vmId)
+      this.profileRepo.upsert(job.vmId, {
+        storage_state: { ...currentProfile.storage_state, cookies, cookies_pending: true },
+      })
+      this.saveBalance(job, record.organization_id, summary)
+      this.repo.upsertAccount(job.accountId, { setup_status: 'ready', last_error: null })
     } finally {
       release()
     }
@@ -533,8 +491,8 @@ export class OpenaiApiManager {
     job.phaseMessage = '等待账号浏览器就绪'
     const live = await this.browserManager.acquire(job.vmId, {
       purpose: 'platform',
-      interactive: job.interactive,
-      retain: job.interactive,
+      interactive: true,
+      retain: true,
       signal: job.abort.signal,
     })
     if (this.stopped || job.abort.signal.aborted) {
@@ -547,7 +505,6 @@ export class OpenaiApiManager {
     live.waiting = false
     live.inputLocked = true
     this.sessions.set(job.vmId, live)
-    job.resolveReady(live)
     job.phase = 'refreshing'
     job.phaseMessage = '正在连接 Platform 以更新余额'
     this.browserManager.setStatus(live, 'opening', '正在打开 OpenAI Platform')
@@ -565,7 +522,6 @@ export class OpenaiApiManager {
     })
     let identity = await adapter.inspect({ timeout: 30_000, signal: browserSignal })
     if (!identity.authenticated) {
-      if (!job.interactive) throw problem('platform_login_required', 'Platform 会话已失效，请补充登录')
       this.repo.upsertAccount(job.accountId, { setup_status: 'needs_login', last_error: null })
       live.inputLocked = false
       this.browserManager.setStatus(live, 'needs_login', '请在此窗口完成 OpenAI Platform 登录')
@@ -581,7 +537,7 @@ export class OpenaiApiManager {
     this.browserManager.setStatus(
       live,
       'configuring',
-      job.kind === 'balance' ? '正在刷新 API 余额' : '正在配置账号 API，请保留此窗口…',
+      context.record?.key_id ? '正在更新 Billing 会话' : '正在配置账号 API，请保留此窗口…',
     )
     await this.persistSession(live)
     let record = this.repo.getAccount(job.accountId)
@@ -592,7 +548,6 @@ export class OpenaiApiManager {
     const existingKey = record.key_id ? this.repo.getKey(record.key_id) : null
     if (existingKey && (existingKey.source_vm_id !== job.vmId || existingKey.source_account_id !== job.accountId))
       throw problem('api_key_account_mismatch', '已保存的 API key 与当前账号不匹配', 409)
-    if (!existingKey && job.kind === 'balance') throw problem('api_key_required', '账号 API key 已移除', 409)
     if (!existingKey) {
       const keyName = (job.keyName ||=
         'vm2api-' +
@@ -653,13 +608,11 @@ export class OpenaiApiManager {
     }
     record = this.repo.getAccount(job.accountId)
     if (!record.key_id) throw problem('platform_key_missing', '项目 key 尚未完成保存')
-    if (job.kind === 'setup' && this.repo.getKey(record.key_id)?.disabled)
-      throw problem('invalid_api_key', '已保存的项目 API key 已失效，请在 Platform 核对密钥')
     try {
       await this.updateBalance(live, organizationId)
     } catch (error) {
       this.assertCurrent(job)
-      if (job.kind === 'balance' || error.code === 'platform_login_required') throw error
+      if (existingKey || error.code === 'platform_login_required') throw error
       this.repo.upsertOrg(organizationId, { balance_error: safeMessage(error) })
     }
     this.assertCurrent(job)
@@ -758,10 +711,6 @@ export class OpenaiApiManager {
     return this.browserManager.handleUpgrade(req, socket, head)
   }
 
-  send(live, message) {
-    this.browserManager.send(live, message)
-  }
-
   async cancel(vmId, { forget = false, closeBrowser = true } = {}) {
     const active = this.sessions.get(vmId)
     if (!closeBrowser && active && !active.waiting)
@@ -774,7 +723,6 @@ export class OpenaiApiManager {
     const queued = this.queue.filter((job) => job.vmId === vmId)
     this.queue = this.queue.filter((job) => job.vmId !== vmId)
     for (const job of queued) {
-      job.resolveReady(null)
       job.resolveFinished()
       this.jobs.delete(vmId)
     }
@@ -794,10 +742,7 @@ export class OpenaiApiManager {
     try {
       const interval = balanceRefreshIntervalMinutes(this.getRouting()) * 60_000
       const dueOrgs = new Set()
-      const accounts = this.repo
-        .listAccounts()
-        .sort((a, b) => Number(a.setup_status === 'needs_login') - Number(b.setup_status === 'needs_login'))
-      for (const account of accounts) {
+      for (const account of this.repo.listAccounts()) {
         let context
         try {
           context = this.credits.accountForVm(account.vm_id)
@@ -810,15 +755,7 @@ export class OpenaiApiManager {
         if (!interval) continue
         if (!account.enabled || !account.key_id || !account.organization_id || dueOrgs.has(account.organization_id))
           continue
-        const profile = this.profileRepo.get(account.vm_id)
-        const session = profile?.billing_session
-        if (
-          profile?.account_id === account.account_id &&
-          session?.organization_id === account.organization_id &&
-          session.recovery_attempted &&
-          !session.headers
-        )
-          continue
+        if (account.setup_status === 'needs_login') continue
         const org = this.repo.getOrg(account.organization_id)
         if (this.now() - Date.parse(org?.balance_checked_at || org?.updated_at || 0) < interval) continue
         if (this.now() - (this.balanceFailedAt.get(account.account_id) ?? -Infinity) < interval) continue
@@ -847,7 +784,6 @@ export class OpenaiApiManager {
     clearInterval(this.timer)
     this.timer = null
     for (const job of this.queue) {
-      job.resolveReady(null)
       job.resolveFinished()
       this.jobs.delete(job.vmId)
     }

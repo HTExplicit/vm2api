@@ -96,7 +96,6 @@ try {
     assert.equal(summary.displayName, 'Offline Billing organization')
     const session = adapter.billingSessionFor(ORGANIZATION_ID)
     assert.equal(session.organization_id, ORGANIZATION_ID)
-    assert.equal(session.recovery_attempted, false)
     assert.equal(session.headers.authorization, 'Bearer offline-billing-fixture')
   }
 

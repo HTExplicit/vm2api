@@ -6,7 +6,6 @@ import {
   filterApiKeys,
   maskedKey,
   proxyAddress,
-  proxyDescription,
   proxyName,
   targetId,
 } from './key-display'
@@ -20,6 +19,8 @@ const entry = (extra: Partial<OpenaiApiKeyEntry> = {}) =>
     organization_id: 'org-one',
     organization_name: 'My Organization',
     enabled: true,
+    has_key: true,
+    claim_status: 'claimed',
     call_status: 'ready',
     balance: null,
     ...extra,
@@ -44,18 +45,14 @@ describe('OpenAi_api list display', () => {
       available: true,
     }
     expect(proxyName(proxy)).toBe('美国出口')
-    expect(proxyDescription(proxy)).toBe('美国出口 · safe.example.test:1080')
     expect(proxyName({ ...proxy, name: '' })).toBe('safe.example.test:1080')
     expect(proxyName({ ...proxy, name: '本地出口', host: null })).toBe(
       '本地出口'
     )
     expect(proxyAddress({ ...proxy, host: null })).toBe('')
     expect(proxyName({ ...proxy, name: '', host: null })).toBe('未绑定')
-    expect(proxyDescription({ ...proxy, name: '已改名出口' })).toContain(
-      '已改名出口'
-    )
   })
-  it('searches slot, email and organization and combines status with intended switch', () => {
+  it('searches identity and combines configuration filters with call status', () => {
     const rows = [
       entry(),
       entry({
@@ -65,15 +62,23 @@ describe('OpenAi_api list display', () => {
         enabled: false,
         call_status: 'quota_blocked',
       }),
+      entry({
+        account_id: 'account-c',
+        claim_status: 'pending',
+        has_key: false,
+        call_status: null,
+      }),
     ]
     expect(filterApiKeys(rows, '  ONE@EXAMPLE ', 'all', 'all')).toEqual([
       rows[0],
+      rows[2],
     ])
     expect(
-      filterApiKeys(rows, 'My Organization', 'off', 'quota_blocked')
+      filterApiKeys(rows, 'My Organization', 'bound', 'quota_blocked')
     ).toEqual([rows[1]])
-    expect(filterApiKeys(rows, '东京', 'on', 'ready')).toEqual([rows[0]])
-    expect(filterApiKeys(rows, '', 'on', 'quota_blocked')).toEqual([])
+    expect(filterApiKeys(rows, '东京', 'bound', 'ready')).toEqual([rows[0]])
+    expect(filterApiKeys(rows, '', 'pending', 'quota_blocked')).toEqual([])
+    expect(filterApiKeys(rows, '', 'pending', 'all')).toEqual([rows[2]])
   })
   it('keeps selections separate when a slot changes account and counts partial results honestly', () => {
     expect(targetId(entry())).not.toBe(

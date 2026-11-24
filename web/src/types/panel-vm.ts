@@ -42,6 +42,7 @@ export type OpenaiApiCreditGrant = {
 }
 
 export type OpenaiApiView = {
+  account_id?: string | null
   pro_eligible: boolean
   claim_status: 'unknown' | 'eligible' | 'ineligible' | 'pending' | 'claimed'
   ineligibility_reason?: string | null

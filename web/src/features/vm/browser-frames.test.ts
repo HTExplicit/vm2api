@@ -156,7 +156,7 @@ describe('latest browser frame transport', () => {
     expect(browserStatusMessage('queued', 'oauth')).toContain('排队')
     expect(browserStatusMessage('ready', 'oauth')).toContain('自动保存')
     expect(browserStatusMessage('oauth_complete', 'oauth')).toContain(
-      '继续进入 Platform'
+      '开机并开启调度'
     )
     expect(browserStatusMessage('api_ready', 'platform')).toContain(
       'API 配置完成'

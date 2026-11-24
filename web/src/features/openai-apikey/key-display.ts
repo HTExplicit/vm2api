@@ -23,6 +23,17 @@ export const BATCH_STATUS_LABELS = {
   error: '失败',
 } as const
 
+export const CONFIG_FILTERS = {
+  unknown: '待查资格',
+  eligible: '待领取',
+  ineligible: '不可领取',
+  pending: '发放中',
+  claimed: '待配置',
+  bound: '已绑定',
+} as const
+
+export type ConfigFilter = keyof typeof CONFIG_FILTERS | 'all'
+
 export function targetId(item: OpenaiApiKeyTarget): string {
   return JSON.stringify([item.vm_id, item.account_id])
 }
@@ -39,12 +50,6 @@ export function proxyName(proxy: OpenaiApiKeyEntry['proxy']): string {
   return proxy?.name || proxyAddress(proxy) || '未绑定'
 }
 
-export function proxyDescription(proxy: OpenaiApiKeyEntry['proxy']): string {
-  return [
-    ...new Set([proxyName(proxy), proxyAddress(proxy)].filter(Boolean)),
-  ].join(' · ')
-}
-
 export function balanceText(balance: string | null): string {
   return balance == null ? '未知' : `$${formatBalanceAmount(balance)}`
 }
@@ -52,12 +57,18 @@ export function balanceText(balance: string | null): string {
 export function filterApiKeys(
   items: OpenaiApiKeyEntry[],
   search: string,
-  enabled: 'all' | 'on' | 'off',
+  config: ConfigFilter,
   status: OpenaiApiCallStatus | 'all'
 ): OpenaiApiKeyEntry[] {
   const term = search.trim().toLocaleLowerCase()
   return items.filter((item) => {
-    if (enabled !== 'all' && item.enabled !== (enabled === 'on')) return false
+    const phase = item.has_key ? 'bound' : item.claim_status
+    if (
+      config !== 'all' &&
+      config !== phase &&
+      !(config === 'pending' && item.claim_status === 'pending')
+    )
+      return false
     if (status !== 'all' && item.call_status !== status) return false
     return (
       !term ||
@@ -80,8 +91,4 @@ export function batchSummary(results: OpenaiApiBatchResult[]): string {
   const count = { done: 0, queued: 0, error: 0 }
   for (const row of results) count[row.status]++
   return `已完成 ${count.done} · 已排队 ${count.queued} · 失败 ${count.error}`
-}
-
-export function apiKeyUrl(item: OpenaiApiKeyTarget): string {
-  return `/api/panel/vms/${encodeURIComponent(item.vm_id)}/openai-api/key`
 }

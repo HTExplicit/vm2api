@@ -188,6 +188,7 @@ const SLOT_HEIGHT: Record<SlotState, string> = {
 }
 
 function HealthCell({ vm }: { vm: Vm }) {
+  if (vm.health_24h === undefined) return <span className={TERT}>24h 未知</span>
   const h = healthSummary(vm.health_24h)
   return (
     <>

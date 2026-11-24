@@ -63,8 +63,8 @@ export function OpenaiApiBalanceSection({
         onChange={update}
       />
       <p className='text-xs leading-5 text-muted-foreground'>
-        会话缺失或失效时自动恢复一次浏览器，需要验证码时提示补登录。余额只作展示，不决定
-        API 调度。
+        会话失效时保留最近一次余额。可在 OpenAI 账号 Key 管理页连接
+        Platform，恢复后继续刷新。
       </p>
     </PaneSection>
   )

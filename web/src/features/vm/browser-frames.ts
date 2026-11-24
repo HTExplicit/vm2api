@@ -125,8 +125,7 @@ export function browserStatusMessage(
     queued: '正在排队，等待当前浏览器任务结束…',
     starting: '正在启动槽位浏览器…',
     opening: '正在打开官方网页…',
-    oauth_complete:
-      'OpenAI 授权成功，凭据已保存。可以继续进入 Platform，或关闭窗口。',
+    oauth_complete: 'OpenAI 授权成功，凭据已保存。可以开机并开启调度。',
     needs_login: '请在此窗口完成官方登录或验证码，再点“登录完成，继续配置”。',
     configuring: '正在配置账号 API，请保留此窗口…',
     awaiting_key_input:

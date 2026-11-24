@@ -188,6 +188,7 @@ function render() {
     controls.purpose === 'platform' ? (
       <OpenaiPlatformBrowserDialog
         vmId={controls.vmId}
+        accountId='account-fixture'
         open={controls.open}
         onOpenChange={controls.changeOpen}
         onComplete={controls.complete}
@@ -357,7 +358,10 @@ describe('Platform key setup handoff', () => {
       '/api/panel/vms/slot-a/browser/open',
       {
         method: 'POST',
-        body: JSON.stringify({ purpose: 'platform' }),
+        body: JSON.stringify({
+          purpose: 'platform',
+          account_id: 'account-fixture',
+        }),
       }
     )
   })
@@ -415,7 +419,7 @@ describe('OAuth browser login completion', () => {
     await settle()
     html = render()
     expect(html).toContain('内核已就绪，调度已开启')
-    expect(html).toContain('继续进入 Platform')
+    expect(html).not.toContain('继续进入 Platform')
     expect(button('完成')?.disabled).not.toBe(true)
     expect(controls.complete).not.toHaveBeenCalled()
     button('完成')!.onClick!({} as never)

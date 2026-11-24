@@ -52,7 +52,7 @@ const base = {
 let items = [
   {
     ...base,
-    vm_id: 'slot-one',
+    vm_id: 'vm-01',
     account_id: 'account-one',
     email: 'one@example.test',
     slot_name: '账号一',
@@ -110,12 +110,137 @@ let items = [
   },
 ]
 const candidate = {
+  ...base,
   vm_id: 'slot-four',
   account_id: 'account-four',
   email: 'four@example.test',
   slot_name: '账号四',
-  claim_status: 'claimed',
+  claim_status: 'unknown',
+  has_key: false,
+  enabled: false,
+  setup_status: 'idle',
+  key_id: null,
+  endpoint_id: null,
+  call_status: null,
+  organization_id: null,
+  organization_name: null,
+  paid_balance: null,
+  balance: null,
+  today_requests: 0,
+  today_cost: 0,
+  last_used_at: null,
 }
+items.push(candidate)
+
+function sampleVm(id, platform, plan, fiveHour, week, extra = {}) {
+  const n = Number(id.slice(-2))
+  const use = 7 - n
+  const future = (hours) => new Date(Date.now() + hours * 3600_000).toISOString()
+  return {
+    id,
+    platform,
+    name: id,
+    email: `${platform === 'openai' ? 'gpt' : 'claude'}-${id.slice(-2)}@example.com`,
+    account_tier: plan,
+    subscription_type: plan,
+    plan_type: plan,
+    status: 'running',
+    runtime_type: 'docker',
+    family: platform === 'openai' ? 'codex' : 'claude',
+    has_token: true,
+    has_refresh: true,
+    credential_mode: 'oauth',
+    schedule_state: 'on',
+    schedulable: true,
+    schedule_level: 4 + (n % 4),
+    schedule_level_mode: n % 2 ? 'auto' : 'manual',
+    availability: { key: 'ok', usable: true, text: '可用' },
+    proxy_configured: true,
+    proxy_id: `demo-${n}`,
+    proxy: { id: `demo-${n}`, kind: 'socks5', status: 'ok', enabled: true, latency_ms: 40 + n * 9 },
+    utilization_5h: fiveHour,
+    utilization_7d: week,
+    utilization_7d_oi: platform === 'anthropic' ? week - 5 : undefined,
+    reset_5h: future(2.5 - n * 0.22),
+    reset_7d: future(41 + n * 10),
+    reset_7d_oi: future(42 + n * 10),
+    chatgpt_subscription_active_until: platform === 'openai' ? future(240 + n * 24) : undefined,
+    today_cost: 4.12 * use,
+    today_requests: 21 * use,
+    today_tokens: 1_817_600 * use,
+    total_cost: 38.52 * use,
+    total_tokens: 13_210_000 * use,
+    cache_hit_rate: 0.63 + n * 0.037,
+    window_5h_cost: 2.19 * use,
+    window_5h_tokens: 810_000 * use,
+    window_7d_cost: 12.31 * use,
+    window_7d_tokens: 4_681_000 * use,
+    window_7d_requests: 98 * use,
+    window_7d_success: 96 * use,
+    window_7d_errors: 2 * use,
+    health_24h: Array.from({ length: 48 }, (_, i) => {
+      const requests = (i * 7 + n * 3) % 16
+      return [requests, requests && i % 13 === n ? 1 : 0]
+    }),
+    max_concurrency: 5,
+    max_rpm: 30,
+    inflight: n % 3,
+    ...extra,
+  }
+}
+
+const sampleVms = [
+  sampleVm('vm-01', 'openai', 'pro', 24, 48, {
+    active: true,
+    session_active: 3,
+    session_max: 12,
+    openai_api: { account_id: 'account-one', has_key: true, pro_eligible: true },
+  }),
+  sampleVm('vm-02', 'anthropic', 'max', 37, 56, { runtime_type: 'kvm', seats_used: 2, seats_max: 10 }),
+  sampleVm('vm-03', 'openai', 'plus', 12, 22, { session_active: 1, session_max: 8 }),
+  sampleVm('vm-04', 'anthropic', 'pro', 91, 73, {
+    schedule_state: 'restricted',
+    schedulable: false,
+    restriction_reason: 'quota_5h',
+    restriction_text: '接近 5 小时额度上限',
+    availability: { key: 'quota', usable: false, text: '额度受限' },
+  }),
+  {
+    id: 'vm-05',
+    name: 'vm-05',
+    platform: 'openai',
+    status: 'stopped',
+    runtime_type: 'docker',
+    has_token: false,
+    schedulable: false,
+    schedule_state: 'off',
+    availability: { key: 'none', usable: false, text: '未导入' },
+  },
+]
+const gemini = {
+  id: 'demo-gemini',
+  name: 'Gemini 示例',
+  proxy_id: 'demo-6',
+  auth_state: 'authorized',
+  runtime_ready: true,
+  billing_ready: true,
+  proxy_ready: true,
+  auth_method: 'oauth',
+  kernel_version: '0.3.0',
+  created_at: fixtureTime,
+  updated_at: fixtureTime,
+  models: ['gemini-3-pro'],
+  models_discovered: true,
+  account: {
+    state: 'ok',
+    checked_at: fixtureTime,
+    email: 'gemini-01@example.com',
+    plan: 'Pro',
+    quotas: [],
+    credits: [],
+  },
+}
+
 const requests = []
 const errors = []
 const externalRequests = []
@@ -124,16 +249,6 @@ let role = 'admin'
 let empty = false
 let balanceMode = null
 let client, vite
-const source = `import React from 'react';
-import {createRoot} from 'react-dom/client';
-import {QueryClient,QueryClientProvider} from '@tanstack/react-query';
-import {TooltipProvider} from '/src/components/ui/tooltip.tsx';
-import {Toaster} from 'sonner';
-import {OpenaiApiKeyPage} from '/src/features/openai-apikey/index.tsx';
-import '/src/styles/index.css';
-const queryClient=new QueryClient({defaultOptions:{queries:{retry:false,refetchOnWindowFocus:false}}});
-createRoot(document.getElementById('root')).render(React.createElement(QueryClientProvider,{client:queryClient},
-React.createElement(TooltipProvider,null,React.createElement(OpenaiApiKeyPage),React.createElement(Toaster,{theme:'dark'}))));`
 
 function json(res, status, body) {
   res.writeHead(status, {
@@ -168,16 +283,6 @@ try {
         configureServer(server) {
           server.middlewares.use((req, res, next) => {
             const url = new URL(req.url, 'http://127.0.0.1')
-            if (url.pathname === '/__openai-key-smoke') {
-              res.setHeader('Content-Type', 'text/html')
-              void server
-                .transformIndexHtml(
-                  req.url,
-                  '<html class="dark"><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div><script type="module" src="/__openai-key-smoke.tsx"></script></body></html>',
-                )
-                .then((html) => res.end(html))
-              return
-            }
             if (!url.pathname.startsWith('/api/')) return next()
             void (async () => {
               const body = await readBody(req)
@@ -193,9 +298,39 @@ try {
                   data: {
                     user: 'offline-admin',
                     role,
-                    views: role === 'admin' ? ['openai-apikey'] : [],
+                    views: role === 'admin' ? undefined : ['openai-apikey'],
+                    version: '1.4.179',
                   },
                 })
+              }
+              if (url.pathname === '/api/panel/vms') {
+                return json(res, 200, {
+                  ok: true,
+                  data: { items: sampleVms, pool_queue: { global_queue_depth: 0, queue_max: 32 } },
+                })
+              }
+              if (url.pathname === '/api/panel/vms/vm-01/health') {
+                return json(res, 200, {
+                  ok: true,
+                  data: { buckets: sampleVms[0].health_24h, slot_min: 30, start: fixtureTime, top_errors: [] },
+                })
+              }
+              if (url.pathname === '/api/panel/usage') return json(res, 200, { ok: true, data: { items: [] } })
+              if (url.pathname === '/api/panel/gemini') {
+                return json(res, 200, {
+                  ok: true,
+                  data: {
+                    available: true,
+                    payload_state: 'installed',
+                    release_activated: true,
+                    environments: [gemini],
+                  },
+                })
+              }
+              if (url.pathname === '/api/panel/pool/stream') {
+                res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' })
+                res.write(': offline\n\n')
+                return
               }
               if (url.pathname === '/api/panel/openai-apikey' && req.method === 'GET') {
                 return json(res, 200, {
@@ -204,9 +339,8 @@ try {
                     items: empty
                       ? []
                       : items.map((item) =>
-                          item.vm_id === 'slot-one' && balanceMode ? { ...item, ...balanceMode } : item,
+                          item.vm_id === 'vm-01' && balanceMode ? { ...item, ...balanceMode } : item,
                         ),
-                    bind_candidates: items.some((item) => item.account_id === candidate.account_id) ? [] : [candidate],
                   },
                 })
               }
@@ -231,7 +365,7 @@ try {
                 return json(res, 200, { ok: true, data: { results } })
               }
               const accountAction = url.pathname.match(
-                /^\/api\/panel\/vms\/([^/]+)\/openai-api\/(key|enabled|resume|refresh)$/,
+                /^\/api\/panel\/vms\/([^/]+)\/openai-api\/(key|enabled|resume|refresh|preview|claim)$/,
               )
               if (accountAction) {
                 const [, vmId, action] = accountAction
@@ -242,13 +376,27 @@ try {
                     data: { api_key: fixtureSecret },
                   })
                 }
+                if (action === 'preview' || action === 'claim') {
+                  assert.equal(vmId, candidate.vm_id)
+                  assert.equal(body.account_id, candidate.account_id)
+                  if (action === 'claim') assert.equal(body.destination_account_id, 'org-offline')
+                  const updated = {
+                    ...candidate,
+                    claim_status: action === 'preview' ? 'eligible' : 'pending',
+                    destinations: [{ destination_account_id: 'org-offline', display_name: 'Offline organization' }],
+                    organization_id: action === 'claim' ? 'org-offline' : null,
+                    organization_name: action === 'claim' ? 'Offline organization' : null,
+                  }
+                  items = items.map((item) => (item.vm_id === vmId ? updated : item))
+                  return json(res, 200, { ok: true, data: updated })
+                }
                 if (action === 'key' && req.method === 'PUT') {
                   assert.equal(vmId, candidate.vm_id)
                   assert.equal(body.account_id, candidate.account_id)
                   assert.equal(body.api_key, 'sk-offline-manual-bind')
-                  items.push({
+                  const updated = {
                     ...base,
-                    ...candidate,
+                    ...items.find((item) => item.vm_id === vmId),
                     key_id: 'ek-four',
                     endpoint_id: 'ep-four',
                     key_suffix: 'bind',
@@ -260,7 +408,8 @@ try {
                     today_requests: 0,
                     today_cost: 0,
                     last_used_at: null,
-                  })
+                  }
+                  items = items.map((item) => (item.vm_id === vmId ? updated : item))
                 }
                 return json(res, 200, { ok: true, data: {} })
               }
@@ -278,12 +427,6 @@ try {
             })
           })
         },
-        resolveId(id) {
-          if (id === '/__openai-key-smoke.tsx') return '\0openai-key-smoke.tsx'
-        },
-        load(id) {
-          if (id === '\0openai-key-smoke.tsx') return source
-        },
       },
     ],
   })
@@ -299,11 +442,23 @@ try {
   await context.route('**/*', (route) => {
     const url = new URL(route.request().url())
     if (url.hostname === '127.0.0.1') return route.continue()
+    if (url.href === 'https://api.github.com/repos/HTExplicit/vm2api/releases/latest') {
+      return route.fulfill({
+        headers: { 'Access-Control-Allow-Origin': '*' },
+        json: {
+          tag_name: 'v1.4.179',
+          html_url: 'https://github.com/HTExplicit/vm2api/releases/tag/v1.4.179',
+        },
+      })
+    }
     externalRequests.push(url.hostname)
     return route.abort()
   })
   await context.addInitScript(() => {
     localStorage.setItem('kin_console_token', 'offline-ui-smoke')
+    const now = new Date()
+    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    localStorage.setItem('vm2api_star_hint_day', date)
     window.__clipboardWrites = []
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -312,8 +467,8 @@ try {
   })
   const page = await context.newPage()
   page.on('pageerror', (error) => errors.push(error.message))
-  const url = 'http://127.0.0.1:' + vite.httpServer.address().port + '/__openai-key-smoke'
-  await page.goto(url)
+  const url = 'http://127.0.0.1:' + vite.httpServer.address().port + '/'
+  await page.goto(url + '#/openai-apikey')
   await page.getByRole('button', { name: 'one@example.test', exact: true }).waitFor()
   assert.equal(
     requests.filter((request) => request.path.endsWith('/key')).length,
@@ -325,52 +480,10 @@ try {
   const firstRow = page
     .getByRole('row')
     .filter({ has: page.getByRole('button', { name: 'one@example.test', exact: true }) })
-  assert.ok((await firstRow.innerText()).includes('sk-proj-abcd…'), 'the key shows a masked prefix')
-  assert.equal((await firstRow.innerText()).includes('•••• 1234'), false, 'the suffix is no longer displayed')
-  assert.ok((await firstRow.innerText()).includes('东京账号出口'), 'the proxy pool name is shown')
-  assert.equal(
-    (await firstRow.innerText()).includes('proxy-fixture-internal'),
-    false,
-    'an internal proxy id is not its display name',
-  )
-  assert.ok(
-    (
-      await page
-        .getByRole('row')
-        .filter({ has: page.getByRole('button', { name: 'two@example.test', exact: true }) })
-        .innerText()
-    ).includes('本地出口'),
-    'local egress keeps its display name',
-  )
-  assert.ok(
-    (
-      await page
-        .getByRole('row')
-        .filter({ has: page.getByRole('button', { name: 'three@example.test', exact: true }) })
-        .innerText()
-    ).includes('192.0.2.11:3128'),
-    'an unnamed proxy falls back to its safe address',
-  )
-  assert.equal(
-    await firstRow.getByText('东京账号出口', { exact: true }).getAttribute('title'),
-    '东京账号出口 · 192.0.2.10:1080',
-  )
-  const originalProxy = items[0].proxy
-  items[0] = { ...items[0], proxy: { ...originalProxy, name: '东京账号出口（新名称）' } }
-  await page.getByRole('button', { name: '刷新列表', exact: true }).click()
-  await until(
-    async () => (await firstRow.innerText()).includes('东京账号出口（新名称）'),
-    'proxy renames appear after a list refresh',
-  )
-  items[0] = { ...items[0], proxy: null }
-  await page.getByRole('button', { name: '刷新列表', exact: true }).click()
-  await until(
-    async () => (await firstRow.innerText()).includes('未绑定'),
-    'missing proxy bindings have an explicit label',
-  )
-  items[0] = { ...items[0], proxy: originalProxy }
-  await page.getByRole('button', { name: '刷新列表', exact: true }).click()
-  await until(async () => (await firstRow.innerText()).includes('东京账号出口'), 'the proxy fixture is restored')
+  assert.equal((await firstRow.innerText()).includes('sk-proj-abcd'), false)
+  assert.equal((await firstRow.innerText()).includes('东京账号出口'), false)
+  await page.getByRole('button', { name: 'four@example.test', exact: true }).waitFor()
+  assert.equal(await page.getByRole('checkbox', { name: '选择 four@example.test' }).count(), 0)
   assert.ok((await page.locator('body').innerText()).includes('$31.78'))
   assert.ok((await page.locator('body').innerText()).includes('$-1.23'))
   await page.screenshot({
@@ -389,19 +502,19 @@ try {
   )
   await page.setViewportSize({ width: 1440, height: 1000 })
 
-  const search = page.getByRole('textbox', { name: '搜索账号 API key' })
+  const search = page.getByRole('searchbox', { name: '搜索 OpenAI 账号' })
   await search.fill('two@example.test')
   assert.equal(await page.getByRole('button', { name: 'one@example.test', exact: true }).count(), 0)
   await page.getByRole('button', { name: 'two@example.test', exact: true }).waitFor()
   await search.fill('no-such-account')
   await page.getByText('没有符合筛选条件的账号', { exact: true }).waitFor()
   await search.fill('')
-  await page.getByRole('combobox', { name: '筛选使用开关' }).click()
-  await page.getByRole('option', { name: '已关闭', exact: true }).click()
-  await page.getByRole('button', { name: 'two@example.test', exact: true }).waitFor()
+  await page.getByRole('combobox', { name: '筛选配置状态' }).click()
+  await page.getByRole('option', { name: '待查资格', exact: true }).click()
+  await page.getByRole('button', { name: 'four@example.test', exact: true }).waitFor()
   assert.equal(await page.getByRole('button', { name: 'one@example.test', exact: true }).count(), 0)
-  await page.getByRole('combobox', { name: '筛选使用开关' }).click()
-  await page.getByRole('option', { name: '全部开关', exact: true }).click()
+  await page.getByRole('combobox', { name: '筛选配置状态' }).click()
+  await page.getByRole('option', { name: '全部配置状态', exact: true }).click()
   await page.getByRole('combobox', { name: '筛选调用状态' }).click()
   await page.getByRole('option', { name: 'key 无效', exact: true }).click()
   await page.getByRole('button', { name: 'three@example.test', exact: true }).waitFor()
@@ -411,10 +524,12 @@ try {
 
   await page.getByRole('button', { name: 'one@example.test', exact: true }).click()
   const detail = page.getByRole('dialog', {
-    name: '账号 API key',
+    name: '账号 API Key',
     exact: true,
   })
   await detail.waitFor()
+  assert.ok(page.url().endsWith('#/openai-apikey?vm_id=vm-01'))
+  assert.ok(await detail.getByRole('button', { name: '复制', exact: true }).isDisabled())
   const desktopDetailBounds = await detail.boundingBox()
   assert.ok(desktopDetailBounds && desktopDetailBounds.x > 40 && desktopDetailBounds.width < 1300)
   assert.ok(
@@ -426,6 +541,7 @@ try {
     'desktop details fit within the viewport',
   )
   assert.ok((await detail.innerText()).includes('192.0.2.10:1080'), 'details show the safe proxy address')
+  assert.ok((await detail.innerText()).includes('东京账号出口'), 'details show the proxy name')
   assert.equal(await detail.getByLabel('官方 key 内容').innerText(), 'sk-proj-abcd…')
   await page.screenshot({ path: path.join(output, 'desktop-detail-1440.png'), fullPage: true, animations: 'disabled' })
   assert.equal(requests.filter((request) => request.path.endsWith('/key')).length, 0)
@@ -518,13 +634,14 @@ try {
   }
   await page.getByRole('button', { name: '刷新列表', exact: true }).click()
   await until(
-    async () => (await firstRow.innerText()).includes('仅手动刷新'),
-    'manual refresh mode remains visible alongside a failure',
+    async () => (await firstRow.innerText()).includes('刷新失败'),
+    'a balance failure remains visible in the account row',
   )
   assert.ok((await firstRow.innerText()).includes('失败'))
   await page.getByRole('button', { name: 'one@example.test', exact: true }).click()
   await detail.waitFor()
   assert.ok((await detail.innerText()).includes('Billing 导航未完成，请重试刷新'))
+  assert.ok((await detail.innerText()).includes('仅手动刷新'))
   await page.screenshot({
     path: path.join(output, 'balance-failure-detail.png'),
     fullPage: true,
@@ -558,18 +675,25 @@ try {
     false,
   )
 
-  await page.getByRole('button', { name: '绑定已有 key', exact: true }).click()
+  await page.goto(url + '#/openai-apikey?vm_id=slot-four')
+  await detail.waitFor()
+  await detail.getByRole('button', { name: '查询领取资格', exact: true }).click()
+  await detail.getByRole('button', { name: '领取赠额', exact: true }).click()
+  await detail.getByRole('button', { name: '配置 API Key', exact: true }).waitFor()
+  assert.equal(requests.filter((request) => request.path.endsWith('/browser/open')).length, 0)
+  await detail.getByRole('button', { name: '绑定已有 Key', exact: true }).click()
   const binding = page.getByRole('dialog', {
-    name: '绑定已有 key',
+    name: '绑定已有 Key',
     exact: true,
   })
   await binding.waitFor()
-  await binding.getByRole('combobox').click()
-  await page.getByRole('option', { name: 'four@example.test · 账号四', exact: true }).click()
-  await binding.getByLabel('官方 API key', { exact: true }).fill('sk-offline-manual-bind')
+  assert.equal(await binding.getByRole('combobox').count(), 0)
+  await binding.getByLabel('官方 API Key', { exact: true }).fill('sk-offline-manual-bind')
   await binding.getByRole('button', { name: '保存', exact: true }).click()
   await binding.waitFor({ state: 'hidden' })
-  await page.getByRole('button', { name: 'four@example.test', exact: true }).waitFor()
+  await detail.getByRole('button', { name: '连接 Platform', exact: true }).waitFor()
+  await detail.getByRole('button', { name: 'Close', exact: true }).click()
+  await detail.waitFor({ state: 'hidden' })
   assert.equal(requests.filter((request) => request.method === 'PUT' && request.path.endsWith('/key')).length, 1)
   assert.equal(
     requests.some((request) => /models|responses|completions/.test(request.path)),
@@ -577,9 +701,54 @@ try {
     'manual binding never queries models or calls inference',
   )
 
+  await page.setViewportSize({ width: 1760, height: 1050 })
+  await page.goto(url + '#/vm')
+  await page.reload()
+  await page.getByRole('heading', { name: '虚拟机', exact: true }).waitFor()
+  await page.getByRole('button', { name: '查看 vm-01 详情', exact: true }).waitFor()
+  assert.equal(await page.getByRole('button', { name: '网格视图' }).getAttribute('aria-pressed'), 'true')
+  await page.screenshot({ path: path.join(output, 'official-grid-1760.png'), animations: 'disabled' })
+  await page.getByRole('button', { name: '列表视图' }).click()
+  const vmTable = page.getByRole('table', { name: '槽位列表' })
+  await vmTable.waitFor()
+  await page.screenshot({ path: path.join(output, 'official-list-1760.png'), animations: 'disabled' })
+  await page.reload()
+  await vmTable.waitFor()
+  assert.equal(await page.getByRole('button', { name: '列表视图' }).getAttribute('aria-pressed'), 'true')
+  const vmSearch = page.getByPlaceholder('搜索名称 / 邮箱 / 代理')
+  await vmSearch.fill('vm-02')
+  await vmTable.getByRole('row', { name: /^vm-02，/ }).waitFor()
+  assert.equal(await vmTable.getByRole('row', { name: /^vm-01，/ }).count(), 0)
+  await vmSearch.clear()
+  await vmTable.getByRole('button', { name: '5H', exact: true }).click()
+  assert.equal(
+    await vmTable.getByRole('columnheader', { name: '5H', exact: true }).getAttribute('aria-sort'),
+    'descending',
+  )
+  const vmRow = vmTable.getByRole('row', { name: /^vm-01，/ })
+  await vmRow.focus()
+  await vmRow.press('Enter')
+  await vmTable.getByRole('region', { name: '请求健康', exact: true }).waitFor()
+  await vmRow.press('Enter')
+  assert.equal(await vmTable.getByRole('region', { name: '请求健康', exact: true }).count(), 0)
+  await page.setViewportSize({ width: 390, height: 844 })
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
+  assert.ok(
+    await page.locator('[data-vm-table]').evaluate((element) => element.scrollWidth > element.clientWidth),
+    'the official VM list retains its horizontal scroller on mobile',
+  )
+  await page.setViewportSize({ width: 1760, height: 1050 })
+  await vmRow.getByRole('button', { name: '更多操作 vm-01', exact: true }).click()
+  await page.getByRole('menuitem', { name: '管理 OpenAI API Key', exact: true }).click()
+  await detail.waitFor()
+  assert.ok(page.url().endsWith('#/openai-apikey?vm_id=vm-01'))
+  assert.ok((await detail.innerText()).includes('one@example.test'))
+  await detail.getByRole('button', { name: 'Close', exact: true }).click()
+  await detail.waitFor({ state: 'hidden' })
+
   empty = true
   await page.reload()
-  await page.getByText('还没有已绑定的官方 key。', { exact: false }).waitFor()
+  await page.getByText('暂无可管理的 OpenAI 账号。', { exact: true }).waitFor()
   await page.screenshot({
     path: path.join(output, 'empty-state.png'),
     fullPage: true,
@@ -587,7 +756,7 @@ try {
   role = 'super'
   const listsBefore = requests.filter((request) => request.path === '/api/panel/openai-apikey').length
   await page.reload()
-  await page.getByText('只有管理员可以管理账号 API key。', { exact: true }).waitFor()
+  await page.getByText('只有管理员可以管理账号 API Key。', { exact: true }).waitFor()
   await sleep(150)
   assert.equal(
     requests.filter((request) => request.path === '/api/panel/openai-apikey').length,
@@ -615,6 +784,8 @@ try {
       batch_partial_result: true,
       delete_confirmation: true,
       manual_binding_without_model_query: true,
+      claim_never_opens_browser: true,
+      official_vm_grid_list_and_link: true,
       empty_state: true,
       administrator_only: true,
       external_requests: externalRequests.length,

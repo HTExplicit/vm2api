@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { VIEW_TITLES } from '@/config/nav'
 import type {
@@ -7,9 +7,8 @@ import type {
   OpenaiApiCallStatus,
   OpenaiApiKeyEntry,
 } from '@/types/panel-openai-apikey'
-import { Plus, RefreshCw } from 'lucide-react'
+import { RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
-import { fmtAgo, fmtExpiresAt, fmtUsd } from '@/lib/format'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -38,8 +37,9 @@ import { meQueryOptions } from '@/features/auth/queries'
 import {
   openaiApiBalanceStatusMessage,
   openaiApiBalanceStatusText,
+  openaiApiClaimLabel,
+  openaiApiClaimLocked,
 } from '@/features/vm/openai-api-state'
-import { ApiKeyBindDialog } from './bind-dialog'
 import { ApiKeyDetailDialog } from './detail-dialog'
 import { batchApiKeys, runApiKeyAction, setApiKeyEnabled } from './key-api'
 import {
@@ -47,18 +47,44 @@ import {
   BATCH_STATUS_LABELS,
   batchSummary,
   CALL_STATUS_LABELS,
+  CONFIG_FILTERS,
   filterApiKeys,
-  maskedKey,
-  proxyDescription,
-  proxyName,
   targetId,
+  type ConfigFilter,
 } from './key-display'
 import { invalidateOpenaiApiKeys, openaiApiKeysQueryOptions } from './queries'
 
+const BATCH_BUTTONS = [
+  ['enable', '开启'],
+  ['disable', '关闭'],
+  ['refresh_balance', '刷新余额'],
+  ['resume', '解除额度阻断'],
+] as const
+
+type KeyAction =
+  | { item: OpenaiApiKeyEntry; name: 'toggle'; enabled: boolean }
+  | { item: OpenaiApiKeyEntry; name: 'refresh' | 'resume' }
+
+function configurationLabel(item: OpenaiApiKeyEntry) {
+  if (!openaiApiClaimLocked(item) && !item.has_key) return null
+  if (
+    item.setup_status === 'configuring' &&
+    (item.balance_refresh_status === 'queued' ||
+      item.balance_refresh_status === 'refreshing')
+  )
+    return '配置中'
+  if (item.has_key) return '已绑定'
+  if (item.setup_status === 'needs_login') return '需要登录'
+  if (item.setup_status === 'error') return '配置失败'
+  return '待配置'
+}
+
 export function OpenaiApiKeyPage({
-  initialVmId = '',
+  vmId,
+  onVmIdChange,
 }: {
-  initialVmId?: string
+  vmId?: string
+  onVmIdChange: (vmId?: string) => void
 }) {
   const me = useQuery(meQueryOptions())
   const isAdmin = me.data?.role === 'admin'
@@ -66,52 +92,40 @@ export function OpenaiApiKeyPage({
   const qc = useQueryClient()
   const items = q.data?.items || []
   const [search, setSearch] = useState('')
-  const [enabledFilter, setEnabledFilter] = useState<'all' | 'on' | 'off'>(
-    'all'
-  )
-  const [statusFilter, setStatusFilter] = useState<OpenaiApiCallStatus | 'all'>(
+  const [configFilter, setConfigFilter] = useState<ConfigFilter>('all')
+  const [callFilter, setCallFilter] = useState<OpenaiApiCallStatus | 'all'>(
     'all'
   )
   const [selection, setSelection] = useState<Set<string>>(() => new Set())
-  const [detailId, setDetailId] = useState('')
-  const [binding, setBinding] = useState(false)
-  const [replacing, setReplacing] = useState<OpenaiApiKeyEntry | null>(null)
   const [deleting, setDeleting] = useState<OpenaiApiKeyEntry[]>([])
-  const [results, setResults] = useState<OpenaiApiBatchResult[]>([])
-  const [resultNames, setResultNames] = useState<Record<string, string>>({})
-  const visible = filterApiKeys(items, search, enabledFilter, statusFilter)
-  const selected = items.filter((item) => selection.has(targetId(item)))
-  const detail = items.find((item) => targetId(item) === detailId)
-  const located = items.find((item) => item.vm_id === initialVmId)
-  const locatedId = located ? targetId(located) : ''
-  const allVisibleSelected =
-    visible.length > 0 && visible.every((item) => selection.has(targetId(item)))
-  useEffect(() => {
-    if (initialVmId) setDetailId(locatedId)
-  }, [initialVmId, locatedId])
+  const [results, setResults] = useState<
+    (OpenaiApiBatchResult & { label: string })[]
+  >([])
+
+  const visible = filterApiKeys(items, search, configFilter, callFilter)
+  const selectable = visible.filter((item) => item.has_key)
+  const selected = items.filter(
+    (item) => item.has_key && selection.has(targetId(item))
+  )
+  const selectedCount = selectable.filter((item) =>
+    selection.has(targetId(item))
+  ).length
+  const detail = items.find((item) => item.vm_id === vmId)
 
   const action = useMutation({
-    mutationFn: async ({
-      item,
-      name,
-      enabled,
-    }: {
-      item: OpenaiApiKeyEntry
-      name: 'toggle' | 'refresh' | 'resume'
-      enabled?: boolean
-    }) => {
-      if (name === 'toggle') await setApiKeyEnabled(item, !!enabled)
-      else await runApiKeyAction(item, name)
-    },
-    onSuccess: async (_data, variables) => {
+    mutationFn: ({ item, ...action }: KeyAction) =>
+      action.name === 'toggle'
+        ? setApiKeyEnabled(item, action.enabled)
+        : runApiKeyAction(item, action.name),
+    onSuccess: async (_data, action) => {
       toast.success(
-        variables.name === 'refresh'
-          ? '余额刷新已提交'
-          : variables.name === 'resume'
-            ? '额度阻断已解除'
-            : variables.enabled
-              ? 'API 使用已开启'
-              : 'API 使用已关闭'
+        action.name === 'toggle'
+          ? action.enabled
+            ? 'API 使用已开启'
+            : 'API 使用已关闭'
+          : action.name === 'refresh'
+            ? '余额刷新已提交'
+            : '额度阻断已解除'
       )
       await invalidateOpenaiApiKeys(qc)
     },
@@ -125,104 +139,125 @@ export function OpenaiApiKeyPage({
       name: OpenaiApiBatchAction
       rows: OpenaiApiKeyEntry[]
     }) => batchApiKeys(name, rows),
-    onSuccess: async (data, variables) => {
-      setResults(data.results)
-      setDeleting([])
-      if (variables.name === 'delete') {
+    onSuccess: async (data, { name, rows }) => {
+      const names = new Map(
+        rows.map((item) => [targetId(item), item.email || item.slot_name])
+      )
+      setResults(
+        data.results.map((row) => ({
+          ...row,
+          label: names.get(targetId(row)) || row.vm_id,
+        }))
+      )
+      if (name === 'delete') {
+        setDeleting([])
         setSelection(new Set())
-        const removed = new Set(
-          data.results.filter((row) => row.status === 'done').map(targetId)
+        if (
+          detail &&
+          data.results.some(
+            (row) => row.status === 'done' && targetId(row) === targetId(detail)
+          )
         )
-        if (removed.has(detailId)) setDetailId('')
+          onVmIdChange()
       }
+      const message = batchSummary(data.results)
       if (data.results.some((row) => row.status === 'error'))
-        toast.error(batchSummary(data.results))
-      else toast.success(batchSummary(data.results))
+        toast.error(message)
+      else toast.success(message)
       await invalidateOpenaiApiKeys(qc)
     },
     onError: (error: Error) => toast.error(error.message),
   })
   const busy = action.isPending || batch.isPending
-  function choose(item: OpenaiApiKeyEntry, checked: boolean) {
+
+  function choose(rows: OpenaiApiKeyEntry[], checked: boolean) {
     setSelection((previous) => {
       const next = new Set(previous)
-      if (checked) next.add(targetId(item))
-      else next.delete(targetId(item))
+      for (const item of rows) {
+        if (checked) next.add(targetId(item))
+        else next.delete(targetId(item))
+      }
       return next
     })
   }
-  function runBatch(name: OpenaiApiBatchAction) {
+
+  function runBatch(name: OpenaiApiBatchAction, rows: OpenaiApiKeyEntry[]) {
     setResults([])
-    setResultNames(
-      Object.fromEntries(selected.map((item) => [targetId(item), item.email]))
-    )
-    batch.mutate({ name, rows: selected })
+    batch.mutate({ name, rows })
   }
 
+  const title = VIEW_TITLES['openai-apikey']
   if (me.isLoading)
     return (
-      <PageHeader title={VIEW_TITLES['openai-apikey']}>
-        <TableSkeleton rows={5} columns={8} />
+      <PageHeader title={title}>
+        <TableSkeleton rows={5} columns={7} />
       </PageHeader>
     )
   if (!isAdmin)
     return (
-      <PageHeader title={VIEW_TITLES['openai-apikey']}>
+      <PageHeader title={title}>
         <p className='text-sm text-muted-foreground'>
-          只有管理员可以管理账号 API key。
+          只有管理员可以管理账号 API Key。
         </p>
       </PageHeader>
     )
   return (
     <PageHeader
-      title={VIEW_TITLES['openai-apikey']}
-      description='管理账号绑定的官方 key。调用使用槽位当前代理，余额仅作展示。'
+      title={title}
+      description='查看订阅赠额、配置 OpenAI Platform Key 和管理账号调用。'
       extra={
-        <div className='flex flex-wrap gap-2'>
-          <Button variant='outline' asChild>
-            <a href='#/models?platform=openai'>OpenAI 模型</a>
-          </Button>
-          <Button onClick={() => setBinding(true)}>
-            <Plus aria-hidden />
-            绑定已有 key
-          </Button>
-        </div>
+        <Button variant='outline' asChild>
+          <a href='#/models?platform=openai'>OpenAI 模型</a>
+        </Button>
       }
       fluid
     >
       <QueryGate
         loading={q.isLoading}
         error={q.error}
-        skeleton={<TableSkeleton rows={6} columns={9} />}
+        skeleton={<TableSkeleton rows={6} columns={7} />}
       >
         <div className='space-y-4'>
+          {vmId && !detail ? (
+            <div
+              role='status'
+              className='flex items-center justify-between rounded-md border px-3 py-2 text-sm'
+            >
+              <span>该槽位暂无可管理的 OpenAI 账号。</span>
+              <Button variant='ghost' size='sm' onClick={() => onVmIdChange()}>
+                返回列表
+              </Button>
+            </div>
+          ) : null}
           <div className='flex flex-wrap items-center gap-2'>
             <Input
               className='w-full sm:w-72'
-              aria-label='搜索账号 API key'
+              type='search'
+              aria-label='搜索 OpenAI 账号'
               placeholder='搜索槽位、邮箱或组织'
               value={search}
               onChange={(event) => setSearch(event.target.value)}
             />
             <Select
-              value={enabledFilter}
-              onValueChange={(value) =>
-                setEnabledFilter(value as typeof enabledFilter)
-              }
+              value={configFilter}
+              onValueChange={(value) => setConfigFilter(value as ConfigFilter)}
             >
-              <SelectTrigger className='w-32' aria-label='筛选使用开关'>
+              <SelectTrigger className='w-36' aria-label='筛选配置状态'>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value='all'>全部开关</SelectItem>
-                <SelectItem value='on'>已开启</SelectItem>
-                <SelectItem value='off'>已关闭</SelectItem>
+                <SelectItem value='all'>全部配置状态</SelectItem>
+                {Object.entries(CONFIG_FILTERS).map(([value, label]) => (
+                  <SelectItem key={value} value={value}>
+                    {label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
             <Select
-              value={statusFilter}
+              value={callFilter}
               onValueChange={(value) =>
-                setStatusFilter(value as typeof statusFilter)
+                setCallFilter(value as typeof callFilter)
               }
             >
               <SelectTrigger className='w-36' aria-label='筛选调用状态'>
@@ -250,51 +285,32 @@ export function OpenaiApiKeyPage({
               {visible.length} / {items.length} 个账号
             </span>
           </div>
-          <div className='flex flex-wrap items-center gap-2 rounded-md bg-muted/40 p-2'>
-            <span className='px-1 text-xs text-muted-foreground'>
-              已选 {selected.length}
-            </span>
-            <Button
-              variant='outline'
-              size='sm'
-              disabled={!selected.length || busy}
-              onClick={() => runBatch('enable')}
-            >
-              开启
-            </Button>
-            <Button
-              variant='outline'
-              size='sm'
-              disabled={!selected.length || busy}
-              onClick={() => runBatch('disable')}
-            >
-              关闭
-            </Button>
-            <Button
-              variant='outline'
-              size='sm'
-              disabled={!selected.length || busy}
-              onClick={() => runBatch('refresh_balance')}
-            >
-              刷新余额
-            </Button>
-            <Button
-              variant='outline'
-              size='sm'
-              disabled={!selected.length || busy}
-              onClick={() => runBatch('resume')}
-            >
-              解除额度阻断
-            </Button>
-            <Button
-              variant='outline'
-              size='sm'
-              disabled={!selected.length || busy}
-              onClick={() => setDeleting(selected)}
-            >
-              解除本地绑定
-            </Button>
-          </div>
+          {selected.length ? (
+            <div className='flex flex-wrap items-center gap-2 rounded-md bg-muted/40 p-2'>
+              <span className='px-1 text-xs text-muted-foreground'>
+                已选 {selected.length}
+              </span>
+              {BATCH_BUTTONS.map(([name, label]) => (
+                <Button
+                  key={name}
+                  variant='outline'
+                  size='sm'
+                  disabled={busy}
+                  onClick={() => runBatch(name, selected)}
+                >
+                  {label}
+                </Button>
+              ))}
+              <Button
+                variant='outline'
+                size='sm'
+                disabled={busy}
+                onClick={() => setDeleting(selected)}
+              >
+                解除本地绑定
+              </Button>
+            </div>
+          ) : null}
           {results.length ? (
             <div
               role='status'
@@ -304,7 +320,7 @@ export function OpenaiApiKeyPage({
               <ul className='max-h-44 space-y-1 overflow-y-auto'>
                 {results.map((result) => (
                   <li key={targetId(result)} className='break-words'>
-                    <span>{resultNames[targetId(result)] || result.vm_id}</span>
+                    <span>{result.label}</span>
                     <span
                       className={
                         result.status === 'error'
@@ -312,8 +328,8 @@ export function OpenaiApiKeyPage({
                           : 'text-muted-foreground'
                       }
                     >
-                      {' '}
-                      · {BATCH_STATUS_LABELS[result.status]}
+                      {' · '}
+                      {BATCH_STATUS_LABELS[result.status]}
                       {result.error ? `：${result.error.message}` : ''}
                     </span>
                   </li>
@@ -322,203 +338,164 @@ export function OpenaiApiKeyPage({
             </div>
           ) : null}
           <div className='rounded-md border'>
-            <Table density='compact'>
+            <Table density='compact' aria-label='OpenAI 账号 API Key'>
               <TableHeader>
                 <TableRow>
                   <TableHead className='w-10'>
                     <Checkbox
-                      aria-label='选择当前筛选的全部账号'
+                      aria-label='选择当前筛选的已绑定账号'
                       checked={
-                        allVisibleSelected
+                        selectedCount > 0 &&
+                        (selectedCount === selectable.length
                           ? true
-                          : visible.some((item) =>
-                                selection.has(targetId(item))
-                              )
-                            ? 'indeterminate'
-                            : false
+                          : 'indeterminate')
                       }
-                      disabled={!visible.length || busy}
+                      disabled={!selectable.length || busy}
                       onCheckedChange={(checked) =>
-                        setSelection((previous) => {
-                          const next = new Set(previous)
-                          for (const item of visible) {
-                            if (checked) next.add(targetId(item))
-                            else next.delete(targetId(item))
-                          }
-                          return next
-                        })
+                        choose(selectable, checked === true)
                       }
                     />
                   </TableHead>
                   <TableHead>账号 / 槽位</TableHead>
-                  <TableHead>官方 key</TableHead>
+                  <TableHead>赠额与配置</TableHead>
                   <TableHead>API 使用</TableHead>
                   <TableHead>调用状态</TableHead>
                   <TableHead>API 余额</TableHead>
-                  <TableHead>当前代理</TableHead>
-                  <TableHead className='text-end'>今日调用</TableHead>
-                  <TableHead className='text-end'>今日估算费用</TableHead>
-                  <TableHead>最近调用</TableHead>
                   <TableHead className='text-end'>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {!visible.length ? (
+                {visible.length === 0 ? (
                   <TableRow>
                     <TableCell
-                      colSpan={11}
+                      colSpan={7}
                       className='h-32 text-center whitespace-normal text-muted-foreground'
                     >
                       {items.length
                         ? '没有符合筛选条件的账号'
-                        : '还没有已绑定的官方 key。请在账号页完成赠额领取和自动配置，或绑定已有 key。'}
+                        : '暂无可管理的 OpenAI 账号。'}
                     </TableCell>
                   </TableRow>
                 ) : null}
-                {visible.map((item) => (
-                  <TableRow
-                    key={targetId(item)}
-                    data-state={
-                      selection.has(targetId(item)) ? 'selected' : undefined
-                    }
-                  >
-                    <TableCell>
-                      <Checkbox
-                        aria-label={`选择 ${item.email}`}
-                        checked={selection.has(targetId(item))}
-                        disabled={busy}
-                        onCheckedChange={(checked) => choose(item, !!checked)}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <button
-                        className='block max-w-64 truncate text-start font-medium underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-ring'
-                        title={item.email}
-                        onClick={() => setDetailId(targetId(item))}
-                      >
-                        {item.email}
-                      </button>
-                      <div className='max-w-64 truncate text-xs text-muted-foreground'>
-                        {item.slot_name || item.vm_id}
-                      </div>
-                    </TableCell>
-                    <TableCell className='font-mono text-xs'>
-                      {maskedKey(item.key_prefix)}
-                    </TableCell>
-                    <TableCell>
-                      <Switch
-                        aria-label={`${item.email} API 使用`}
-                        checked={item.enabled}
-                        disabled={busy}
-                        onCheckedChange={(enabled) =>
-                          action.mutate({ item, name: 'toggle', enabled })
-                        }
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={
-                          item.call_status === 'ready' ? 'secondary' : 'outline'
-                        }
-                      >
-                        {CALL_STATUS_LABELS[item.call_status]}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className='tabular-nums'>
-                      <span>{balanceText(item.balance)}</span>
-                      {openaiApiBalanceStatusText(item) ? (
-                        <div
-                          className='text-[11px] text-muted-foreground'
-                          title={openaiApiBalanceStatusMessage(item)}
-                        >
-                          {openaiApiBalanceStatusText(item)}
-                        </div>
-                      ) : null}
-                      {item.balance_refresh_interval_minutes === 0 ? (
-                        <div className='text-[11px] text-muted-foreground'>
-                          仅手动刷新
-                        </div>
-                      ) : null}
-                    </TableCell>
-                    <TableCell>
-                      <span
-                        className='block max-w-36 truncate'
-                        title={proxyDescription(item.proxy)}
-                      >
-                        {proxyName(item.proxy)}
-                      </span>
-                    </TableCell>
-                    <TableCell className='text-end tabular-nums'>
-                      {item.today_requests}
-                    </TableCell>
-                    <TableCell className='text-end tabular-nums'>
-                      {item.today_cost == null
-                        ? '未知'
-                        : fmtUsd(item.today_cost)}
-                      {item.unpriced_requests ? (
-                        <div className='text-[11px] text-muted-foreground'>
-                          含未定价调用
-                        </div>
-                      ) : null}
-                    </TableCell>
-                    <TableCell
-                      className='text-xs text-muted-foreground'
-                      title={
-                        item.last_used_at
-                          ? fmtExpiresAt(item.last_used_at)
-                          : undefined
-                      }
+                {visible.map((item) => {
+                  const id = targetId(item)
+                  const checked = item.has_key && selection.has(id)
+                  const label = item.email || item.slot_name
+                  const balanceStatus = openaiApiBalanceStatusText(item)
+                  const setupStatus = configurationLabel(item)
+                  return (
+                    <TableRow
+                      key={id}
+                      data-state={checked ? 'selected' : undefined}
                     >
-                      {item.last_used_at
-                        ? fmtAgo(item.last_used_at)
-                        : '暂无调用'}
-                    </TableCell>
-                    <TableCell className='text-end'>
-                      <Button
-                        size='sm'
-                        variant='ghost'
-                        onClick={() => setDetailId(targetId(item))}
-                      >
-                        详情
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                      <TableCell>
+                        {item.has_key ? (
+                          <Checkbox
+                            aria-label={`选择 ${label}`}
+                            checked={checked}
+                            disabled={busy}
+                            onCheckedChange={(value) =>
+                              choose([item], value === true)
+                            }
+                          />
+                        ) : null}
+                      </TableCell>
+                      <TableCell>
+                        <button
+                          type='button'
+                          className='block max-w-64 truncate text-start font-medium underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-ring'
+                          title={label}
+                          onClick={() => onVmIdChange(item.vm_id)}
+                        >
+                          {label}
+                        </button>
+                        <div className='max-w-64 truncate text-xs text-muted-foreground'>
+                          {item.slot_name}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <span className='text-sm'>
+                          {item.claim_status === 'claimed'
+                            ? '已领取'
+                            : openaiApiClaimLabel(item)}
+                        </span>
+                        {setupStatus ? (
+                          <div className='text-xs text-muted-foreground'>
+                            {setupStatus}
+                          </div>
+                        ) : null}
+                      </TableCell>
+                      <TableCell>
+                        {item.has_key ? (
+                          <Switch
+                            aria-label={`${label} API 使用`}
+                            checked={item.enabled}
+                            disabled={busy}
+                            onCheckedChange={(enabled) =>
+                              action.mutate({ item, name: 'toggle', enabled })
+                            }
+                          />
+                        ) : (
+                          '—'
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {item.call_status ? (
+                          <Badge
+                            variant={
+                              item.call_status === 'ready'
+                                ? 'secondary'
+                                : 'outline'
+                            }
+                          >
+                            {CALL_STATUS_LABELS[item.call_status]}
+                          </Badge>
+                        ) : (
+                          '—'
+                        )}
+                      </TableCell>
+                      <TableCell className='tabular-nums'>
+                        {item.has_key || item.balance != null
+                          ? balanceText(item.balance)
+                          : '—'}
+                        {balanceStatus ? (
+                          <div
+                            className='text-xs text-muted-foreground'
+                            title={openaiApiBalanceStatusMessage(item)}
+                          >
+                            {balanceStatus}
+                          </div>
+                        ) : null}
+                      </TableCell>
+                      <TableCell className='text-end'>
+                        <Button
+                          size='sm'
+                          variant='ghost'
+                          onClick={() => onVmIdChange(item.vm_id)}
+                        >
+                          详情
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
               </TableBody>
             </Table>
           </div>
-          <p className='text-xs leading-relaxed text-muted-foreground'>
-            调用统计按账号累计，包含官方明确拒绝的尝试；费用为 vm2api
-            估算。客户端密钥仍在“密钥”页选择 OpenAI(apikey) 并勾选槽位。
-          </p>
         </div>
       </QueryGate>
       {detail ? (
         <ApiKeyDetailDialog
-          key={`${targetId(detail)}:${detail.key_prefix || ''}`}
+          key={targetId(detail)}
           item={detail}
           busy={busy}
-          onClose={() => setDetailId('')}
+          onClose={() => onVmIdChange()}
           onToggle={(enabled) =>
             action.mutate({ item: detail, name: 'toggle', enabled })
           }
           onRefresh={() => action.mutate({ item: detail, name: 'refresh' })}
           onResume={() => action.mutate({ item: detail, name: 'resume' })}
-          onReplace={() => {
-            setDetailId('')
-            setReplacing(detail)
-          }}
           onDelete={() => setDeleting([detail])}
-        />
-      ) : null}
-      {binding || replacing ? (
-        <ApiKeyBindDialog
-          candidates={q.data?.bind_candidates || []}
-          replacing={replacing}
-          onClose={() => {
-            setBinding(false)
-            setReplacing(null)
-          }}
         />
       ) : null}
       <ConfirmDialog
@@ -527,13 +504,10 @@ export function OpenaiApiKeyPage({
         title={`解除 ${deleting.length} 个账号的本地绑定`}
         desc={
           <div className='space-y-2'>
-            <p>
-              仅删除 vm2api 保存的 key，保留领取记录、组织余额和历史日志，官方
-              key 不会被撤销。
-            </p>
+            <p>仅删除 vm2api 保存的 Key，保留领取记录、组织余额和历史日志。</p>
             <ul className='max-h-48 list-inside list-disc overflow-y-auto break-all'>
               {deleting.map((item) => (
-                <li key={targetId(item)}>{item.email}</li>
+                <li key={targetId(item)}>{item.email || item.slot_name}</li>
               ))}
             </ul>
           </div>
@@ -542,15 +516,7 @@ export function OpenaiApiKeyPage({
         cancelBtnText='取消'
         destructive
         isLoading={batch.isPending}
-        handleConfirm={() => {
-          setResults([])
-          setResultNames(
-            Object.fromEntries(
-              deleting.map((item) => [targetId(item), item.email])
-            )
-          )
-          batch.mutate({ name: 'delete', rows: deleting })
-        }}
+        handleConfirm={() => runBatch('delete', deleting)}
       />
     </PageHeader>
   )

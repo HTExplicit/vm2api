@@ -83,11 +83,10 @@ async function rpcPayload(response, id) {
 
 /** Promo tools use the slot's ChatGPT credential; Platform key management is separate. */
 export class OpenaiApiCreditsService {
-  constructor({ projectRoot, repo, fetchImpl, onLinked, now = Date.now } = {}) {
+  constructor({ projectRoot, repo, fetchImpl, now = Date.now } = {}) {
     this.projectRoot = projectRoot
     this.repo = repo
     this.fetchImpl = fetchImpl
-    this.onLinked = onLinked
     this.now = now
     this.inflight = new Map()
   }
@@ -321,7 +320,7 @@ export class OpenaiApiCreditsService {
           : preview.eligible
             ? 'eligible'
             : 'ineligible'
-      const record = this.repo.upsertAccount(context.accountId, {
+      this.repo.upsertAccount(context.accountId, {
         vm_id: vmId,
         claim_status: claimStatus,
         ineligibility_reason: preview.ineligibility_reason || null,
@@ -332,7 +331,6 @@ export class OpenaiApiCreditsService {
         destinations: (discovered.destinations || []).filter((row) => row.destination_type === 'api_org'),
         last_error: null,
       })
-      if (claimStatus === 'claimed') this.notifyLinked(vmId, record)
       return this.view(context.vm)
     } catch (error) {
       this.saveError(context, error)
@@ -354,7 +352,7 @@ export class OpenaiApiCreditsService {
       this.repo.upsertOrg(organizationId, {
         display_name: linked.destination_display_name || destination?.display_name || '',
       })
-      const record = this.repo.upsertAccount(context.accountId, {
+      this.repo.upsertAccount(context.accountId, {
         vm_id: context.vm.id,
         organization_id: organizationId,
         claim_status: delivery.outcome === 'pending' ? 'pending' : 'claimed',
@@ -373,7 +371,6 @@ export class OpenaiApiCreditsService {
             : null),
         last_error: null,
       })
-      if (record.claim_status === 'claimed') this.notifyLinked(context.vm.id, record)
       return this.view(context.vm)
     } catch (error) {
       this.saveError(context, error)
@@ -386,17 +383,5 @@ export class OpenaiApiCreditsService {
       vm_id: context.vm.id,
       last_error: error.message || 'API 赠额查询失败',
     })
-  }
-
-  notifyLinked(vmId, record) {
-    if (this.onLinked)
-      Promise.resolve()
-        .then(() => this.onLinked(vmId, record))
-        .catch(() => {
-          this.repo.upsertAccount(record.account_id, {
-            setup_status: 'error',
-            last_error: '自动配置 API 失败，请继续配置',
-          })
-        })
   }
 }

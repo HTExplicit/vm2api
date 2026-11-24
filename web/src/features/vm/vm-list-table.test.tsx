@@ -145,6 +145,7 @@ describe('VM row interaction and health', () => {
     expect(html).toContain('>99.0%</b>')
     expect(html).toContain('>99/100</span>')
     expect(render({ health_24h: null })).toContain('24h 无请求')
+    expect(render()).toContain('24h 未知')
     expect(render({ health_24h: null })).not.toContain('主机内存紧张')
   })
 })

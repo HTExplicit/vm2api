@@ -8,12 +8,6 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { openaiApiCreditDetailRows } from '@/features/vm/openai-api-credit-details'
-import {
-  hasOpenaiApiFeature,
-  openaiApiBalanceStatusMessage,
-  openaiApiBalanceStatusText,
-} from '@/features/vm/openai-api-state'
 
 /** Balance credits are separate from the reset vouchers below the quota windows. */
 export function CodexCreditSummary({
@@ -25,9 +19,7 @@ export function CodexCreditSummary({
   compact?: boolean
   className?: string
 }) {
-  if (!isCodexVm(vm)) return null
-  const showApi = hasOpenaiApiFeature(vm)
-  if (!vm.has_token && !showApi) return null
+  if (!isCodexVm(vm) || !vm.has_token) return null
   const credits = vm.codex_credits
   const status = credits?.status || 'unknown'
   const pending = status === 'pending'
@@ -67,85 +59,31 @@ export function CodexCreditSummary({
   ]
     .filter(Boolean)
     .join('\n')
-  const apiState = vm.openai_api
-  const apiLabel = `API ${apiState?.balance != null ? `$${formatBalanceAmount(apiState.balance)}` : '未知'}`
-  const apiStatus = openaiApiBalanceStatusText(apiState)
-  const apiMessage = openaiApiBalanceStatusMessage(apiState)
-  const apiFacts = [
-    apiLabel,
-    apiState?.organization_name ? `组织：${apiState.organization_name}` : '',
-    '组织总可用余额，包括赠额和购买余额。',
-    ...openaiApiCreditDetailRows(apiState).map(
-      ([label, value]) => `${label}：${value}`
-    ),
-    apiState?.balance_checked_at
-      ? `最近刷新：${fmtExpiresAt(apiState.balance_checked_at)}`
-      : '尚无 API 余额样本',
-    apiStatus ? `${apiStatus}${apiMessage ? `：${apiMessage}` : ''}` : '',
-    apiState?.balance_refresh_interval_minutes === 0 ? '仅手动刷新' : '',
-    apiState?.benefit
-      ? `每${apiState.benefit.cadence === 'annual' ? '年' : '月'}权益：$${formatBalanceAmount(apiState.benefit.period_credit_amount_usd)}`
-      : '',
-    apiState?.benefit?.expires_at
-      ? `本期赠额到期：${fmtExpiresAt(apiState.benefit.expires_at)}`
-      : '',
-  ]
-    .filter(Boolean)
-    .join('\n')
   return (
-    <div
-      className={cn(
-        'flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1',
-        className
-      )}
-    >
-      {vm.has_token ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div
-              tabIndex={0}
-              aria-label={facts}
-              className={cn(
-                'min-w-0 cursor-help text-[11px] text-muted-foreground'
-              )}
-            >
-              <div className='flex min-w-0 items-baseline gap-1'>
-                <span className='truncate tabular-nums'>{label}</span>
-                {state ? (
-                  <span className='shrink-0 text-[color:var(--status-warn)]'>
-                    {state}
-                  </span>
-                ) : null}
-              </div>
-              {!compact && spending ? <div>{spending}</div> : null}
-            </div>
-          </TooltipTrigger>
-          <TooltipContent className='max-w-xs whitespace-pre-line'>
-            {facts}
-          </TooltipContent>
-        </Tooltip>
-      ) : null}
-      {showApi ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div
-              tabIndex={0}
-              aria-label={apiFacts}
-              className='flex min-w-0 cursor-help items-baseline gap-1 text-[11px] text-muted-foreground'
-            >
-              <span className='tabular-nums'>{apiLabel}</span>
-              {apiStatus ? (
-                <span className='text-[color:var(--status-warn)]'>
-                  {apiStatus}
-                </span>
-              ) : null}
-            </div>
-          </TooltipTrigger>
-          <TooltipContent className='max-w-xs whitespace-pre-line'>
-            {apiFacts}
-          </TooltipContent>
-        </Tooltip>
-      ) : null}
-    </div>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div
+          tabIndex={0}
+          aria-label={facts}
+          className={cn(
+            'min-w-0 cursor-help text-[11px] text-muted-foreground',
+            className
+          )}
+        >
+          <div className='flex min-w-0 items-baseline gap-1'>
+            <span className='truncate tabular-nums'>{label}</span>
+            {state ? (
+              <span className='shrink-0 text-[color:var(--status-warn)]'>
+                {state}
+              </span>
+            ) : null}
+          </div>
+          {!compact && spending ? <div>{spending}</div> : null}
+        </div>
+      </TooltipTrigger>
+      <TooltipContent className='max-w-xs whitespace-pre-line'>
+        {facts}
+      </TooltipContent>
+    </Tooltip>
   )
 }

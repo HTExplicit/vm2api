@@ -270,7 +270,6 @@ test('balance updates expose organization details without making old promo eligi
 
 test('claim selects the sole organization and persists its operation before linking, then blocks duplicate claims', async (t) => {
   const slot = fixture(t)
-  const linkedEvents = []
   let linkCalls = 0
   const mock = mcpMock({
     link: (args) => {
@@ -283,14 +282,14 @@ test('claim selects the sole organization and persists its operation before link
       return linked()
     },
   })
-  const service = slot.service(mock.fetch, { onLinked: (...args) => linkedEvents.push(args) })
+  const service = slot.service(mock.fetch)
   await service.preview(slot.vmId)
   const view = await service.claim(slot.vmId)
   assert.equal(view.claim_status, 'pending')
   assert.equal(view.organization_id, ORG_ID)
   assert.equal(view.organization_name, 'Personal')
   assert.equal(slot.repo.getAccount(ACCOUNT_ID).claim_status, 'pending')
-  assert.equal(linkedEvents.length, 0, 'API setup waits for the issued delivery result')
+  assert.equal(view.setup_status, 'idle')
   await service.claim(slot.vmId).catch(() => {})
   assert.equal(linkCalls, 1, 'active pending links cannot create a second linking attempt')
 })
@@ -322,6 +321,7 @@ test('pending delivery survives service recreation and rechecks the same operati
   const restarted = slot.service(mock.fetch)
   const view = await restarted.refreshClaim(slot.vmId)
   assert.equal(view.claim_status, 'claimed')
+  assert.equal(view.setup_status, 'idle')
   assert.equal(linkArguments.length, 2)
   assert.deepEqual(linkArguments[1], linkArguments[0])
   assert.equal(slot.repo.getAccount(ACCOUNT_ID).delivery.outcome, 'issued')

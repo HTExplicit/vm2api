@@ -699,7 +699,6 @@ test('Billing credentials come only from the successful exact request and requir
       accept: 'application/json',
     },
     captured_at: '2026-11-01T00:00:00.000Z',
-    recovery_attempted: false,
   })
   saved.headers.authorization = 'changed-copy'
   assert.equal(adapter.billingSessionFor('org-one').headers.authorization, headers.authorization)

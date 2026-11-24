@@ -554,18 +554,11 @@ const slotBrowserManager = new SlotBrowserManager({
   resolveTimezone: (vm, proxyUrl) => proxyPool.browserTimezone(vm.proxy?.id, proxyUrl),
   getAccountIdentity: (id) => slotAccountIdentity(id).accountId || '',
 })
-let openaiApiManager
 const openaiApiCredits = new OpenaiApiCreditsService({
   projectRoot: cfg.paths.project,
   repo: openaiApiRepo,
-  onLinked: (vmId) => {
-    Promise.resolve()
-      .then(() => codexBrowserLogin.cancel(vmId))
-      .then(() => openaiApiManager.setup(vmId))
-      .catch(() => {})
-  },
 })
-openaiApiManager = new OpenaiApiManager({
+const openaiApiManager = new OpenaiApiManager({
   cfg,
   repo: openaiApiRepo,
   browserManager: slotBrowserManager,

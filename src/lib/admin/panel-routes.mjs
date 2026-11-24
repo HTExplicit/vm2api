@@ -2307,9 +2307,13 @@ export function createPanelHandler(ctx) {
             accountBrowserRuntime?.launchConfig()
           let result
           if (req.method === 'GET' && resource === 'browser') result = slotBrowserManager.state(vmId)
-          else if (req.method === 'POST' && resource === 'browser-ticket')
-            result = slotBrowserManager.browserTicket(vmId)
-          else if (req.method === 'POST' && action === 'open') {
+          else if (req.method === 'POST' && resource === 'browser-ticket') {
+            const body = await readBody(req, 4096)
+            if (body?.account_id != null) {
+              openaiApiManager.assertAccountIdentity(vmId, body.account_id)
+              result = slotBrowserManager.browserTicket(vmId, { purpose: 'platform' })
+            } else result = slotBrowserManager.browserTicket(vmId)
+          } else if (req.method === 'POST' && action === 'open') {
             const body = await readBody(req, 4096)
             const purpose = body?.purpose || 'oauth'
             if (purpose === 'oauth' || purpose === 'platform') {
@@ -2321,10 +2325,13 @@ export function createPanelHandler(ctx) {
               await openaiApiManager.cancel(vmId, { closeBrowser: false })
               result = codexBrowserLogin.start(vmId)
             } else if (purpose === 'platform') {
+              if (body?.account_id != null) openaiApiManager.assertAccountIdentity(vmId, body.account_id)
               await codexBrowserLogin.cancel(vmId)
-              const account = openaiApiManager.view(vm)
-              if (['claimed', 'pending'].includes(account?.claim_status)) {
-                openaiApiManager.setup(vmId)
+              if (
+                body?.account_id != null ||
+                ['claimed', 'pending'].includes(openaiApiManager.view(vm)?.claim_status)
+              ) {
+                openaiApiManager.setup(vmId, body?.account_id)
                 result = slotBrowserManager.state(vmId)
               } else {
                 slotBrowserManager.open(vmId, { purpose: 'platform', interactive: true })
@@ -2347,6 +2354,8 @@ export function createPanelHandler(ctx) {
                 error: { code: 'invalid_browser_purpose', message: '请选择 OAuth 或 Platform' },
               })
           } else if (req.method === 'POST' && action === 'close') {
+            const body = await readBody(req, 4096)
+            if (body?.account_id != null) openaiApiManager.assertAccountIdentity(vmId, body.account_id)
             await codexBrowserLogin?.cancel(vmId)
             await openaiApiManager?.cancel(vmId)
             await slotBrowserManager.close(vmId)
@@ -2417,13 +2426,18 @@ export function createPanelHandler(ctx) {
                   : await openaiApiManager.removeKey(vmId, input)
             } else return json(res, 404, { ok: false, error: { code: 'not_found', message: '接口不存在' } })
           } else if (req.method === 'GET' && !action) result = openaiApiManager.view(vm)
-          else if (req.method === 'POST' && action === 'preview') result = await openaiApiCredits.preview(vmId)
-          else if (req.method === 'POST' && action === 'claim') {
+          else if (req.method === 'POST' && (action === 'preview' || action === 'claim')) {
             const body = await readBody(req, 8192)
-            result = await openaiApiCredits.claim(vmId, { destination_account_id: body?.destination_account_id })
+            if (body?.account_id != null) openaiApiManager.assertAccountIdentity(vmId, body.account_id)
+            result =
+              action === 'preview'
+                ? await openaiApiCredits.preview(vmId)
+                : await openaiApiCredits.claim(vmId, { destination_account_id: body?.destination_account_id })
           } else if (req.method === 'POST' && action === 'setup') {
+            const body = await readBody(req, 8192)
+            if (body?.account_id != null) openaiApiManager.assertAccountIdentity(vmId, body.account_id)
             await codexBrowserLogin?.cancel(vmId)
-            result = await openaiApiManager.setup(vmId)
+            result = await openaiApiManager.setup(vmId, body?.account_id)
           } else if (req.method === 'POST' && action === 'refresh') {
             const body = await readBody(req, 8192)
             if (body?.account_id != null) openaiApiManager.assertAccountIdentity(vmId, body.account_id)

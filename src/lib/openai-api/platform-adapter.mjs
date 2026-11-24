@@ -493,7 +493,6 @@ export class PlatformAdapter {
             organization_id: organizationId,
             headers: Object.fromEntries(Object.entries(allHeaders).filter(([name]) => BILLING_HEADERS.has(name))),
             captured_at: new Date(this.now()).toISOString(),
-            recovery_attempted: false,
           })
         }
       }

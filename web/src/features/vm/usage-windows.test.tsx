@@ -141,7 +141,7 @@ describe('Codex quota readings after a quota error', () => {
     expect(html).not.toContain('到期')
   })
 
-  it('shows points and organization API balance together without trailing zeroes', () => {
+  it('shows only subscription points in the virtual machine summary', () => {
     const html = renderToStaticMarkup(
       <CodexCreditSummary
         vm={{
@@ -169,52 +169,9 @@ describe('Codex quota readings after a quota error', () => {
       />
     )
     expect(html).toContain('余额 12.34 点')
-    expect(html).toContain('API $37')
+    expect(html).not.toContain('API $37')
     expect(html).not.toContain('37.000')
     expect(html).not.toContain('12.3400')
-  })
-
-  it('keeps API balance visible without OAuth tokens and preserves failed refresh history', () => {
-    const base: Vm = {
-      id: 'vm-api',
-      platform: 'openai',
-      has_token: false,
-      plan_type: 'free',
-      openai_api: {
-        pro_eligible: false,
-        claim_status: 'claimed',
-        setup_status: 'needs_login',
-        has_key: true,
-        enabled: true,
-        balance: '12.345678901',
-        balance_error: '需要重新登录',
-      },
-    }
-    const html = renderToStaticMarkup(<CodexCreditSummary vm={base} />)
-    expect(html).toContain('API $12.34')
-    expect(html).not.toContain('12.345678901')
-    expect(html).toContain('刷新失败')
-    expect(html).not.toContain('点数不可用')
-    const unknown = renderToStaticMarkup(
-      <CodexCreditSummary
-        vm={{ ...base, openai_api: { ...base.openai_api!, balance: null } }}
-      />
-    )
-    expect(unknown).toContain('API 未知')
-    expect(unknown).not.toContain('API $0')
-    const negative = renderToStaticMarkup(
-      <CodexCreditSummary
-        vm={{ ...base, openai_api: { ...base.openai_api!, balance: '-1.239' } }}
-      />
-    )
-    expect(negative).toContain('API $-1.23')
-    const tiny = renderToStaticMarkup(
-      <CodexCreditSummary
-        vm={{ ...base, openai_api: { ...base.openai_api!, balance: '-0.009' } }}
-      />
-    )
-    expect(tiny).toContain('API $0')
-    expect(tiny).not.toContain('API $-0')
   })
 })
 
