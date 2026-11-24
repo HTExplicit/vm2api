@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.19501 — 2026-11-24
+
+- 合入[上游 v1.4.195](https://github.com/dofastted/vm2api/releases/tag/v1.4.195)，更新 CRAGGemini 请求字段筛选和调试日志，采用官方独立 Go 构建的 OAuth 换票助手。
+- 更新 Gemini 宿主时沿用已安装旧签名载荷的公钥和发行校验配置。
+
 ## 1.4.19401 — 2026-11-24
 
 - 合入[上游 v1.4.194](https://github.com/dofastted/vm2api/releases/tag/v1.4.194)，纳入 Gemini 设置、分片调度和请求兼容修复。新装默认 Gemini 载荷为 0.4.4。
@@ -243,6 +248,12 @@
 - 保留账号 API、GPT Responses 终态与失败用量、浏览器修复和不暂停调度策略。固定载荷沿用原摘要及 CRAG v2.8.16，完整归档保留官方 081 来源，22 个载荷附件及来源清单仍从同一最终镜像提取。
 
 正常面板升级即可，无新增数据库迁移或依赖。保留原启停、人工调度、并发、资源、隐私、凭据和运行配置，不自动登录或调用模型；不重装或切换现有推理内核。
+
+## 1.4.195 — 2026-11-24 · CRAGGemini 请求字段剥离与调试日志捕获；独立 Go Chrome-TLS `kin-oauth-auth`
+
+- **CRAGGemini 不受支持字段的剥离与调试体捕获**：`buildGeminiRequest` 在 `target: 'antigravity'` 下不再下发 CRAGGemini（`ALLOWED_BODY_KEYS`）与 Antigravity 拒绝的顶层 `safetySettings` / `cachedContent`，仅在直连 Gemini API 渠道且值非空时保留；宿主 `_extract_native_turn_body` 同步剥离 `safetySettings` / `cachedContent` / `conversationId` / `stream` 并把 `conversationId` 归一化为 `conversation_id`；公开处理器新增 `requestLog.tapResponse` 挂载与 debug 模式下的 `inbound_body` / `outbound_body`（含 `outbound_body_source` 区分 `craggemini` 与 `gemini_api`）捕获（#1718）。
+- **`kin-oauth-auth` 改为独立 Go Chrome-TLS 构建**：`deploy/payload.json` 的槽位载荷钉住 `payload-2026.11.24-oauth-chrome-tls`，`bin/kin-oauth-auth` 由原先 47.4 MB 的打包产物替换为 11.6 MB 的独立 Go 二进制（#1717）。
+- 部署说明：本版涉及控制面、宿主脚本（`scripts/gemini-host.py`）与 `bin/kin-oauth-auth`。**`kin-oauth-auth` 是 OAuth 换票组件且本次为整体构建链路替换**，`verify-live.py` 的门禁不覆盖真实换票，上线后请单独验证一次 OAuth 授权流程。Claude/Codex 槽位内核与 `wrap-cli` 字节未变，预期 `SLOT_SYNC=skip`；`scripts/` 不在 `remote-apply.sh` 的应用范围内，宿主侧的剥离逻辑需执行 `install.sh prepare-gemini` 才会生效（该步骤会重启 `vm2api-gemini.service`）。
 
 ## 1.4.194 — 2026-11-24 · CRAGGemini 请求净化与 Antigravity-Manager 对齐；空 `safetySettings` 不再误判为不支持
 

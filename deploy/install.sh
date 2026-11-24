@@ -786,13 +786,15 @@ prepare_gemini_host() (
   local default_source="${host_dir}/defaults/0.3.0"
   local unit=/etc/systemd/system/vm2api-gemini.service
   local current="${INSTALL_DIR}/share/gemini/current"
-  if [ -z "$source" ] && command -v systemctl >/dev/null; then
-    # Keep a source supplied by an existing unit/drop-in without copying it into .env.
-    local exec_start source_pattern='(^|[[:space:]])--payload-source(=|[[:space:]]+)(/[A-Za-z0-9._/-]+)([[:space:]]|$)'
+  local exec_start=""
+  local source_pattern='(^|[[:space:]])--payload-source(=|[[:space:]]+)(/[A-Za-z0-9._/-]+)([[:space:]]|$)'
+  local legacy_trust='(^|[[:space:]])(--default-public-key[[:space:]]+/[A-Za-z0-9._/-]+[[:space:]]+--default-release-verifier[[:space:]]+/[A-Za-z0-9._/-]+)([[:space:]]|$)'
+  if command -v systemctl >/dev/null; then
     exec_start="$(systemctl show --property=ExecStart --value vm2api-gemini.service 2>/dev/null)" || exec_start=""
-    if [[ "$exec_start" =~ $source_pattern ]] && [ "${BASH_REMATCH[3]}" != "$default_source" ]; then
-      source="${BASH_REMATCH[3]}"
-    fi
+  fi
+  # Keep a source supplied by an existing unit/drop-in without copying it into .env.
+  if [ -z "$source" ] && [[ "$exec_start" =~ $source_pattern ]] && [ "${BASH_REMATCH[3]}" != "$default_source" ]; then
+    source="${BASH_REMATCH[3]}"
   fi
   if [ "$mode" != source ] && ! command -v curl >/dev/null; then
     err "Gemini 宿主机缺少 curl；请用包管理器安装 curl 后重试"
@@ -801,11 +803,12 @@ prepare_gemini_host() (
   local installed=0 want_default=0 use_default=0 default_args="" staging file dependency status host_mode
   if [ -e "$current" ] || [ -L "$current" ]; then
     installed=1
-    # Retain the trust inputs of an installed default payload, never replace current.
-    if { [ -f "${current}/manifest.json" ] &&
+    # An installed legacy release still needs the verifier for its own manifest.
+    if [[ "$exec_start" =~ $legacy_trust ]]; then
+      default_args="${BASH_REMATCH[2]}"
+    elif { [ -f "${current}/manifest.json" ] &&
       cmp -s -- "${current}/manifest.json" "${default_source}/manifest.json"; } ||
-      { [ -f "$unit" ] && grep -Fq -- "${default_source}/crag-license-public.pem" "$unit"; } ||
-      { [ -f "$unit" ] && grep -Fq -- "--default-public-key ${default_source}/gemini-ed25519.pub" "$unit"; }; then
+      { [ -f "$unit" ] && grep -Fq -- "${default_source}/crag-license-public.pem" "$unit"; }; then
       want_default=1
     fi
   elif [ -z "$source" ]; then
