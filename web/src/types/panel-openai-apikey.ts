@@ -16,9 +16,9 @@ export type OpenaiApiKeyEntry = OpenaiApiView &
   OpenaiApiKeyTarget & {
     email: string
     slot_name: string
-    key_id: string
-    endpoint_id: string
-    call_status: OpenaiApiCallStatus
+    key_id: string | null
+    endpoint_id: string | null
+    call_status: OpenaiApiCallStatus | null
     call_error?: { code: string; message: string; at: string } | null
     cooldown_until?: string | null
     proxy: {
@@ -38,15 +38,8 @@ export type OpenaiApiKeyEntry = OpenaiApiView &
     unpriced_requests?: number
   }
 
-export type OpenaiApiBindCandidate = OpenaiApiKeyTarget & {
-  email: string
-  slot_name: string
-  claim_status: 'pending' | 'claimed'
-}
-
 export type OpenaiApiKeyPayload = {
   items: OpenaiApiKeyEntry[]
-  bind_candidates: OpenaiApiBindCandidate[]
 }
 
 export type OpenaiApiBatchAction =

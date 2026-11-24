@@ -40,6 +40,12 @@ import {
   cragSlotsInUse,
 } from '@/features/vm/crag-runtime-counts'
 import {
+  cragCredentialRecoveryFaults,
+  cragSubscriptionErrors,
+  describeCragOrderActivationFailure,
+  type CragOrderActivationRecovery,
+} from '@/features/vm/crag-subscription-errors'
+import {
   cragHostStatusQueryOptions,
   vmCragLicenseQueryOptions,
   vmsListQueryOptions,
@@ -106,6 +112,9 @@ type Order = {
       | 'needs_attention'
       | 'ready_to_apply'
     vm_id?: string
+    error_code?: string
+    recovery?: CragOrderActivationRecovery
+    authority_request_id?: string
   }
 }
 type Checkout = Order & { url?: string; data?: Record<string, string> }
@@ -200,12 +209,19 @@ function hostRedemptionError(error: unknown) {
       const details = isApiError(error) ? error.details : undefined
       const id = (details as { authority_request_id?: unknown } | undefined)
         ?.authority_request_id
+      const recovery = (details as { recovery?: unknown } | undefined)?.recovery
       const validId =
         typeof id === 'string' &&
         /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(
           id
         )
-      return `授权服务拒绝了这台宿主机的兑换请求。请联系管理员核对，不要重置宿主凭据。${validId ? `请求 ID：${id}` : ''}`
+      const reason =
+        recovery === 'host_id_collision'
+          ? '授权服务拒绝了这台宿主机的兑换请求（检测到宿主设备标识冲突，常见于克隆镜像未重置 /etc/machine-id）。'
+          : recovery === 'not_activated'
+            ? '授权服务拒绝了这台宿主机的身份与凭据（本机尚无已签名的宿主授权记录）。'
+            : '授权服务拒绝了这台宿主机的兑换请求。'
+      return `${reason}请联系管理员核对原订单，不要重置宿主凭据。${validId ? `请求 ID：${id}` : ''}`
     }
     case 'crag_subscription_sync_pending':
       return '上一笔兑换待同步。请点「继续同步」核对原码，不要提交新码。'
@@ -522,6 +538,12 @@ function HostOverview({
           刷新本机订阅
         </Button>
       </div>
+      {status?.credential_recovery ? (
+        <p role='alert' className='text-sm text-destructive'>
+          {cragCredentialRecoveryFaults[status.credential_recovery] ??
+            cragSubscriptionErrors.auth_forbidden}
+        </p>
+      ) : null}
       {status ? (
         <>
           <dl className='grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm tabular-nums [&_dd]:wrap-anywhere [&_dt]:text-muted-foreground'>
@@ -685,12 +707,21 @@ function HostOverview({
             className='text-sm text-muted-foreground'
           >
             每张码从兑换时独立计时，未到期额度相加；不绑定、不启动 VM。 Claude
-            订阅码增加本机槽位；以 CGG1- 开头的码兑换 CRAGGemini，不占用 Claude
+            订阅码增加本机槽位；CRAGGemini 订阅码（CRAGR1.…）请点击右上角「兑换
+            CRAGGemini」兑换，旧版 CGG1- 码也可直接在此兑换，不占用 Claude
             槽位。
           </p>
           <Button type='submit' size='sm' disabled={!code.trim() || !!action}>
             {action === 'redeem' ? '正在兑换…' : '兑换到本机'}
           </Button>
+          <div className='rounded-md border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-xs leading-5 text-muted-foreground'>
+            <strong className='font-medium text-foreground'>
+              CRAGGemini 兑换码说明：
+            </strong>
+            1 个月 / 10 槽兑换码（¥100，¥10/槽，支持多码叠加）；首批测试支持 7
+            天 / 10 槽测试兑换码（单码可用 100 次，不同宿主机各 1
+            次、同机幂等）。请点右上角「兑换 CRAGGemini」完成兑换。
+          </div>
         </form>
       ) : null}
       {notice ? (
@@ -1137,11 +1168,14 @@ function ShopOrders({
                     error.code === 'shop_activation_target_unavailable'
                   ? '所选槽位暂不可用。请先核对历史订单，再刷新激活目标或选择仅领取兑换码。'
                   : isApiError(error) &&
-                      /coupon|stock|sold_out|inventory|renew|price|amount|cap/.test(
-                        error.code ?? ''
-                      )
-                    ? quoteProblem(error)
-                    : fallback
+                      error.code === 'shop_activation_disabled'
+                    ? '当前实例已暂停自动激活（VM2API_CRAG_SHOP_AUTO_ACTIVATION=0）。请先恢复自动激活配置后再重试原订单。'
+                    : isApiError(error) &&
+                        /coupon|stock|sold_out|inventory|renew|price|amount|cap/.test(
+                          error.code ?? ''
+                        )
+                      ? quoteProblem(error)
+                      : fallback
       )
     } finally {
       operating.current = false
@@ -1666,6 +1700,8 @@ function ShopOrders({
                   description: plan.description,
                   remaining: plan.remaining,
                   renewable: plan.renewable,
+                  product: plan.product,
+                  stackable: plan.stackable,
                   monthly: monthlyPrice(
                     plan.amount_minor,
                     planMonths(plan.term, plan.months)
@@ -1961,44 +1997,97 @@ function ShopOrders({
                               CRAG。
                             </p>
                           ) : order.activation.state === 'needs_attention' ? (
-                            <div className='space-y-2'>
-                              <p className='text-muted-foreground'>
-                                {isAdmin
-                                  ? '自动激活已暂停。确认原目标可用后，可重试原订单；无需重新购买或兑换。'
-                                  : '自动激活尚未完成，请联系管理员核查原订单；不要重复购买或另行兑换。'}
-                              </p>
-                              {isAdmin ? (
-                                <Button
-                                  type='button'
-                                  variant='outline'
-                                  size='sm'
-                                  disabled={busy || loading}
-                                  onClick={() =>
-                                    void run(async () => {
-                                      const updated = await api<Order>(
-                                        `${root}/orders/${encodeURIComponent(order.order_id)}/retry-activation`,
-                                        { method: 'POST', body: '{}' }
-                                      )
-                                      if (updated.order_id !== order.order_id)
-                                        throw new Error('order mismatch')
-                                      setOrders((prior) =>
-                                        prior?.map((item) =>
-                                          item.order_id === updated.order_id
-                                            ? updated
-                                            : item
-                                        )
-                                      )
-                                      refresh((n) => n + 1)
-                                      setNotice(
-                                        '已刷新原订单的激活状态，请在历史订单查看。'
-                                      )
-                                    }, '无法重试自动激活，请刷新历史订单后重试。')
-                                  }
-                                >
-                                  重试自动激活
-                                </Button>
-                              ) : null}
-                            </div>
+                            (() => {
+                              const validErrorCode =
+                                typeof order.activation.error_code ===
+                                  'string' &&
+                                /^[a-z][a-z0-9_]{1,63}$/.test(
+                                  order.activation.error_code
+                                )
+                                  ? order.activation.error_code
+                                  : undefined
+                              const validRecovery =
+                                validErrorCode &&
+                                (order.activation.recovery ===
+                                  'not_activated' ||
+                                  order.activation.recovery ===
+                                    'host_id_collision' ||
+                                  order.activation.recovery === 'failed')
+                                  ? order.activation.recovery
+                                  : undefined
+                              const validRequestId =
+                                typeof order.activation.authority_request_id ===
+                                  'string' &&
+                                isOrderId(order.activation.authority_request_id)
+                                  ? order.activation.authority_request_id
+                                  : undefined
+                              return (
+                                <div className='space-y-2'>
+                                  <p
+                                    role={validErrorCode ? 'alert' : undefined}
+                                    className={
+                                      validErrorCode
+                                        ? 'break-words text-destructive'
+                                        : 'text-muted-foreground'
+                                    }
+                                  >
+                                    {describeCragOrderActivationFailure({
+                                      errorCode: validErrorCode,
+                                      recovery: validRecovery,
+                                      isAdmin,
+                                    })}
+                                  </p>
+                                  {validErrorCode || validRequestId ? (
+                                    <p className='flex flex-wrap gap-x-3 gap-y-1 font-mono text-xs text-muted-foreground'>
+                                      {validErrorCode ? (
+                                        <span>
+                                          错误码：{validErrorCode}
+                                          {validRecovery
+                                            ? ` (${validRecovery})`
+                                            : ''}
+                                        </span>
+                                      ) : null}
+                                      {validRequestId ? (
+                                        <span>请求 ID：{validRequestId}</span>
+                                      ) : null}
+                                    </p>
+                                  ) : null}
+                                  {isAdmin ? (
+                                    <Button
+                                      type='button'
+                                      variant='outline'
+                                      size='sm'
+                                      disabled={busy || loading}
+                                      onClick={() =>
+                                        void run(async () => {
+                                          const updated = await api<Order>(
+                                            `${root}/orders/${encodeURIComponent(order.order_id)}/retry-activation`,
+                                            { method: 'POST', body: '{}' }
+                                          )
+                                          if (
+                                            updated.order_id !== order.order_id
+                                          )
+                                            throw new Error('order mismatch')
+                                          setOrders((prior) =>
+                                            prior?.map((item) =>
+                                              item.order_id === updated.order_id
+                                                ? updated
+                                                : item
+                                            )
+                                          )
+                                          refresh((n) => n + 1)
+                                          setNotice(
+                                            '已刷新原订单的激活状态，请在历史订单查看。'
+                                          )
+                                        }, '无法重试自动激活，请刷新历史订单后重试。')
+                                      }
+                                    >
+                                      重试自动激活
+                                    </Button>
+                                  ) : null}
+                                </div>
+                              )
+                            })()
                           ) : order.activation.state === 'active' ? (
                             <div className='space-y-2'>
                               <p className='text-muted-foreground'>

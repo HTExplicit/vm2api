@@ -38,6 +38,7 @@ type BrowserStatus = {
   message?: string
   purpose?: BrowserPurpose
   result?: CommitResult
+  siwc_session_id?: string
   warning?: string | null
   error?: string
 }
@@ -62,13 +63,21 @@ function closeBrowser(
   requests: Map<string, Promise<BrowserState>>,
   vmId: string,
   base: string,
-  starting?: Promise<unknown>
+  starting?: Promise<unknown>,
+  accountId?: string
 ) {
   const existing = requests.get(vmId)
   if (existing) return existing
   const request = Promise.resolve(starting)
     .catch(() => {})
-    .then(() => api<BrowserState>(`${base}/close`, { method: 'POST' }))
+    .then(() =>
+      api<BrowserState>(`${base}/close`, {
+        method: 'POST',
+        ...(accountId
+          ? { body: JSON.stringify({ account_id: accountId }) }
+          : {}),
+      })
+    )
   requests.set(vmId, request)
   const clear = () => {
     if (requests.get(vmId) === request) requests.delete(vmId)
@@ -89,6 +98,8 @@ type SlotBrowserDialogProps = {
   vmId: string
   email?: string | null
   purpose: BrowserPurpose
+  accountId?: string
+  siwcSession?: string
   open: boolean
   onOpenChange: (open: boolean) => void
   onCredentialsSaved?: (result?: CommitResult) => void
@@ -109,7 +120,9 @@ function emptyOauthFinish(): OauthFinish {
 }
 
 export function OpenaiPlatformBrowserDialog(
-  props: Omit<SlotBrowserDialogProps, 'purpose'>
+  props: Omit<SlotBrowserDialogProps, 'purpose' | 'accountId'> & {
+    accountId: string
+  }
 ) {
   return <SlotBrowserDialog {...props} purpose='platform' />
 }
@@ -118,6 +131,8 @@ export function SlotBrowserDialog({
   vmId,
   email,
   purpose,
+  accountId,
+  siwcSession,
   open,
   onOpenChange,
   onCredentialsSaved,
@@ -144,7 +159,6 @@ export function SlotBrowserDialog({
   const completed = useRef(new Set<string>())
   const resultReported = useRef(false)
   const qualityRef = useRef<BrowserQuality>('smooth')
-  const purposeRef = useRef(purpose)
   const finishing = useRef(false)
   const finishReported = useRef(false)
   const completeOnClose = useRef(false)
@@ -158,7 +172,6 @@ export function SlotBrowserDialog({
   const firstNavigation = useRef(true)
   const [finish, setFinish] = useState<OauthFinish>(emptyOauthFinish)
   const [frame, setFrame] = useState<DisplayedBrowserFrame | null>(null)
-  const [currentPurpose, setCurrentPurpose] = useState(purpose)
   const [message, setMessage] = useState('正在连接槽位浏览器…')
   const [error, setError] = useState('')
   const [status, setStatus] = useState('starting')
@@ -326,7 +339,7 @@ export function SlotBrowserDialog({
             lifecycle.current.vmId !== vmId ||
             lifecycle.current.epoch === epoch
           )
-            return closeBrowser(requests, vmId, base)
+            return closeBrowser(requests, vmId, base, undefined, accountId)
               .then((result) => {
                 if (result.warning) toast.warning(result.warning)
               })
@@ -335,7 +348,7 @@ export function SlotBrowserDialog({
               })
         })
     }
-  }, [open, vmId, base])
+  }, [open, vmId, base, accountId])
 
   useEffect(() => {
     if (!open) return
@@ -384,9 +397,6 @@ export function SlotBrowserDialog({
           opened.current = ''
           opening.current = null
         }
-        const targetPurpose = attempt ? purposeRef.current : purpose
-        purposeRef.current = targetPurpose
-        setCurrentPurpose(targetPurpose)
         completed.current.clear()
         resultReported.current = false
         if (opening.current?.vmId !== vmId) {
@@ -394,7 +404,11 @@ export function SlotBrowserDialog({
             vmId,
             promise: api(`${base}/open`, {
               method: 'POST',
-              body: JSON.stringify({ purpose: targetPurpose }),
+              body: JSON.stringify(
+                siwcSession
+                  ? { purpose: 'siwc', session_id: siwcSession }
+                  : { purpose, account_id: accountId }
+              ),
             }),
           }
           opening.current = request
@@ -409,7 +423,12 @@ export function SlotBrowserDialog({
       if (cancelled) return
       const ticket = await api<{ ticket: string; url: string }>(
         `/api/panel/vms/${encodeURIComponent(vmId)}/browser-ticket`,
-        { method: 'POST' }
+        {
+          method: 'POST',
+          ...(accountId
+            ? { body: JSON.stringify({ account_id: accountId }) }
+            : {}),
+        }
       )
       if (cancelled) return
       ws = new WebSocket(
@@ -452,13 +471,11 @@ export function SlotBrowserDialog({
           }
           firstNavigation.current = false
         } else if (payload.type === 'status') {
-          const nextPurpose = payload.purpose || purposeRef.current
-          purposeRef.current = nextPurpose
-          setCurrentPurpose(nextPurpose)
           setStatus(payload.status)
           setWarning(payload.warning || '')
           setMessage(
-            payload.message || browserStatusMessage(payload.status, nextPurpose)
+            payload.message ||
+              browserStatusMessage(payload.status, payload.purpose || purpose)
           )
           if (payload.status === 'closed') {
             opened.current = ''
@@ -491,7 +508,20 @@ export function SlotBrowserDialog({
             setError('')
             setErrorCode('')
           }
-          if (purpose === 'oauth' && payload.status === 'oauth_complete') {
+          if (siwcSession) {
+            if (
+              payload.status === 'oauth_complete' &&
+              payload.siwc_session_id === siwcSession &&
+              !completed.current.has(payload.status)
+            ) {
+              completed.current.add(payload.status)
+              callbacks.current.onComplete?.()
+            }
+          } else if (
+            purpose === 'oauth' &&
+            payload.status === 'oauth_complete' &&
+            !payload.siwc_session_id
+          ) {
             const previous = finishRef.current
             updateFinish({
               ...previous,
@@ -549,7 +579,7 @@ export function SlotBrowserDialog({
       stop()
       if (stopTransport.current === stop) stopTransport.current = null
     }
-  }, [open, vmId, purpose, attempt, base])
+  }, [open, vmId, purpose, attempt, base, accountId, siwcSession])
 
   const send = (payload: object) => {
     if (
@@ -650,7 +680,8 @@ export function SlotBrowserDialog({
         closeRequests.current,
         vmId,
         base,
-        opening.current?.vmId === vmId ? opening.current.promise : undefined
+        opening.current?.vmId === vmId ? opening.current.promise : undefined,
+        accountId
       )
       if (!isCurrent()) return
       if (result.warning) toast.warning(result.warning)
@@ -692,7 +723,7 @@ export function SlotBrowserDialog({
       vmId,
       promise: api(`${base}/open`, {
         method: 'POST',
-        body: JSON.stringify({ purpose: 'platform' }),
+        body: JSON.stringify({ purpose: 'platform', account_id: accountId }),
       }),
     }
     opening.current = request
@@ -760,19 +791,18 @@ export function SlotBrowserDialog({
         <DialogHeader className='pe-6'>
           <DialogTitle className='flex items-center gap-2 text-base'>
             <ExternalLink className='size-4' aria-hidden />
-            {currentPurpose === 'oauth'
-              ? 'OpenAI 浏览器登录'
-              : '连接 OpenAI Platform'}
+            {siwcSession
+              ? '绑定 Sign in with ChatGPT'
+              : purpose === 'oauth'
+                ? 'OpenAI 浏览器登录'
+                : '连接 OpenAI Platform'}
           </DialogTitle>
           <DialogDescription>
             {email || '首次登录'} · 槽位固定指纹 · 使用当前绑定代理
           </DialogDescription>
         </DialogHeader>
         <p className='m-0 text-xs text-muted-foreground' role='status'>
-          {!inputBlocked &&
-          purpose === 'oauth' &&
-          finish.saved &&
-          currentPurpose === 'oauth'
+          {!inputBlocked && purpose === 'oauth' && finish.saved
             ? oauthMessage
             : message}
         </p>
@@ -1043,38 +1073,8 @@ export function SlotBrowserDialog({
             ) : null}
           </div>
           <div className='flex flex-wrap items-center gap-2'>
-            {currentPurpose === 'oauth' ? (
-              purpose === 'oauth' && finish.phase === 'ready' ? (
-                <Button
-                  size='sm'
-                  variant='outline'
-                  disabled={!connected || switching || inputBlocked}
-                  loading={switching}
-                  onClick={async () => {
-                    const epoch = lifecycle.current.epoch
-                    setSwitching(true)
-                    setError('')
-                    try {
-                      await api(`${base}/open`, {
-                        method: 'POST',
-                        body: JSON.stringify({ purpose: 'platform' }),
-                      })
-                      if (lifecycle.current.epoch !== epoch) return
-                      purposeRef.current = 'platform'
-                      setCurrentPurpose('platform')
-                      setStatus('opening')
-                      setMessage('正在打开 OpenAI Platform…')
-                    } catch (reason) {
-                      if (lifecycle.current.epoch === epoch)
-                        setError((reason as Error).message)
-                    } finally {
-                      if (lifecycle.current.epoch === epoch) setSwitching(false)
-                    }
-                  }}
-                >
-                  继续进入 Platform
-                </Button>
-              ) : !finish.saved ? (
+            {siwcSession ? null : purpose === 'oauth' ? (
+              !finish.saved ? (
                 <p className='m-0 text-xs text-muted-foreground'>
                   授权成功后自动保存凭据，再开机完成配置
                 </p>

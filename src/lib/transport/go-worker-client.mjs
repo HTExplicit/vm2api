@@ -28,6 +28,7 @@ import {
   readWorkerCredentialFile,
   refreshErrorCodeOf,
   REFRESH_SKEW_MS,
+  stripWorkerCredentialEmail,
   writeWorkerCredentialFile,
   ensureOfficialCredentialLink,
   slotUidGidFromHomeDir,
@@ -329,6 +330,29 @@ function classifyManagedQueueRejection(result, managedCrag) {
  * the CLI still owned the job. Best effort: the kernel also sees the drop,
  * and an old worker without the route just answers 404.
  */
+function createHopAbortScope(signal) {
+  if (!signal) return { signal: undefined, disarm: () => {} }
+  const controller = new AbortController()
+  let disarmed = false
+  const onAbort = () => {
+    if (disarmed) return
+    controller.abort(signal.reason)
+  }
+  if (signal.aborted) {
+    controller.abort(signal.reason)
+    return { signal: controller.signal, disarm: () => {} }
+  }
+  signal.addEventListener('abort', onAbort, { once: true })
+  return {
+    signal: controller.signal,
+    disarm: () => {
+      if (disarmed) return
+      disarmed = true
+      signal.removeEventListener('abort', onAbort)
+    },
+  }
+}
+
 function cancelOnAbort(exec, signal, requestId) {
   if (!signal) return () => {}
   const onAbort = () => {
@@ -934,7 +958,8 @@ async function callGoWorkerRaw({
     }
   }
   const requestId = randomUUID()
-  let stopCancel = () => {}
+  const hopSignal = createHopAbortScope(signal)
+  let stopCancel = () => hopSignal.disarm()
   const clusterSlot = requestPath === '/internal/v1/messages' && !!vmNodeId(exec?.vm)
   let requestStarted = false
   let nativeHandoff = false
@@ -1000,15 +1025,20 @@ async function callGoWorkerRaw({
       onRequestStarted: () => {
         requestStarted = true
         nativeHandoff = useNativeHandoff
-        stopCancel = cancelOnAbort(exec, signal, requestId)
+        const stopRemoteCancel = cancelOnAbort(exec, hopSignal.signal, requestId)
+        stopCancel = () => {
+          hopSignal.disarm()
+          stopRemoteCancel()
+        }
       },
-      signal,
+      signal: hopSignal.signal,
       timeoutMs,
     })
     observedHeaders = mergeRateLimitHeaders(publicHeaders(response.headers))
     handoff?.observeHeaders(response.headers)
     const data = await readAll(response)
-    const parsedRaw = await inferenceCodec.decode(data, { status: response.statusCode, signal })
+    stopCancel()
+    const parsedRaw = await inferenceCodec.decode(data, { status: response.statusCode, signal: hopSignal.signal })
     let parsed = handoff ? handoff.consumeBody(parsedRaw) : parsedRaw
     if (prepared.redaction) parsed = await restoreJsonValue(parsed, prepared.redaction)
     if (handoff) {
@@ -1049,7 +1079,7 @@ async function callGoWorkerRaw({
     const blocked = redactionResult(error)
     if (blocked) return { ...blocked, ...nativeMetadata() }
     if (error.code === 'invalid_kernel_request') return { ...invalidKernelResult(error), ...nativeMetadata() }
-    if (signal?.aborted) return clientCancelledResult({ via: 'go-worker', ...nativeMetadata() })
+    if (hopSignal.signal?.aborted) return clientCancelledResult({ via: 'go-worker', ...nativeMetadata() })
     if (error instanceof InferencePostDenied) return error.result
     return {
       ok: false,
@@ -1217,7 +1247,8 @@ async function streamGoWorkerRaw({
   const diagnostics = createFailureDiagnostics(requestId)
   let lastError = null
   let successfulTerminal = null
-  let stopCancel = () => {}
+  const hopSignal = createHopAbortScope(signal)
+  let stopCancel = () => hopSignal.disarm()
   const clusterSlot = requestPath === '/internal/v1/messages' && !!vmNodeId(exec?.vm)
   let requestStarted = false
   let nativeHandoff = false
@@ -1285,10 +1316,14 @@ async function streamGoWorkerRaw({
       onRequestStarted: () => {
         requestStarted = true
         nativeHandoff = useNativeHandoff
-        stopCancel = cancelOnAbort(exec, signal, requestId)
+        const stopRemoteCancel = cancelOnAbort(exec, hopSignal.signal, requestId)
+        stopCancel = () => {
+          hopSignal.disarm()
+          stopRemoteCancel()
+        }
       },
       onConnected: () => diagnostics.connected(),
-      signal,
+      signal: hopSignal.signal,
       timeoutMs,
     })
     const headers = mergeRateLimitHeaders(publicHeaders(response.headers))
@@ -1298,7 +1333,8 @@ async function streamGoWorkerRaw({
     const jsonReply = claudeMessages && /^application\/json\b/i.test(response.headers['content-type'] || '')
     if (jsonReply || (response.statusCode || 0) < 200 || (response.statusCode || 0) >= 300) {
       const data = await readAll(response, handoff ? MAX_BODY : 1024 * 1024)
-      let parsedBody = await inferenceCodec.decode(data, { status: response.statusCode, signal })
+      stopCancel()
+      let parsedBody = await inferenceCodec.decode(data, { status: response.statusCode, signal: hopSignal.signal })
       if (handoff) parsedBody = handoff.consumeBody(parsedBody)
       if (prepared.redaction) parsedBody = await restoreJsonValue(parsedBody, prepared.redaction)
       const responseModel = parsedBody?.response?.model || parsedBody?.model
@@ -1340,6 +1376,7 @@ async function streamGoWorkerRaw({
           if (event.type === 'message_start') rememberThreadTurn(event.message?.id, prepared.thread)
           const responseModel = event.message?.model
           if (typeof responseModel === 'string' && responseModel.trim()) upstreamResponseModel = responseModel
+          if (event.type === 'message_stop') stopCancel()
         },
         onProviderResult: (result) => {
           // Freeze the already-observed generation window at the native stop;
@@ -1368,6 +1405,7 @@ async function streamGoWorkerRaw({
           }
         },
       })
+      stopCancel()
       const body = received.body
       const failed = body?.type === 'error' || !!body?.error
       const trailers = publicHeaders(response.trailers)
@@ -1454,6 +1492,10 @@ async function streamGoWorkerRaw({
           : event
         handoff?.observeError(lastError)
       }
+      if (event.type === 'message_stop') {
+        sawMessageStop = true
+        stopCancel()
+      }
       if (event.response && typeof event.response === 'object' && !Array.isArray(event.response)) {
         if (codexResponses && typeof event.response.id === 'string') responsesId = event.response.id
         if (
@@ -1463,6 +1505,7 @@ async function streamGoWorkerRaw({
         ) {
           responsesTerminal = event
           successfulTerminal = event
+          stopCancel()
         }
       }
       if (
@@ -1478,7 +1521,6 @@ async function streamGoWorkerRaw({
           },
         }
       }
-      if (event.type === 'message_stop') sawMessageStop = true
       if (event.type === 'message_start') rememberThreadTurn(event.message?.id, prepared.thread)
       const evUsage = usageFromSseEvent(event)
       if (evUsage) sseUsage = mergeUsage(sseUsage, evUsage)
@@ -1606,6 +1648,7 @@ async function streamGoWorkerRaw({
           throw error
         cleanupError = error
       }
+      stopCancel()
       if (buffer && !outboundHeadersFrame) {
         if (sseRestorer) {
           for (const line of sseRestorer.before(buffer)) {
@@ -1725,7 +1768,7 @@ async function streamGoWorkerRaw({
         upstreamResponseModel,
         ...nativeMetadata(),
       }
-    if (signal?.aborted) {
+    if (hopSignal.signal?.aborted) {
       return clientCancelledResult({
         via: 'go-worker-stream',
         ...timing.snapshot(),
@@ -1959,7 +2002,6 @@ export function credentialSummary(credential, now = Date.now()) {
     mode: credential.mode || credential.type || null,
     account_uuid: credential.account_uuid || null,
     org_uuid: credential.org_uuid || null,
-    email: credential.email || null,
     scope: credential.scope || null,
     auth_scheme: credential.auth_scheme || null,
     has_access: credential.has_access ?? !!(credential.access_token || credential.api_key),
@@ -2044,12 +2086,19 @@ async function reconcileClaudeClientCredentials(
           throw new Error('credential_link_failed')
         }
       }
+      const sanitizeCredentials = async () => {
+        const stripped = stripWorkerCredentialEmail(exec.homeDir)
+        if (stripped.changed && host.kind === 'node' && typeof host.onImport === 'function') {
+          await host.onImport(exec.vm, slotDir)
+        }
+      }
       if (host.kind === 'node') {
         const pulled = await host.afterRefresh(exec.vm, slotDir)
         if (pulled?.reason === 'remote_missing') {
           if (refreshInSlot) return clientCredentialRequired()
           throw new Error('remote_missing')
         }
+        await sanitizeCredentials()
         await repairRemoteLink()
       }
       const credential = readWorkerCredentialFile(exec.homeDir)
@@ -2058,8 +2107,15 @@ async function reconcileClaudeClientCredentials(
       const hasAccess = hasAccessPresence(credential || {})
       const hasRefresh = hasRefreshPresence(credential || {})
       if (!hasAccess && !(refreshInSlot && refreshable && hasRefresh)) return clientCredentialRequired()
+      await sanitizeCredentials()
       repairLocalLink()
-      if (!refreshInSlot) return { ok: true, synced: true, credential: credentialSummary(credential) }
+      if (!refreshInSlot) {
+        return {
+          ok: true,
+          synced: true,
+          credential: credentialSummary(readWorkerCredentialFile(exec.homeDir) || credential),
+        }
+      }
 
       let live = credential
       let refreshed = false
@@ -2075,6 +2131,7 @@ async function reconcileClaudeClientCredentials(
         if (!result?.ok) return staleClientCredential({ error: result?.body?.error })
         // Slot refresh also pulls the remote file back. Verify persisted expiry,
         // not the subprocess's reported expiry, before admitting the client.
+        await sanitizeCredentials()
         live = readWorkerCredentialFile(exec.homeDir)
         if (!live || !hasAccessPresence(live) || needsRefresh(live.expires_at)) return staleClientCredential()
         await repairRemoteLink()

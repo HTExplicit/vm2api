@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest'
 import { browserInputPoint } from './browser-input'
 import {
   hasOpenaiApiFeature,
-  isProApiAccount,
   isOpenaiApiKeyCandidate,
   isOpenaiApiBalancePending,
   openaiApiBalanceStatusMessage,
@@ -14,6 +13,7 @@ import {
 
 const vm: Vm = { id: 'a', platform: 'openai', family: 'codex' }
 const state: OpenaiApiView = {
+  account_id: 'account-a',
   pro_eligible: true,
   claim_status: 'unknown',
   enabled: false,
@@ -23,45 +23,27 @@ const state: OpenaiApiView = {
 }
 
 describe('account API feature gates', () => {
-  it('recognizes exactly the three Pro tiers and their credential spellings', () => {
-    for (const plan_type of [
-      'prolite',
-      'pro',
-      'promax',
-      'chatgptprolite',
-      'chatgptpro',
-      'chatgptpromax',
-    ]) {
-      expect(isProApiAccount({ ...vm, plan_type })).toBe(true)
-    }
-    for (const plan_type of [
-      'free',
-      'plus',
-      'team',
-      'business',
-      'edu',
-      'chatgptteamplan',
-      'enterprise',
-      'pro-trial',
-    ]) {
-      expect(isProApiAccount({ ...vm, plan_type })).toBe(false)
-    }
+  it('links an account identified and eligible in the server view', () => {
+    expect(hasOpenaiApiFeature({ ...vm, openai_api: state })).toBe(true)
     expect(
-      isProApiAccount({ ...vm, plan_type: null, chatgpt_plan_type: 'prolite' })
-    ).toBe(true)
+      hasOpenaiApiFeature({
+        ...vm,
+        openai_api: { ...state, account_id: null },
+      })
+    ).toBe(false)
     expect(
-      isProApiAccount({
+      hasOpenaiApiFeature({
         ...vm,
         plan_type: 'pro',
         openai_api: { ...state, pro_eligible: false },
       })
     ).toBe(false)
     expect(
-      isProApiAccount({
+      hasOpenaiApiFeature({
         ...vm,
         platform: 'claude',
         family: 'claude',
-        plan_type: 'pro',
+        openai_api: state,
       })
     ).toBe(false)
   })

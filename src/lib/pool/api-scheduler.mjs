@@ -183,6 +183,7 @@ export class ApiScheduler {
       const proto = normalizeProtocol(ep.protocol, ep.kind)
       if (targetGroup === 'anthropic' && proto !== 'anthropic') continue
       if (targetGroup === 'openai' && proto !== 'openai') continue
+      if (targetGroup === 'gemini' && proto !== 'gemini') continue
       if (scope.group_type === 'openai_apikey' && ep.kind !== 'openai') continue
       const visibleKeys = (ep.api_key_entries || []).filter((key) => this.resolveKey(key, scope))
       if (!visibleKeys.length && (scope.group_type === 'openai_apikey' || ep.api_key_entries?.length)) continue
@@ -218,6 +219,7 @@ export class ApiScheduler {
         const proto = normalizeProtocol(ep.protocol, ep.kind)
         if (targetGroup === 'anthropic' && proto !== 'anthropic') return false
         if (targetGroup === 'openai' && proto !== 'openai') return false
+        if (targetGroup === 'gemini' && proto !== 'gemini') return false
         return endpointMatchesModel(ep, requestedModel, modelOptions)
       })
       .sort((a, b) => (Number(b.priority) || 0) - (Number(a.priority) || 0))

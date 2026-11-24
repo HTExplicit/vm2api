@@ -252,26 +252,33 @@ export function withVmLock(key, fn) {
   return run
 }
 
-export function atomicWriteJson(filePath, obj, { mode } = {}) {
+export function atomicWriteJson(filePath, obj, { mode, durable = false } = {}) {
   const dir = path.dirname(filePath)
   const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`)
   const data = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2)
-  const opts = mode ? { mode } : undefined
-  fs.writeFileSync(tmp, data, opts)
+  fs.writeFileSync(tmp, data, { mode, flush: durable })
   try {
     fs.renameSync(tmp, filePath)
   } catch (e) {
     try {
-      fs.rmSync(tmp, { force: true })
+      fs.unlinkSync(tmp)
     } catch {}
     throw e
+  }
+  invalidateReadCache(filePath)
+  if (durable && process.platform !== 'win32') {
+    const fd = fs.openSync(dir, 'r')
+    try {
+      fs.fsyncSync(fd)
+    } finally {
+      fs.closeSync(fd)
+    }
   }
   if (mode) {
     try {
       fs.chmodSync(filePath, mode)
     } catch {}
   }
-  invalidateReadCache(filePath)
   notifyVmWrite(filePath)
   return true
 }

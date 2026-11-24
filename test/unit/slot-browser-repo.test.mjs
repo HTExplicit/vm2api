@@ -64,7 +64,6 @@ test('Billing session is encrypted and survives database restart and the existin
     organization_id: 'org-a',
     headers: { authorization: 'Bearer billing-secret', 'user-agent': 'fixed-slot-ua' },
     captured_at: '2026-11-01T00:00:00Z',
-    recovery_attempted: false,
   }
   repo.upsert('slot-a', { account_id: 'account-a', billing_session: billing })
   const raw = db.prepare('SELECT billing_session_enc FROM slot_browser_profiles WHERE vm_id = ?').get('slot-a')

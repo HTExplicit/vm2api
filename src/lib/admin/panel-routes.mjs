@@ -59,6 +59,7 @@ import { generateAuthUrl, exchangeAuthCode, normalizeOauthFlavor } from '../oaut
 import { sessionKeyToOAuth, panelImportErrorPayload } from '../oauth/cookie-auth.mjs'
 import { enrichOauthIdentity } from '../oauth/oauth-identity.mjs'
 import { generateCodexAuthUrl, exchangeCodexAuthCode } from '../oauth/codex-oauth.mjs'
+import { SIWC_CREDENTIAL_FILE } from '../vm/codex-siwc-store.mjs'
 import { cleanupVmFiles } from '../vm/slot-cleanup.mjs'
 import {
   completeClaudeSetupToken,
@@ -214,7 +215,11 @@ import {
   SESSION_SLOT_MIN,
   validateInferenceRoutingPatch,
 } from '../vm/slot-engine.mjs'
-import { telemetryDefaultEnabled, validateTelemetryRoutingPatch } from '../vm/native-telemetry.mjs'
+import {
+  telemetryDefaultEnabled,
+  telemetryDisableNonessentialTraffic,
+  validateTelemetryRoutingPatch,
+} from '../vm/native-telemetry.mjs'
 import { makeError, ErrorType, ErrorCode } from '../core/errors.mjs'
 import * as panel from './panel-api.mjs'
 import { GATEWAY_CAPABILITIES } from '../vm/execution-context.mjs'
@@ -316,6 +321,7 @@ import { assignComputerFingerprint } from '../identity/slot-computer.mjs'
 import { runFleetUpdate, fleetStatus } from '../vm/fleet-update.mjs'
 import {
   captureWrapSample,
+  cragTargetArch,
   describeWrapSample,
   makeWrapSample,
   materializeResolvedKernel,
@@ -708,10 +714,13 @@ async function runKernelSync({
       if (resolveInferenceEngine(vm, routingConfig) !== 'rust') continue
       writeKernelConfig(project, vm, { routing: routingConfig, timezone: vm.timezone })
       const exec = slotExec(project, vm)
-      item.kernel = await restartKernel(exec).catch((e) => ({
-        ok: false,
-        error: String(e?.message || e).slice(0, 200),
-      }))
+      // A callback may return a plain result instead of a promise; neither may abort the loop.
+      item.kernel = await Promise.resolve()
+        .then(() => restartKernel(exec))
+        .catch((e) => ({
+          ok: false,
+          error: String(e?.message || e).slice(0, 200),
+        }))
       if (!item.kernel?.ok) {
         markKernelRestartPending(project, item.id, item.kernel?.reason || 'kernel_restart_failed')
         item.ok = false
@@ -779,6 +788,8 @@ export function createPanelHandler(ctx) {
     readBody: ctx.readBody,
     proxyPool: () => ctx.proxyPool,
     terminal: ctx.geminiTerminal,
+    cragSubscription: ctx.geminiCragSubscription,
+    billingReady: Boolean(ctx.requestLog),
   })
   // A checkout can change under a live Node process; report its boot version.
   const runningVersion = readLocalVersion(ctx.cfg?.paths?.project)
@@ -837,6 +848,7 @@ export function createPanelHandler(ctx) {
   const slotBrowserManager = ctx.slotBrowserManager
   const accountBrowserRuntime = ctx.accountBrowserRuntime
   const codexBrowserLogin = ctx.codexBrowserLogin
+  const codexSiwc = ctx.codexSiwc
   const changingProxies = new Set()
   const applyProxyChange = async (res, vmIds, change, proxyIds = []) => {
     const previous = vmIds.length
@@ -2284,6 +2296,53 @@ export function createPanelHandler(ctx) {
           error: { code: 'migration_busy', message: '槽位迁移中或待人工恢复，暂不能修改' },
         })
       }
+      const siwcRoute = p.match(/^\/api\/panel\/vms\/([^/]+)\/siwc(?:\/(bind|callback|cancel|models))?$/)
+      if (siwcRoute) {
+        const [, vmId, action] = siwcRoute
+        if (panelIdentity(req).role !== 'admin') {
+          return json(res, 403, { ok: false, error: { code: 'forbidden', message: '只有管理员可以管理 SIWC 绑定。' } })
+        }
+        if (!isValidVmId(vmId) || !codexSiwc) {
+          return json(res, 404, { ok: false, error: { code: 'vm_not_found', message: 'GPT 槽位不存在。' } })
+        }
+        const method = req.method
+        try {
+          let result
+          if (!action && method === 'GET') result = codexSiwc.view(vmId)
+          else if (!action && method === 'DELETE') result = await codexSiwc.unbind(vmId)
+          else if (!action && method === 'PATCH') {
+            const { enabled } = await readBody(req, 4096)
+            if (typeof enabled !== 'boolean') {
+              return json(res, 400, {
+                ok: false,
+                error: { code: 'invalid_siwc_mode', message: '请选择是否启用 SIWC。' },
+              })
+            }
+            result = await codexSiwc.setEnabled(vmId, enabled)
+          } else if (method === 'POST' && action === 'bind') result = await codexSiwc.start(vmId)
+          else if (method === 'POST' && action === 'callback') {
+            const { session_id, callback_url } = await readBody(req, 16 * 1024)
+            result = await codexSiwc.finish(vmId, session_id, callback_url)
+          } else if (method === 'POST' && action === 'cancel') {
+            const { session_id } = await readBody(req, 4096)
+            result = { cancelled: codexSiwc.cancel(vmId, session_id) }
+          } else if (method === 'POST' && action === 'models') {
+            await codexSiwc.refreshModels(vmId)
+            result = codexSiwc.view(vmId)
+          } else {
+            return json(res, 404, { ok: false, error: { code: 'not_found', message: '接口不存在。' } })
+          }
+          return json(res, 200, panel.ok(result))
+        } catch (error) {
+          return json(res, error.status || 502, {
+            ok: false,
+            error: {
+              code: error.publicMessage ? error.code : 'siwc_request_failed',
+              message: error.publicMessage || 'SIWC 操作失败，请检查槽位出口后重试。',
+            },
+          })
+        }
+      }
       const slotBrowserRoute = p.match(/^\/api\/panel\/vms\/([^/]+)\/(browser(?:\/(open|close))?|browser-ticket)$/)
       if (slotBrowserRoute) {
         if (panelIdentity(req).role !== 'admin')
@@ -2297,24 +2356,38 @@ export function createPanelHandler(ctx) {
             accountBrowserRuntime?.launchConfig()
           let result
           if (req.method === 'GET' && resource === 'browser') result = slotBrowserManager.state(vmId)
-          else if (req.method === 'POST' && resource === 'browser-ticket')
-            result = slotBrowserManager.browserTicket(vmId)
-          else if (req.method === 'POST' && action === 'open') {
+          else if (req.method === 'POST' && resource === 'browser-ticket') {
+            const body = await readBody(req, 4096)
+            if (body?.account_id != null) {
+              openaiApiManager.assertAccountIdentity(vmId, body.account_id)
+              result = slotBrowserManager.browserTicket(vmId, { purpose: 'platform' })
+            } else result = slotBrowserManager.browserTicket(vmId)
+          } else if (req.method === 'POST' && action === 'open') {
             const body = await readBody(req, 4096)
             const purpose = body?.purpose || 'oauth'
-            if (purpose === 'oauth' || purpose === 'platform') {
+            if (purpose === 'oauth' || purpose === 'platform' || purpose === 'siwc') {
               const currentBrowser = slotBrowserManager.state(vmId)
               if (['closing', 'close_failed'].includes(currentBrowser.status))
                 return json(res, 200, panel.ok(currentBrowser))
             }
-            if (purpose === 'oauth') {
+            if (purpose === 'oauth' || purpose === 'siwc') {
+              const siwcSession = purpose === 'siwc' ? body?.session_id : null
+              if (purpose === 'siwc' && (!codexSiwc || typeof siwcSession !== 'string' || !siwcSession)) {
+                return json(res, 400, {
+                  ok: false,
+                  error: { code: 'siwc_session_required', message: '请先开始 SIWC 绑定。' },
+                })
+              }
               await openaiApiManager.cancel(vmId, { closeBrowser: false })
-              result = codexBrowserLogin.start(vmId)
+              result = codexBrowserLogin.start(vmId, { siwcSession })
             } else if (purpose === 'platform') {
+              if (body?.account_id != null) openaiApiManager.assertAccountIdentity(vmId, body.account_id)
               await codexBrowserLogin.cancel(vmId)
-              const account = openaiApiManager.view(vm)
-              if (['claimed', 'pending'].includes(account?.claim_status)) {
-                openaiApiManager.setup(vmId)
+              if (
+                body?.account_id != null ||
+                ['claimed', 'pending'].includes(openaiApiManager.view(vm)?.claim_status)
+              ) {
+                openaiApiManager.setup(vmId, body?.account_id)
                 result = slotBrowserManager.state(vmId)
               } else {
                 slotBrowserManager.open(vmId, { purpose: 'platform', interactive: true })
@@ -2337,6 +2410,8 @@ export function createPanelHandler(ctx) {
                 error: { code: 'invalid_browser_purpose', message: '请选择 OAuth 或 Platform' },
               })
           } else if (req.method === 'POST' && action === 'close') {
+            const body = await readBody(req, 4096)
+            if (body?.account_id != null) openaiApiManager.assertAccountIdentity(vmId, body.account_id)
             await codexBrowserLogin?.cancel(vmId)
             await openaiApiManager?.cancel(vmId)
             await slotBrowserManager.close(vmId)
@@ -2407,13 +2482,18 @@ export function createPanelHandler(ctx) {
                   : await openaiApiManager.removeKey(vmId, input)
             } else return json(res, 404, { ok: false, error: { code: 'not_found', message: '接口不存在' } })
           } else if (req.method === 'GET' && !action) result = openaiApiManager.view(vm)
-          else if (req.method === 'POST' && action === 'preview') result = await openaiApiCredits.preview(vmId)
-          else if (req.method === 'POST' && action === 'claim') {
+          else if (req.method === 'POST' && (action === 'preview' || action === 'claim')) {
             const body = await readBody(req, 8192)
-            result = await openaiApiCredits.claim(vmId, { destination_account_id: body?.destination_account_id })
+            if (body?.account_id != null) openaiApiManager.assertAccountIdentity(vmId, body.account_id)
+            result =
+              action === 'preview'
+                ? await openaiApiCredits.preview(vmId)
+                : await openaiApiCredits.claim(vmId, { destination_account_id: body?.destination_account_id })
           } else if (req.method === 'POST' && action === 'setup') {
+            const body = await readBody(req, 8192)
+            if (body?.account_id != null) openaiApiManager.assertAccountIdentity(vmId, body.account_id)
             await codexBrowserLogin?.cancel(vmId)
-            result = await openaiApiManager.setup(vmId)
+            result = await openaiApiManager.setup(vmId, body?.account_id)
           } else if (req.method === 'POST' && action === 'refresh') {
             const body = await readBody(req, 8192)
             if (body?.account_id != null) openaiApiManager.assertAccountIdentity(vmId, body.account_id)
@@ -3509,6 +3589,7 @@ export function createPanelHandler(ctx) {
           })
         }
         try {
+          codexSiwc?.cancelBindings()
           await codexBrowserLogin?.stop()
           await slotBrowserManager?.stop()
           await openaiApiManager?.stop()
@@ -3613,7 +3694,7 @@ export function createPanelHandler(ctx) {
           panel.ok({
             vm: normalizeVmConfig(ctx.routingConfig?.vm),
             kvm,
-            crag_supported: process.platform === 'linux' && process.arch === 'x64',
+            crag_supported: process.platform === 'linux' && cragTargetArch(cfg.paths.project) === 'amd64',
           }),
         )
       }
@@ -4614,6 +4695,8 @@ export function createPanelHandler(ctx) {
             : body.maxConcurrency
           const nextRpm = Object.prototype.hasOwnProperty.call(body || {}, 'max_rpm') ? body.max_rpm : body.maxRpm
           const hasMaxSessions = body && Object.prototype.hasOwnProperty.call(body, 'max_sessions')
+          const hasMaxPrimarySessions = body && Object.prototype.hasOwnProperty.call(body, 'max_primary_sessions')
+          const hasMaxSubagents = body && Object.prototype.hasOwnProperty.call(body, 'max_subagents_per_session')
           // Explicit null = drop the slot's pin and follow its tier / global default again.
           const inheritConc = body?.max_concurrency === null
           const inheritRpm = body?.max_rpm === null
@@ -4649,6 +4732,8 @@ export function createPanelHandler(ctx) {
             !inheritRpm &&
             !hasSessionSlots &&
             !hasMaxSessions &&
+            !hasMaxPrimarySessions &&
+            !hasMaxSubagents &&
             !hasQuotaOverride &&
             !hasModels &&
             !hasAuthScheme &&
@@ -4691,6 +4776,10 @@ export function createPanelHandler(ctx) {
             if (hasSessionSlots && body.session_slots !== null)
               strictInteger(body.session_slots, SESSION_SLOT_MIN, SESSION_SLOT_MAX, 'session_slots')
             if (hasMaxSessions && body.max_sessions !== null) strictInteger(body.max_sessions, 0, 256, 'max_sessions')
+            if (hasMaxPrimarySessions && body.max_primary_sessions !== null)
+              strictInteger(body.max_primary_sessions, 1, 20, 'max_primary_sessions')
+            if (hasMaxSubagents && body.max_subagents_per_session !== null)
+              strictInteger(body.max_subagents_per_session, 0, 20, 'max_subagents_per_session')
             // null puts the slot back on the default weight of 1
             if (hasWeight && body.weight !== null) strictInteger(body.weight, 1, 100, 'weight')
           } catch (error) {
@@ -4729,6 +4818,12 @@ export function createPanelHandler(ctx) {
             return json(res, 400, {
               ok: false,
               error: { code: 'claude_max_sessions_forbidden', message: 'Claude 槽不使用 OpenAI 会话容量上限' },
+            })
+          }
+          if ((hasMaxPrimarySessions || hasMaxSubagents) && isCodexVm(currentVm)) {
+            return json(res, 400, {
+              ok: false,
+              error: { code: 'gpt_family_limits_forbidden', message: 'GPT slots do not use Claude family limits' },
             })
           }
           if (hasAuthScheme && hostUnsupported(res, currentVm, 'auth_scheme')) return
@@ -4819,6 +4914,24 @@ export function createPanelHandler(ctx) {
               const vm = ctx.applyVmMaxSessions(id, body.max_sessions, { override: true })
               if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
             }
+          }
+          if (hasMaxPrimarySessions || hasMaxSubagents) {
+            const vm = patchVmRecord(cfg.paths.project, id, (record) => ({
+              policy: {
+                ...record.policy,
+                ...(hasMaxPrimarySessions && {
+                  maxPrimarySessions: body.max_primary_sessions,
+                  maxPrimarySessionsOverride: body.max_primary_sessions !== null,
+                }),
+                ...(hasMaxSubagents && {
+                  maxSubagentsPerSession: body.max_subagents_per_session,
+                  maxSubagentsPerSessionOverride: body.max_subagents_per_session !== null,
+                }),
+              },
+            }))
+            if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
+            ctx.poolScheduler?.notifyCapacity?.()
+            ctx.poolScheduler?.signalChange?.()
           }
           if (parsedQuotaOverride) {
             const vm = applyVmQuotaOverride(id, parsedQuotaOverride.value)
@@ -5207,6 +5320,7 @@ export function createPanelHandler(ctx) {
           vmId,
           platform,
           refresh,
+          siwc: codexSiwc,
         })
         return json(res, 200, panel.ok(payload))
       }
@@ -5507,9 +5621,17 @@ export function createPanelHandler(ctx) {
           await openaiApiManager?.cancel(id)
           await slotBrowserManager?.close(id, { forget: true })
           openaiApiRepo?.cleanupForVm(id)
-          if (isCodexVm(prev)) resetOpenaiAuth(cfg.paths.project, id)
+          if (isCodexVm(prev)) {
+            resetOpenaiAuth(cfg.paths.project, id)
+            codexSiwc?.cancel(id)
+          }
           const slotDir = path.join(cfg.paths.project, 'vms', id)
           const removed = []
+          const siwcFile = path.join(slotDir, SIWC_CREDENTIAL_FILE)
+          if (fs.existsSync(siwcFile)) {
+            fs.unlinkSync(siwcFile)
+            removed.push(path.relative(cfg.paths.project, siwcFile))
+          }
           for (const file of [
             path.join(slotDir, 'codex-credentials.json'),
             path.join(slotDir, 'cli-home', '.codex', 'auth.json'),
@@ -5634,7 +5756,9 @@ export function createPanelHandler(ctx) {
         const payload = {
           vm_id: id,
           seed_policy,
-          ...seedTelemetryContract(seed_policy),
+          ...seedTelemetryContract(seed_policy, {
+            disableNonessentialTraffic: telemetryDisableNonessentialTraffic(ctx.routingConfig),
+          }),
           ...observed,
         }
         if (debug) {
@@ -5772,6 +5896,7 @@ export function createPanelHandler(ctx) {
                   existingSettings:
                     existing.files['settings.json'] === null ? {} : JSON.parse(existing.files['settings.json']),
                   replaceEnv: Object.hasOwn(body, 'extra_env') || Object.hasOwn(body, 'settings_json_override'),
+                  routing: ctx.routingConfig,
                 })
                 outcome.wrote = outcome.seed.wrote === true
                 const result = await host.syncSeed(fresh, path.join(cfg.paths.project, 'vms', id))
@@ -5798,7 +5923,9 @@ export function createPanelHandler(ctx) {
           const data = {
             vm_id: id,
             seed_policy: next,
-            ...seedTelemetryContract(next),
+            ...seedTelemetryContract(next, {
+              disableNonessentialTraffic: telemetryDisableNonessentialTraffic(ctx.routingConfig),
+            }),
             saved: true,
             published: service.published === true,
             applied: service.applied === true,
@@ -6110,7 +6237,7 @@ export function createPanelHandler(ctx) {
         const placementPolicy = normalizeAutoPlacement(ctx.routingConfig?.cluster?.auto_placement)
         const wanted = requestedPlacement(body, placementPolicy)
         const exitPinsHost = typeof body.proxy_id === 'string' && isLocalEgressId(body.proxy_id.trim())
-        const localCragSupported = process.platform === 'linux' && process.arch === 'x64'
+        const localCragSupported = process.platform === 'linux' && cragTargetArch(cfg.paths.project) === 'amd64'
         const cragCapableNodes = new Set()
         if (wanted.mode === 'auto' && ident.role === 'admin' && runtime !== RUNTIME_KVM && !exitPinsHost) {
           const picked = await (ctx.pickPlacement || pickPlacement)({

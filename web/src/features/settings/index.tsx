@@ -501,6 +501,10 @@ export function SettingsPage() {
                     (draft.telemetry as Record<string, unknown> | undefined)
                       ?.default_enabled === true
                   }
+                  disableNonessentialTraffic={
+                    (draft.telemetry as Record<string, unknown> | undefined)
+                      ?.disable_nonessential_traffic === true
+                  }
                   onIntervalChange={(seconds) =>
                     setDraft((current) => ({
                       ...current,
@@ -518,6 +522,16 @@ export function SettingsPage() {
                         ...((current.telemetry as Record<string, unknown>) ||
                           {}),
                         default_enabled: enabled,
+                      },
+                    }))
+                  }
+                  onDisableNonessentialTrafficChange={(enabled) =>
+                    setDraft((current) => ({
+                      ...current,
+                      telemetry: {
+                        ...((current.telemetry as Record<string, unknown>) ||
+                          {}),
+                        disable_nonessential_traffic: enabled,
                       },
                     }))
                   }

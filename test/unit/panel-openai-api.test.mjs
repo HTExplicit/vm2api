@@ -277,10 +277,11 @@ test('legacy Platform browser tickets still reject Claude before opening a brows
   assert.equal(denied.body.error.code, 'not_gpt_slot')
 })
 
-test('OpenAi_api aggregates only current bound keys, eligible bind choices and safe proxy summaries', async (t) => {
+test('OpenAi_api lists bound, waiting and eligible accounts with safe proxy summaries', async (t) => {
   const root = fixture(t)
   for (const [id, name] of [
     ['vm-bind', '待绑定'],
+    ['vm-pro', '待查资格'],
     ['vm-free', '未领取'],
   ]) {
     fs.writeFileSync(
@@ -311,7 +312,8 @@ test('OpenAi_api aggregates only current bound keys, eligible bind choices and s
           account_id: `account-${vm.id}`,
           email: `${vm.id}@example.test`,
           has_key: vm.id === 'vm-api',
-          claim_status: vm.id === 'vm-free' ? 'unknown' : 'claimed',
+          pro_eligible: vm.id === 'vm-pro',
+          claim_status: vm.id === 'vm-api' ? 'claimed' : vm.id === 'vm-bind' ? 'pending' : 'unknown',
           call_status: 'ready',
           key_suffix: 'abcd',
         }
@@ -320,7 +322,7 @@ test('OpenAi_api aggregates only current bound keys, eligible bind choices and s
     requestLog: {
       repo: {
         accountApiUsage(ids, now, timezone) {
-          assert.deepEqual(ids, ['account-vm-api'])
+          assert.deepEqual([...ids].sort(), ['account-vm-api', 'account-vm-bind', 'account-vm-pro'])
           assert.equal(timezone, 'Asia/Singapore')
           assert.equal(typeof now, 'number')
           return new Map([
@@ -334,7 +336,8 @@ test('OpenAi_api aggregates only current bound keys, eligible bind choices and s
     },
   })('GET', '/api/panel/openai-apikey?timezone=Asia%2FSingapore')
   assert.equal(out.status, 200)
-  assert.equal(out.body.data.items.length, 1)
+  assert.deepEqual(Object.keys(out.body.data), ['items'])
+  assert.equal(out.body.data.items.length, 3)
   assert.equal(out.body.data.items[0].slot_name, '主账号')
   assert.equal(out.body.data.items[0].today_requests, 2)
   assert.deepEqual(out.body.data.items[0].proxy, {
@@ -348,8 +351,11 @@ test('OpenAi_api aggregates only current bound keys, eligible bind choices and s
     available: true,
   })
   assert.deepEqual(
-    out.body.data.bind_candidates.map((item) => item.vm_id),
-    ['vm-bind'],
+    out.body.data.items.filter((item) => !item.has_key).map((item) => [item.vm_id, item.key_id, item.call_status]),
+    [
+      ['vm-bind', null, null],
+      ['vm-pro', null, null],
+    ],
   )
   assert.equal(JSON.stringify(out.body).includes('private.proxy'), false)
   assert.equal(JSON.stringify(out.body).includes('private-password'), false)
@@ -421,10 +427,12 @@ test('batch operations preserve partial results, verify identity and deduplicate
   const seen = []
   const manager = {
     jobs: new Map(),
-    assertAccountIdentity(vmId, accountId) {
+    boundKey(vmId, accountId) {
       seen.push(['identity', vmId, accountId])
       if (accountId === 'old-account')
         throw Object.assign(new Error('槽位账号已改变'), { code: 'api_account_changed', status: 409 })
+      if (accountId === 'unbound-account')
+        throw Object.assign(new Error('尚未绑定'), { code: 'api_key_required', status: 409 })
       return { vm: { id: vmId }, record: { organization_id: 'org-shared' } }
     },
     refresh(vmId) {
@@ -452,6 +460,7 @@ test('batch operations preserve partial results, verify identity and deduplicate
     { vm_id: 'vm-api', account_id: 'account-a' },
     { vm_id: 'vm-other', account_id: 'account-b' },
     { vm_id: 'vm-old', account_id: 'old-account' },
+    { vm_id: 'vm-new', account_id: 'unbound-account' },
   ]
   const refreshed = await handler(root, { manager, body: { action: 'refresh_balance', items: selected } })(
     'POST',
@@ -460,9 +469,10 @@ test('batch operations preserve partial results, verify identity and deduplicate
   assert.equal(refreshed.status, 200)
   assert.deepEqual(
     refreshed.body.data.results.map((item) => item.status),
-    ['queued', 'queued', 'error'],
+    ['queued', 'queued', 'error', 'error'],
   )
   assert.equal(refreshed.body.data.results[2].error.code, 'api_account_changed')
+  assert.equal(refreshed.body.data.results[3].error.code, 'api_key_required')
   assert.equal(seen.filter(([name]) => name === 'refresh').length, 1)
   for (const [action, expected] of [
     ['enable', 'enabled'],
@@ -479,7 +489,7 @@ test('batch operations preserve partial results, verify identity and deduplicate
   }
 })
 
-test('identity-bearing switches and refreshes reject stale account selections', async (t) => {
+test('identity-bearing switches, grants and configuration reject stale account selections', async (t) => {
   const root = fixture(t)
   const mismatch = () => {
     throw Object.assign(new Error('槽位账号已改变'), { code: 'api_account_changed', status: 409 })
@@ -487,6 +497,7 @@ test('identity-bearing switches and refreshes reject stale account selections', 
   for (const [method, action, manager] of [
     ['PATCH', 'enabled', { setEnabled: mismatch }],
     ['POST', 'resume', { resume: mismatch }],
+    ...['preview', 'claim', 'setup'].map((action) => ['POST', action, { assertAccountIdentity: mismatch }]),
     [
       'POST',
       'refresh',

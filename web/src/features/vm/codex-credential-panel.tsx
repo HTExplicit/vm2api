@@ -4,14 +4,20 @@ import type { Vm } from '@/types/panel-vm'
 import { Copy, ExternalLink, Globe, Upload } from 'lucide-react'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
+import { copyText } from '@/lib/clipboard'
 import { proxyNamedLabel } from '@/lib/vm-status'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { dashboardQueryOptions } from '@/features/overview/queries'
+import { CodexSiwcPanel } from '@/features/vm/codex-siwc-panel'
 import type { CommitResult } from '@/features/vm/credential-panel'
 import { SlotBrowserDialog } from '@/features/vm/openai-platform-browser-dialog'
-import { vmQueryOptions, vmsListQueryOptions } from '@/features/vm/queries'
+import {
+  testModelsQueryOptions,
+  vmQueryOptions,
+  vmsListQueryOptions,
+} from '@/features/vm/queries'
 import { useVmPerms } from '@/features/vm/vm-perms'
 
 type CodexImportMode = 'oauth' | 'access_token' | 'refresh_token' | 'json'
@@ -250,13 +256,15 @@ export function CodexCredentialPanel({
           <div className='space-y-2'>
             <div className='flex flex-wrap items-center gap-2'>
               <Button
+                type='button'
                 size='sm'
                 variant='outline'
-                onClick={() => {
-                  void navigator.clipboard
-                    ?.writeText(link.authUrl)
-                    .then(() => toast.success('已复制授权链接'))
-                    .catch(() => toast.error('复制失败，请手动选中链接'))
+                onClick={async () => {
+                  if (await copyText(link.authUrl)) {
+                    toast.success('已复制授权链接')
+                  } else {
+                    toast.error('复制失败，请手动选中链接')
+                  }
                 }}
               >
                 <Copy className='size-3.5' aria-hidden='true' />
@@ -418,6 +426,20 @@ export function CodexCredentialPanel({
           </Button>
         </div>
       )}
+      {perms.admin && (vm.has_token || vm.codex_siwc) ? (
+        <CodexSiwcPanel
+          key={vm.id}
+          vm={vm}
+          onChanged={() =>
+            Promise.all([
+              invalidate(),
+              qc.invalidateQueries({
+                queryKey: testModelsQueryOptions(vm.id).queryKey,
+              }),
+            ])
+          }
+        />
+      ) : null}
       {browserOpen ? (
         <SlotBrowserDialog
           vmId={vm.id}

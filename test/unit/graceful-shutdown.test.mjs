@@ -185,6 +185,8 @@ for (const cleanupFails of [false, true]) {
       process: { exit: (code) => events.push(`exit:${code}`) },
       console: { warn() {} },
       delay,
+      foreignLoadWriter: null,
+      handoverRole: () => 'single',
       geminiTerminal: {
         close: async () => {
           events.push('gemini-terminal')
@@ -194,7 +196,7 @@ for (const cleanupFails of [false, true]) {
         events.push('jev-recorder-off')
       },
       vmTestSchedule: stop('schedule'),
-      backupService: { stopScheduler() {} },
+      backupService: { stopScheduler() {}, abortRunning: async () => {} },
       proxyPool: { stopScheduler() {} },
       healthMonitor: stop('health'),
       credentialRefreshMonitor: stop('credentials'),

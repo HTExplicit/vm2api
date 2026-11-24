@@ -70,24 +70,20 @@ function accountProxyView(vm, { proxyPool, nodes = [] }) {
 
 export function buildOpenaiApiKeyList(vms, manager, usageRepo, timezone, proxyOptions = {}) {
   const items = []
-  const bind_candidates = []
   for (const vm of vms) {
     const state = manager?.view(vm)
     if (!state?.account_id) continue
-    const identity = {
-      vm_id: vm.id,
-      account_id: state.account_id,
-      email: state.email || '',
-      slot_name: vm.name || vm.display_name || vm.id,
-    }
-    if (!state.has_key) {
-      if (state.claim_status === 'pending' || state.claim_status === 'claimed')
-        bind_candidates.push({ ...identity, claim_status: state.claim_status })
-      continue
-    }
+    if (!state.has_key && !state.pro_eligible && !['pending', 'claimed'].includes(state.claim_status)) continue
     items.push({
       ...state,
-      ...identity,
+      vm_id: vm.id,
+      email: state.email || '',
+      slot_name: vm.name || vm.display_name || vm.id,
+      key_id: state.has_key ? state.key_id : null,
+      endpoint_id: state.has_key ? state.endpoint_id : null,
+      call_status: state.has_key ? state.call_status : null,
+      call_reason: state.has_key ? state.call_reason : null,
+      call_error: state.has_key ? state.call_error : null,
       proxy: accountProxyView(vm, proxyOptions),
     })
   }
@@ -107,7 +103,6 @@ export function buildOpenaiApiKeyList(vms, manager, usageRepo, timezone, proxyOp
         unpriced_requests: 0,
       }),
     })),
-    bind_candidates,
   }
 }
 
@@ -123,7 +118,7 @@ export async function runOpenaiApiKeyBatch(manager, { action, items } = {}) {
     const identity = { vm_id: vmId, account_id: String(item?.account_id || '').trim() }
     try {
       const account_id = requireAccountIdentity(identity.account_id)
-      const context = manager.assertAccountIdentity(vmId, account_id)
+      const context = manager.boundKey(vmId, account_id)
       let result
       let status = 'done'
       if (action === 'enable' || action === 'disable')

@@ -42,36 +42,16 @@ export function openaiApiBalanceStatusMessage(
   return state?.balance_refresh_message || state?.balance_error || ''
 }
 
-const PRO_PLANS = new Set([
-  'prolite',
-  'pro',
-  'promax',
-  'chatgptprolite',
-  'chatgptpro',
-  'chatgptpromax',
-])
-
-export function isProApiAccount(vm: Vm): boolean {
-  if (!isCodexVm(vm)) return false
-  return (
-    vm.openai_api?.pro_eligible ??
-    PRO_PLANS.has(
-      String(vm.plan_type || vm.chatgpt_plan_type || '').toLowerCase()
-    )
-  )
-}
-
 export function openaiApiClaimLocked(state?: OpenaiApiView | null): boolean {
   return state?.claim_status === 'pending' || state?.claim_status === 'claimed'
 }
 
 export function hasOpenaiApiFeature(vm: Vm): boolean {
+  const state = vm.openai_api
   return (
     isCodexVm(vm) &&
-    (isProApiAccount(vm) ||
-      !!vm.openai_api?.has_key ||
-      openaiApiClaimLocked(vm.openai_api) ||
-      vm.openai_api?.balance != null)
+    !!state?.account_id &&
+    (state.pro_eligible || state.has_key || openaiApiClaimLocked(state))
   )
 }
 

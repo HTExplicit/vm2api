@@ -4,6 +4,7 @@
  * quota/auth before any SSE byte is committed.
  */
 import { isCodexVm } from '../vm/vm-kind.mjs'
+import { siwcModelAvailable } from '../vm/codex-siwc-store.mjs'
 import {
   extraToCodexSnapshot,
   normalizeCodexLimits,
@@ -31,7 +32,7 @@ const HARD_UNAVAILABLE = new Set(['dead', 'error', 'disabled'])
 
 export function isCodexSlotReady(vm, now = Date.now()) {
   if (!vm || !isCodexVm(vm)) return false
-  if (openaiAuthBlock(vm)) return false
+  if (openaiAuthBlock(vm) || (vm.codex_siwc?.enabled && (vm.runtime?.stopped || vm.status === 'stopped'))) return false
   if (proxyBlockedReason(vm.proxy)) return false
   if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)) return false
   if (!vm.has_token) return false
@@ -95,6 +96,12 @@ function parkUntil(vm, now) {
 
 /** Live gates shared by pinned admission and the final check before sending. */
 export function codexAdmissionBlock(vm, now = Date.now(), policy = null) {
+  if (vm?.codex_siwc?.enabled && vm.codex_siwc.status === 'reauth_required') {
+    return { error: 'siwc_reauth_required', reason: 'siwc_reauth_required', retryAt: null }
+  }
+  if (vm?.codex_siwc?.enabled && (vm.runtime?.stopped || vm.status === 'stopped')) {
+    return { error: 'vm_stopped', reason: 'vm_stopped', retryAt: null }
+  }
   if (openaiAuthBlock(vm)) return { error: 'credential_blocked', reason: 'credential_blocked', retryAt: null }
   const proxy = proxyBlockedReason(vm?.proxy)
   if (proxy) return { error: proxy, reason: proxy, retryAt: null }
@@ -249,7 +256,10 @@ export function codexAccountStatus(vm, now = Date.now(), policy = null) {
 /** Panel allowlist on a GPT slot. No model or no list means allowed. */
 export function codexSlotAllowsModel(vm, model) {
   if (!model) return true
-  return modelMatchesAllowlist(model, vm?.allowed_models ?? vm?.policy?.allowed_models)
+  return (
+    modelMatchesAllowlist(model, vm?.allowed_models ?? vm?.policy?.allowed_models) &&
+    (!vm?.codex_siwc?.enabled || siwcModelAvailable(vm.codex_siwc.models, model))
+  )
 }
 
 export function codexAccountCandidate(vm, now = Date.now(), signals = null, policy = null) {
@@ -449,6 +459,13 @@ export function isCodexFailoverError(result) {
   // Uncommitted upstream 503 server_error is transient. The caller already
   // refused committed hops and anything that has written to the client.
   if (status === 408) return true
+  if (
+    status === 503 &&
+    /^(siwc_(catalog_unavailable|refresh_pending|mode_changed|unavailable|upstream_error)|subscription_sharing_.*_unavailable)$/.test(
+      code,
+    )
+  )
+    return true
   // The kernel may be busy/cooling down even while the gateway has a seat.
   if (status === 503 && (code === 'no_capacity' || code === 'overloaded' || /server_error|provider_error/i.test(code)))
     return true

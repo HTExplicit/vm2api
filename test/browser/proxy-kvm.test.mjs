@@ -333,7 +333,7 @@ test(
       name: '生成授权链接',
       exact: true,
     })
-    const dialog = page.getByRole('dialog', {
+    const panel = page.getByRole('region', {
       name: 'Claude Code 授权',
       exact: true,
     })
@@ -344,14 +344,14 @@ test(
       'viewing credentials does not open a native session'
     )
     await trigger.click()
-    await dialog.waitFor()
+    await panel.waitFor()
     await page.waitForFunction(() => document.body.innerText.includes('已连接'))
     assert.equal(sockets.length, 1)
     sockets[0].send(
       Buffer.from('https://claude.ai/oauth/authorize?client_id=offline&sta')
     )
     assert.equal(
-      await dialog.getByLabel('授权链接', { exact: true }).inputValue(),
+      await panel.getByLabel('授权链接', { exact: true }).inputValue(),
       ''
     )
     sockets[0].send(Buffer.from('te=fixture-state\nLogin successful\n'))
@@ -365,10 +365,10 @@ test(
       '0',
       'terminal text cannot confirm persistence'
     )
-    await dialog
+    await panel
       .getByLabel('授权码或回调链接', { exact: true })
       .fill('offline-code#fixture-state')
-    await dialog
+    await panel
       .getByRole('button', { name: '提交授权码', exact: true })
       .click()
     await page.waitForFunction(
@@ -382,7 +382,7 @@ test(
       'offline-code#fixture-state\r'
     )
     sockets[0].close({ code: 1000, reason: 'offline fixture disconnected' })
-    await dialog
+    await panel
       .getByRole('button', { name: '重新连接并生成链接', exact: true })
       .waitFor()
     assert.equal(
@@ -391,11 +391,11 @@ test(
       'disconnect waits for an explicit operator retry'
     )
     assert.equal(
-      await dialog.getByLabel('授权链接', { exact: true }).inputValue(),
+      await panel.getByLabel('授权链接', { exact: true }).inputValue(),
       ''
     )
     assert.equal(await commits.innerText(), '0')
-    await dialog
+    await panel
       .getByRole('button', { name: '重新连接并生成链接', exact: true })
       .click()
     await page.waitForFunction(() => document.body.innerText.includes('已连接'))
@@ -411,16 +411,16 @@ test(
       })
     )
     sockets[1].send(JSON.stringify({ t: 'login', ok: true }))
-    await dialog
-      .getByText('凭证已保存并同步到槽位，可以关闭此窗口。', { exact: true })
+    await panel
+      .getByText('凭证已保存并同步到槽位，可以收起此面板。', { exact: true })
       .waitFor()
     assert.equal(
       await commits.innerText(),
       '1',
       'one committed result is delivered once'
     )
-    await dialog.getByRole('button', { name: 'Close', exact: true }).click()
-    await dialog.waitFor({ state: 'hidden' })
+    await panel.getByRole('button', { name: '完成收起', exact: true }).click()
+    await panel.waitFor({ state: 'hidden' })
     await page.waitForFunction(
       () => document.activeElement?.textContent?.trim() === '生成授权链接'
     )

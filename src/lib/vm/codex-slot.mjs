@@ -4,6 +4,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { atomicWriteJson, readJsonCached } from './vm-file.mjs'
+import {
+  codexSiwcOwner,
+  readCodexSiwc,
+  sameSiwcOwner,
+  summarizeCodexSiwc,
+  writeCodexSiwc,
+} from './codex-siwc-store.mjs'
 import { isCodexVm } from '../protocol/codex-route.mjs'
 import {
   buildCodexUsageView,
@@ -351,6 +358,14 @@ export function upsertCodexAccount(projectRoot, vmId, patch = {}, { replaceCrede
   writeCodexAccounts(projectRoot, vmId, accounts)
   resetOpenaiAuth(projectRoot, vmId)
   if (replaceCredentials) {
+    const siwc = readCodexSiwc(projectRoot, vmId)
+    if (siwc?.owner && !sameSiwcOwner(siwc.owner, codexSiwcOwner(cur))) {
+      writeCodexSiwc(projectRoot, vmId, {
+        host_id: siwc.host_id,
+        enabled: siwc.enabled,
+        state: 'reauth_required',
+      })
+    }
     const file = path.join(projectRoot, 'vms', `${vmId}.json`)
     const vm = readJsonCached(file)
     if (vm?.codex) {
@@ -381,9 +396,10 @@ function reconcileCodexLimitedUntil(vm, now = Date.now()) {
 export function persistCodexQuotaSnapshot(
   projectRoot,
   vmId,
-  { extra, resetCredits, credits, planType, sampledAt, checkedAt } = {},
+  { extra, resetCredits, credits, planType, sampledAt, checkedAt, now } = {},
 ) {
   if (!projectRoot || !vmId) throw new Error('projectRoot and vmId required')
+  const stampNow = Number.isFinite(now) ? Number(now) : Date.now()
   const file = path.join(projectRoot, 'vms', `${vmId}.json`)
   let vm
   try {
@@ -403,8 +419,8 @@ export function persistCodexQuotaSnapshot(
   if (credits) vm.codex.credits = credits
   if (checkedAt) vm.codex.credits_checked_at = checkedAt
   if (extra && typeof extra === 'object') {
-    reconcileCodexLimitedUntil(vm)
-  } else if (credits && hasSpendableCodexCredits(vm) && vm.codex.extra?.codex_limited_until) {
+    reconcileCodexLimitedUntil(vm, stampNow)
+  } else if (credits && hasSpendableCodexCredits(vm, stampNow) && vm.codex.extra?.codex_limited_until) {
     vm.codex.extra = { ...vm.codex.extra }
     delete vm.codex.extra.codex_limited_until
   }
@@ -458,6 +474,7 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
     chatgpt_plan_type: first.chatgpt_plan_type || null,
     subscription,
     auth_block: openaiAuthBlock(vm, first),
+    siwc: summarizeCodexSiwc(readCodexSiwc(projectRoot, vm.id), codexSiwcOwner(first)),
     account_count: accounts.length,
     usage,
     reset_credits: vm.codex?.reset_credits || null,

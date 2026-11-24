@@ -10,5 +10,13 @@ export const Route = createFileRoute('/_authenticated/openai-apikey')({
 
 function OpenaiApiKeyRoute() {
   const { vm_id } = Route.useSearch()
-  return <OpenaiApiKeyPage initialVmId={vm_id} />
+  const navigate = Route.useNavigate()
+  return (
+    <OpenaiApiKeyPage
+      vmId={vm_id}
+      onVmIdChange={(id) =>
+        void navigate({ search: id ? { vm_id: id } : {}, replace: true })
+      }
+    />
+  )
 }

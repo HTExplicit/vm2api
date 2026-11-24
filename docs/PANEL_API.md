@@ -114,7 +114,7 @@ GPT 订阅主动刷新仅管理员，普通 user 不可调用；其他普通租�
 | POST | `/vms/:id/oauth/to-setup-token` | 把当前完整 OAuth 活票改成 Setup Token（保留 refresh/过期）。已是 setup-token 则幂等 |
 | POST | `/vms/:id/oauth/generate-auth-url` | CAI / Setup Token PKCE 授权链接；要求绑定可用出口。`claude_code` 返回 409 `native_login_required`，请使用专用终端 |
 | POST | `/vms/:id/oauth/exchange-code` | CAI / Setup Token 提交会话 ID 和授权码；导入并同步后才返回成功。Claude Code 的回调由专用终端处理 |
-| POST | `/vms/:id/credentials/sync` | 管理员手动同步 Claude 客户端凭证，成功返回 `{ synced: true }`。无凭证返回 409，同步失败返回 502；不换票、不回传 token。远程槽保留节点已轮换凭证并修复客户端链接 |
+| POST | `/vms/:id/credentials/sync` | 管理员手动同步 Claude 客户端凭证，成功返回 `{ synced: true }`。无凭证返回 409，同步失败返回 502；不换票、不回传 token，并排除凭证内邮箱字段。远程槽保留节点已轮换凭证、剔除遗留邮箱并修复客户端链接 |
 | GET/POST | `/vms/:id/official-cc-bootstrap` | 初装进度 / `{ manual:true }` 再跑 |
 | GET/PUT | `/vms/:id/seed-settings` | 播种；面板默认锁定，解锁后改、播种前确认。`settings.json` 可编辑 env（经 `extra_env`）与 `theme`；`autoUpdates`/`grove_enabled` 与 TZ/LANG/LC_ALL、telemetry/bedrock/vertex 等契约 env 只读展示，TZ/LANG 经 PUT `timezone` / `timezone_follow_proxy` / `locale` 写入槽位后再播种，不经 `extra_env`；`claude_setting` 可编辑。`GET ?debug=1` 额外返回 `telemetry_log`（最近 40 行脱敏上传审计，默认不带） |
 | POST | `/vms/:id/collect-identity` | guest 采集（locale/tz/`guest_machine_id`、槽内 `/etc/os-release` 的 `VERSION_ID`、系统与架构）；Codex Analytics 只使用这次采集的运行环境 |
@@ -211,6 +211,10 @@ KVM 的 CRAG 切核使用此入口；既有 PATCH、槽策略和 `/dataplane` �
 记录字段：`schedule_off`、`unschedulable{reason,detail,at}`、`schedule_hold{reason,detail,at}`（系统暂停：仅 `proxy_cooldown`，由写入方自己解除；旧版遗留的 `maintenance` 暂停在启动迁移时直接清除）。`schedulable` / `schedule_disabled_reason` / `schedule_manual` 每次写入时派生，保留给旧读者与回滚。升级后首次启动把旧记录迁到新字段，原文件备份到 `backups/schedule-migration-<ts>/`；上线前可用 `node scripts/replay-schedule-state.mjs --project <dir>` 预览迁移结果。设置 `routing.pool.manual_schedule_wins` 已移除（调度关不会被任何自动路径打开）。
 
 ### 平台独立的槽位限额
+
+Claude 的 `PATCH /api/panel/vms/:id` 接受 `max_primary_sessions` (1-20) 和 `max_subagents_per_session` (0-20). 每项单独传 `null` 恢复继承, 非法值返回 400 `invalid_scheduling_value`. 全局默认由 `PUT /api/panel/routing` 的 `pool` 对象设置. 两项均默认 `null`, 前者跟随本 VM 物理席位上限, 后者关闭家族模式. 列表和详情返回两项生效值、对应的 `_override` 标记及 `scheduling_inherited` 中的继承值.
+
+家族模式下, `seats_used` 统计本 VM 占用的根席位, `seats_max` 为生效的主会话上限 n. 每个 `seat_sessions` 成员及 SSE 对应的 `sessions` 成员另带 `subagents_running` (含已放行请求), `subagents_queued` 和 `subagents_max`. 根迁移后, 当前根席位保留到整个家族的在跑和排队请求结束, 旧 VM 在本地最后一份预约结束时交还席位. 热更新的 n 和 m 用于新进调度的请求. 所有执行预约 (含旧票和免席位探测) 在放行时按 VM 当时的家族模式检查物理位. 关闭模式的快照显示最近观察到的物理容量.
 
 `max_concurrency` / `max_rpm` 传数字钉住本槽，传 `null` 清除覆盖并立即使用本平台全局值。Claude 跟随 `tiers`；OpenAI 跟随 `codex.quota`，不受 Claude 分档保存影响。
 
@@ -362,7 +366,7 @@ H1 删除已绑定槽时，控制面保留最小私有回收记录，只有严�
 | `websocket.enabled` | `true` | 全局推理 WS 总闸，不影响面板终端或集群连接 |
 | `codex.websocket.enabled` | `true` | GPT 推理 WS 子闸；必须与总闸同时开启 |
 | `codex.upstream_transport` | `prefer_websocket` | `prefer_websocket` 或 `http`；入站与上游传输不是同一段连接 |
-| `codex.user_agent` | `codex_cli_rs/0.167.1 (linux x86_64)` | 上游客户端画像，不读取下游用户的系统信息；originator/version 由内核按该画像生成，调用方不能覆盖 |
+| `codex.user_agent` | `codex_cli_rs/0.170.0 (linux x86_64)` | 上游客户端画像，不读取下游用户的系统信息；originator/version 由内核按该画像生成，调用方不能覆盖 |
 | `codex.catalog_client_version` | `auto` | 模型目录同步的客户端版本，与推理 UA 分开 |
 | `codex.client_features.enabled` | `false` | 显式开启后上送槽位独立安装 UUID 与官方 `client_metadata`；不使用 VM/硬件指纹 |
 | `codex.analytics.enabled` | `false` | 显式开启后独立上报运行环境 Analytics，不是推理成功的前提 |
@@ -705,13 +709,13 @@ sessionKey / 授权码导入必须走该槽 SOCKS5。
 
 ## OpenAI 槽位浏览器（仅 admin）
 
-基址 `/vms/:id`。POST `/browser/open` 接收 `{ purpose: "oauth" | "platform" }`，立即返回公开状态并在后台排队、启动；GET `/browser` 读取当前 `active/status/purpose/message` 及可选 `warning`。POST `/browser-ticket` 返回 `{ ticket, url }`，30 秒单次票据可在排队时连接 WebSocket `/browser?ticket=…`。POST `/browser/close` 取消该槽登录及配置任务，保存会话并释放浏览器。`/openai-api/browser-ticket` 与 WebSocket `/openai-api/browser` 保留兼容。
+基址 `/vms/:id`。POST `/browser/open` 接收 `{ purpose: "oauth" | "platform" | "siwc", account_id?, session_id? }`，立即返回公开状态并在后台排队、启动；GET `/browser` 读取当前 `active/status/purpose/message` 及可选 `warning`。POST `/browser-ticket` 返回 `{ ticket, url }`，30 秒单次票据可在排队时连接 WebSocket `/browser?ticket=…`。POST `/browser/close` 取消该槽登录及配置任务，保存会话并释放浏览器。管理页的 Platform 开窗、取票和关闭都携带当前 `account_id`。Sign in with ChatGPT 开窗携带 `/siwc/bind` 返回的 `session_id`。`/openai-api/browser-ticket` 与 WebSocket `/openai-api/browser` 保留兼容。
 
 关闭时停止画面、输入和 ticket，仅保存 Cookie，然后由 Puppeteer 关闭浏览器，确认进程退出并关闭代理 relay、虚拟显示后推进队列。Puppeteer 自带的异常关闭终止行为保留；异常进程退出也会触发资源回收。真实退出失败返回 `browser_close_failed`，状态为 `close_failed/active:true`；管理员再次 POST `/browser/close` 重试未完成的步骤。主动关闭失败保留弹窗并显示“重试关闭”。Cookie 保存失败但资源释放成功时返回 `closed` 和 `warning`。删槽遇到关闭失败会停止删除。
 
 管理员通过 GET `/account-browser` 读取本地状态，POST `/account-browser/check` 查询官方最新清单，POST `/account-browser/install` 安装、更新或人工重试；原授权 key 接口已删除。设置显示已安装／运行／最新版本、build、后端统一更新判断及错误。安装会暂停新开窗，仅核对文件、实际版本与组件，不执行页面自检，不保留额外旧内核副本或自动回滚。公开镜像不含浏览器内核；运行期缓存在 data 卷，应用升级保留。截图仅在内存和 WebSocket 传输。
 
-一个槽位固定一套首次从上游 Linux 模板生成的 ShardBrowser 身份，采用 Puppeteer 原生持久 profile、英文界面及绑定代理时区，Cookie 与 Billing 会话加密保存。所有网页及换票请求使用当前绑定代理；连接或绑定变更先关闭受影响窗口，连接信息改变清除旧地理缓存。同账号 OAuth 回调自动换票、保存并推送 `oauth_complete`，仅表示凭据已保存。登录窗口保留，点击“开机并完成”依次调用 `POST /vms/:id/start`、`{ ensure_kernel: true }`，`GET /vms/:id/health` 核验目标 GPT 内核，再调用 `POST /vms/:id/schedulable`、`{ schedulable: true }` 开启调度；全部成功后点击“完成”才结束向导，也可继续进入 Platform。失败保留凭据并允许重试，直接关闭不报告向导完成。API 配置完成为 `api_ready`，`ready` 仅表示浏览器已就绪。未关联赠额的账号打开 Platform 只导航，不自动领取。
+一个槽位固定一套首次从上游 Linux 模板生成的 ShardBrowser 身份，采用 Puppeteer 原生持久 profile、英文界面及绑定代理时区，Cookie 与 Billing 会话加密保存。所有网页及换票请求使用当前绑定代理；连接或绑定变更先关闭受影响窗口，连接信息改变清除旧地理缓存。同账号 OAuth 回调自动换票、保存并推送 `oauth_complete`，仅表示凭据已保存。登录窗口保留，点击“开机并完成”依次调用 `POST /vms/:id/start`、`{ ensure_kernel: true }`，`GET /vms/:id/health` 核验目标 GPT 内核，再调用 `POST /vms/:id/schedulable`、`{ schedulable: true }` 开启调度；全部成功后点击“完成”结束向导。OpenAI 账号 Key 在 OpenAi_api 管理。失败保留凭据并允许重试，直接关闭不报告向导完成。API 配置完成为 `api_ready`，`ready` 仅表示浏览器已就绪。未关联赠额的账号打开 Platform 只导航，不自动领取。
 
 账号邮箱确认后，组织可由官方请求或 General 页唯一只读 `Organization ID` 字段核对；字段必须属于已观测的当前账号组织列表。身份先返回时，组织选择最多等待 10 秒供页面及网络信息就绪，取消或关窗立即退出，不从用户菜单名称推断组织。
 
@@ -725,21 +729,21 @@ Platform 自动配置推送 `configuring`，此时禁用重复操作；创建 ke
 
 ## OpenAI 账号 API（仅 admin）
 
-面板 OpenAi_api（`/openai-apikey`）集中管理账号托管 key，支持 `?vm_id=…` 定位；详情使用居中、限高滚动弹窗，关闭后清除临时 key 明文。账号页保留领取、Platform 登录、自动配置及余额；通用 API 上游管理隐藏托管来源，混合端点只展示普通 key，运行时上游集合不变。可见名称调整不改变路由和权限标识。
+面板 OpenAi_api（`/openai-apikey`）统一管理赠额、Platform 连接、余额和账号 Key，支持 `?vm_id=…` 定位槽位详情。通用 API 上游管理隐藏托管来源，混合端点只展示普通 Key，运行时上游集合沿用现有规则。
 
-`GET /api/panel/openai-apikey?timezone=Asia%2FSingapore` 返回 `{ items, bind_candidates }`：只列当前账号已有 key，待绑定候选为 `pending/claimed` 且无 key。列表包含 `account_id/vm_id/key_id/endpoint_id`、安全代理摘要、`call_status/call_reason/call_error`、余额及 `today_requests/today_cost/last_used_at/unpriced_requests`，不返回 secret。代理使用当前池内最新名称，无名时显示安全 `host:port`；提示和详情补地址，不返回认证信息。今日按页面时区统计，费用为 vm2api 用量估算，未定价保持未知。
+`GET /api/panel/openai-apikey?timezone=Asia%2FSingapore` 返回 `{ items }`。同一列表包含当前具备资格的 GPT 账号、发放中或已领取账号和已有账号 Key。未绑定时 `key_id/endpoint_id/call_status` 为空。列表包含安全代理摘要、账号状态、余额及今日调用统计。今日按页面时区统计，费用为 vm2api 用量估算，未定价保持未知。代理摘要省略认证信息，Key 仅返回遮罩所需字段。
 
 `GET/PUT/DELETE /api/panel/vms/:id/openai-api/key` 按需读取、人工绑定／替换及本地解绑。GET 查询参数带 `account_id`，响应 `Cache-Control: no-store`；PUT 接收 `{ account_id, api_key }`，DELETE 接收 `{ account_id }`。人工 key 直接保存，不联网验证归属、不查询模型；首次默认开启，替换保留使用开关并清旧调用阻断，同值保存不清。删除保留领取、组织及历史，不撤销官方 key。`POST /api/panel/openai-apikey/batch` 接收 `{ action: "enable" | "disable" | "refresh_balance" | "delete" | "resume", items: [{ vm_id, account_id }] }`，逐项返回 `done/queued/error` 与原因，同组织刷新去重。新页修改携带账号身份核对，旧单账号开关／刷新接口兼容原请求。
 
-基址 `/vms/:id/openai-api`。GET 返回公开状态；POST `/preview` 查询 Pro 三档赠额资格与接收组织，POST `/claim` 接收 `{ destination_account_id? }`，唯一组织可省略。资格样本超过 5 分钟后，首次领取前重新查询；关联后的 `pending/claimed` 状态锁定领取，复查沿用原操作编号。外部已领取账号也可继续配置。
+基址 `/vms/:id/openai-api`。GET 返回公开状态。POST `/preview` 查询 Pro 三档赠额资格与接收组织。POST `/claim` 接收 `{ destination_account_id? }`，只有一个接收组织时可省略该字段。管理页会在查询和领取请求中携带当前 `account_id`。首次领取前会重新查询超过 5 分钟的资格样本。关联后的 `pending/claimed` 状态锁定领取，复查沿用原操作编号。外部已领取账号也可继续配置。资格查询、领取及发放确认只更新赠额状态，由管理员单独启动 Platform 配置。
 
-POST `/setup` 继续 Platform 登录并在当前组织已有的 Default project 内创建账号 key，有效期选择官方 `Never`；已有 key 直接复用，不新建项目。POST `/refresh` 刷新发放或组织总余额；PATCH `/enabled` 接收 `{ enabled: boolean }`，独立于 OAuth 启停、调度及登录会话。POST `/resume` 仅解除当前账号 key 的上游额度／配额阻断，不打开 API 开关、不重新启用无效 key、不发送模型请求；`quota_blocked` 返回该阻断状态。账号行 `openai_api` 返回领取、配置、`key_prefix`、组织余额及更新时间，不返回 secret、指纹或登录会话。前缀取前 12 位，界面追加省略号；长度不超过 12 时返回空值并使用固定遮罩，旧 `key_suffix` 保留兼容。
+POST `/setup` 显式启动 Platform 配置，发放中和已领取的账号可在当前组织的 Default project 内创建 Key。已有 Key 时复用原 Key，只连接 Billing。POST `/refresh` 在已绑定时通过保存的 Billing 会话刷新余额，未绑定且发放中时查询赠额进度。PATCH `/enabled` 接收 `{ enabled: boolean }`，独立于 OAuth 启停、调度及登录会话。POST `/resume` 仅解除当前账号 key 的上游额度／配额阻断，不打开 API 开关、不重新启用无效 key、不发送模型请求；`quota_blocked` 返回该阻断状态。账号行 `openai_api` 返回领取、配置、`key_prefix`、组织余额及更新时间，不返回 secret、指纹或登录会话。前缀取前 12 位，界面追加省略号；长度不超过 12 时返回空值并使用固定遮罩，旧 `key_suffix` 保留兼容。
 
 组织余额来自官方 Billing `credit_grants` JSON 的 `total_available`，购买余额来自 `total_paid_available`；不由逐笔额度推导总余额。`paid_balance/grants/next_expiring_amount/next_expiring_at` 补充购买余额及最近到期额度，金额以十进制字符串保存并去尾零，未知保持空值，负余额照实返回。面板中的点数余额及 API 金额最多显示两位小数，直接截断、不进位并去尾零，截断后的负零显示为 0；接口和后台原值精度不变。`offer_checked_at/link_checked_at/balance_checked_at` 分别记录资格、关联和余额观测时间；`offer_stale` 提示资格待重查，余额刷新不更新领取资格。
 
 已启用且配置 key 的账号按全局间隔经当前绑定代理刷新组织余额，同组织共用一次成功样本。`GET/PUT /api/panel/routing` 的 `openai_api.balance_refresh_interval_minutes` 默认为 10，支持整数 1–1440，0 表示仅手动；保存后下一次后台扫描热生效。失败重试使用当前间隔，手动刷新不受间隔限制；设置为 0 后未发送的后台任务停止，已发送的请求可完成。账号 view 返回有效 `balance_refresh_interval_minutes` 和只读 `balance_refresh_status: idle|queued|refreshing|needs_login|error`、`balance_refresh_message`。无任务但样本过期显示“等待刷新”；失败保留最后成功金额、时间及原因，0 的“仅手动刷新”独立显示。
 
-Billing 认证头按槽加密保存，Cookie 沿用同一份加密网页会话；正常查询使用独立 HTTP，不启动浏览器，更新 Cookie 时保留网页存储。仅缺会话或官方明确认证失效时自动用原固定身份恢复一次；仍需登录、验证码或恢复失败时保留状态，等待管理员手动刷新／连接 Platform。普通网络、代理、429、5xx 错误只影响余额查询。Billing 导航与本次精确组织成功响应共用 30 秒期限，仅对同窗口官方接续导航的 `NS_BINDING_ABORTED` 继续观测；仍核验实际邮箱，不接受旧请求／响应、错误组织或取消结果，不刷新重开。同槽人工窗口活动时后台等待，避免 Cookie 覆盖。查询失败不改变推理 key、API 独立开关或 OAuth 调度。
+Billing 认证头按槽加密保存，Cookie 沿用同一份加密网页会话；正常查询使用独立 HTTP，不启动浏览器，更新 Cookie 时保留网页存储。会话缺失或官方明确认证失效时保留最近成功的余额和时间，标记“需要登录”，由管理员点击“连接 Platform”恢复会话。普通网络、代理、429、5xx 错误只影响余额查询。Billing 导航与本次精确组织成功响应共用 30 秒期限，仅对同窗口官方接续导航的 `NS_BINDING_ABORTED` 继续观测；仍核验实际邮箱，不接受旧请求／响应、错误组织或取消结果，不刷新重开。同槽人工窗口活动时后台等待，避免 Cookie 覆盖。查询失败不改变推理 key、API 独立开关或 OAuth 调度。
 
 生成密钥使用 `group_type: "openai_apikey"`、`category: "api"`、`allowed_vms: [...]`。新增候选只要求已配置正确归属的 OpenAI 账号 key，不要求 Pro 或正余额；零、负数、未知或待刷新余额均可选择。编辑时已有绑定保留回显、可移除，仅校验新加入的账号。勾选不会开启 API 独立开关。余额数字不决定推理停调或恢复；上游明确额度／配额不足阻断当前 key，仅管理员 `/resume` 解除，正余额刷新不解锁。无效 key 保持禁用，临时限流保持冷却，托管密钥预算维持原规则。模型列表和推理均限所选账号，普通 API 全局池不隐式使用账号 key；保留官方错误码，API 请求不计入 OAuth 5H/7D 窗口估算。
 

@@ -251,6 +251,19 @@ export function alignSamplingWithThinking(body = {}, { drop = false } = {}) {
  * block without a usable signature (missing, empty, shorter than 24, dummy)
  * is dropped instead of forwarded with an empty signature.
  */
+function thinkingBlockDedupeKey(block) {
+  if (block?.type === 'thinking') {
+    const signature = typeof block.signature === 'string' ? block.signature.trim() : ''
+    if (!signature) return null
+    return `t\0${signature}\0${typeof block.thinking === 'string' ? block.thinking : ''}`
+  }
+  if (block?.type === 'redacted_thinking') {
+    const data = typeof block.data === 'string' ? block.data.trim() : ''
+    return data ? `r\0${data}` : null
+  }
+  return null
+}
+
 export function stripInvalidThinkingBlocks(body = {}, { preserveThinkingBlocks = false } = {}) {
   if (!Array.isArray(body.messages)) return body
   const betweenTools = body.thinking?.type === 'between_tools'
@@ -261,7 +274,18 @@ export function stripInvalidThinkingBlocks(body = {}, { preserveThinkingBlocks =
   const messages = body.messages.map((message) => {
     if (!Array.isArray(message?.content)) return message
     const content = []
+    const seenThinking = new Set()
     let filteredThis = false
+    const pushUniqueThinking = (block) => {
+      const key = thinkingBlockDedupeKey(block)
+      if (key && seenThinking.has(key)) {
+        changed = true
+        filteredThis = true
+        return
+      }
+      if (key) seenThinking.add(key)
+      content.push(block)
+    }
     for (const block of message.content) {
       const type = block?.type
       if (type === 'thinking' || type === 'redacted_thinking') {
@@ -269,7 +293,7 @@ export function stripInvalidThinkingBlocks(body = {}, { preserveThinkingBlocks =
           // Omitted thinking keeps empty text; redacted thinking keeps encrypted data.
           if (preserveThinkingBlocks) {
             if (type === 'redacted_thinking' || hasUsableThinkingSignature(block.signature)) {
-              content.push(block)
+              pushUniqueThinking(block)
             } else {
               changed = true
               filteredThis = true
@@ -282,14 +306,14 @@ export function stripInvalidThinkingBlocks(body = {}, { preserveThinkingBlocks =
             continue
           }
           if (type === 'redacted_thinking' && chainModel && String(block.data || '').trim()) {
-            content.push(block)
+            pushUniqueThinking(block)
             continue
           }
           const signed = chainModel
             ? hasNonDummyThinkingSignature(block.signature)
             : hasUsableThinkingSignature(block.signature)
           if (signed) {
-            content.push(block)
+            pushUniqueThinking(block)
             continue
           }
           if (chainModel) chainBroken = true
@@ -362,7 +386,7 @@ export function modelSupportsContextManagement(modelId = '') {
 }
 
 /**
- * Docs list: Fable 5 / 5.1, Mythos 5 / 5.1, Opus 5.5 / 5 / 4.8, Sonnet 5.5, Haiku 5.5.
+ * Docs list: Fable 5 / 5.1 / 5.2, Mythos 5 / 5.1 / 5.2, Opus 5.5 / 5 / 4.8, Sonnet 5.5, Haiku 5.5.
  * Sonnet 5, Haiku 4.5 and other Claude 4.x reject mid-conversation `role=system` (400).
  */
 export function modelSupportsMidConversationSystem(modelId = '') {
@@ -370,7 +394,9 @@ export function modelSupportsMidConversationSystem(modelId = '') {
     .trim()
     .toLowerCase()
     .replace(/\[1m\]$/i, '')
-  return /^claude-(?:(?:fable|mythos)-5(?:[-.]1)?|opus-(?:5(?:[-.]5)?|4[-.]8)|(?:sonnet|haiku)-5[-.]5)(?:-|$)/.test(id)
+  return /^claude-(?:(?:fable|mythos)-5(?:[-.](?:1|2))?|opus-(?:5(?:[-.]5)?|4[-.]8)|(?:sonnet|haiku)-5[-.]5)(?:-|$)/.test(
+    id,
+  )
 }
 
 /**

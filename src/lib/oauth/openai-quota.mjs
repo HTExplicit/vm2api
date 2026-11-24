@@ -14,9 +14,20 @@ import {
   persistCodexQuotaSnapshot,
   markCodexQuotaRefreshPending,
 } from '../vm/codex-slot.mjs'
-import { buildCodexUsageView, extraToCodexSnapshot, normalizeCodexCredits } from '../protocol/codex-usage.mjs'
+import {
+  buildCodexUsageView,
+  extraToCodexSnapshot,
+  hasSpendableCodexCredits,
+  normalizeCodexCredits,
+} from '../protocol/codex-usage.mjs'
 import { CODEX_OAUTH_ORIGINATOR, makeProxyFetch, refreshCodexAccessToken } from '../protocol/codex-models.mjs'
 import { openaiIdentityFromJwt } from './openai-jwt.mjs'
+import { expiresAtToMs } from './oauth-credentials.mjs'
+import { codexQuotaWindowReason, isCodexSlotParked } from '../pool/codex-slot-pool.mjs'
+import { openAIAccountHold } from '../pool/openai-account-runtime.mjs'
+import { activeHoursOf, evaluateActiveHours } from '../pool/active-hours.mjs'
+import { isLeftoverQuotaScheduleOff, isQuotaWindowReason } from '../pool/availability.mjs'
+import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { refreshOpenaiSubscription } from './openai-subscription.mjs'
 import {
   captureOpenaiAuth,
@@ -29,7 +40,10 @@ export const CHATGPT_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 export const CHATGPT_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits'
 export const CHATGPT_RESET_CONSUME_URL = `${CHATGPT_RESET_CREDITS_URL}/consume`
 export const OPENAI_QUOTA_TIMEOUT_MS = 20_000
+export const CODEX_CREDITS_REFRESH_COOLDOWN_MS = 60_000
 const CODEX_BETA = 'codex-1'
+const HARD_UNAVAILABLE_STATUS = new Set(['dead', 'error', 'disabled'])
+const staleCreditsRefreshState = new Map()
 
 function num(value) {
   if (value == null || value === '') return null
@@ -90,7 +104,7 @@ function resetAtIso(window = {}, now = Date.now()) {
   return new Date(now + after * 1000).toISOString()
 }
 
-function pickWindow(window) {
+function pickWindow(window, now = Date.now()) {
   if (!window || typeof window !== 'object') return null
   const used = num(window.used_percent ?? window.usedPercent)
   if (used == null) return null
@@ -99,14 +113,14 @@ function pickWindow(window) {
       used_percent: used,
       reset_after_seconds: int(window.reset_after_seconds ?? window.resetAfterSeconds),
       window_minutes: windowMinutes(window),
-      reset_at: resetAtIso(window),
+      reset_at: resetAtIso(window, now),
     }).filter(([, value]) => value != null),
   )
 }
 
 export function extraFromRateLimit(rateLimit = {}, now = Date.now()) {
-  const primary = pickWindow(rateLimit.primary_window || rateLimit.primaryWindow)
-  const secondary = pickWindow(rateLimit.secondary_window || rateLimit.secondaryWindow)
+  const primary = pickWindow(rateLimit.primary_window || rateLimit.primaryWindow, now)
+  const secondary = pickWindow(rateLimit.secondary_window || rateLimit.secondaryWindow, now)
   if (!primary && !secondary) return null
   const extra = {
     codex_usage_updated_at: new Date(now).toISOString(),
@@ -342,7 +356,208 @@ function publicUsage(extra, resetCredits, credits, usagePayload = {}) {
   }
 }
 
-async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId, policy = null } = {}) {
+function refreshStateKey(projectRoot, vmId) {
+  return `${String(projectRoot || '')}\0${String(vmId || '')}`
+}
+
+function slotRefreshIdentity(projectRoot, vmId) {
+  const vm = getVm(projectRoot, vmId)
+  const first = readCodexAccounts(projectRoot, vmId)[0] || {}
+  const accountId = firstString(first.chatgpt_account_id, vm?.codex?.chatgpt_account_id)
+  const email = firstString(first.email, vm?.codex?.email)
+  const access = firstString(first.access_token, vm?.codex?.access_token)
+  const refresh = firstString(first.refresh_token, vm?.codex?.refresh_token)
+  const tokenHash =
+    access || refresh ? crypto.createHash('sha256').update(`${access}\0${refresh}`).digest('hex').slice(0, 16) : ''
+  return `${vm?.created_at || ''}\0${accountId}\0${email}\0${tokenHash}`
+}
+
+function clearRefreshCooldown(projectRoot, vmId) {
+  const entry = staleCreditsRefreshState.get(refreshStateKey(projectRoot, vmId))
+  if (entry) entry.cooldownUntil = 0
+}
+
+export function resetStaleCodexCreditsRefreshState(vmId = null) {
+  if (vmId == null) {
+    staleCreditsRefreshState.clear()
+    return
+  }
+  const target = String(vmId)
+  const suffix = `\0${target}`
+  for (const key of staleCreditsRefreshState.keys()) {
+    if (key === target || key.endsWith(suffix)) staleCreditsRefreshState.delete(key)
+  }
+}
+
+/**
+ * True iff a Codex slot is otherwise enabled/ready and inside its working hours,
+ * has no active failure/429 hold, previously recorded spendable credits
+ * (`unlimited` or `has_credits`), its credits reading expired past TTL, and the
+ * slot would currently be parked/restricted by 5h/7d exhaustion or local quota gate.
+ */
+export function needsStaleCodexCreditsRefresh(vm, policy = null, now = Date.now()) {
+  if (!vm || !isCodexVm(vm)) return false
+  if (proxyBlockedReason(vm.proxy)) return false
+  if (vm.schedule_off === true || vm.unschedulable || vm.schedule_hold) return false
+  if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)) return false
+  const status = String(vm.status || '').toLowerCase()
+  if (HARD_UNAVAILABLE_STATUS.has(status)) return false
+  const hasToken =
+    vm.has_token !== undefined
+      ? Boolean(vm.has_token)
+      : Boolean(vm.codex?.has_access || vm.codex?.has_refresh || vm.codex?.access_token || vm.codex?.refresh_token)
+  if (!hasToken) return false
+  const hasRefresh = Boolean(vm.has_refresh ?? vm.codex?.has_refresh ?? vm.codex?.refresh_token)
+  const expMs = expiresAtToMs(vm.expires_at || vm.codex?.expires_at)
+  if (expMs && expMs <= now && !hasRefresh) return false
+  if (!evaluateActiveHours(activeHoursOf(vm), now, vm.timezone).active) return false
+  if (vm.id && openAIAccountHold(vm.id, now)) return false
+  const tempReason =
+    vm?.claude?.temp_unschedulable_reason || vm?.temp_unschedulable_reason || vm?.cooldown_reason || null
+  const tempUntil = Number(
+    vm?.claude?.temp_unschedulable_until || vm?.temp_unschedulable_until || vm?.cooldown_until || 0,
+  )
+  if (tempReason && !isQuotaWindowReason(tempReason) && tempUntil > now) return false
+  const credits = vm?.codex?.credits ?? vm?.codex_credits
+  if (!credits || (credits.unlimited !== true && credits.has_credits !== true)) return false
+  if (hasSpendableCodexCredits(vm, now)) return false
+  const summaryQuotaBlocked =
+    isQuotaWindowReason(vm?.quota_policy?.reason) &&
+    (vm.quota_policy?.restricted_until == null || Number(vm.quota_policy.restricted_until) > now)
+  return Boolean(isCodexSlotParked(vm, now, policy) || codexQuotaWindowReason(vm, now) || summaryQuotaBlocked)
+}
+
+function awaitWithBounds(promise, { signal = null, deadline = null, now = Date.now() } = {}) {
+  if (signal?.aborted) return Promise.resolve({ bounded: 'aborted' })
+  const remainingMs = Number.isFinite(deadline) ? Number(deadline) - now : null
+  if (remainingMs != null && remainingMs <= 0) return Promise.resolve({ bounded: 'deadline' })
+  if (!signal && remainingMs == null) return promise.then((value) => ({ bounded: null, value }))
+  return new Promise((resolve) => {
+    let settled = false
+    let timer = null
+    const cleanup = () => {
+      if (timer != null) clearTimeout(timer)
+      signal?.removeEventListener?.('abort', onAbort)
+    }
+    const finish = (outcome) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(outcome)
+    }
+    const onAbort = () => finish({ bounded: 'aborted' })
+    if (signal) {
+      if (signal.aborted) return finish({ bounded: 'aborted' })
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+    if (remainingMs != null) {
+      timer = setTimeout(() => finish({ bounded: 'deadline' }), Math.max(1, remainingMs))
+      timer.unref?.()
+    }
+    promise.then(
+      (value) => finish({ bounded: null, value }),
+      (error) => finish({ bounded: 'error', error }),
+    )
+  })
+}
+
+export async function refreshStaleCodexCreditsForVm(
+  projectRoot,
+  vmId,
+  {
+    policy = null,
+    fetchImpl,
+    rotate = true,
+    now,
+    signal = null,
+    deadline = null,
+    cooldownMs = CODEX_CREDITS_REFRESH_COOLDOWN_MS,
+  } = {},
+) {
+  if (!projectRoot || !vmId) return { ok: false, refreshed: false, spendable: false, error: 'invalid_args' }
+  if (signal?.aborted) return { ok: false, refreshed: false, spendable: false, aborted: true }
+  const currentNow = () => (Number.isFinite(now) ? Number(now) : Date.now())
+  const startNow = currentNow()
+  if (Number.isFinite(deadline) && Number(deadline) <= startNow) {
+    return { ok: false, refreshed: false, spendable: false, timedOut: true }
+  }
+  const key = refreshStateKey(projectRoot, vmId)
+  let entry = staleCreditsRefreshState.get(key)
+  if (!entry) {
+    entry = { inflight: null, cooldownUntil: 0, identity: '' }
+    staleCreditsRefreshState.set(key, entry)
+  }
+  const currentIdentity = slotRefreshIdentity(projectRoot, vmId)
+  if (!entry.inflight && entry.identity && entry.identity !== currentIdentity) {
+    entry.cooldownUntil = 0
+    entry.identity = currentIdentity
+  }
+  if (!entry.inflight && entry.cooldownUntil > startNow) {
+    return {
+      ok: false,
+      refreshed: false,
+      spendable: false,
+      skipped: 'cooldown',
+      cooldownUntil: entry.cooldownUntil,
+    }
+  }
+  if (!entry.inflight) {
+    const duration =
+      Number.isFinite(cooldownMs) && cooldownMs >= 0 ? Number(cooldownMs) : CODEX_CREDITS_REFRESH_COOLDOWN_MS
+    entry.inflight = (async () => {
+      try {
+        const result = await queryOpenaiQuota({
+          projectRoot,
+          vmId,
+          fetchImpl,
+          rotate,
+          policy,
+          now,
+        })
+        const finishNow = currentNow()
+        const vmAfter = getVm(projectRoot, vmId)
+        const spendable = Boolean(result?.ok && hasSpendableCodexCredits(vmAfter, finishNow))
+        entry.identity = slotRefreshIdentity(projectRoot, vmId)
+        if (spendable) {
+          entry.cooldownUntil = 0
+          return { ok: true, refreshed: true, spendable: true, cooldownUntil: 0, result }
+        }
+        entry.cooldownUntil = finishNow + duration
+        return {
+          ok: Boolean(result?.ok),
+          refreshed: Boolean(result?.ok),
+          spendable: false,
+          cooldownUntil: entry.cooldownUntil,
+          error: result?.ok
+            ? result?.credits == null
+              ? 'credits_missing'
+              : 'credits_exhausted'
+            : result?.error || 'refresh_failed',
+          result,
+        }
+      } catch (err) {
+        const finishNow = currentNow()
+        entry.identity = slotRefreshIdentity(projectRoot, vmId)
+        entry.cooldownUntil = finishNow + duration
+        return {
+          ok: false,
+          refreshed: false,
+          spendable: false,
+          cooldownUntil: entry.cooldownUntil,
+          error: err?.code || 'refresh_failed',
+        }
+      } finally {
+        entry.inflight = null
+      }
+    })()
+  }
+  const raced = await awaitWithBounds(entry.inflight, { signal, deadline, now: startNow })
+  if (raced.bounded === 'aborted') return { ok: false, refreshed: false, spendable: false, aborted: true }
+  if (raced.bounded === 'deadline') return { ok: false, refreshed: false, spendable: false, timedOut: true }
+  return raced.value
+}
+
+async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId, policy = null, now } = {}) {
   if (!slot.proxyUrl && !fetchImpl && !slot.direct) {
     return fail('proxy_required', 'GPT 槽未绑定 SOCKS5', 400)
   }
@@ -366,7 +581,8 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
         upstream_status: usage.status,
       })
     }
-    const credits = normalizeCodexCredits(usage.payload?.credits)
+    const stampNow = Number.isFinite(now) ? Number(now) : Date.now()
+    const credits = normalizeCodexCredits(usage.payload?.credits, stampNow)
     if (
       usage.status >= 200 &&
       usage.status < 300 &&
@@ -376,10 +592,11 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
     ) {
       persistCodexQuotaSnapshot(projectRoot, vmId, {
         credits,
-        checkedAt: new Date().toISOString(),
+        checkedAt: new Date(stampNow).toISOString(),
+        now: stampNow,
       })
     }
-    const extra = extraFromRateLimit(usage.payload?.rate_limit || usage.payload?.rateLimit || {})
+    const extra = extraFromRateLimit(usage.payload?.rate_limit || usage.payload?.rateLimit || {}, stampNow)
     if (!extra) {
       if (isOpenaiAuthCurrent(current.auth)) {
         markCodexQuotaRefreshPending(projectRoot, vmId, { reason: 'quota_sample_missing' })
@@ -393,7 +610,7 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
       direct: current.direct,
       auth: current.auth,
     })
-    return { usage, details, extra, credits }
+    return { usage, details, extra, credits, stampNow }
   }
 
   let pack = await run(current.access)
@@ -414,7 +631,7 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
   if (pack.ok === false || pack.error) return pack
   if (!isOpenaiAuthCurrent(current.auth)) return fail('credential_changed', '账号或凭据已更新，未写入旧额度结果', 409)
 
-  const extra = pack.extra
+  const { extra, stampNow } = pack
   const usageCredits = pack.usage.payload?.rate_limit_reset_credits || pack.usage.payload?.rateLimitResetCredits
   const detailCredits = pack.details?.ok ? parseResetCreditDetails(pack.details.payload) : null
   const resetCredits = mergeResetCredits(
@@ -434,11 +651,17 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
     extra,
     sampledAt: extra.codex_usage_updated_at,
     planType: pack.usage.payload?.plan_type || pack.usage.payload?.planType,
+    now: stampNow,
     ...(persistable ? { resetCredits: persistable } : {}),
   })
-  syncCodexQuotaSchedule(projectRoot, getVm(projectRoot, vmId), {
+  const syncedVm = getVm(projectRoot, vmId)
+  syncCodexQuotaSchedule(projectRoot, syncedVm, {
+    now: stampNow,
     policy,
   })
+  if (credits && hasSpendableCodexCredits(syncedVm, stampNow)) {
+    clearRefreshCooldown(projectRoot, vmId)
+  }
   return {
     ok: true,
     ...publicUsage(saved?.codex?.extra || extra, persistable || resetCredits, credits, pack.usage.payload || {}),
@@ -447,10 +670,10 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
   }
 }
 
-export async function queryOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = true, policy = null } = {}) {
+export async function queryOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = true, policy = null, now } = {}) {
   const slot = await loadSlot(projectRoot, vmId)
   if (!slot.ok) return slot
-  const result = await queryUpstream(slot, { fetchImpl, rotate, projectRoot, vmId, policy })
+  const result = await queryUpstream(slot, { fetchImpl, rotate, projectRoot, vmId, policy, now })
   if (result.ok) {
     const refreshed = await refreshOpenaiSubscription({ projectRoot, vmId, fetchImpl })
     result.subscription = refreshed.subscription

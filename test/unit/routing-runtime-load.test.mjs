@@ -605,6 +605,22 @@ test('native interval publication reports an unreachable remote VM as failed, no
       JSON.parse(fs.readFileSync(path.join(vms, 'vm-claude.json'), 'utf8')).seed_policy.telemetry_disabled,
       false,
     )
+    const suppressed = await runtime.persistRoutingPatch({ telemetry: { disable_nonessential_traffic: true } })
+    assert.equal(suppressed.telemetry_sync.updated, 1)
+    assert.equal(JSON.parse(fs.readFileSync(routingFile, 'utf8')).telemetry.disable_nonessential_traffic, true)
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(vms, 'vm-claude', 'cli-home', '.claude', 'settings.json'), 'utf8')).env
+        .CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC,
+      '1',
+    )
+    const unsuppressed = await runtime.persistRoutingPatch({ telemetry: { disable_nonessential_traffic: false } })
+    assert.equal(unsuppressed.telemetry_sync.updated, 1)
+    assert.equal(JSON.parse(fs.readFileSync(routingFile, 'utf8')).telemetry.disable_nonessential_traffic, false)
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(vms, 'vm-claude', 'cli-home', '.claude', 'settings.json'), 'utf8')).env
+        .CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC,
+      undefined,
+    )
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -724,6 +740,56 @@ test('persistRoutingPatch replaces codex.model_mappings with the full table the 
     await runtime.persistRoutingPatch({ codex: { model_mappings: { 'my-fast': 'gpt-6-luna' } } })
     saved = JSON.parse(fs.readFileSync(routingFile, 'utf8'))
     assert.deepEqual(saved.codex.model_mappings, { 'codex-auto-review': 'gpt-6-luna', 'my-fast': 'gpt-6-luna' })
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('persistRoutingPatch merges and normalizes batch_group and loadRoutingConfig normalizes persisted batch_group', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-routing-batch-group-'))
+  const routingFile = path.join(root, 'routing.json')
+  const routingConfig = { concurrency: {}, tiers: {} }
+  fs.writeFileSync(routingFile, JSON.stringify(routingConfig))
+  try {
+    const runtime = persistHarness(root, routingFile, routingConfig)
+    await runtime.persistRoutingPatch({
+      batch_group: { enabled: true, keys: ['k-1', '', 'k-2'], min: 2, max: 6, per_member_concurrency: 4 },
+    })
+    let saved = JSON.parse(fs.readFileSync(routingFile, 'utf8'))
+    assert.deepEqual(saved.batch_group, {
+      enabled: true,
+      enabled_for_all: false,
+      keys: ['k-1', 'k-2'],
+      min: 2,
+      max: 6,
+      per_member_concurrency: 4,
+      idle_ttl_s: 900,
+      observe: false,
+    })
+    await runtime.persistRoutingPatch({ batch_group: { observe: true } })
+    saved = JSON.parse(fs.readFileSync(routingFile, 'utf8'))
+    assert.equal(saved.batch_group.enabled, true)
+    assert.equal(saved.batch_group.observe, true)
+    assert.deepEqual(saved.batch_group.keys, ['k-1', 'k-2'])
+
+    fs.writeFileSync(
+      routingFile,
+      JSON.stringify({
+        codex: { quota: { max_concurrency: 2 } },
+        batch_group: { enabled: 1, min: -3, per_member_concurrency: 0 },
+      }),
+    )
+    const loaded = runtimeFor(routingFile).loadRoutingConfig()
+    assert.deepEqual(loaded.batch_group, {
+      enabled: false,
+      enabled_for_all: false,
+      keys: [],
+      min: 1,
+      max: 0,
+      per_member_concurrency: 3,
+      idle_ttl_s: 900,
+      observe: false,
+    })
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }

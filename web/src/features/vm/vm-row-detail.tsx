@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
-import { supportsOfficialCc } from '@/lib/cred-type'
 import { fmtResetClock, resetCountdown } from '@/lib/fable-status'
 import { fmtNum, fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -13,7 +12,6 @@ import {
   SLOT_BG,
   SLOT_LABEL,
 } from '@/lib/vm-health'
-import { isCodexVm } from '@/lib/vm-kind'
 import { poolStatus, scheduleStateLabel } from '@/lib/vm-status'
 import {
   usageAccountForVm,
@@ -23,27 +21,20 @@ import {
   vmWeekOutcome,
 } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
-import { ActiveUsageAction } from './active-usage-action'
-import { ClaudeResetActions } from './claude-reset-actions'
-import { CodexCreditSummary } from './codex-credit-summary'
 import { CodexQuotaSampleStatus } from './codex-quota-sample-status'
-import { OpenaiApiActions } from './openai-api-actions'
-import { OpenaiQuotaActions } from './openai-quota-actions'
 import { vmHealthQueryOptions, type VmHealthRange } from './queries'
 import { riskFg } from './usage-meter'
-import { WindowBar } from './usage-windows'
+import { VmQuotaActions, WindowBar } from './usage-windows'
 import { useVmPerms } from './vm-perms'
 import { vmWindows } from './vm-rack-model'
-import { VmRowPriority } from './vm-row-priority'
 import { windowTiming } from './window-timing'
 
 const CARD = 'min-w-0 rounded-lg border bg-card p-3'
 const CARD_HEAD =
-  'mb-2.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs font-semibold'
+  'mb-2.5 flex items-baseline justify-between gap-2 text-xs font-semibold'
 const CARD_NOTE = 'text-[11px] font-normal text-muted-foreground'
 const KV_LABEL = 'text-[11px] text-muted-foreground'
-const KV_VALUE =
-  'mt-0.5 block font-mono text-sm font-bold tabular-nums wrap-anywhere'
+const KV_VALUE = 'mt-0.5 block font-mono text-sm font-bold tabular-nums'
 
 function fmtDur(ms: number | null): string {
   if (ms == null || !Number.isFinite(ms)) return '—'
@@ -120,13 +111,13 @@ function HealthCard({ vm }: { vm: Vm }) {
     <section className={CARD} aria-label='请求健康'>
       <div className={CARD_HEAD}>
         <span>请求健康</span>
-        <span className='flex flex-wrap items-center gap-2'>
+        <span className='flex items-center gap-2'>
           <span className={CARD_NOTE}>按错误率着色 · 无请求不计</span>
           {perms.admin ? (
             <span
               role='group'
               aria-label='健康时间范围'
-              className='inline-flex shrink-0 overflow-hidden rounded-md border'
+              className='inline-flex overflow-hidden rounded-md border'
             >
               {(['24h', '7d'] as const).map((r) => (
                 <button
@@ -135,7 +126,7 @@ function HealthCard({ vm }: { vm: Vm }) {
                   aria-pressed={range === r}
                   onClick={() => setRange(r)}
                   className={cn(
-                    'min-h-6 min-w-6 px-2 py-0.5 text-[11px] font-medium transition-colors',
+                    'px-2 py-0.5 text-[11px] font-medium transition-colors',
                     range === r
                       ? 'bg-foreground text-background'
                       : 'text-muted-foreground hover:bg-muted'
@@ -167,7 +158,7 @@ function HealthCard({ vm }: { vm: Vm }) {
             {s.slots.map((state, i) => (
               <span
                 key={i}
-                className='min-w-0 flex-1 rounded-[2px]'
+                className='flex-1 rounded-[2px]'
                 style={{ backgroundColor: SLOT_BG[state] }}
                 title={`${startMs ? fmtClock(startMs + i * slotMin * 60_000) : ''} · ${SLOT_LABEL[state]}`}
               />
@@ -211,9 +202,9 @@ function HealthCard({ vm }: { vm: Vm }) {
                 q.data.top_errors.map((e) => (
                   <div
                     key={e.code}
-                    className='grid grid-cols-[minmax(0,1fr)_auto] gap-x-2 py-0.5 text-[11.5px] @sm/row-detail:grid-cols-[minmax(0,1fr)_auto_auto]'
+                    className='grid grid-cols-[1fr_auto_auto] gap-3 py-0.5 text-[11.5px]'
                   >
-                    <span className='font-mono wrap-anywhere'>
+                    <span className='truncate font-mono'>
                       {e.status && String(e.status) !== e.code
                         ? `${e.status} `
                         : ''}
@@ -222,7 +213,7 @@ function HealthCard({ vm }: { vm: Vm }) {
                     <span className='font-mono text-[color:var(--status-bad)] tabular-nums'>
                       × {fmtNum(e.count)}
                     </span>
-                    <span className='font-mono text-muted-foreground tabular-nums @max-sm/row-detail:col-span-full'>
+                    <span className='font-mono text-muted-foreground tabular-nums'>
                       {fmtResetClock(e.last_at) ?? ''}
                     </span>
                   </div>
@@ -241,20 +232,12 @@ function HealthCard({ vm }: { vm: Vm }) {
 }
 
 function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
-  const perms = useVmPerms()
-  const codex = isCodexVm(vm)
-  const showClaudeCards =
-    !codex &&
-    perms.credential &&
-    (vm.can_claude_reset ?? supportsOfficialCc(vm))
-  const windows = vmWindows(vm)
   const hasToken = Boolean(vm.has_token)
   const restricted =
     vm.schedule_state === 'restricted' || vm.schedule_state === 'unschedulable'
-  const reason =
-    vm.restriction_text ||
-    vm.unschedulable_text ||
-    (restricted ? poolStatus(vm).text : null)
+  const restriction = restricted
+    ? vm.restriction_text || vm.unschedulable_text || poolStatus(vm).text
+    : null
   return (
     <section className={CARD} aria-label='用量窗口明细'>
       <div className={CARD_HEAD}>
@@ -264,12 +247,12 @@ function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
         </span>
       </div>
       <div className='grid gap-3'>
-        {windows.map((w) => {
+        {vmWindows(vm).map((w) => {
           const t = windowTiming(w, now)
           const full = w.pct != null && w.pct >= 100
           return (
             <div key={w.key}>
-              <div className='flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 text-[11px] text-muted-foreground'>
+              <div className='flex items-baseline justify-between gap-2 text-[11px] text-muted-foreground'>
                 <span>
                   <b className='text-foreground'>{w.label}</b>{' '}
                   {w.note ? (
@@ -330,7 +313,7 @@ function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
                   <div className='my-1.5'>
                     <WindowBar w={w} timing={t} size='md' />
                   </div>
-                  <div className='flex flex-wrap justify-between gap-x-2 gap-y-1 font-mono text-[10.5px] text-muted-foreground tabular-nums'>
+                  <div className='flex justify-between gap-2 font-mono text-[10.5px] text-muted-foreground tabular-nums'>
                     <span>{fmtClock(t.startMs)}</span>
                     <span>
                       时间已过{' '}
@@ -349,43 +332,13 @@ function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
         })}
       </div>
       <CodexQuotaSampleStatus vm={vm} />
-      <CodexCreditSummary vm={vm} />
-      {reason ? (
+      {restriction ? (
         <p className='mt-3 text-xs text-muted-foreground'>
-          调度{scheduleStateLabel(vm)}：{reason}
+          调度{scheduleStateLabel(vm)}：{restriction}
         </p>
       ) : null}
-      <div
-        role='group'
-        aria-label='账号快捷操作'
-        className='@container/window-tools mt-3 grid min-w-0 gap-2.5 border-t pt-2.5'
-      >
-        {codex ? (
-          <div className='flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 empty:hidden'>
-            {vm.has_token ? <OpenaiQuotaActions vm={vm} showCount /> : null}
-            <OpenaiApiActions vm={vm} compact />
-          </div>
-        ) : (
-          <div className='grid min-w-0 gap-1 empty:hidden'>
-            {showClaudeCards ? (
-              <ClaudeResetActions
-                vm={vm}
-                inline
-                now={now}
-                usage={{
-                  fiveHour: windows.find((w) => w.key === '5h')?.pct,
-                  sevenDay: windows.find((w) => w.key === '7d')?.pct,
-                  fable: windows.find((w) => w.key === 'fable')?.pct,
-                  sevenDayGate: vm.quota_policy
-                    ? vm.quota_policy.limit_7d * 100
-                    : null,
-                }}
-              />
-            ) : null}
-            <ActiveUsageAction vm={vm} />
-          </div>
-        )}
-        <VmRowPriority vm={vm} editable={perms.admin} />
+      <div className='mt-3 border-t pt-2.5'>
+        <VmQuotaActions vm={vm} now={now} />
       </div>
     </section>
   )
@@ -439,12 +392,14 @@ function CostCard({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
         <span>成本</span>
         <span className={CARD_NOTE}>官方价估算 · 网关外用量不计</span>
       </div>
-      <table className='w-full table-fixed text-xs wrap-anywhere'>
+      <table className='w-full text-xs'>
         <thead>
           <tr className='text-[11px] text-muted-foreground'>
-            <th scope='col' className='py-1 text-left font-medium'>
-              窗口
-            </th>
+            <th
+              scope='col'
+              aria-label='窗口'
+              className='py-1 text-left font-medium'
+            />
             <th scope='col' className='py-1 text-right font-medium'>
               请求
             </th>
@@ -465,7 +420,11 @@ function CostCard({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
                 r.total && 'font-bold'
               )}
             >
-              <th title={r.note} scope='row' className='py-1 text-left font-sans font-medium'>
+              <th
+                scope='row'
+                className='py-1 text-left font-sans font-normal'
+                title={r.note}
+              >
                 {r.label}
               </th>
               <td className='py-1 text-right'>
@@ -532,20 +491,20 @@ export function VmRowDetail({
       id={id}
       role='region'
       aria-label={`${vm.id} 明细`}
-      className='@container/row-detail min-w-0 border-b border-border/40 bg-muted/40 p-3'
+      className='border-b border-border/40 bg-muted/40 py-3 pr-4 pl-12'
     >
-      <div className='mb-1 flex justify-end'>
+      <div className='mb-2 flex justify-end'>
         <Button
           type='button'
           variant='link'
           size='sm'
-          className='h-auto min-h-6 px-0 py-0 text-xs'
+          className='h-6 px-0 text-xs'
           onClick={onOpenDetail}
         >
           打开完整详情 →
         </Button>
       </div>
-      <div className='grid min-w-0 gap-3 @min-[60rem]/row-detail:grid-cols-[1.3fr_1fr_1.1fr]'>
+      <div className='grid gap-3 lg:grid-cols-[1.3fr_1fr_1.1fr]'>
         <HealthCard vm={vm} />
         <WindowsCard vm={vm} now={now} />
         <CostCard vm={vm} accounts={accounts} />

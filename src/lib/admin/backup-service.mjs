@@ -46,7 +46,8 @@ import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { BackupRepo } from '../db/repos/backup-repo.mjs'
 import { reconcileVms } from '../vm/vm-db-sync.mjs'
 import { migrateScheduleFields, repairSlotSmbios, repairVmProxyCliEnabled } from '../vm/vm-registry.mjs'
-import { invalidateReadCache, isVmRecordFile } from '../vm/vm-file.mjs'
+import { atomicWriteJson, invalidateReadCache, isVmRecordFile } from '../vm/vm-file.mjs'
+import { sameSiwcOwner, SIWC_CREDENTIAL_FILE } from '../vm/codex-siwc-store.mjs'
 
 // tarAvailability / sha256File / the runnable pipeline live in backup-core.mjs;
 // keep the historical export surface for tests and callers.
@@ -120,6 +121,30 @@ export const DEFAULT_SCHEDULE = {
   enabled: true,
   interval_hours: 24,
   retention: 7,
+}
+
+/** SIGTERM the tar processes this process spawned (Linux /proc; no-op elsewhere). Returns how many. */
+export function killChildArchivers({ pid = process.pid, proc = '/proc' } = {}) {
+  let entries = []
+  try {
+    entries = fs.readdirSync(proc)
+  } catch {
+    return 0
+  }
+  let n = 0
+  for (const e of entries) {
+    if (!/^\d+$/.test(e)) continue
+    try {
+      const stat = fs.readFileSync(path.join(proc, e, 'stat'), 'utf8')
+      const close = stat.lastIndexOf(')')
+      const comm = stat.slice(stat.indexOf('(') + 1, close)
+      const ppid = Number(stat.slice(close + 2).split(' ')[1])
+      if (ppid !== pid || comm !== 'tar') continue
+      process.kill(Number(e), 'SIGTERM')
+      n++
+    } catch {}
+  }
+  return n
 }
 
 export class BackupService {
@@ -258,6 +283,58 @@ export class BackupService {
     }
   }
 
+  /** True while a backup worker thread is alive; it can outlive abortRunning() while VACUUM INTO runs. */
+  get busy() {
+    return !!this._worker
+  }
+
+  /**
+   * Stop a backup in progress (blue/green handover, shutdown): the worker holds a minutes-long VACUUM +
+   * tar and keeps a draining controller alive. Its staging dir is removed by the next cleanStaging().
+   */
+  async abortRunning() {
+    const worker = this._worker
+    if (!worker) return false
+    // terminate() cannot interrupt the worker's synchronous spawnSync('tar'): stop the archiver first.
+    killChildArchivers()
+    await worker.terminate().catch(() => {})
+    return true
+  }
+
+  /**
+   * Remove staging dirs left by backups that never finished (process killed mid-run). Each is a full
+   * DB snapshot (tens of GB). Only the leader backs up, so at leader start none of them is live.
+   * The dirs are picked synchronously (a backup started right after is never among them) and removed
+   * off the main thread: unlinking a tens-of-GB file on ext4 blocks for seconds.
+   */
+  async cleanStaging() {
+    const stale = []
+    for (const base of new Set([process.env.KIN_BACKUP_TMPDIR, this.tmpDir].filter(Boolean))) {
+      let names = []
+      try {
+        names = fs.readdirSync(base)
+      } catch {
+        continue
+      }
+      for (const name of names) {
+        if (!/^kin-backup-[A-Za-z0-9]{6}$/.test(name)) continue
+        const dir = path.join(base, name)
+        try {
+          if (fs.lstatSync(dir).isDirectory()) stale.push(dir)
+        } catch {}
+      }
+    }
+    const removed = []
+    for (const dir of stale) {
+      try {
+        await fs.promises.rm(dir, { recursive: true, force: true })
+        removed.push(dir)
+      } catch {}
+    }
+    if (removed.length) console.log(`[backup] removed ${removed.length} unfinished staging dir(s)`)
+    return removed
+  }
+
   _runBackupWorker(job) {
     return new Promise((resolve, reject) => {
       const worker = new Worker(new URL('./backup-worker.mjs', import.meta.url), {
@@ -272,6 +349,7 @@ export class BackupService {
           job,
         },
       })
+      this._worker = worker
       let settled = false
       let result = null
       const finish = (fn, arg) => {
@@ -293,7 +371,9 @@ export class BackupService {
       })
       worker.once('error', (e) => finish(reject, e))
       worker.once('exit', (code) => {
-        if (code !== 0) finish(reject, new Error(`backup worker exited with code ${code}`))
+        if (this._worker === worker) this._worker = null
+        if (code !== 0)
+          finish(reject, Object.assign(new Error(`backup worker exited with code ${code}`), { code: 'backup_aborted' }))
         else if (result) finish(resolve, result)
         else finish(reject, new Error('backup worker exited without a result'))
       })
@@ -357,6 +437,7 @@ export class BackupService {
       let dbFile
       let manifest = null
       let files = []
+      const siwcRecords = new Map()
       if (rec.file_name?.endsWith('.tar.gz')) {
         validateArchiveEntries(rec.file_path)
         const r = spawnSync('tar', ['-xzf', rec.file_path, '-C', tmp], { stdio: 'pipe' })
@@ -380,7 +461,18 @@ export class BackupService {
           ) {
             throw corruptBackup('file sha256 mismatch inside backup archive')
           }
-          if (key.startsWith('vms/') && this.projectRoot) validateRestoreTarget(this.projectRoot, key)
+          if (key.startsWith('vms/') && this.projectRoot) {
+            validateRestoreTarget(this.projectRoot, key)
+            if (path.posix.basename(key) === SIWC_CREDENTIAL_FILE) {
+              try {
+                const record = JSON.parse(fs.readFileSync(path.join(tmp, key), 'utf8'))
+                if (typeof record?.host_id !== 'string') throw new Error('missing host ID')
+                siwcRecords.set(key, record)
+              } catch {
+                throw corruptBackup('invalid SIWC credential record')
+              }
+            }
+          }
           if (key.startsWith('config/') && this.configDir) validateRestoreTarget(this.configDir, key.slice(7))
         }
       } else {
@@ -426,6 +518,16 @@ export class BackupService {
         for (const key of files.filter((name) => name.startsWith('vms/'))) {
           const dest = path.join(this.projectRoot, key)
           fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 })
+          const saved = siwcRecords.get(key)
+          if (saved) {
+            const current = fs.existsSync(dest) ? JSON.parse(fs.readFileSync(dest, 'utf8')) : null
+            // Keep the newer local record, including an explicit local unbind.
+            if (current && (!saved.owner || !current.owner || sameSiwcOwner(current.owner, saved.owner))) continue
+            // A snapshot by itself cannot prove the grant did not rotate later.
+            if (saved.refresh_token) saved.state = 'refresh_outcome_unknown'
+            atomicWriteJson(dest, saved, { mode: 0o600, durable: true })
+            continue
+          }
           fs.copyFileSync(path.join(tmp, key), dest)
           try {
             fs.chmodSync(dest, 0o600)

@@ -22,10 +22,11 @@ import { spawnSync } from 'node:child_process'
 import { getDb, vacuumInto } from '../db/database.mjs'
 import { BackupRepo } from '../db/repos/backup-repo.mjs'
 import { isValidVmId } from '../vm/vm-file.mjs'
+import { SIWC_CREDENTIAL_FILE } from '../vm/codex-siwc-store.mjs'
 
 // Deliberately bounded: guest disks, sockets, caches and binaries are not part
 // of this archive. Codex OAuth is not mirrored into the database.
-export const SLOT_BACKUP_FILES = ['codex-credentials.json']
+export const SLOT_BACKUP_FILES = ['codex-credentials.json', SIWC_CREDENTIAL_FILE]
 
 export function stamp(d = new Date()) {
   return d.toISOString().replace(/[:.]/g, '-')

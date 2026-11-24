@@ -1,15 +1,11 @@
 import { type ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { Vm } from '@/types/panel-vm'
+import { readFileSync } from 'node:fs'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { FleetPulse } from './fleet-pulse'
 import { geminiSlot } from './gemini-slot'
-import {
-  CLASSIC_COLUMNS,
-  METRIC_COLUMNS,
-  normalizeColumns,
-} from './vm-list-columns'
 import { VmTable } from './vm-list-table'
 import { VmRack } from './vm-rack'
 import { zoneCounts } from './vm-rack-model'
@@ -20,6 +16,12 @@ vi.mock('./vm-actions-context', () => ({ useVmActions: () => ({}) }))
 vi.mock('./vm-action-menu', () => ({ VmActionMenu: () => null }))
 vi.mock('./vm-owner-line', () => ({ VmRentedMark: () => null }))
 vi.mock('./vm-perms', () => ({ useVmPerms: () => ({ admin: false }) }))
+vi.mock('./use-vm-column-order', () => ({
+  useVmColumnOrder: () => ({
+    order: ['vm', 'sched', 'status'],
+    isDefault: true,
+  }),
+}))
 vi.mock('@/components/ui/dialog', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/ui/dialog')>()),
   DialogContent: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -34,6 +36,24 @@ function render(over: Partial<Vm> = {}) {
 }
 
 describe('VM scheduling priority', () => {
+  it('groups the three Claude seat PATCH fields under one VM type check', () => {
+    const source = readFileSync(
+      new URL('./vm-scheduling.tsx', import.meta.url),
+      'utf8'
+    )
+    const guards = [...source.matchAll(/if \(!isCodexVm\(vm\)\) \{([^}]+)\}/g)]
+    const fields = [
+      'session_slots',
+      'max_primary_sessions',
+      'max_subagents_per_session',
+    ]
+    expect(
+      guards.some(([, block]) =>
+        fields.every((field) => block.includes(`knob('${field}',`))
+      )
+    ).toBe(true)
+  })
+
   it.each(['anthropic', 'openai'] as const)(
     'shows and edits the same %s priority throughout the panel',
     (platform) => {
@@ -45,10 +65,10 @@ describe('VM scheduling priority', () => {
         weight: 42,
       }
       const list = render(vm)
-      expect(list).toContain('data-column="sched"')
-      expect(list).toContain('data-column="type"')
-      expect(list).toContain('手动指定优先级')
-      expect(list).toContain('P8 手')
+      expect(list).toContain('>调度 · 优先级</div>')
+      expect(list).toMatch(
+        /text-blue-800[^"]*shadow-\[inset_0_0_0_1px_currentColor\][^"]*"[^>]*>P8</
+      )
       expect(list).not.toMatch(/等级|权重/)
 
       const detail = renderToStaticMarkup(<VmSchedulingBlock vm={vm} />)
@@ -71,38 +91,49 @@ describe('VM scheduling priority', () => {
 })
 
 describe('VM row interaction and health', () => {
-  it('shows the active request count in the account cell even while scheduling is off', () => {
-    const html = render({
-      platform: 'openai',
-      schedulable: false,
-      inflight: 3,
-      session_active: 7,
-    })
-    expect(html).toMatch(
-      /data-vm-cell="account"[\s\S]*?data-vm-requesting="3"[^>]*title="请求中 3"/
+  it('shows family limits and the waiting children on a Claude root seat', () => {
+    const vm: Vm = {
+      id: 'vm-01',
+      session_slots: 6,
+      seats_max: 2,
+      max_primary_sessions: 2,
+      max_primary_sessions_override: true,
+      max_subagents_per_session: 0,
+      max_subagents_per_session_override: true,
+      seat_sessions: [
+        {
+          index: 0,
+          session_id: 'root',
+          state: 'idle',
+          inflight: 0,
+          subagents_running: 0,
+          subagents_queued: 2,
+          subagents_max: 0,
+        },
+      ],
+    }
+    const block = renderToStaticMarkup(<VmSchedulingBlock vm={vm} />)
+    expect(block).toContain('主会话上限')
+    expect(block).toContain('子代理 0/0 · 排队 2')
+    expect(block).toContain('本槽钉住；全局 关闭')
+    expect(
+      renderToStaticMarkup(<VmSchedulingBlock vm={{ id: 'legacy' }} />)
+    ).toContain('关闭(子代理各占一个席位)')
+    const editor = renderToStaticMarkup(
+      <QueryClientProvider client={new QueryClient()}>
+        <VmSchedulingEditor vm={vm} />
+      </QueryClientProvider>
     )
-    expect(html).not.toContain('data-vm-requesting="7"')
+    expect(editor).toContain('默认控制同时占用的客户端会话席位数')
+    expect(editor).toContain('跟随 · 6')
+    expect(editor).toMatch(/<select[^>]*aria-label="每会话子代理上限"/)
+    expect(editor).toContain('<option value="20">20</option>')
   })
-
-  it('omits the account badge for held seats and idle Codex sessions', () => {
-    expect(
-      render({
-        inflight: 4,
-        seat_sessions: [
-          { index: 1, session_id: 'held', state: 'held', inflight: 0 },
-        ],
-      })
-    ).not.toContain('data-vm-requesting=')
-    expect(
-      render({ platform: 'openai', inflight: 0, session_active: 7 })
-    ).not.toContain('data-vm-requesting=')
-  })
-
-  it('keeps separate controls to open and expand the details', () => {
+  it('opens detail from a left button and exposes a separate expand control', () => {
     const html = render()
-    expect(html).toContain('aria-label="打开 account@example.com 详情页"')
+    expect(html).toContain('aria-label="打开 vm-01 详情页"')
     expect(html).toContain('aria-expanded="false"')
-    expect(html).toContain('aria-label="展开 vm-01 明细"')
+    expect(html).toContain('aria-controls="vm-row-detail-vm-01"')
     expect(html).not.toContain('role="button"')
   })
 
@@ -111,11 +142,10 @@ describe('VM row interaction and health', () => {
       i === 47 ? [99, 1] : [0, 0]
     )
     const html = render({ health_24h: buckets })
-    expect(html).toContain('24h 99.0%')
-    expect(html).toContain('title="24h 成功 99 / 总数 100"')
+    expect(html).toContain('>99.0%</b>')
+    expect(html).toContain('>99/100</span>')
     expect(render({ health_24h: null })).toContain('24h 无请求')
     expect(render()).toContain('24h 未知')
-    expect(render()).not.toContain('24h 无请求')
     expect(render({ health_24h: null })).not.toContain('主机内存紧张')
   })
 })
@@ -148,7 +178,7 @@ describe('VM account column kernel label', () => {
         </QueryClientProvider>
       )
     const table = renderSlots(<VmTable vms={[openai, gemini]} />)
-    expect(table).toContain('>GPT</span>')
+    expect(table).toContain('aria-label="openai"')
     expect(table).toContain('data-vm-table')
     for (const html of [
       table,
@@ -169,6 +199,96 @@ describe('VM account column kernel label', () => {
     const hostOnly = renderSlots(<VmTable vms={[gemini]} />)
     expect(hostOnly).not.toContain('role="switch"')
     expect(hostOnly).not.toContain('24h 无请求')
+  })
+
+  it('renders a Gemini slot proxy with the same chip as a normal slot', () => {
+    const pool = [
+      { id: 'px-011f7746', host: '1.2.3.4', port: 1080, status: 'ok', latency_ms: 88 },
+    ]
+    const gemini = geminiSlot(
+      {
+        id: 'gemini-proxy',
+        name: 'Gemini proxy',
+        proxy_id: 'px-011f7746',
+        auth_state: 'authorized',
+        runtime_ready: false,
+        billing_ready: false,
+        auth_method: 'oauth',
+        kernel_version: null,
+        created_at: null,
+        updated_at: null,
+        models: [],
+        account: null,
+      },
+      undefined,
+      pool
+    )
+    const normal: Vm = { id: 'vm-01', has_token: true, proxy: pool[0], proxy_id: 'px-011f7746' }
+    const chip = (vm: Vm) =>
+      renderToStaticMarkup(
+        <QueryClientProvider client={new QueryClient()}>
+          <VmRack vms={[vm]} filter='all' size='l' />
+        </QueryClientProvider>
+      ).match(/<div[^>]*bg-ok-1[^>]*>.*?<\/div>/)?.[0]
+    const geminiChip = chip(gemini)
+    expect(geminiChip).toContain('1.2.3.4:1080')
+    expect(geminiChip).toContain('88')
+    expect(geminiChip).toBe(chip(normal))
+  })
+
+  it('keeps Gemini rows and cards compact and hides stale eligibility after a newer verified run', () => {
+    const verified = geminiSlot({
+      id: 'verified-gemini',
+      name: 'Verified Gemini',
+      proxy_id: 'px-011f7746',
+      auth_state: 'authorized',
+      auth_method: 'oauth',
+      runtime_ready: true,
+      billing_ready: true,
+      kernel_version: '0.3.0',
+      created_at: null,
+      updated_at: null,
+      models_discovered: true,
+      models: ['gemini-2.5-pro'],
+      last_inference: {
+        state: 'completed',
+        model: 'gemini-2.5-pro',
+        started_at: '2026-11-24T02:00:00Z',
+        finished_at: '2026-11-24T02:00:05Z',
+        error_code: null,
+      },
+      account: {
+        state: 'ok',
+        checked_at: '2026-11-24T01:00:00Z',
+        email: 'a@example.com',
+        project_id: null,
+        region: null,
+        plan: null,
+        expires_at: null,
+        eligibility: 'verification_required',
+        quotas: [],
+        credits: [],
+      },
+    })
+    const html = (node: ReactNode) =>
+      renderToStaticMarkup(
+        <QueryClientProvider client={new QueryClient()}>
+          {node}
+        </QueryClientProvider>
+      )
+    const table = html(<VmTable vms={[verified]} />)
+    expect(table).toContain('data-vm-row')
+    expect(table).toMatch(/data-vm-row[^>]*class="[^"]*h-\[38px\]/)
+    expect(table).not.toContain('min-h-[38px]')
+    for (const view of [
+      table,
+      html(<VmRack vms={[verified]} size='l' filter='all' />),
+      html(<VmRack vms={[verified]} size='s' filter='all' />),
+    ]) {
+      expect(view).toContain('上次宿主推理成功')
+      expect(view).not.toContain('VALIDATION_REQUIRED')
+      expect(view).not.toContain('text-[color:var(--status-caution)]')
+    }
   })
 
   it('keeps pending, cancelled, failed and verified turns out of generic 在池 counts', () => {
@@ -252,57 +372,109 @@ describe('VM account column kernel label', () => {
     expect(pulse).not.toContain('在池')
   })
 
-  it('prioritizes the full account name and presents the platform, plan and kernel together', () => {
-    const name = 'A much longer operations account name'
+  it.each(['wrap', 'cc'] as const)(
+    'renders %s as a silver standard kernel',
+    (dataplane) => {
+      const html = render({ resolved_dataplane: dataplane })
+      expect(html).toMatch(/class="[^"]*bg-zinc-200[^"]*"[^>]*>默认<\/span>/)
+      expect(html).not.toContain('>crag</span>')
+      expect(html).toContain('account@example.com')
+    }
+  )
+
+  it.each(['legacy', 'v2'] as const)(
+    'renders CRAG %s as orange crag',
+    (version) => {
+      const html = render({
+        resolved_dataplane: 'crag',
+        resolved_crag_kernel_version: version,
+      })
+      expect(html).toMatch(/class="[^"]*bg-orange-200[^"]*"[^>]*>crag<\/span>/)
+      expect(html).not.toContain('>默认</span>')
+    }
+  )
+
+  it('uses the resolved route instead of the configured override', () => {
+    expect(render({ dataplane: 'wrap', resolved_dataplane: 'crag' })).toContain(
+      '>crag</span>'
+    )
+    expect(render({ dataplane: 'crag', resolved_dataplane: 'wrap' })).toContain(
+      '>默认</span>'
+    )
+  })
+
+  it('supports older responses without a resolved route', () => {
+    expect(render({ dataplane: 'crag' })).toContain('>crag</span>')
+    expect(render()).toContain('>默认</span>')
+  })
+
+  it('shows the platform mark, stable VM number, email and enrollment independently of the auth scheme', () => {
     const vm: Partial<Vm> = {
-      name,
       has_token: true,
+      auth_scheme: 'authorization_bearer',
       subscription_type: 'max',
       runtime_type: 'kvm',
       node_name: '测试集群',
     }
     const html = render(vm)
-    expect(html).toContain('>Claude</span>')
-    expect(html).toContain(`aria-label="打开 ${name} 详情页">${name}</button>`)
-    expect(html).toContain('>Claude</span>')
-    expect(html).toContain('>Max</span>')
-    expect(render({ name: '' })).toContain(
-      'aria-label="打开 account@example.com 详情页">account@example.com</button>'
-    )
-    expect(render({ name: '', email: '' })).toContain(
-      'aria-label="打开 vm-01 详情页">vm-01</button>'
+    expect(html).toContain('aria-label="anthropic"')
+    for (const label of [
+      'vm-01',
+      'account@ex…',
+      'Max',
+      'kvm',
+      'oauth',
+      '测试集群',
+    ]) {
+      expect(html).toMatch(new RegExp(`>${label}</(?:span|div)>`))
+    }
+    expect(html).toContain('title="account@example.com"')
+    expect(html).not.toContain('订阅 未知')
+    expect(html).not.toContain('01·account')
+    expect(
+      render({
+        ...vm,
+        credential_mode: 'setup-token',
+        oauth_registration: 'oauth',
+      })
+    ).toContain('>oauth</span>')
+    expect(
+      render({
+        ...vm,
+        credential_mode: 'setup-token',
+        oauth_registration: 'console',
+      })
+    ).toContain('>console</span>')
+    expect(render({ platform: 'openai', has_token: true })).toContain(
+      'aria-label="openai"'
     )
     expect(render({ platform: 'openai', has_token: true })).toContain(
-      '>GPT</span>'
+      '>local</span>'
     )
   })
 })
 
-describe('classic account table columns', () => {
-  it('starts with the official seven columns and makes the full set of sort metrics accessible', () => {
-    const html = render()
-    expect(
-      Array.from(html.matchAll(/data-column="([^"]+)"/g), (m) => m[1])
-    ).toEqual(CLASSIC_COLUMNS)
-    expect(html).toContain('显示列')
-    expect(html).toContain('列表统计')
-    expect(html).toContain('value="today">今日请求数</option>')
-    expect(html).toContain('value="spend">7 天窗口花费</option>')
-    expect(html).toContain('data-pin="false"')
-    for (const key of METRIC_COLUMNS) expect(html).toContain(`value="${key}"`)
-  })
-  it('migrates the old order, discards unknowns, and always pins the identity', () => {
-    const result = normalizeColumns(
-      ['cost', 'bogus', 'vm', 'cost', 'sched'],
-      null
+describe('VM list summary and toggles', () => {
+  it('renders the fleet summary and both list toggles', () => {
+    const buckets = Array.from({ length: 48 }, (_, i): [number, number] =>
+      i === 47 ? [9, 1] : [0, 0]
     )
-    expect(result.order.slice(0, 3)).toEqual(['vm', 'cost', 'sched'])
-    expect(result.visible).toEqual(CLASSIC_COLUMNS)
-    expect(new Set(result.order).size).toBe(19)
-    expect(normalizeColumns({}, ['queue', 'new', 'queue']).visible).toEqual([
-      'vm',
-      'queue',
-    ])
-    expect(normalizeColumns(null, []).visible).toEqual(['vm'])
+    const html = render({ health_24h: buckets, seats_used: 1, seats_max: 4 })
+    expect(html).toContain('aria-label="全局汇总"')
+    expect(html).toContain('>在池</div>')
+    expect(html).toContain('>今日请求数</button>')
+    expect(html).toContain('>近 24h 请求</div>')
+    expect(html).not.toContain('>24h 请求')
+    expect(html).toContain('北京时间今日 0')
+    expect(html).toContain('>7 天窗口花费</button>')
+    expect(html).toContain('>7 天窗口花费</div>')
+    expect(html.match(/7 天窗口花费/g)).toHaveLength(2)
+    expect(html).not.toContain('7D 花费')
+    expect(html).not.toContain('>今日</div>')
+    expect(html).toContain('>90.0%</b>')
+    expect(html).toContain('失败 1')
+    expect(html).toMatch(/aria-pressed="false"[^>]*>.*按状态分组/)
+    expect(html).toMatch(/aria-pressed="false"[^>]*>.*次要信息常显/)
+    expect(html).toContain('data-pin="false"')
   })
 })

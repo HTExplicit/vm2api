@@ -42,6 +42,7 @@ export type OpenaiApiCreditGrant = {
 }
 
 export type OpenaiApiView = {
+  account_id?: string | null
   pro_eligible: boolean
   claim_status: 'unknown' | 'eligible' | 'ineligible' | 'pending' | 'claimed'
   ineligibility_reason?: string | null
@@ -148,6 +149,15 @@ export type VmProxySnap = {
 }
 
 export type InferenceEngine = 'auto' | 'go' | 'rust'
+
+export type VmCodexCredits = {
+  has_credits?: boolean
+  unlimited?: boolean
+  balance?: string | number | null
+  fetched_at?: string | number | null
+  status?: 'available' | 'unavailable' | 'pending' | 'unknown'
+  invalidated_at?: string | null
+}
 
 export type CragLicenseStatus = {
   status:
@@ -327,11 +337,25 @@ export type SeatOccupant = {
   state: 'active' | 'held' | 'idle' | string
   inflight: number
   held_until?: number | null
+  subagents_running?: number
+  subagents_queued?: number
+  subagents_max?: number | null
 }
 
 export type ScheduleState = 'on' | 'off' | 'unschedulable' | 'restricted'
 
+export type CodexSiwcState = {
+  enabled: boolean
+  bound: boolean
+  status: string
+  has_token: boolean
+  expires_at: number | null
+  next_refresh_at: number | null
+  models: { id: string; name: string; visible: boolean }[] | null
+}
+
 export type Vm = {
+  codex_siwc?: CodexSiwcState | null
   id: string
   gemini?: GeminiEnvironment
   name?: string
@@ -431,21 +455,13 @@ export type Vm = {
   subscription?: OpenaiSubscription | null
   /** Account API channel; independent from OAuth kernel lifecycle and quota. */
   openai_api?: OpenaiApiView | null
-  /** Last official balance sample; status is the server's current spending verdict. */
-  codex_credits?: {
-    has_credits: boolean
-    unlimited: boolean
-    balance: string | null
-    fetched_at: string
-    status: 'available' | 'unavailable' | 'pending' | 'unknown'
-    invalidated_at: string | null
-  } | null
   codex_credits_checked_at?: string | null
   reset_credits?: {
     available_count?: number
     credits?: Array<{ expires_at?: string }>
     fetched_at?: string
   } | null
+  codex_credits?: VmCodexCredits | null
   /** 限额重置按钮。setup-token 标签但 scope 含 user:profile 时也为 true。 */
   can_claude_reset?: boolean
   claude_reset_credits?: {
@@ -529,6 +545,12 @@ export type Vm = {
   /** Claude CLI native 执行位热准入上限，也是预调度的席位上限；内核固定预开 20。 */
   session_slots?: number | null
   session_slots_override?: boolean
+  /** Claude family mode root-session cap. */
+  max_primary_sessions?: number | null
+  max_primary_sessions_override?: boolean
+  /** null = family mode disabled, children keep their own seats. */
+  max_subagents_per_session?: number | null
+  max_subagents_per_session_override?: boolean
   /** 去掉本槽覆盖（PATCH 字段传 null）后会落回的值。 */
   scheduling_inherited?: VmSchedulingInherited | null
   /** 单槽位配额覆盖；缺字段 = 跟随全局 `settings/quota`。GPT 槽位恒为 null。 */
@@ -927,6 +949,8 @@ export type VmSchedulingInherited = {
   max_sessions?: number | null
   /** Codex 行为 null。 */
   session_slots: number | null
+  max_primary_sessions?: number | null
+  max_subagents_per_session?: number | null
 }
 
 export type OpenAIQuotaPolicy = {

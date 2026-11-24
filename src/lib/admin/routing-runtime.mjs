@@ -24,6 +24,7 @@ import { slotExec } from '../vm/slot-runtime.mjs'
 import { maxRequestBytes, streamIdleTimeoutMs } from '../core/config.mjs'
 
 import { accountTierKey, mergeTierMaps, normalizeTiers } from '../pool/quota-tiers.mjs'
+import { mergeBatchGroupConfig } from '../pool/batch-group.mjs'
 import { vmQuotaOverrideOf } from '../pool/vm-quota-override.mjs'
 import { PoolScheduler, normalizePoolRouting } from '../pool/pool-scheduler.mjs'
 import { FailoverRunner } from '../pool/failover-runner.mjs'
@@ -61,7 +62,11 @@ import { syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { wakeOpenAIWaiter } from '../pool/openai-account-runtime.mjs'
 import { normalizeVmConfig } from '../vm/machine-spec.mjs'
 import { applyNativeTelemetry } from '../vm/fleet-update.mjs'
-import { telemetryDefaultEnabled, telemetryUploadInterval } from '../vm/native-telemetry.mjs'
+import {
+  telemetryDefaultEnabled,
+  telemetryDisableNonessentialTraffic,
+  telemetryUploadInterval,
+} from '../vm/native-telemetry.mjs'
 import { normalizeOpenaiApiConfig, validateOpenaiApiPatch } from '../openai-api/config.mjs'
 
 export function createRoutingRuntime(ctx) {
@@ -445,7 +450,7 @@ export function createRoutingRuntime(ctx) {
   // Native slots hot-read kernel.json; publication must be acknowledged per VM.
   async function syncTelemetryUploadInterval(
     routingConfig,
-    { defaultEnabled = false, prevDefaultEnabled = false } = {},
+    { defaultEnabled = false, prevDefaultEnabled = false, disableNonessentialChanged = false } = {},
   ) {
     const project = ctx.cfg.paths.project
     const applied = { updated: 0, queued: 0, skipped: 0, failed: [] }
@@ -460,7 +465,7 @@ export function createRoutingRuntime(ctx) {
         fresh.updated_at = new Date().toISOString()
         atomicWriteJson(vmPath, fresh, { mode: 0o600 })
       }
-      if (resolveKernelDataplane(vm, routingConfig) === 'crag' && !optIn) {
+      if (resolveKernelDataplane(vm, routingConfig) === 'crag' && !optIn && !disableNonessentialChanged) {
         applied.skipped += 1
         continue
       }
@@ -511,12 +516,19 @@ export function createRoutingRuntime(ctx) {
     const prevRequestBytes = maxRequestBytes(routingConfig)
     const prevUploadInterval = telemetryUploadInterval(routingConfig)
     const prevDefaultEnabled = telemetryDefaultEnabled(routingConfig)
+    const prevDisableNonessential = telemetryDisableNonessentialTraffic(routingConfig)
     setRouting(routingConfig)
     if (body.sticky) routingConfig.sticky = { ...(routingConfig.sticky || {}), ...body.sticky }
     if (body.quota) routingConfig.quota = { ...(routingConfig.quota || {}), ...body.quota }
     if (body.concurrency) routingConfig.concurrency = { ...(routingConfig.concurrency || {}), ...body.concurrency }
     if (body.pool) {
       routingConfig.pool = normalizePoolRouting({ ...(routingConfig.pool || {}), ...body.pool })
+    }
+    if (body.batch_group && typeof body.batch_group === 'object' && !Array.isArray(body.batch_group)) {
+      routingConfig.batch_group = mergeBatchGroupConfig({
+        ...(routingConfig.batch_group || {}),
+        ...body.batch_group,
+      })
     }
     if (body.failover) routingConfig.failover = { ...(routingConfig.failover || {}), ...body.failover }
     if (body.inference) {
@@ -569,6 +581,9 @@ export function createRoutingRuntime(ctx) {
       if (Object.hasOwn(body.telemetry, 'default_enabled')) {
         nextTelemetry.default_enabled = body.telemetry.default_enabled === true
       }
+      if (Object.hasOwn(body.telemetry, 'disable_nonessential_traffic')) {
+        nextTelemetry.disable_nonessential_traffic = body.telemetry.disable_nonessential_traffic === true
+      }
       routingConfig.telemetry = nextTelemetry
     }
     applyOfficialCcRoutingBody(body, prevOfficialCc)
@@ -616,9 +631,17 @@ export function createRoutingRuntime(ctx) {
         ? reloadClaudeKernelsWhenIdle(routingConfig, { idleOnly: !requestBytesChanged })
         : 0
     const defaultEnabled = telemetryDefaultEnabled(routingConfig)
+    const disableNonessential = telemetryDisableNonessentialTraffic(routingConfig)
+    const disableNonessentialChanged = disableNonessential !== prevDisableNonessential
     const telemetrySync =
-      telemetryUploadInterval(routingConfig) !== prevUploadInterval || defaultEnabled !== prevDefaultEnabled
-        ? await syncTelemetryUploadInterval(routingConfig, { defaultEnabled, prevDefaultEnabled })
+      telemetryUploadInterval(routingConfig) !== prevUploadInterval ||
+      defaultEnabled !== prevDefaultEnabled ||
+      disableNonessentialChanged
+        ? await syncTelemetryUploadInterval(routingConfig, {
+            defaultEnabled,
+            prevDefaultEnabled,
+            disableNonessentialChanged,
+          })
         : null
     // Pool and failover settings hot-reload into the live scheduler and runner.
     // Rebuilding them would drop the seat book and queues while their requests
@@ -675,6 +698,7 @@ export function createRoutingRuntime(ctx) {
       doc.pool = normalizePoolRouting(doc.pool)
       doc.vm = normalizeVmConfig(doc.vm)
       if (!hasOpenAIQuota) migrateLegacyOpenAIPolicies(doc)
+      if (doc.batch_group != null) doc.batch_group = mergeBatchGroupConfig(doc.batch_group)
       if (doc.redaction != null) doc.redaction = normalizeRedaction(doc.redaction)
       return doc
     } catch (error) {
