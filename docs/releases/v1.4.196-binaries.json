@@ -2,12 +2,12 @@
   "schema": 1,
   "recorded_by": "HTExplicit/vm2api",
   "record_type": "supplier_release_observation",
-  "application_release": "v1.4.195",
-  "application_commit": "cb3b57b69c81773ec1a3b22aaf5c78cdad5f4d4e",
-  "application_source": "https://github.com/dofastted/vm2api/releases/tag/v1.4.195",
+  "application_release": "v1.4.196",
+  "application_commit": "72c272821f4b209afb57ae50e19861d9489936b5",
+  "application_source": "https://github.com/dofastted/vm2api/releases/tag/v1.4.196",
   "statement": "The fork builds kin-egress from source. All 22 supplier assets match the pinned payload releases and the upstream Linux amd64 application release.",
   "official_release_workflow": {
-    "url": "https://github.com/dofastted/vm2api/actions/runs/45347320830",
+    "url": "https://github.com/dofastted/vm2api/actions/runs/45351308967/job/138298152789",
     "conclusion": "success"
   },
   "payload_release": "payload-2026.11.24-oauth-chrome-tls",
