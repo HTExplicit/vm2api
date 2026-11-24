@@ -84,6 +84,7 @@ test('the fork appends migrations to the 13601 ledger and allows rollback', (t) 
     '070_crag_shop_redemption.sql',
     '071_crag_shop_device_host.sql',
     '072_crag_shop_activation_error.sql',
+    '073_multi_tier_key_permissions.sql',
   ]
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-fork-migrations-'))
   t.after(() => fs.rmSync(root, { recursive: true }))

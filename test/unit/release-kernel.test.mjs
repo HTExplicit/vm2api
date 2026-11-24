@@ -90,6 +90,18 @@ test('runtime version lists use the fork application and the fixed CRAG supplier
       },
     ],
   })
+  const geminiTag = 'payload-2026.11.24-gemini-0.4.6'
+  const gemini = {
+    tag_name: geminiTag,
+    draft: false,
+    prerelease: true,
+    assets: ['craggemini', 'craggemini.payload.enc', 'libagy_bridge.so', 'crag-license-public.pem', 'manifest.json'].map(
+      (name) => ({
+        name,
+        browser_download_url: `https://github.com/dofastted/vm2api/releases/download/${geminiTag}/${name}`,
+      }),
+    ),
+  }
   const app = {
     tag_name: 'v1.4.11001',
     draft: false,
@@ -105,10 +117,10 @@ test('runtime version lists use the fork application and the fixed CRAG supplier
       seen.push(url.pathname)
       if (url.pathname === `/repos/${GITHUB_REPO}/releases`) return Response.json([app, crag(standard)])
       assert.equal(url.pathname, '/repos/dofastted/vm2api/releases')
-      return Response.json([app, crag(standard), crag(legacy)])
+      return Response.json([app, crag(standard), crag(legacy), gemini])
     },
   })
-  assert.deepEqual(versions, { 'cli-node': ['v1.4.11001'], crag: [standard] })
+  assert.deepEqual(versions, { 'cli-node': ['v1.4.11001'], crag: [standard], craggemini: [geminiTag] })
   assert.deepEqual(seen, [`/repos/${GITHUB_REPO}/releases`, '/repos/dofastted/vm2api/releases'])
 })
 
