@@ -269,6 +269,7 @@ test('migration 059 onward preserves the published 9102 ledger, browser state an
       '069_proxy_dns_disable_svcb_https.sql',
       '070_crag_shop_redemption.sql',
       '071_crag_shop_device_host.sql',
+      '072_crag_shop_activation_error.sql',
     ])
     assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '059' ORDER BY version").all(), ledger)
     for (const table of preservedTables)
@@ -587,6 +588,7 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       '069_proxy_dns_disable_svcb_https.sql',
       '070_crag_shop_redemption.sql',
       '071_crag_shop_device_host.sql',
+      '072_crag_shop_activation_error.sql',
     ])
     const { risk_review_enabled, body_policy, ...after } = db
       .prepare('SELECT * FROM api_endpoints WHERE id = ?')

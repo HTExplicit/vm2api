@@ -403,11 +403,9 @@ for (const placement of ['local', 'cluster']) {
 }
 
 test('native macOS still rejects licensed CRAG switching through both legacy endpoints', async (t) => {
-  const { root, vm } = fixture(t, { node_id: 'node-mac', node_platform: 'darwin' })
+  const { root, vm } = fixture(t, { node_id: 'node-mac', node_platform: 'darwin' }, { universalBeforeSlot: true })
   bindPlacement({ projectRoot: root, manager: { nodePlatform: () => 'darwin' } })
   t.after(unbindPlacement)
-  seedEncryptedPackage(root)
-  activateCragLicense(root, vm, issueUniversalCode(root).code)
   const record = fs.readFileSync(path.join(root, 'vms', `${vm.id}.json`))
   const operations = {
     kernelPolicyOps: {

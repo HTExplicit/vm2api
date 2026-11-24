@@ -12,7 +12,7 @@ const { default: react } = await import(pathToFileURL(webRequire.resolve('@vitej
 const { default: tailwindcss } = await import(pathToFileURL(webRequire.resolve('@tailwindcss/vite')))
 const fixture = fileURLToPath(new URL('./scheduling-fixture.tsx', import.meta.url)).replaceAll('\\', '/')
 
-test('seven-column VM list preserves sorting, live counts, responsive access and detail permissions', {
+test('official VM list preserves sorting, live counts, responsive access and detail permissions', {
   timeout: 90_000,
 }, async (t) => {
   assert.ok(process.env.UI_BROWSER_EXE, 'UI_BROWSER_EXE must point to an installed test Chromium')
@@ -62,8 +62,6 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
   })
   const rejectedOrigins = []
   const errors = []
-  const priorityWrites = []
-  let rejectPriority = false
   const switchWrites = []
   const healthRequests = []
   let rejectHealth = false
@@ -253,21 +251,6 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
         json: { ok: true, data: { items: allRows } },
       })
     }
-    if (request.method() === 'PATCH' && url.pathname === '/api/panel/vms/offline-slot') {
-      assert.equal(role, 'admin')
-      const body = request.postDataJSON()
-      assert.deepEqual(Object.keys(body), ['schedule_level'])
-      priorityWrites.push(body.schedule_level)
-      if (rejectPriority) {
-        return route.fulfill({
-          status: 409,
-          json: { ok: false, error: { message: '测试保存失败' } },
-        })
-      }
-      vm.schedule_level_mode = body.schedule_level === null ? 'auto' : 'manual'
-      vm.schedule_level = body.schedule_level ?? 6
-      return route.fulfill({ json: { ok: true, data: { vm } } })
-    }
     if (url.pathname.endsWith('/health')) {
       assert.equal(request.method(), 'GET')
       const range = url.searchParams.get('range')
@@ -316,10 +299,6 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
   })
   await context.addInitScript(() => {
     localStorage.setItem('kin_console_token', 'offline-scheduling-token')
-    localStorage.setItem(
-      'kin.vm.column-order',
-      JSON.stringify(['vm', 'type', 'sched', 'status', 'req', 'usage', 'cost']),
-    )
   })
   const page = await context.newPage()
   page.on('pageerror', (error) => errors.push(error.message))
@@ -328,220 +307,94 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
   const row = rowOf('offline-slot')
   const table = page.getByRole('table', { name: '槽位列表', exact: true })
   await row.waitFor()
-  const headers = (await table.locator('th[data-column]').allInnerTexts()).map((label) => label.trim())
-  assert.deepEqual(headers, ['账号', '类型', '调度', '状态', '今日 / 7D 请求', '用量窗口', '成本'])
-  const cell = (slot, name) => slot.locator(`[data-vm-cell="${name}"]`)
-  assert.equal(await cell(row, 'sched').getByRole('switch').count(), 1)
-  assert.equal(await row.getByText('P6', { exact: true }).count(), 1)
-  const accountBadge = cell(row, 'account').locator('[data-vm-requesting]')
-  assert.equal(await accountBadge.getAttribute('title'), '请求中 3')
-  const accountNameBox = await cell(row, 'account').getByText('测试槽', { exact: true }).boundingBox()
-  const accountBadgeBox = await accountBadge.boundingBox()
-  assert.ok(accountNameBox && accountBadgeBox)
-  assert.ok(accountBadgeBox.x - accountNameBox.x - accountNameBox.width <= 10)
-  assert.equal(
-    await cell(rowOf('offline-available-codex'), 'account').getByTitle('请求中 3', { exact: true }).count(),
-    1,
+  const headers = await table.getByRole('columnheader').allTextContents()
+  assert.deepEqual(
+    headers.map((label) => label.trim()),
+    [
+      '详情页',
+      '槽位',
+      '调度 · 优先级',
+      '健康 · 24h',
+      '5H',
+      '7D',
+      'Fable',
+      '今日请求数',
+      '席位',
+      '排队',
+      '请求中',
+      '7 天窗口花费',
+      'Token',
+      '$/请求',
+      '总费用',
+      '操作',
+    ],
   )
-  const claude = rowOf('offline-claude-seats')
-  assert.match(await claude.innerText(), /排队\s*1/)
-  assert.equal(await cell(claude, 'account').locator('[data-vm-requesting]').count(), 0)
-  const picker = page.getByRole('button', { name: '显示列' })
-  const drawer = page.getByRole('dialog', { name: '显示列' })
-  await picker.click()
-  assert.equal(await drawer.getByRole('checkbox').count(), 19)
-  assert.ok(await drawer.getByRole('checkbox', { name: /账号/ }).isDisabled())
-  for (const label of ['席位占用', 'Fable 用量', '请求中']) {
-    await drawer.getByRole('checkbox', { name: label, exact: true }).check()
-  }
-  await drawer.getByRole('checkbox', { name: '成本', exact: true }).uncheck()
-  await page.keyboard.press('Escape')
-  assert.equal(await cell(claude, 'seats').innerText(), '2/5')
-  assert.equal(await cell(claude, 'fable').innerText(), '37%')
-  assert.equal(await cell(row, 'fable').innerText(), '—')
-  assert.equal(await cell(row, 'cost').count(), 0)
-  await page.reload()
-  await row.waitFor()
-  assert.equal(await cell(row, 'inflight').innerText(), '3')
-  await picker.click()
-  await drawer.getByRole('button', { name: '恢复官方布局' }).click()
-  await page.keyboard.press('Escape')
-  assert.deepEqual(await table.locator('th[data-column]').allTextContents(), ['账号','调度','类型','状态','今日 / 7D 请求','用量窗口','成本'])
-  assert.match(await cell(row, 'req').innerText(), /12 请求/)
-  assert.match(await cell(row, 'cost').innerText(), /\$71\.72/)
+  const cell = (slot, label) => slot.getByRole('cell').nth(headers.findIndex((header) => header.trim() === label))
+  assert.equal(await cell(row, '槽位').getByText('测试槽', { exact: true }).count(), 1)
+  assert.equal(await cell(row, '调度 · 优先级').getByText('P6', { exact: true }).count(), 1)
+  assert.equal(await cell(row, '今日请求数').innerText(), '12')
+  assert.equal(await cell(row, '7 天窗口花费').innerText(), '$71.72')
+  assert.equal(await cell(rowOf('offline-claude-seats'), '席位').innerText(), '2/5')
+  assert.equal(await cell(rowOf('offline-claude-seats'), '排队').innerText(), '1')
   assert.equal(await rowOf('offline-manual6').getByText('24h 无请求', { exact: true }).count(), 1)
   assert.equal(await rowOf('offline-manual10').getByText('24h 未知', { exact: true }).count(), 1)
-  assert.equal(await page.getByLabel(/额度待刷新/).count(), 0)
-  assert.equal(await row.getByText('余额 12.5 点', { exact: true }).count(), 0)
-  const screenshotDirectory = process.env.VM_LIST_SCREENSHOT_DIR
-  if (screenshotDirectory)
-    await page.screenshot({ path: path.join(screenshotDirectory, 'vm-list-desktop.png'), fullPage: true })
+  await page.getByLabel('全局汇总', { exact: true }).waitFor()
+
+  const requests = cell(row, '请求中')
+  assert.equal(await requests.innerText(), '3')
   const refresh = page.getByRole('button', { name: '刷新离线数据', exact: true })
   for (const inflight of [0, 2, 3]) {
     vm.inflight = inflight
     await refresh.click()
-    if (inflight) {
-      await cell(row, 'account').getByTitle(`请求中 ${inflight}`, { exact: true }).waitFor()
-    } else {
-      await accountBadge.waitFor({ state: 'detached' })
-    }
+    await requests.getByText(String(inflight), { exact: true }).waitFor()
   }
-  const summary = page.getByRole('button', { name: '列表统计', exact: true })
-  await summary.click()
-  await page.getByLabel('当前列表汇总', { exact: true }).waitFor()
-  await summary.click()
-  const order = () => page.locator('[data-vm-row]').evaluateAll((els) => els.map((el) => el.getAttribute('aria-label')))
+
+  const order = () =>
+    page.locator('[data-vm-row]').evaluateAll((rows) => rows.map((el) => el.getAttribute('aria-label')))
   const initialOrder = await order()
-  const nameSort = table.getByRole('button', { name: '账号', exact: true })
-  await nameSort.focus()
+  const queueSort = table.getByRole('button', { name: '排队', exact: true })
+  await queueSort.focus()
   await page.keyboard.press('Enter')
-  assert.equal(await nameSort.evaluate((el) => el === document.activeElement), true)
-  assert.equal(await nameSort.locator('..').getAttribute('aria-sort'), 'ascending')
-  await nameSort.click()
-  assert.equal(await nameSort.locator('..').getAttribute('aria-sort'), 'descending')
-  await nameSort.click()
-  assert.deepEqual(await order(), initialOrder)
-  const quotaSort = table.getByRole('button', { name: '用量窗口', exact: true })
-  await quotaSort.click()
-  assert.ok((await order())[0].startsWith(`${longId}，`))
-  assert.equal(await quotaSort.locator('..').getAttribute('aria-sort'), 'descending')
-  await quotaSort.click()
-  await quotaSort.click()
-  assert.deepEqual(await order(), initialOrder)
-  const metricSort = page.getByRole('combobox', { name: '排序指标', exact: true })
-  const options = await metricSort.locator('option').allTextContents()
-  assert.deepEqual(options, [
-    '调度状态', '账号名称', '5H 剩余', '今日费用', '缓存命中',
-    '24h 成功率',
-    '5H 用量',
-    '7D 用量',
-    'Fable 用量',
-    '今日请求数',
-    '席位占用',
-    '排队',
-    '请求中',
-    '7 天窗口花费',
-    '7D Token',
-    '每请求费用',
-    '累计费用',
-  ])
-  await metricSort.selectOption({ label: '排队' })
   assert.ok((await order())[0].startsWith('offline-claude-seats，'))
-  await metricSort.selectOption({ label: '7D Token' })
-  assert.ok((await order())[0].startsWith(`${longId}，`))
-  await metricSort.selectOption({ index: 0 })
+  assert.equal(await queueSort.locator('..').getAttribute('aria-sort'), 'descending')
+  assert.equal(await queueSort.evaluate((el) => el === document.activeElement), true)
+  await queueSort.click()
+  assert.equal(await queueSort.locator('..').getAttribute('aria-sort'), 'ascending')
+  await queueSort.click()
   assert.deepEqual(await order(), initialOrder)
-  const optionsButton = page.getByRole('button', { name: '列表选项' })
-  const grouping = page.getByRole('checkbox', { name: '按状态分组' })
-  const secondary = page.getByRole('checkbox', { name: '次要信息常显' })
-  await optionsButton.click()
-  assert.equal(await grouping.isChecked(), false)
-  assert.equal(await secondary.isChecked(), false)
-  await grouping.check()
-  await page.keyboard.press('Escape')
-  await row.waitFor({state:'hidden'})
-  await page.getByRole('button',{name:/关闭调用.*1 台/}).click()
+
+  const grouping = page.getByRole('button', { name: '按状态分组', exact: true })
+  const secondary = page.getByRole('button', { name: '次要信息常显', exact: true })
+  await grouping.click()
+  await row.waitFor({ state: 'hidden' })
+  await page.getByRole('button', { name: /关闭调用/ }).click()
   await row.waitFor()
-  await optionsButton.click()
-  await grouping.uncheck()
-  await secondary.check()
-  assert.equal(await page.locator('[data-vm-table]').getAttribute('data-pin'),'true')
-  await secondary.uncheck()
-  await page.keyboard.press('Escape')
-  const scrollPane = page.getByRole('region',{name:'账号列表横向滚动'})
-  const assertNoHorizontalOverflow = async () => {
-    assert.ok(await scrollPane.evaluate(el => {
-      const viewport=document.documentElement, bounds=el.getBoundingClientRect()
-      return viewport.scrollWidth<=viewport.clientWidth+1 && bounds.left>=0 && bounds.right<=viewport.clientWidth+1
-    }))
-  }
-  await assertNoHorizontalOverflow()
-  await row.getByRole('button', { name: '更多操作 offline-slot', exact: true }).click()
-  await page.getByRole('menuitem', { name: 'API 赠额与调用', exact: true }).waitFor()
-  await page.keyboard.press('Escape')
+  await grouping.click()
+  const scrollPane = page.locator('[data-vm-table]')
+  await secondary.click()
+  assert.equal(await scrollPane.getAttribute('data-pin'), 'true')
+  await secondary.click()
   assert.deepEqual(healthRequests, [])
+
   const scheduleSwitch = row.getByRole('switch')
   await scheduleSwitch.click()
-  await page.waitForFunction(
-    () =>
-      document
-        .querySelector('[data-vm-row][aria-label^="offline-slot，"] [role="switch"]')
-        ?.getAttribute('aria-checked') === 'true',
-  )
+  await row.getByRole('switch', { checked: true }).waitFor()
   await scheduleSwitch.click()
-  await page.waitForFunction(
-    () =>
-      document
-        .querySelector('[data-vm-row][aria-label^="offline-slot，"] [role="switch"]')
-        ?.getAttribute('aria-checked') === 'false',
-  )
+  await row.getByRole('switch', { checked: false }).waitFor()
   assert.deepEqual(switchWrites, [{ schedulable: true }, { schedulable: false }])
-  const expand = row.getByRole('button', {
-    name: '展开 offline-slot 明细',
-    exact: true,
-  })
-  const detail = page.getByRole('region', {
-    name: 'offline-slot 明细',
-    exact: true,
-  })
+
+  const expand = row.getByRole('button', { name: '展开 offline-slot 明细', exact: true })
+  const detail = page.getByRole('region', { name: 'offline-slot 明细', exact: true })
   await row.focus()
   await page.keyboard.press('Enter')
   await detail.getByText('99.0%', { exact: true }).waitFor()
-  const assertCompactDetail = async () => {
-    assert.equal(await detail.getByLabel('账号信息', { exact: true }).count(), 0)
-    const link = await detail.getByRole('button', { name: '打开完整详情 →' }).boundingBox()
-    const panel = await detail.boundingBox()
-    const card = await detail.getByRole('region', { name: '请求健康', exact: true }).boundingBox()
-    assert.ok(link && panel && card)
-    assert.ok(link.y >= panel.y && link.x + link.width > panel.x + panel.width - 24)
-    assert.ok(card.y >= link.y + link.height - 1 && card.y < link.y + link.height + 12)
-  }
-  await assertCompactDetail()
-
-  const rangeTargets = await detail
-    .getByRole('group', { name: '健康时间范围', exact: true })
-    .getByRole('button')
-    .evaluateAll((buttons) =>
-      buttons.map((el) => {
-        const box = el.getBoundingClientRect()
-        return box.width >= 24 && box.height >= 24
-      }),
-    )
-  assert.deepEqual(rangeTargets, [true, true])
-  assert.equal(await detail.getByRole('region').count(), 3)
   await detail.getByLabel(/额度待刷新，最近测量/).waitFor()
-  await detail.getByText('余额 12.5 点', { exact: true }).waitFor()
-  assert.equal(await detail.getByRole('button', { name: 'API配置', exact: true }).count(), 1)
-  const quick = detail.getByRole('region', { name: '用量窗口明细' }).getByRole('group', { name: '账号快捷操作' })
-  await quick.getByRole('button', { name: 'API配置', exact: true }).waitFor()
-  const priority = quick.getByRole('group', { name: '调度优先级' })
-  const option = (name) => priority.getByRole('radio', { name, exact: true })
-  assert.equal(await priority.getByRole('radio').count(), 11)
-  assert.ok(await option('自动').isChecked())
-  await option('P2').click()
-  await row.getByText('P2 手', { exact: true }).waitFor()
-  await priority.getByText('手动 P2', { exact: true }).waitFor()
-  await option('P2').focus()
-  await page.keyboard.press('ArrowRight')
-  await row.getByText('P3 手', { exact: true }).waitFor()
-  assert.ok(await option('P3').isChecked())
-  assert.ok(await option('P3').evaluate(el => el.matches(':focus-visible')))
-  await option('P5').click()
-  await row.getByText('P5 手', { exact: true }).waitFor()
-  rejectPriority = true
-  await option('P8').click()
-  await quick.getByRole('alert').waitFor()
-  assert.match(await quick.getByRole('alert').innerText(), /测试保存失败/)
-  assert.ok(await option('P5').isChecked())
-  rejectPriority = false
-  await option('自动').click()
-  await row.getByText('P6', { exact: true }).waitFor()
-  await priority.getByText('自动 · 当前 P6', { exact: true }).waitFor()
-  assert.deepEqual(priorityWrites, [2, 3, 5, 8, null])
+  await detail.getByRole('button', { name: '刷新额度和积分', exact: true }).waitFor()
+  assert.equal(await detail.getByRole('button', { name: 'API配置', exact: true }).count(), 0)
+  const cost = detail.getByRole('region', { name: '成本拆分', exact: true })
+  assert.match(await cost.innerText(), /57\.1M/)
+  assert.match(await cost.innerText(), /\$0\.130/)
 
-  const costDetail = detail.getByRole('region', { name: '成本拆分', exact: true })
-  assert.match(await costDetail.innerText(), /57\.1M/)
-  assert.match(await costDetail.innerText(), /\$0\.130/)
   rejectHealth = true
   await detail.getByRole('button', { name: '近 7 天', exact: true }).click()
   await detail.getByText('加载失败：离线健康查询失败', { exact: true }).waitFor()
@@ -551,11 +404,11 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
     healthRequests.map(({ range }) => range),
     ['24h', '7d'],
   )
+
   await row.focus()
   await page.keyboard.press('Space')
-  assert.equal(await detail.count(), 0)
-  await row.getByRole('button', { name: '打开 测试槽 详情页', exact: true }).click()
-  assert.equal(await detail.count(), 0)
+  await detail.waitFor({ state: 'hidden' })
+  await row.getByRole('button', { name: '打开 offline-slot 详情页', exact: true }).click()
   await row.focus()
   await page.keyboard.press('Shift+Enter')
   assert.equal(await page.getByRole('status', { name: '详情打开次数' }).innerText(), '2')
@@ -563,8 +416,9 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
   await detail.getByRole('button', { name: '打开完整详情 →' }).click()
   assert.equal(await page.getByRole('status', { name: '详情打开次数' }).innerText(), '3')
   await row.getByRole('button', { name: '收起 offline-slot 明细' }).click()
-  const accountName = cell(row, 'account').getByText('测试槽', { exact: true })
-  await accountName.evaluate((el) => {
+
+  const account = cell(row, '槽位')
+  await account.getByText('测试槽', { exact: true }).evaluate((el) => {
     const selection = window.getSelection()
     const range = document.createRange()
     range.selectNodeContents(el)
@@ -574,39 +428,33 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
   await row.dispatchEvent('click')
   assert.equal(await detail.count(), 0)
   await page.evaluate(() => window.getSelection().removeAllRanges())
-  await cell(row, 'req').click()
+  await requests.click()
   await detail.waitFor()
   await row.focus()
   await page.keyboard.press('Escape')
-  assert.equal(await detail.count(), 0)
-  await page.getByRole('button', { name: '展开 offline-manual6 明细', exact: true }).click()
-  const emptyDetail = page.getByRole('region', {
-    name: 'offline-manual6 明细',
-    exact: true,
-  })
-  await emptyDetail.getByText('该时段无请求', { exact: true }).waitFor()
-  await page.getByRole('button', { name: '收起 offline-manual6 明细', exact: true }).click()
-  await page.setViewportSize({ width: 390, height: 844 })
-  await assertNoHorizontalOverflow()
-  const narrowAccount = await cell(row, 'account').boundingBox()
-  assert.ok(narrowAccount)
-  assert.ok(await scrollPane.evaluate(el=>el.scrollWidth>el.clientWidth))
-  await scrollPane.evaluate(el=>el.scrollLeft=el.scrollWidth)
-  const pinned = await cell(row,'account').boundingBox()
-  assert.ok(pinned && Math.abs(pinned.x-narrowAccount.x)<1)
-  const narrowBadge = await accountBadge.boundingBox()
-  assert.ok(narrowBadge && narrowBadge.x >= 0 && narrowBadge.x + narrowBadge.width <= 390)
-  await expand.click()
-  await detail.waitFor()
-  await assertCompactDetail()
-  await assertNoHorizontalOverflow()
-  await row.getByRole('button', { name: '收起 offline-slot 明细', exact: true }).click()
+  await detail.waitFor({ state: 'hidden' })
+
+  const screenshotDirectory = process.env.VM_LIST_SCREENSHOT_DIR
   if (screenshotDirectory) {
-    await page.setViewportSize({ width: 390, height: 960 })
-    await page.reload()
-    await row.waitFor()
+    await page.screenshot({ path: path.join(screenshotDirectory, 'vm-list-desktop.png'), fullPage: true })
+  }
+  await page.setViewportSize({ width: 390, height: 844 })
+  assert.ok(
+    await scrollPane.evaluate((el) => {
+      const viewport = document.documentElement
+      return el.scrollWidth > el.clientWidth && viewport.scrollWidth <= viewport.clientWidth + 1
+    }),
+  )
+  await scrollPane.evaluate((el) => (el.scrollLeft = el.scrollWidth))
+  assert.ok(await scrollPane.evaluate((el) => el.scrollLeft > 0))
+  assert.equal(await account.evaluate((el) => getComputedStyle(el).position), 'sticky')
+  const name = await account.getByText('测试槽', { exact: true }).boundingBox()
+  assert.ok(name && name.x >= 0 && name.x + name.width <= 390)
+  if (screenshotDirectory) {
+    await scrollPane.evaluate((el) => (el.scrollLeft = 0))
     await page.screenshot({ path: path.join(screenshotDirectory, 'vm-list-mobile.png') })
   }
+
   await page.setViewportSize({ width: 1440, height: 900 })
   for (role of ['user', 'super']) {
     await page.reload()
@@ -615,10 +463,7 @@ test('seven-column VM list preserves sorting, live counts, responsive access and
     await expand.click()
     await detail.getByText('健康明细仅管理员可查看', { exact: true }).waitFor()
     assert.equal(healthRequests.length, beforeHealth)
-    assert.equal(await detail.getByRole('button', { name: 'API配置', exact: true }).count(), 0)
-    const readonlyPriority = detail.getByRole('group', { name: '调度优先级' })
-    assert.equal(await readonlyPriority.getByRole('radio', { disabled: true }).count(), 11)
-    assert.ok(await readonlyPriority.getByRole('radio', { name: '自动' }).isChecked())
+    assert.equal(await detail.getByRole('button', { name: '刷新额度和积分', exact: true }).count(), 0)
   }
   assert.deepEqual(rejectedOrigins, [])
   assert.deepEqual(errors, [])

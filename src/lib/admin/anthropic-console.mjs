@@ -229,7 +229,7 @@ export function buildAnthropicConsoleRequest(input = {}, picked = null, proxyPoo
       : {
           model,
           ...(openai
-            ? { max_output_tokens: maxTokens, input: message, stream: false }
+            ? { max_output_tokens: maxTokens, input: message, stream: false, store: false }
             : { max_tokens: maxTokens, messages: [{ role: 'user', content: message }] }),
         },
     proxyUrl,

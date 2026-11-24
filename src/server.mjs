@@ -1702,8 +1702,6 @@ const gracefulShutdown = createGracefulShutdown({
   beforeDrain: async () => {
     endPanelStreams()
     geminiTerminalDrain = geminiTerminal.close()
-    // A handed-over controller keeps recording usage for the streams it is still finishing.
-    if (handoverRole() !== 'draining') installJevUsageRecorder(null)
     stopLeaderJobs()
   },
   afterDrain: async () => {

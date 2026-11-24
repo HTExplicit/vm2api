@@ -316,6 +316,9 @@ try {
                 })
               }
               if (url.pathname === '/api/panel/usage') return json(res, 200, { ok: true, data: { items: [] } })
+              if (url.pathname === '/api/panel/proxies' && req.method === 'GET') {
+                return json(res, 200, { ok: true, data: { items: [] } })
+              }
               if (url.pathname === '/api/panel/gemini') {
                 return json(res, 200, {
                   ok: true,

@@ -32,15 +32,7 @@ vi.mock('./vm-perms', async (importOriginal) => {
     useVmPerms: () => original.vmPermsFor(controls.role),
   }
 })
-vi.mock('./openai-quota-actions', () => ({
-  OpenaiQuotaActions: ({ vm, compact }: { vm: Vm; compact: boolean }) => (
-    <span
-      data-testid='codex-quota-actions'
-      data-vm={vm.id}
-      data-compact={compact}
-    />
-  ),
-}))
+
 vi.mock('./claude-reset-actions', () => ({
   ClaudeResetActions: ({ vm, now }: { vm: Vm; now: number }) => (
     <span data-testid='claude-reset-actions' data-vm={vm.id} data-now={now} />
@@ -266,13 +258,9 @@ describe('VM row quota integration', () => {
     expect(html).toContain('12%')
     expect(html).toContain('34%')
     expect(html).toContain('aria-label="额度待刷新，最近测量：')
-    expect(html).toContain('历史余额 12.34 点')
-    expect(html).toContain('待确认')
-    const marker = 'data-testid="codex-quota-actions"'
-    expect(page.split(marker)).toHaveLength(2)
-    expect(html.indexOf(marker)).toBeGreaterThan(
-      html.indexOf('历史余额 12.34 点')
-    )
+    expect(html).toContain('12.345 积分')
+    expect(html).toContain('余额待刷新')
+    expect(page.split('刷新额度和积分')).toHaveLength(2)
     expect(html).not.toContain('管理 OpenAI API Key')
   })
 
