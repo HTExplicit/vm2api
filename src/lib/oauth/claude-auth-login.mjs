@@ -6,7 +6,7 @@ import { LOCAL_CRAG_CLAUDE, REMOTE_CRAG_CLAUDE } from '../vm/slot-engine.mjs'
 import { slotExecCmd, slotExecContainer } from '../vm/slot-exec.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
 import { flattenOauthIdentity } from './oauth-identity.mjs'
-import { installedCragV2Root, materializeCragV2, verifyCragV2Tree } from '../vm/wrap-cli-runtime.mjs'
+import { cragSlotArch, installedCragV2Root, materializeCragV2, verifyCragV2Tree } from '../vm/wrap-cli-runtime.mjs'
 
 export const AUTH_LOGIN_SOURCE = 'claude-auth-login'
 export const AUTH_LOGIN_FLAVOR = 'claude_code'
@@ -23,9 +23,10 @@ export function resolveAuthLoginClaude(vm) {
 /** Stage a complete package without selecting CRAG as the slot's inference engine. */
 function stageBundledAuthClaude(projectRoot, vm) {
   if (slotHost(vm).bakedKernel) return
+  const slotArch = cragSlotArch(projectRoot, vm)
   const installed = installedCragV2Root(projectRoot, vm)
   if (installed && fs.existsSync(path.join(installed, 'manifest.json'))) {
-    const verified = verifyCragV2Tree(installed, { allowPreviousClaude: true })
+    const verified = verifyCragV2Tree(installed, { arch: slotArch, allowPreviousClaude: true })
     if (!verified.ok) throw fail(verified.code, verified.error)
     return
   }
@@ -78,7 +79,6 @@ export function nativeLoginLaunch(bin, configDir) {
       'CLAUDE_CODE_USE_BEDROCK=0',
       'CLAUDE_CODE_USE_VERTEX=0',
       'CLAUDE_CODE_USE_FOUNDRY=0',
-      'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0',
       'ANTHROPIC_BASE_URL=',
       'ANTHROPIC_API_KEY=',
       'ANTHROPIC_AUTH_TOKEN=',

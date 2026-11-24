@@ -51,6 +51,7 @@ import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { pickScheduleFields } from '../pool/schedule-state.mjs'
 import { socksProxyFamily, normalizeSocksHost } from '../vm/socks-address.mjs'
 import { accountTierKey, isNearLimit, normalizeTiers, resolveTierPolicy } from '../pool/quota-tiers.mjs'
+import { mergeBatchGroupConfig } from '../pool/batch-group.mjs'
 import { applyVmQuotaConfig, applyVmQuotaPolicy, vmQuotaOverrideOf, vmQuotaView } from '../pool/vm-quota-override.mjs'
 import { GATE_OPEN, gatePolicyFields, gateZone, quotaGateOf } from '../pool/quota-gate.mjs'
 import { guardUsageTier, inferClaudeTier } from '../pool/claude-tier.mjs'
@@ -59,7 +60,7 @@ import { lastClosedWindow } from '../pool/window-history.mjs'
 import { hardBlockOf } from '../pool/rate-limit-service.mjs'
 import { kernelFaults } from '../transport/rust-kernel-client.mjs'
 import { unitCircuit } from '../pool/unit-circuit.mjs'
-import { accountIdOf, normalizePoolRouting } from '../pool/pool-scheduler.mjs'
+import { accountIdOf, familyLimitsOf, normalizePoolRouting } from '../pool/pool-scheduler.mjs'
 import { codexMaxSessions, codexScheduleLevel } from '../pool/codex-slot-pool.mjs'
 import { resolveCredentialScheduleLevel } from '../pool/credential-weight.mjs'
 import { activeHoursZoneOf, evaluateActiveHours } from '../pool/active-hours.mjs'
@@ -108,7 +109,11 @@ import { effectiveOpenAIPolicy, normalizeOpenAIQuotaPolicy } from '../pool/opena
 import { openAIRuntimeSignals } from '../pool/openai-account-runtime.mjs'
 import { normalizeVmConfig, memoryMiB } from '../vm/machine-spec.mjs'
 import { runtimeKind } from '../vm/runtime-kind.mjs'
-import { telemetryDefaultEnabled, telemetryUploadInterval } from '../vm/native-telemetry.mjs'
+import {
+  telemetryDefaultEnabled,
+  telemetryDisableNonessentialTraffic,
+  telemetryUploadInterval,
+} from '../vm/native-telemetry.mjs'
 
 export function ok(data, meta) {
   const out = { ok: true, data }
@@ -1527,6 +1532,7 @@ export function buildRouting({ routingConfig, stickyRouter }) {
     tiers,
     logging: routingConfig?.logging || {},
     pool: normalizePoolRouting(routingConfig?.pool),
+    batch_group: mergeBatchGroupConfig(routingConfig?.batch_group),
     failover: routingConfig?.failover || {},
     compatibility: presentCompatibility(routingConfig?.compatibility),
     inference: presentInference(routingConfig?.inference),
@@ -1541,6 +1547,7 @@ export function buildRouting({ routingConfig, stickyRouter }) {
     telemetry: {
       upload_interval_seconds: telemetryUploadInterval(routingConfig),
       default_enabled: telemetryDefaultEnabled(routingConfig),
+      disable_nonessential_traffic: telemetryDisableNonessentialTraffic(routingConfig),
     },
     redaction: normalizeRedaction(routingConfig?.redaction),
     redaction_runtime: redactionStatus(),
@@ -2004,7 +2011,17 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     availability.reason ||
     null
   const circuit = isCodex ? null : circuitViewFor(v, extras.projectRoot)
-  const seatsMax = isCodex ? null : resolveSessionSlots(v, extras.routingConfig || {})
+  const limits = isCodex
+    ? null
+    : familyLimitsOf(v, {
+        ...extras.routingConfig?.pool,
+        default_session_slots: extras.routingConfig?.inference?.session_slots,
+      })
+  const seatsMax = isCodex
+    ? null
+    : limits.subagents == null
+      ? resolveSessionSlots(v, extras.routingConfig || {})
+      : limits.seats
   const triad = resolveScheduleState({
     vm: v,
     availability,
@@ -2077,12 +2094,18 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     max_sessions_override: isCodex ? openAIEffective.sessions_override : false,
     session_slots: isCodex ? null : resolveSessionSlots(v, extras.routingConfig || {}),
     session_slots_override: isCodex ? false : v.session_slots_override === true,
+    max_primary_sessions: limits?.primary ?? null,
+    max_primary_sessions_override: !isCodex && v.max_primary_sessions_override === true,
+    max_subagents_per_session: limits?.subagents ?? null,
+    max_subagents_per_session_override: !isCodex && v.max_subagents_per_session_override === true,
     // What each knob falls back to when the slot drops its pin (PATCH field = null).
     scheduling_inherited: {
       max_concurrency: Number(inheritedPolicy.max_concurrency ?? 2),
       max_rpm: Number(inheritedPolicy.max_rpm ?? 0),
       max_sessions: isCodex ? Number(inheritedPolicy.max_sessions ?? 0) : null,
       session_slots: isCodex ? null : normalizeSessionSlots(extras.routingConfig?.inference?.session_slots),
+      max_primary_sessions: limits?.inheritedPrimary ?? null,
+      max_subagents_per_session: limits?.inheritedSubagents ?? null,
     },
     quota_override: quotaOverride,
     quota_policy: isCodex ? null : vmQuotaView(policy, vmQuotaConfig),

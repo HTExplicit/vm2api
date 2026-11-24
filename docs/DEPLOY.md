@@ -253,13 +253,19 @@ location / {
 }
 ```
 
-`Connection ""` 会剥掉 Upgrade，终端、账号浏览器或 Responses WS 握手拿不到 101，所以 shell / browser / openai-api/browser / responses 路径单独放在前面。生产机的 Go 前门在 `:8787`、Node 在 `:8788` 时，这些 location 必须 `proxy_pass` 到 Node。终端症状和核对命令见 [nginx-shell.md](nginx-shell.md)。
+`Connection ""` 会剥掉 Upgrade，终端、账号浏览器或 Responses WS 握手拿不到 101，所以 shell / browser / openai-api/browser / responses 路径单独放在前面。生产机的 Go 前门在 `:8787`、Node 在 `:8788` 时，这些 location 必须 `proxy_pass` 到 Node。如反代单独匹配 API 路由，也将 `/v1beta/` 转发至网关供 Gemini SDK 使用。终端症状和核对命令见 [nginx-shell.md](nginx-shell.md)。
 
 升级前保存最新数据库、槽凭据和配置，再使用正常面板升级。镜像更新不会修改宿主 Nginx；已有反代须同时补齐通用 `/api/panel/vms/<id>/browser` 与兼容的 `/openai-api/browser` 路径，校验配置后平滑重载。
 
 ## 本机 Node（备选）
 
 `npm run fetch:payload` 拉 `bin/kin-{kernel,codex-kernel,oauth-auth}` 与 `share/`；`npm run build:egress && npm run build:worker`；`npm ci`、`pnpm -C web install --frozen-lockfile && npm run build:web`；以及占位 `vms/active.json`。单元：[deploy/vm2api.service](deploy/vm2api.service)。细节见 [BUILD.md](BUILD.md)。
+
+## 不停服升级（蓝绿）
+
+普通升级要重启控制面，期间请求挂住、长流可能被砍。单机可以改用蓝绿：haproxy 在前，两个颜色轮流接班，切换约 1 秒、旧实例在后台跑完长流。见 [BLUEGREEN.md](BLUEGREEN.md)。
+
+切到蓝绿后，升级一律用 `deploy/bluegreen/bg-deploy.sh`：`install.sh` 只更新文件、不再 `compose up`；直接 `docker compose up -d` 起来的单容器会拒绝启动（`vm2api_bluegreen_install`）。
 
 ## 一键安装 / 更新
 

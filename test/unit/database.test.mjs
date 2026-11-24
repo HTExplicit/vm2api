@@ -681,3 +681,35 @@ test('migration 042 adds image generation columns; old rows and prompt totals st
   )
   db.close()
 })
+
+test('migration 072 upgrades pre-072 crag_shop_orders in place with NULL activation failure columns and idempotent checksums', () => {
+  const src = path.resolve('src/lib/db/migrations')
+  const oldDir = path.join(tmp, 'before072')
+  fs.mkdirSync(oldDir)
+  for (const file of fs.readdirSync(src)) {
+    if (file.endsWith('.sql') && file < '072') fs.copyFileSync(path.join(src, file), path.join(oldDir, file))
+  }
+  const db = new DatabaseSync(':memory:')
+  try {
+    applyMigrations(db, { migrationsDir: oldDir })
+    db.prepare(`INSERT INTO crag_shop_orders
+      (order_id, owner, request_id, sku, payment_method, reserved_at, status, created_at, term, amount_minor, slot_limit,
+       activation_vm_id, activation_fingerprint)
+      VALUES ('legacy-pinned', 'panel:admin', 'req-072', 'quarter', 'alipay', 1, 'fulfilled', 1, '3m', 59900, 10,
+              'vm-1', ?)`).run('a'.repeat(64))
+    const applied = applyMigrations(db, { migrationsDir: src })
+    assert.deepEqual(applied, ['072_crag_shop_activation_error.sql'])
+    assert.deepEqual(applyMigrations(db, { migrationsDir: src }), [])
+    const row = db
+      .prepare(
+        'SELECT activation_error_code, activation_error_recovery, activation_request_id FROM crag_shop_orders WHERE order_id = ?',
+      )
+      .get('legacy-pinned')
+    assert.deepEqual(
+      { ...row },
+      { activation_error_code: null, activation_error_recovery: null, activation_request_id: null },
+    )
+  } finally {
+    db.close()
+  }
+})

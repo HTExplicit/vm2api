@@ -381,9 +381,10 @@ function reconcileCodexLimitedUntil(vm, now = Date.now()) {
 export function persistCodexQuotaSnapshot(
   projectRoot,
   vmId,
-  { extra, resetCredits, credits, planType, sampledAt, checkedAt } = {},
+  { extra, resetCredits, credits, planType, sampledAt, checkedAt, now } = {},
 ) {
   if (!projectRoot || !vmId) throw new Error('projectRoot and vmId required')
+  const stampNow = Number.isFinite(now) ? Number(now) : Date.now()
   const file = path.join(projectRoot, 'vms', `${vmId}.json`)
   let vm
   try {
@@ -403,8 +404,8 @@ export function persistCodexQuotaSnapshot(
   if (credits) vm.codex.credits = credits
   if (checkedAt) vm.codex.credits_checked_at = checkedAt
   if (extra && typeof extra === 'object') {
-    reconcileCodexLimitedUntil(vm)
-  } else if (credits && hasSpendableCodexCredits(vm) && vm.codex.extra?.codex_limited_until) {
+    reconcileCodexLimitedUntil(vm, stampNow)
+  } else if (credits && hasSpendableCodexCredits(vm, stampNow) && vm.codex.extra?.codex_limited_until) {
     vm.codex.extra = { ...vm.codex.extra }
     delete vm.codex.extra.codex_limited_until
   }

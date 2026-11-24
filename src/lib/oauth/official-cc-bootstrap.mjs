@@ -56,6 +56,7 @@ import {
 import { getVm } from '../vm/vm-registry.mjs'
 import { guardUsageTier } from '../pool/claude-tier.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
+import { materializeCragV2 } from '../vm/wrap-cli-runtime.mjs'
 
 export { officialCcUidGid } from '../vm/vm-runtime.mjs'
 export const DEFAULT_HELLO_PROMPT = 'hello'
@@ -323,7 +324,6 @@ export function startOfficialCcResidentProcess({ vmId, projectRoot, uid, gid, ti
       OFFICIAL_CC_MARKER,
       'CLAUDE_CODE_USE_BEDROCK=0',
       'CLAUDE_CODE_USE_VERTEX=0',
-      'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0',
       'DISABLE_TELEMETRY=1',
       'DO_NOT_TRACK=1',
       'ANTHROPIC_BASE_URL=',
@@ -531,6 +531,14 @@ export function officialCcHostCli(homeDir) {
 
 export function officialCcNativeCli(homeDir) {
   return path.join(homeDir, '.kin', path.posix.relative('/home/kincli/.kin', LOCAL_CRAG_CLAUDE))
+}
+
+export function ensureOfficialCcNativeCli(projectRoot, vm, homeDir, { uid, gid, ...runtimeOptions } = {}) {
+  const staged = officialCcNativeCli(homeDir)
+  if (!slotHost(vm).bakedKernel && !fs.existsSync(staged)) {
+    materializeCragV2(projectRoot, vm, { uid, gid, select: false, ...runtimeOptions })
+  }
+  return staged
 }
 
 export function officialCcStatusPath(homeDir) {
@@ -854,7 +862,6 @@ export function buildOfficialCcDockerArgs({
         'USER_TYPE=external',
         'CLAUDE_CODE_USE_BEDROCK=0',
         'CLAUDE_CODE_USE_VERTEX=0',
-        'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=0',
         'DISABLE_TELEMETRY=1',
         'DO_NOT_TRACK=1',
         'ANTHROPIC_BASE_URL=',
@@ -1196,7 +1203,7 @@ export async function runOfficialCcBootstrap(rawOpts = {}) {
 
     const host = slotHost(vm)
     const bin = host.bakedKernel ? REMOTE_CRAG_CLAUDE : LOCAL_CRAG_CLAUDE
-    const staged = officialCcNativeCli(homeDir)
+    const staged = ensureOfficialCcNativeCli(projectRoot, vm, homeDir, { uid, gid })
     if (!host.bakedKernel && !fs.existsSync(staged)) {
       const status = writeOfficialCcStatus(homeDir, {
         status: 'error',
