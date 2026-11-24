@@ -13,7 +13,7 @@ import {
   supportsCragTelemetryApply,
   verifyCragTelemetryPolicy,
 } from '../transport/rust-kernel-client.mjs'
-import { restartRustKernel, wrapHopInflight } from '../transport/rust-kernel-supervisor.mjs'
+import { restartRustKernel, writeKernelConfig, wrapHopInflight } from '../transport/rust-kernel-supervisor.mjs'
 import path from 'node:path'
 import { syncNativeTelemetry } from './vm-runtime.mjs'
 import { writeSlotSeedFiles } from './slot-seed.mjs'
@@ -56,11 +56,23 @@ function publicationPlacement(vm) {
 
 const ACTIONS = new Set(['collect', 'reload', 'roll', 'telemetry'])
 
-async function restartForCragTelemetry({ projectRoot, vmPath, current, revision, enabled, timeoutMs, lifecycle, ops }) {
+async function restartForCragTelemetry({
+  projectRoot,
+  vmPath,
+  current,
+  revision,
+  routing,
+  enabled,
+  needsRecreate = false,
+  timeoutMs,
+  lifecycle,
+  ops,
+}) {
   return withVmLock(vmPath, async () => {
     const record = current()
     const id = record.id
-    const changed = () => publicationRevision(current()) !== revision
+    let expectedRevision = revision
+    const changed = () => publicationRevision(current()) !== expectedRevision
     const superseded = { ok: false, code: 'telemetry_publication_superseded', error: 'VM 配置已更改，未确认遥测应用' }
     const busy = { ok: false, code: 'telemetry_slot_busy', error: '槽位仍有活动或正在维护，未重启 CRAG' }
     if (changed()) return superseded
@@ -73,7 +85,12 @@ async function restartForCragTelemetry({ projectRoot, vmPath, current, revision,
         const supersededOperation = () => changed() || !!current().schedule_hold
         const verified = await verifyCragTelemetryPolicy(exec, enabled, timeoutMs)
         if (supersededOperation()) return superseded
-        if (verified.code !== 'telemetry_restart_required') return verified
+        if (
+          verified.code !== 'telemetry_restart_required' &&
+          !(needsRecreate && verified.code === 'telemetry_native_settings_blocked')
+        ) {
+          return verified
+        }
         const observed = await rustKernelHealth(exec, { timeoutMs })
         if (supersededOperation()) return superseded
         if (
@@ -101,12 +118,25 @@ async function restartForCragTelemetry({ projectRoot, vmPath, current, revision,
           kernelConfig.runtime_variant !== 'crag-v2'
         )
           return configMismatch
-        const restarted = await (ops.restart || restartRustKernel)(exec)
-        if (!restarted?.ok) return { ok: false, code: 'telemetry_restart_failed', error: 'CRAG 重启未确认' }
+        if (needsRecreate) {
+          const recreated = await (ops.recreate || reloadSlotReady)(current(), projectRoot, {
+            routing,
+            allowMissingCredential: true,
+          })
+          if (!recreated?.ok) return { ok: false, code: 'telemetry_restart_failed', error: 'CRAG 重启未确认' }
+          expectedRevision = publicationRevision(current())
+        } else {
+          // The restarted kernel reads its config at boot, so it is written first, always.
+          const writeConfig = ops.writeKernelConfig || writeKernelConfig
+          writeConfig(projectRoot, current(), { routing, publish: false })
+          const restarted = await (ops.restart || restartRustKernel)(exec)
+          if (!restarted?.ok) return { ok: false, code: 'telemetry_restart_failed', error: 'CRAG 重启未确认' }
+        }
         if (supersededOperation()) return superseded
-        const applied = await verifyCragTelemetryPolicy(exec, enabled, timeoutMs)
+        const activeExec = slotExec(projectRoot, current())
+        const applied = await verifyCragTelemetryPolicy(activeExec, enabled, timeoutMs)
         if (supersededOperation()) return superseded
-        return { ...applied, restarted: true }
+        return { ...applied, restarted: true, nextRevision: expectedRevision }
       },
     })
   })
@@ -195,10 +225,24 @@ export async function applyNativeTelemetry({
         const enabled = isTelemetryEnabled(record.seed_policy)
         const verified = await verifyCragTelemetryPolicy(exec, enabled, timeoutMs)
         if (publicationRevision(current()) !== revision) return superseded
-        if (verified.code !== 'telemetry_restart_required' || !lifecycle) return { ...result, ...verified }
-        // The caller's lifecycle operation takes VM then seed-publication.
-        // Complete publication before acquiring that VM lock for a restart.
-        restartRequest = { projectRoot, vmPath, current, revision, enabled, timeoutMs, lifecycle, ops }
+        const needsRecreate = retired.needsRecreate === true
+        const canRestartOrRecreate =
+          verified.code === 'telemetry_restart_required' ||
+          (needsRecreate && verified.code === 'telemetry_native_settings_blocked')
+        if (!canRestartOrRecreate || !lifecycle) return { ...result, ...verified }
+        // Release seed-publication before acquiring the VM lifecycle lock.
+        restartRequest = {
+          projectRoot,
+          vmPath,
+          current,
+          revision,
+          routing,
+          enabled,
+          needsRecreate,
+          timeoutMs,
+          lifecycle,
+          ops,
+        }
         return result
       }
       const written = syncNativeTelemetry(record, projectRoot, routing, { publish: false })
@@ -243,8 +287,8 @@ export async function applyNativeTelemetry({
       return { ...result, code: 'telemetry_not_ready', error: 'native telemetry did not acknowledge policy' }
     })
     if (!restartRequest) return publication
-    const restarted = await restartForCragTelemetry(restartRequest)
-    if (publicationRevision(current()) !== restartRequest.revision) {
+    const { nextRevision, ...restarted } = await restartForCragTelemetry(restartRequest)
+    if (publicationRevision(current()) !== (nextRevision || restartRequest.revision)) {
       return { ...result, code: 'telemetry_publication_superseded', error: 'VM 配置已更改，未确认遥测应用' }
     }
     return { ...result, ...restarted }

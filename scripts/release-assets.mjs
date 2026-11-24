@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { verifyCragV2Tree } from '../src/lib/vm/wrap-cli-runtime.mjs'
 
 const root = path.resolve(import.meta.dirname, '..')
-const upstreamSourceRecord = 'docs/releases/v1.4.191-binaries.json'
+const upstreamSourceRecord = 'docs/releases/v1.4.194-binaries.json'
 export function imageAssets(manifest) {
   const assets = new Map()
   for (const file of manifest.files) {

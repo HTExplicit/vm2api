@@ -229,6 +229,7 @@ export class ApiEndpointsRepo {
       rec.cooldown_until,
       rec.id,
     )
+    return rowKey(this._getKey.get(rec.id))
   }
 
   setKeyCooldown(id, untilIso) {

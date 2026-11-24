@@ -132,7 +132,8 @@ import { recoverProxyScheduleHold } from './lib/vm/proxy-schedule-recovery.mjs'
 import { syncIpv6ProxyEgress } from './lib/vm/proxy-policy-runtime.mjs'
 import { GATEWAY_CAPABILITIES } from './lib/vm/execution-context.mjs'
 import { isTelemetryPath, telemetryInterceptResponse } from './lib/identity/telemetry-rewrite.mjs'
-import { openDatabase, closeDatabase, getDb } from './lib/db/database.mjs'
+import { openDatabaseAsync, closeDatabaseAsync, getDb, getDbEngine } from './lib/db/database.mjs'
+import { snapshotCacheMetrics } from './lib/cache/index.mjs'
 import { armWriteBehind } from './lib/db/write-behind.mjs'
 import { JevUsageRepo } from './lib/db/repos/jev-usage-repo.mjs'
 import { installJevUsageRecorder } from './lib/protocol/jev-usage.mjs'
@@ -342,9 +343,9 @@ const allowRate = createRateLimiter({
   refillPerSec: cfg.limits.rate_refill,
 })
 
-// --- Persistent store (SQLite) ---
+// --- Persistent store (PostgreSQL or SQLite) ---
 const dataDir = cfg.paths.data || path.join(cfg.paths.root, 'data')
-openDatabase({ dataDir, pooled: true })
+await openDatabaseAsync({ dataDir, pooled: true })
 armWriteBehind(getDb())
 const jevUsageRepo = new JevUsageRepo()
 installJevUsageRecorder((event) => jevUsageRepo.record(event))
@@ -1492,6 +1493,7 @@ const geminiScheduler = createGeminiScheduler({
   apiKeyStore,
   groupsRepo: { rateMultiplier: (id) => groupsRepo.rateMultiplier(id) },
   cragSubscription: geminiCragSubscription,
+  getRoutingConfig: () => routingConfig,
 })
 const handleGeminiPublic = createGeminiPublicHandler({
   json,
@@ -1499,6 +1501,7 @@ const handleGeminiPublic = createGeminiPublicHandler({
   scheduler: geminiScheduler,
   requestLog,
   groupsRepo: { rateMultiplier: (id) => groupsRepo.rateMultiplier(id) },
+  getRoutingConfig: () => routingConfig,
 })
 const handlePanel = createPanelHandler({
   getDb,
@@ -1734,7 +1737,7 @@ const gracefulShutdown = createGracefulShutdown({
     } catch {}
     installJevUsageRecorder(null)
     try {
-      closeDatabase()
+      await closeDatabaseAsync()
     } catch {}
   },
 })
@@ -2375,6 +2378,8 @@ server.listen(cfg.port, cfg.host, () => {
       event: 'vm2api-started',
       port: boundPort,
       base_url: cfg.base_url,
+      db_engine: getDbEngine(),
+      cache_mode: snapshotCacheMetrics()?.mode || 'l1',
       active_vm: getActiveVmId(cfg.paths.project),
       features: pub.features,
       capabilities: GATEWAY_CAPABILITIES,

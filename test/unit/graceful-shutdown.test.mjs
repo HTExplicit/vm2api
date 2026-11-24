@@ -7,7 +7,7 @@ import vm from 'node:vm'
 import { setTimeout as delay } from 'node:timers/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { RequestLogStore } from '../../src/lib/admin/request-log.mjs'
-import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { openDatabase, closeDatabase, closeDatabaseAsync } from '../../src/lib/db/database.mjs'
 import test from 'node:test'
 import { createGracefulShutdown } from '../../src/lib/http/graceful-shutdown.mjs'
 
@@ -225,9 +225,9 @@ for (const cleanupFails of [false, true]) {
         events.push('kernels')
       },
       clusterManager: stop('cluster'),
-      closeDatabase() {
+      async closeDatabaseAsync() {
         events.push('database')
-        closeDatabase()
+        await closeDatabaseAsync()
       },
     }
     let persisted

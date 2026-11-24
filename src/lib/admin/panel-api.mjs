@@ -11,6 +11,7 @@ import { hostMemoryPressureOf, LOCAL_HOST_KEY } from '../cluster/host-memory-pre
 import { THINKING_DISPLAY_MODES } from '../protocol/thinking.mjs'
 import { normalizeRedaction } from '../redaction/policy.mjs'
 import { redactionStatus } from '../redaction/runtime.mjs'
+import { normalizeGeminiRouting } from '../gemini/routing-config.mjs'
 import { readSlotProcessStatus } from '../vm/slot-process-status.mjs'
 import { openaiUsageAccountId } from '../vm/codex-slot.mjs'
 import os from 'node:os'
@@ -452,6 +453,19 @@ export function validatePersonaRoutingPatch(body = {}) {
     const raw = String(compat.crag_persona_preset).trim()
     if (raw !== 'official_full' && raw !== 'zero') {
       problems.push(`crag_persona_preset 必须是 official_full / zero，收到 ${raw}`)
+    }
+  }
+  if (compat.craggemini_persona_preset != null && String(compat.craggemini_persona_preset).trim() !== '') {
+    const raw = String(compat.craggemini_persona_preset).trim()
+    if (raw !== 'official_full' && raw !== 'zero') {
+      problems.push(`craggemini_persona_preset 必须是 official_full / zero，收到 ${raw}`)
+    }
+  }
+  if (compat.craggemini_system_prompt != null) {
+    if (typeof compat.craggemini_system_prompt !== 'string') {
+      problems.push('craggemini_system_prompt 必须是字符串')
+    } else if (compat.craggemini_system_prompt.length > 32_768) {
+      problems.push('craggemini_system_prompt 超过 32768 字符')
     }
   }
   if (compat.overlay_preset != null && String(compat.overlay_preset).trim() !== '') {
@@ -1539,6 +1553,7 @@ export function buildRouting({ routingConfig, stickyRouter }) {
     websocket: normalizeInferenceWebsocket(routingConfig?.websocket),
     codex: normalizeCodexRouting(routingConfig?.codex),
     openai_api: normalizeOpenaiApiConfig(routingConfig?.openai_api),
+    gemini: normalizeGeminiRouting(routingConfig?.gemini),
     official_cc: normalizeOfficialCcConfig(routingConfig?.official_cc),
     health_probe: normalizeHealthProbeConfig(routingConfig?.health_probe),
     usage_probe: normalizeUsageProbeConfig(routingConfig?.usage_probe),

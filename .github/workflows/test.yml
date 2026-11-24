@@ -342,6 +342,12 @@ jobs:
             test/unit/crag-shop-plan-response-size.test.mjs \
             test/unit/crag-shop-plans-presentation.test.mjs \
             test/unit/gemini-host.test.mjs \
+            test/unit/gemini-convert.test.mjs \
+            test/unit/gemini-foundation.test.mjs \
+            test/unit/gemini-routing-config.test.mjs \
+            test/unit/gemini-system-prompt.test.mjs \
+            test/unit/proxy-boot-grace.test.mjs \
+            test/unit/pg-sql-compat.test.mjs \
             test/unit/crag-subscription.test.mjs \
             test/unit/crag-subscription-license.test.mjs \
             test/unit/panel-vm-create-placement.test.mjs \
@@ -406,7 +412,7 @@ jobs:
           pnpm exec vitest run src/features/vm/claude-reset-actions.test.tsx src/features/vm/claude-reset-cards.test.ts
           pnpm exec vitest run src/lib/fable-status.test.ts src/lib/pool-quota.test.ts
           pnpm exec vitest run src/features/models/model-mapping.test.ts src/features/models/policy.test.ts
-          pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx src/features/vm/openai-api-actions.test.tsx src/features/settings/openai-api-balance-section.test.tsx
+          pnpm exec vitest run src/features/keys/key-payload.test.ts src/features/vm/openai-api-state.test.ts src/lib/decimal-display.test.ts src/features/keys/key-account-choices.test.ts src/features/vm/openai-api-credit-details.test.tsx src/features/vm/browser-frames.test.ts src/features/vm/codex-credential-panel.test.tsx src/features/settings/openai-api-balance-section.test.tsx
           pnpm exec vitest run src/features/vm/openai-platform-browser-dialog.test.tsx
           pnpm exec vitest run src/features/settings/account-browser-section.test.tsx
           pnpm exec vitest run src/features/vm/codex-browser-finish.test.ts src/features/vm/codex-credential-browser-completion.test.tsx
@@ -424,6 +430,7 @@ jobs:
           pnpm exec vitest run src/features/billing/crag-commerce.test.tsx src/features/billing/crag-plan-picker.test.tsx src/features/billing/crag-shop.test.tsx src/features/vm/vm-type-visual.test.ts src/features/vm/vm-owner.test.ts src/features/vm/vm-list-table.test.tsx src/lib/login-terminal.test.ts src/lib/cred-type.test.ts src/lib/vm-usage.test.ts
           pnpm exec vitest run src/features/billing/crag-plan-content.test.tsx src/features/billing/crag-preview-channel.test.tsx src/features/billing/crag-preview-field.test.tsx src/features/billing/crag-preview.test.tsx src/lib/release-check.test.ts
           pnpm exec vitest run src/lib/vm-health.test.ts src/features/vm/vm-row-detail.test.tsx
+          pnpm exec vitest run src/features/settings/gemini-config-pane.test.tsx src/features/system/craggemini-panel.test.tsx
           pnpm build
       - name: Platform configuration retry UI
         run: node scripts/smoke-platform-retry-ui.mjs

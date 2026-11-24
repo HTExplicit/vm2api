@@ -47,6 +47,12 @@ import {
   validateInferenceWebsocketPatch,
 } from '../protocol/codex-route.mjs'
 import {
+  mergeGeminiRouting,
+  normalizeGeminiRouting,
+  validateGeminiRoutingPatch,
+} from '../gemini/routing-config.mjs'
+import { callGeminiHost } from '../gemini/routes.mjs'
+import {
   validateOpenAIQuotaPatch,
   mergeOpenAIQuotaPolicy,
   normalizeOpenAIQuotaPolicy,
@@ -499,6 +505,7 @@ export function createRoutingRuntime(ctx) {
     const hasCodexQuota = body?.codex && Object.prototype.hasOwnProperty.call(body.codex, 'quota')
     if (hasCodexQuota) validateOpenAIQuotaPatch(body.codex.quota)
     validateInferenceWebsocketPatch(body)
+    validateGeminiRoutingPatch(body)
     let nextRedaction = null
     if (body.redaction !== undefined) {
       nextRedaction = normalizeRedaction(body.redaction)
@@ -564,6 +571,9 @@ export function createRoutingRuntime(ctx) {
     }
     if (body.openai_api) {
       routingConfig.openai_api = normalizeOpenaiApiConfig({ ...routingConfig.openai_api, ...body.openai_api })
+    }
+    if (body.gemini) {
+      routingConfig.gemini = mergeGeminiRouting(routingConfig.gemini, body.gemini)
     }
     if (body.vm) {
       const prev = routingConfig.vm && typeof routingConfig.vm === 'object' ? routingConfig.vm : {}
@@ -649,6 +659,23 @@ export function createRoutingRuntime(ctx) {
     if (body.pool) configureUnitCircuit(routingConfig)
     if (body.failover) ctx.failoverRunner?.reloadConfig?.(routingConfig.failover || {})
     const kernelReload = await reloadNeeded
+    let geminiSync = null
+    if (body.gemini) {
+      const hostCaller = ctx.callGeminiHost || callGeminiHost
+      try {
+        const res = await hostCaller('apply-policy', { policy: routingConfig.gemini })
+        geminiSync = {
+          ok: true,
+          shards_updated: Number(res?.shards_updated || 0),
+          shards_total: Number(res?.shards_total || 0),
+        }
+      } catch (error) {
+        geminiSync = {
+          ok: false,
+          code: error?.code || 'gemini_host_unavailable',
+        }
+      }
+    }
     try {
       return {
         concurrency: applyRoutingTierConcurrency(routingConfig.tiers),
@@ -660,6 +687,7 @@ export function createRoutingRuntime(ctx) {
         kernel_persona: kernelPersona,
         kernel_reload: kernelReload,
         telemetry_sync: telemetrySync,
+        gemini_sync: geminiSync,
       }
     } catch (err) {
       console.error(
@@ -674,6 +702,7 @@ export function createRoutingRuntime(ctx) {
         kernel_persona: kernelPersona,
         kernel_reload: kernelReload,
         telemetry_sync: telemetrySync,
+        gemini_sync: geminiSync,
       }
     }
   }
@@ -695,6 +724,7 @@ export function createRoutingRuntime(ctx) {
       doc.websocket = normalizeInferenceWebsocket(doc.websocket)
       doc.codex = normalizeCodexRouting(doc.codex)
       doc.openai_api = normalizeOpenaiApiConfig(doc.openai_api)
+      doc.gemini = normalizeGeminiRouting(doc.gemini)
       doc.pool = normalizePoolRouting(doc.pool)
       doc.vm = normalizeVmConfig(doc.vm)
       if (!hasOpenAIQuota) migrateLegacyOpenAIPolicies(doc)
