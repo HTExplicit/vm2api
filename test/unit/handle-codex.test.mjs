@@ -352,7 +352,7 @@ test('persistCodexUsage keeps switch on and clears restriction after the 5h wind
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('openai.chat GPT request is washed to Responses before the kernel hop', async () => {
+test('openai.chat GPT request is converted and the OpenAI prompt is appended before the kernel hop', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-wash-'))
   writeGptVm(root, 'vm-gpt-a')
   let hopBody = null
@@ -393,7 +393,9 @@ test('openai.chat GPT request is washed to Responses before the kernel hop', asy
     writeSSEHeaders() {
       res.headersSent = true
     },
-    routing: {},
+    routing: {
+      compatibility: { openai_system_prompt: { enabled: true, text: 'Gateway prompt' } },
+    },
     projectRoot: root,
     ops: {
       writeCodexKernelConfig() {},
@@ -409,7 +411,14 @@ test('openai.chat GPT request is washed to Responses before the kernel hop', asy
   assert.ok(hopBody)
   assert.equal(Array.isArray(hopBody.input), true)
   assert.equal(hopBody.messages, undefined)
-  assert.equal(hopBody.input[0].role, 'developer')
+  assert.deepEqual(
+    hopBody.input.map(({ role, content }) => [role, content[0].text]),
+    [
+      ['developer', 'be brief'],
+      ['developer', 'Gateway prompt'],
+      ['user', 'hello'],
+    ],
+  )
   assert.equal(logBag.protocol, 'openai.responses')
   assert.equal(logBag.path, '/v1/responses')
   assert.equal(logBag.hop_meta.inbound_path, '/v1/chat/completions')
@@ -1111,14 +1120,18 @@ test('transient GPT failures retry the same account three times before switching
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-same-retry-'))
   for (const id of ['vm-gpt-a', 'vm-gpt-b']) writeGptVm(root, id)
   const seen = []
+  const prompts = []
+  const compatibility = { openai_system_prompt: { enabled: true, text: 'Gateway prompt' } }
   const logBag = {}
   const out = await handleCodexProtocol(
     codexArgs(
       root,
       {
         ensureCodexKernel: async () => ({ ok: true }),
-        streamCodexKernel: async ({ exec, onEvent }) => {
+        streamCodexKernel: async ({ exec, body, onEvent }) => {
           seen.push(exec.vm.id)
+          prompts.push(body.input[0].content[0].text)
+          compatibility.openai_system_prompt = { ...compatibility.openai_system_prompt, text: 'Saved during retry' }
           if (exec.vm.id === 'vm-gpt-a') {
             return {
               ok: false,
@@ -1133,12 +1146,16 @@ test('transient GPT failures retry the same account three times before switching
       },
       {
         logBag,
-        routing: { failover: { max_total_attempts: 12, max_same_account_retries: 3, max_account_switches: 3 } },
+        routing: {
+          failover: { max_total_attempts: 12, max_same_account_retries: 3, max_account_switches: 3 },
+          compatibility,
+        },
       },
     ),
   )
   assert.equal(out.status, 200)
   assert.deepEqual(seen, ['vm-gpt-a', 'vm-gpt-a', 'vm-gpt-a', 'vm-gpt-a', 'vm-gpt-b'])
+  assert.deepEqual(prompts, Array(5).fill('Gateway prompt'))
   assert.equal(logBag.attempt_count, 5)
   assert.equal(logBag.codex_same_account_retried, 3)
   rt.resetOpenAIAccountRuntime()
