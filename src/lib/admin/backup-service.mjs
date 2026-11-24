@@ -39,9 +39,11 @@ import crypto from 'node:crypto'
 import zlib from 'node:zlib'
 import { spawnSync } from 'node:child_process'
 import { Worker } from 'node:worker_threads'
-import { getDb, getDbPath, closeDatabase, openDatabase } from '../db/database.mjs'
+import { getDb, getDbEngine, getDbPath, getPgConfig, getPgPool, closeDatabase, openDatabase } from '../db/database.mjs'
+import { buildPgConnectionString } from '../db/pg/config.mjs'
 import { stopSqlitePool } from '../db/sqlite-pool.mjs'
-import { sha256File, SLOT_BACKUP_FILES } from './backup-core.mjs'
+import { pgRestoreAvailable, sha256File, SLOT_BACKUP_FILES } from './backup-core.mjs'
+import { getCacheRuntime } from '../cache/index.mjs'
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { BackupRepo } from '../db/repos/backup-repo.mjs'
 import { reconcileVms } from '../vm/vm-db-sync.mjs'
@@ -60,7 +62,7 @@ function corruptBackup(message) {
 }
 
 function allowedArchiveFile(name) {
-  if (name === 'manifest.json' || name === 'db/kin.db') return true
+  if (['manifest.json', 'db/kin.db', 'db/kin.pgdump', 'db/kin.pg.ndjson.gz'].includes(name)) return true
   if (/^(vms|config)\/[^/\\:]+\.json$/.test(name)) return true
   const parts = name.split('/')
   return (
@@ -337,8 +339,11 @@ export class BackupService {
 
   _runBackupWorker(job) {
     return new Promise((resolve, reject) => {
+      const engine = getDbEngine()
       const worker = new Worker(new URL('./backup-worker.mjs', import.meta.url), {
         workerData: {
+          engine,
+          pgConnectionString: engine === 'postgres' ? buildPgConnectionString(getPgConfig()) : null,
           dataDir: this.dataDir,
           ctx: {
             projectRoot: this.projectRoot,
@@ -434,6 +439,7 @@ export class BackupService {
       // Stage and validate before taking the safety snapshot: its retention
       // policy may remove the selected archive if it is an older pre_restore.
       tmp = this._mkdtemp('kin-restore-')
+      const isPg = getDbEngine() === 'postgres'
       let dbFile
       let manifest = null
       let files = []
@@ -442,13 +448,24 @@ export class BackupService {
         validateArchiveEntries(rec.file_path)
         const r = spawnSync('tar', ['-xzf', rec.file_path, '-C', tmp], { stdio: 'pipe' })
         if (r.status !== 0) throw new Error(`tar extract failed: ${String(r.stderr || '').slice(0, 300)}`)
-        dbFile = path.join(tmp, 'db', 'kin.db')
         try {
           manifest = JSON.parse(fs.readFileSync(path.join(tmp, 'manifest.json'), 'utf8'))
         } catch {
           throw corruptBackup('backup manifest is missing or invalid')
         }
-        if (manifest?.version !== 1 || !manifest.sha256s?.['db/kin.db']) throw corruptBackup('invalid backup manifest')
+        if (manifest?.version !== 1 && manifest?.version !== 2) throw corruptBackup('invalid backup manifest')
+        if (manifest?.version !== (isPg ? 2 : 1)) {
+          throw Object.assign(new Error('backup database engine differs from the live database'), {
+            code: 'backup_incompatible',
+          })
+        }
+        const snapshotPath = isPg
+          ? manifest.format === 'pg_dump_custom'
+            ? 'db/kin.pgdump'
+            : 'db/kin.pg.ndjson.gz'
+          : 'db/kin.db'
+        if (!manifest.sha256s?.[snapshotPath]) throw corruptBackup('invalid backup manifest')
+        dbFile = path.join(tmp, snapshotPath)
         files = archiveFiles(tmp)
         for (const key of new Set([
           ...files.filter((name) => name !== 'manifest.json'),
@@ -475,6 +492,8 @@ export class BackupService {
           }
           if (key.startsWith('config/') && this.configDir) validateRestoreTarget(this.configDir, key.slice(7))
         }
+      } else if (isPg) {
+        dbFile = rec.file_path
       } else {
         dbFile = path.join(tmp, 'kin.db')
         fs.writeFileSync(dbFile, zlib.gunzipSync(fs.readFileSync(rec.file_path)))
@@ -483,23 +502,28 @@ export class BackupService {
 
       const pre = await this.createBackup({ kind: 'pre_restore', note: `before restore of ${rec.id}` })
 
-      // 2. swap the live database
       const dbPath = getDbPath()
-      await stopSqlitePool()
-      closeDatabase()
-      databaseClosed = true
-      const keep = `${dbPath}.pre-restore`
-      // A stale WAL can replay newer pages over the restored snapshot. Never
-      // overwrite the database when a sidecar is still open or unremovable.
-      for (const suffix of ['-wal', '-shm']) {
-        fs.rmSync(dbPath + suffix, { force: true })
+      if (isPg) {
+        databaseClosed = true
+        await this._restorePostgresSnapshot(dbFile)
+        await getCacheRuntime().client.invalidate({ prefixes: ['apikey:', 'billing:', 'sched:', 'dash:'] })
+      } else {
+        await stopSqlitePool()
+        closeDatabase()
+        databaseClosed = true
+        const keep = `${dbPath}.pre-restore`
+        // A stale WAL can replay newer pages over the restored snapshot. Never
+        // overwrite the database when a sidecar is still open or unremovable.
+        for (const suffix of ['-wal', '-shm']) {
+          fs.rmSync(dbPath + suffix, { force: true })
+        }
+        fs.rmSync(keep, { force: true })
+        fs.renameSync(dbPath, keep)
+        fs.copyFileSync(dbFile, dbPath)
+        try {
+          fs.chmodSync(dbPath, 0o600)
+        } catch {}
       }
-      fs.rmSync(keep, { force: true })
-      fs.renameSync(dbPath, keep)
-      fs.copyFileSync(dbFile, dbPath)
-      try {
-        fs.chmodSync(dbPath, 0o600)
-      } catch {}
 
       // 3. restore vm + config files from the archive (tar flavor only)
       const vmsDirSrc = path.join(tmp, 'vms')
@@ -545,7 +569,7 @@ export class BackupService {
       }
 
       // 4. reopen + migrate (old backups upgrade automatically)
-      const db = openDatabase({ dataDir: this.dataDir, dbPath })
+      const db = isPg ? getDb() : openDatabase({ dataDir: this.dataDir, dbPath })
 
       // 5. db-only backups: rebuild slot metadata (not OAuth credentials)
       if (this.projectRoot) {
@@ -589,6 +613,47 @@ export class BackupService {
         } catch {}
       }
     }
+  }
+
+  async _restorePostgresSnapshot(dbFile) {
+    const pgConnectionString = buildPgConnectionString(getPgConfig())
+    if (!pgConnectionString) throw new Error('PostgreSQL connection configuration unavailable for restore')
+    return await new Promise((resolve, reject) => {
+      const worker = new Worker(new URL('./backup-worker.mjs', import.meta.url), {
+        workerData: {
+          op: 'pg_restore',
+          engine: 'postgres',
+          pgConnectionString,
+          dbFile,
+        },
+      })
+      let settled = false
+      const finish = (fn, arg) => {
+        if (settled) return
+        settled = true
+        fn(arg)
+      }
+      worker.once('message', (msg) => {
+        if (msg && msg.ok) return finish(resolve)
+        finish(
+          reject,
+          Object.assign(new Error((msg && msg.error && msg.error.message) || 'PostgreSQL restore failed'), {
+            code: (msg && msg.error && msg.error.code) || 'restore_failed',
+          }),
+        )
+      })
+      worker.once('error', (e) => finish(reject, e))
+      worker.once('exit', (code) => {
+        if (code !== 0) {
+          finish(
+            reject,
+            Object.assign(new Error(`restore worker exited with code ${code}`), { code: 'restore_aborted' }),
+          )
+        } else {
+          finish(reject, new Error('restore worker exited without a result'))
+        }
+      })
+    })
   }
 
   /**

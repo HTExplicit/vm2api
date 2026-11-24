@@ -14,7 +14,9 @@ import {
 import { createGeminiTerminalBridge } from './terminal.mjs'
 import { createGeminiMaintenanceHandler } from './maintenance.mjs'
 import { ANTIGRAVITY_PROVIDERS, ANTIGRAVITY_QUOTA_GROUPS, isAntigravityRoutedModel } from './model-catalog.mjs'
+import { isGeminiProtocolAllowed } from './routing-config.mjs'
 import { GEMINI_LICENSE_MESSAGES } from './subscription.mjs'
+import { applyCragGeminiPromptPolicy, resolveCragGeminiPromptPolicy } from './system-prompt.mjs'
 
 const PANEL_PATH = '/api/panel/gemini'
 const PUBLIC_PATH = '/v1/gemini/sessions'
@@ -722,7 +724,10 @@ export async function warmGeminiEnvironments({ callHost = callGeminiHost, proxyP
       report.skipped += 1
       continue
     }
-    if (env.runtime_ready === true && env.models_discovered === true) {
+    const hasBlockingEligibility = Boolean(
+      env.account?.eligibility && ACCOUNT_ELIGIBILITIES.has(env.account.eligibility),
+    )
+    if (env.runtime_ready === true && env.models_discovered === true && !hasBlockingEligibility) {
       report.warmed += 1
       continue
     }
@@ -806,6 +811,29 @@ export function createGeminiPanelHandler({
       return maintenance(req, res, pathname)
     }
     try {
+      if (req.method === 'GET' && pathname === `${PANEL_PATH}/daemon-status`) {
+        try {
+          const data = await callHost('daemon-status', {})
+          return ok({ available: true, ...(data && typeof data === 'object' ? data : {}) })
+        } catch (error) {
+          const code = Object.hasOwn(HOST_ERRORS, error?.code) ? error.code : FAILURE
+          return ok({
+            available: false,
+            host_error: code,
+            host_message: HOST_ERRORS[code]?.[1] || '未检测到可用的 Gemini 宿主机服务',
+            shards: [],
+          })
+        }
+      }
+      if (req.method === 'POST' && pathname === `${PANEL_PATH}/daemon-action`) {
+        const body = await readBody(req, 4096)
+        const action = typeof body?.action === 'string' ? body.action.trim() : ''
+        if (!['restart_shard', 'rebalance', 'account_lifecycle'].includes(action)) {
+          return fail(400, 'invalid_request', '不支持的守护进程管理操作')
+        }
+        const data = await callHost('daemon-action', body)
+        return ok(data)
+      }
       if (req.method === 'GET' && pathname === `${PANEL_PATH}/crag-subscription`) {
         if (!cragSubscription) return fail(503, 'license_unconfigured', GEMINI_LICENSE_MESSAGES.license_unconfigured)
         return ok(await cragSubscription.status())
@@ -1370,7 +1398,14 @@ function logProtocolName(protocol) {
   }
 }
 
-export function createGeminiPublicHandler({ json, readBody, scheduler, requestLog = null, groupsRepo = null }) {
+export function createGeminiPublicHandler({
+  json,
+  readBody,
+  scheduler,
+  requestLog = null,
+  groupsRepo = null,
+  getRoutingConfig = null,
+}) {
   return async function handleGeminiPublic(req, res, { logBag: externalLogBag = null } = {}) {
     res.setHeader('Cache-Control', 'no-store')
     const keyGroupType = req.apiKeyKind === 'managed' ? req.apiKeyRecord?.group_type || 'all' : null
@@ -1440,6 +1475,16 @@ export function createGeminiPublicHandler({ json, readBody, scheduler, requestLo
           : responses
             ? 'openai-responses'
             : 'gemini-session'
+    if (typeof getRoutingConfig === 'function') {
+      const allowed = isGeminiProtocolAllowed(logProtocolName(protocol), getRoutingConfig())
+      if (!allowed.ok) {
+        return json(
+          res,
+          allowed.status || 403,
+          protocolErrorBody(protocol, allowed.status || 403, allowed.code, allowed.message),
+        )
+      }
+    }
     const routeStream = google ? google.stream : undefined
     const modelFromPath = google ? google.model : null
     const bodyLimit = protocol === 'gemini-session' ? 256 * 1024 : 12 * 1024 * 1024
@@ -1649,13 +1694,32 @@ export function createGeminiPublicHandler({ json, readBody, scheduler, requestLo
       res.write(text)
     }
 
+    const stickyHeader =
+      (typeof req.headers?.['x-session-id'] === 'string' && req.headers['x-session-id'].trim()) ||
+      (typeof req.headers?.['x-conversation-id'] === 'string' && req.headers['x-conversation-id'].trim()) ||
+      (typeof body?.conversation_id === 'string' && body.conversation_id.trim()) ||
+      (typeof body?.session_id === 'string' && body.session_id.trim()) ||
+      (session?.[1] || '')
+    const stickyKey = stickyHeader ? `${req.apiKeyRecord?.id || 'anon'}:${stickyHeader.slice(0, 128)}` : null
+
     try {
+      const promptPolicy =
+        typeof getRoutingConfig === 'function' ? resolveCragGeminiPromptPolicy(getRoutingConfig()) : null
       const turn = await scheduler.stream({
         model: parsed.model,
-        targetBodyFor: (target, meta) =>
-          buildGeminiRequest(meta?.upstreamModel ? { ...parsed, model: meta.upstreamModel } : parsed, { target }),
+        targetBodyFor: (target, meta) => {
+          const reqBody = buildGeminiRequest(
+            meta?.upstreamModel ? { ...parsed, model: meta.upstreamModel } : parsed,
+            { target },
+          )
+          return target === 'antigravity' && promptPolicy
+            ? applyCragGeminiPromptPolicy(reqBody, promptPolicy)
+            : reqBody
+        },
         requiredCapabilities: parsed.requiredCapabilities,
+        unsupportedFields: parsed.unsupportedFields,
         plainText: parsed.plainText,
+        stickyKey,
         signal: controller.signal,
         apiKeyRecord: req.apiKeyRecord,
         allowUnprefixedNonGemini: keyGroupType === 'gemini',

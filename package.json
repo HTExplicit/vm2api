@@ -27,7 +27,9 @@
   "dependencies": {
     "croner": "^10.0.1",
     "https-proxy-agent": "^9.1.0",
+    "ioredis": "^6.1.0",
     "node-fetch": "^2.7.0",
+    "pg": "^8.23.1",
     "puppeteer-core": "25.17.0",
     "sharp": "0.35.5",
     "socks-proxy-agent": "^10.1.0",
