@@ -711,7 +711,8 @@ export function createHandleProtocol(deps) {
     }
     const clientAbort = bindClientAbort(req, res)
     const apiGemini = picked?.endpoint?.protocol === 'gemini'
-    const clientStream = protocol === 'google.gemini' ? routeMeta?.routeStream === true : isClientStream(inbound, req.headers)
+    const clientStream =
+      protocol === 'google.gemini' ? routeMeta?.routeStream === true : isClientStream(inbound, req.headers)
     const publicStream = rememberPublic && clientStream ? createIssuedToolStream() : null
     const requestedDelivery = String(
       req.headers['x-kin-delivery'] || getRouting()?.failover?.delivery_mode || 'realtime',
@@ -1206,18 +1207,18 @@ export function createHandleProtocol(deps) {
     const platform = accountApiBackend
       ? { ok: true, platform: 'openai' }
       : apiPicked
-      ? {
-          ok: true,
-          platform:
-            apiPicked.endpoint.protocol === 'openai'
-              ? 'openai'
-              : apiPicked.endpoint.protocol === 'gemini'
-                ? 'gemini'
-                : 'anthropic',
-        }
-      : imageModel
-        ? { ok: true, platform: 'openai' }
-        : detectInboundPlatform(ctx.body?.model)
+        ? {
+            ok: true,
+            platform:
+              apiPicked.endpoint.protocol === 'openai'
+                ? 'openai'
+                : apiPicked.endpoint.protocol === 'gemini'
+                  ? 'gemini'
+                  : 'anthropic',
+          }
+        : imageModel
+          ? { ok: true, platform: 'openai' }
+          : detectInboundPlatform(ctx.body?.model)
     const apiOpenAI = inferenceBackend === 'api' && platform.platform === 'openai'
     const apiGemini = inferenceBackend === 'api' && platform.platform === 'gemini'
     const apiNonAnthropic = apiOpenAI || apiGemini
@@ -1585,18 +1586,17 @@ export function createHandleProtocol(deps) {
       inferenceBackend === 'api' && !apiNonAnthropic && apiPicked?.endpoint?.body_policy === 'caller'
     let converted
     try {
-      converted =
-        apiGemini
-          ? { claude: ctx.body, mode: 'passthrough' }
-          : toClaudeMessages(protocol, ctx.body, {
-              rewrite: rewriteEnabled,
-              model_map: false,
-              preserve_content_shape: accountApiBackend ? officialInbound : officialPassthrough,
-              onSystemBlock:
-                inferenceBackend !== 'api' && !officialPassthrough
-                  ? trackCallerSystemBlock(ctx.body?.system, callerEnvironment)
-                  : undefined,
-            })
+      converted = apiGemini
+        ? { claude: ctx.body, mode: 'passthrough' }
+        : toClaudeMessages(protocol, ctx.body, {
+            rewrite: rewriteEnabled,
+            model_map: false,
+            preserve_content_shape: accountApiBackend ? officialInbound : officialPassthrough,
+            onSystemBlock:
+              inferenceBackend !== 'api' && !officialPassthrough
+                ? trackCallerSystemBlock(ctx.body?.system, callerEnvironment)
+                : undefined,
+          })
     } catch (error) {
       if (
         !['invalid_responses_conversion', 'invalid_messages_conversion', 'thinking_incompatible'].includes(error.code)

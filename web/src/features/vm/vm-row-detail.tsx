@@ -21,7 +21,6 @@ import {
   vmWeekOutcome,
 } from '@/lib/vm-usage'
 import { Button } from '@/components/ui/button'
-import { CodexCreditSummary } from './codex-credit-summary'
 import { CodexQuotaSampleStatus } from './codex-quota-sample-status'
 import { vmHealthQueryOptions, type VmHealthRange } from './queries'
 import { riskFg } from './usage-meter'
@@ -333,7 +332,6 @@ function WindowsCard({ vm, now }: { vm: Vm; now: number }) {
         })}
       </div>
       <CodexQuotaSampleStatus vm={vm} />
-      <CodexCreditSummary vm={vm} />
       {restriction ? (
         <p className='mt-3 text-xs text-muted-foreground'>
           调度{scheduleStateLabel(vm)}：{restriction}

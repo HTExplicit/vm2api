@@ -709,7 +709,7 @@ sessionKey / 授权码导入必须走该槽 SOCKS5。
 
 ## OpenAI 槽位浏览器（仅 admin）
 
-基址 `/vms/:id`。POST `/browser/open` 接收 `{ purpose: "oauth" | "platform", account_id? }`，立即返回公开状态并在后台排队、启动；GET `/browser` 读取当前 `active/status/purpose/message` 及可选 `warning`。POST `/browser-ticket` 返回 `{ ticket, url }`，30 秒单次票据可在排队时连接 WebSocket `/browser?ticket=…`。POST `/browser/close` 取消该槽登录及配置任务，保存会话并释放浏览器。管理页的 Platform 开窗、取票和关闭都携带当前 `account_id`。`/openai-api/browser-ticket` 与 WebSocket `/openai-api/browser` 保留兼容。
+基址 `/vms/:id`。POST `/browser/open` 接收 `{ purpose: "oauth" | "platform" | "siwc", account_id?, session_id? }`，立即返回公开状态并在后台排队、启动；GET `/browser` 读取当前 `active/status/purpose/message` 及可选 `warning`。POST `/browser-ticket` 返回 `{ ticket, url }`，30 秒单次票据可在排队时连接 WebSocket `/browser?ticket=…`。POST `/browser/close` 取消该槽登录及配置任务，保存会话并释放浏览器。管理页的 Platform 开窗、取票和关闭都携带当前 `account_id`。Sign in with ChatGPT 开窗携带 `/siwc/bind` 返回的 `session_id`。`/openai-api/browser-ticket` 与 WebSocket `/openai-api/browser` 保留兼容。
 
 关闭时停止画面、输入和 ticket，仅保存 Cookie，然后由 Puppeteer 关闭浏览器，确认进程退出并关闭代理 relay、虚拟显示后推进队列。Puppeteer 自带的异常关闭终止行为保留；异常进程退出也会触发资源回收。真实退出失败返回 `browser_close_failed`，状态为 `close_failed/active:true`；管理员再次 POST `/browser/close` 重试未完成的步骤。主动关闭失败保留弹窗并显示“重试关闭”。Cookie 保存失败但资源释放成功时返回 `closed` 和 `warning`。删槽遇到关闭失败会停止删除。
 

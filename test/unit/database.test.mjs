@@ -588,7 +588,9 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       '070_crag_shop_redemption.sql',
       '071_crag_shop_device_host.sql',
     ])
-    const { risk_review_enabled, body_policy, ...after } = db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get('legacy')
+    const { risk_review_enabled, body_policy, ...after } = db
+      .prepare('SELECT * FROM api_endpoints WHERE id = ?')
+      .get('legacy')
     assert.equal(risk_review_enabled, 0)
     assert.equal(body_policy, 'persona')
     assert.deepEqual(after, before)

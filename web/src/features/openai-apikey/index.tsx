@@ -341,7 +341,7 @@ export function OpenaiApiKeyPage({
             <Table density='compact' aria-label='OpenAI 账号 API Key'>
               <TableHeader>
                 <TableRow>
-                  <TableHead className='w-10'>
+                  <TableHead scope='col' className='w-10'>
                     <Checkbox
                       aria-label='选择当前筛选的已绑定账号'
                       checked={
@@ -356,12 +356,14 @@ export function OpenaiApiKeyPage({
                       }
                     />
                   </TableHead>
-                  <TableHead>账号 / 槽位</TableHead>
-                  <TableHead>赠额与配置</TableHead>
-                  <TableHead>API 使用</TableHead>
-                  <TableHead>调用状态</TableHead>
-                  <TableHead>API 余额</TableHead>
-                  <TableHead className='text-end'>操作</TableHead>
+                  <TableHead scope='col'>账号 / 槽位</TableHead>
+                  <TableHead scope='col'>赠额与配置</TableHead>
+                  <TableHead scope='col'>API 使用</TableHead>
+                  <TableHead scope='col'>调用状态</TableHead>
+                  <TableHead scope='col'>API 余额</TableHead>
+                  <TableHead scope='col' className='text-end'>
+                    操作
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>

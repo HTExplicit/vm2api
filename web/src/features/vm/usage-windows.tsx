@@ -1,5 +1,6 @@
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import { supportsOfficialCc } from '@/lib/cred-type'
 import {
   expiresAtToMs,
   fmtResetClock,
@@ -105,7 +106,9 @@ export function VmQuotaActions({ vm, now }: { vm: Vm; now: number }) {
   ) : (
     <div className='flex flex-wrap items-center gap-1'>
       <ActiveUsageAction vm={vm} />
-      <ClaudeResetActions vm={vm} compact now={now} />
+      {vm.has_token && (vm.can_claude_reset ?? supportsOfficialCc(vm)) ? (
+        <ClaudeResetActions vm={vm} compact now={now} />
+      ) : null}
     </div>
   )
 }
@@ -141,8 +144,11 @@ export function VmUsageWindows({
         />
       ))}
       <CodexQuotaSampleStatus vm={vm} />
-      <CodexCreditSummary vm={vm} />
-      {quotaActions ? <VmQuotaActions vm={vm} now={now} /> : null}
+      {quotaActions ? (
+        <VmQuotaActions vm={vm} now={now} />
+      ) : (
+        <CodexCreditSummary vm={vm} />
+      )}
     </div>
   )
 }

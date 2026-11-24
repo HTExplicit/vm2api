@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.19101 — 2026-11-24
+
+- 合入[上游 v1.4.191](https://github.com/dofastted/vm2api/releases/tag/v1.4.191)，更新 Codex 额度刷新、Gemini 多协议和宿主支持，并提供新版 CRAG 3.1.14 与 CRAGGemini 0.4.3 默认载荷。
+- 账号列表恢复官方网格和表格，保留已保存的视图偏好。「OpenAi_api」统一处理赠额、Platform 连接、Key 与余额。管理员可在 Codex 槽位绑定 Sign in with ChatGPT。
+- 追加 SQLite 迁移 072，为 CRAG 订单保存脱敏后的激活失败诊断。升级沿用现有 Compose 助手和所选槽位载荷。
+
 ## 1.4.17901 — 2026-11-23
 
 - 合入[上游 v1.4.179](https://github.com/dofastted/vm2api/releases/tag/v1.4.179)。面板支持管理员诊断与维护 Gemini 宿主，账号列表独立显示最近宿主推理状态，沿用现有凭据、调度和代理恢复策略。

@@ -133,7 +133,16 @@ test('automatic activation polling without orders performs no supplier calls or 
   t.after(() => fs.rmSync(root, { recursive: true }))
   const db = new DatabaseSync(':memory:')
   t.after(() => db.close())
-  for (const migration of [MIGRATION, COMMERCE_MIGRATION, ACTIVATION_MIGRATION, DISPATCH_MIGRATION, CLOSED_MIGRATION, REDEMPTION_MIGRATION, DEVICE_HOST_MIGRATION, ACTIVATION_ERROR_MIGRATION]) {
+  for (const migration of [
+    MIGRATION,
+    COMMERCE_MIGRATION,
+    ACTIVATION_MIGRATION,
+    DISPATCH_MIGRATION,
+    CLOSED_MIGRATION,
+    REDEMPTION_MIGRATION,
+    DEVICE_HOST_MIGRATION,
+    ACTIVATION_ERROR_MIGRATION,
+  ]) {
     db.exec(fs.readFileSync(migration, 'utf8'))
   }
   const unexpected = () => assert.fail('empty startup must not contact the supplier or activate a slot')

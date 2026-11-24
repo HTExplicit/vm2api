@@ -155,6 +155,8 @@ export type VmCodexCredits = {
   unlimited?: boolean
   balance?: string | number | null
   fetched_at?: string | number | null
+  status?: 'available' | 'unavailable' | 'pending' | 'unknown'
+  invalidated_at?: string | null
 }
 
 export type CragLicenseStatus = {
@@ -453,15 +455,6 @@ export type Vm = {
   subscription?: OpenaiSubscription | null
   /** Account API channel; independent from OAuth kernel lifecycle and quota. */
   openai_api?: OpenaiApiView | null
-  /** Last official balance sample; status is the server's current spending verdict. */
-  codex_credits?: {
-    has_credits: boolean
-    unlimited: boolean
-    balance: string | null
-    fetched_at: string
-    status: 'available' | 'unavailable' | 'pending' | 'unknown'
-    invalidated_at: string | null
-  } | null
   codex_credits_checked_at?: string | null
   reset_credits?: {
     available_count?: number

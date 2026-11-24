@@ -118,7 +118,10 @@ export function describeCodexCredits(
   }
 
   const isFresh =
-    fetchedAtMs != null && now - fetchedAtMs <= CODEX_CREDITS_TTL_MS
+    credits.status !== 'pending' &&
+    !credits.invalidated_at &&
+    fetchedAtMs != null &&
+    now - fetchedAtMs <= CODEX_CREDITS_TTL_MS
 
   if (priorSpendable && isFresh) {
     return {

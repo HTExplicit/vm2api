@@ -372,7 +372,8 @@ export class BackupService {
       worker.once('error', (e) => finish(reject, e))
       worker.once('exit', (code) => {
         if (this._worker === worker) this._worker = null
-        if (code !== 0) finish(reject, Object.assign(new Error(`backup worker exited with code ${code}`), { code: 'backup_aborted' }))
+        if (code !== 0)
+          finish(reject, Object.assign(new Error(`backup worker exited with code ${code}`), { code: 'backup_aborted' }))
         else if (result) finish(resolve, result)
         else finish(reject, new Error('backup worker exited without a result'))
       })

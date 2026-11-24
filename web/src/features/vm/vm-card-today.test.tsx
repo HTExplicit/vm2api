@@ -7,6 +7,10 @@ import { VmDetailCard } from './vm-detail-card'
 import { VmRowDetail } from './vm-row-detail'
 
 vi.mock('./vm-actions-context', () => ({ useVmActions: () => ({}) }))
+vi.mock('./vm-perms', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./vm-perms')>()
+  return { ...original, useVmPerms: () => original.vmPermsFor('admin') }
+})
 vi.mock('@tanstack/react-router', () => ({
   Link: ({ children }: { children?: ReactNode }) => <a>{children}</a>,
 }))
