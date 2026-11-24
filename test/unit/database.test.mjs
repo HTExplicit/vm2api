@@ -270,6 +270,7 @@ test('migration 059 onward preserves the published 9102 ledger, browser state an
       '070_crag_shop_redemption.sql',
       '071_crag_shop_device_host.sql',
       '072_crag_shop_activation_error.sql',
+      '073_multi_tier_key_permissions.sql',
     ])
     assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '059' ORDER BY version").all(), ledger)
     for (const table of preservedTables)
@@ -589,12 +590,14 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       '070_crag_shop_redemption.sql',
       '071_crag_shop_device_host.sql',
       '072_crag_shop_activation_error.sql',
+      '073_multi_tier_key_permissions.sql',
     ])
-    const { risk_review_enabled, body_policy, ...after } = db
+    const { risk_review_enabled, body_policy, owner_user_id, ...after } = db
       .prepare('SELECT * FROM api_endpoints WHERE id = ?')
       .get('legacy')
     assert.equal(risk_review_enabled, 0)
     assert.equal(body_policy, 'persona')
+    assert.equal(owner_user_id, null)
     assert.deepEqual(after, before)
     assert.throws(() => db.prepare('UPDATE api_endpoints SET risk_review_enabled = 2').run(), /CHECK/)
     assert.throws(() => db.prepare('UPDATE api_endpoints SET risk_review_enabled = NULL').run(), /NOT NULL/)
@@ -702,7 +705,7 @@ test('migration 072 upgrades pre-072 crag_shop_orders in place with NULL activat
       VALUES ('legacy-pinned', 'panel:admin', 'req-072', 'quarter', 'alipay', 1, 'fulfilled', 1, '3m', 59900, 10,
               'vm-1', ?)`).run('a'.repeat(64))
     const applied = applyMigrations(db, { migrationsDir: src })
-    assert.deepEqual(applied, ['072_crag_shop_activation_error.sql'])
+    assert.deepEqual(applied, ['072_crag_shop_activation_error.sql', '073_multi_tier_key_permissions.sql'])
     assert.deepEqual(applyMigrations(db, { migrationsDir: src }), [])
     const row = db
       .prepare(

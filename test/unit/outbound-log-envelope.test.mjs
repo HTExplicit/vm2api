@@ -348,7 +348,6 @@ const cwdTag = (cwd) => `<cwd>\n${cwd}\n</cwd>`
 // user message before any hop renders (third-party-system.mjs). CRAG then
 // receives only the official identity line as its caller prompt. A valid <cwd>
 // declaration still becomes caller_cwd and is not relocated with the text.
-const identityPrompt = (mode) => ({ mode, text: CRS_OFFICIAL_CLI_SYSTEM })
 
 async function protocolKernelFixture(t, { health, staleHealth, preset = 'official_full', interceptRules, tool }) {
   const kernel = await fakeKernel({ health, tool })
@@ -428,7 +427,7 @@ async function protocolKernelFixture(t, { health, staleHealth, preset = 'officia
   }
 }
 
-unixTest('native CRAG receives caller tool names and structured system cache blocks', async (t) => {
+unixTest('native CRAG receives caller tool names without adding an identity-only system prompt', async (t) => {
   const fixture = await protocolKernelFixture(t, {
     health: {
       ...printHealth,
@@ -470,7 +469,7 @@ unixTest('native CRAG receives caller tool names and structured system cache blo
   assert.equal(extra.worker_envelope_headers, null)
   assert.deepEqual(envelope.body.tools, tools)
   // The structured caller blocks keep their cache markers at the head of the first user turn.
-  assert.deepEqual(envelope.body.system, [{ type: 'text', text: CRS_OFFICIAL_CLI_SYSTEM }])
+  assert.equal(envelope.body.system, undefined)
   assert.equal(envelope.body.crag_prompt, undefined)
   assert.deepEqual(envelope.body.messages, [
     { ...messages[0], content: [...system, ...messages[0].content] },
@@ -658,7 +657,7 @@ unixTest('public CRAG handler preserves folded controls through normalization an
       ['user', 'assistant', 'system', 'user', 'system'],
     )
     assert.match(body.messages[0].content.at(-1).text, /Claude Code environment update/)
-    assert.deepEqual(body.messages[2].content[0].cache_control, longMarker)
+    assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
     assert.deepEqual(body.messages[3].content[0].cache_control, shortMarker)
     assert.equal(body.messages.at(-1).clear_at, 'tool_uses')
     assert.equal(body.messages.at(-1).content[0].text, 'clear this point')
@@ -685,14 +684,14 @@ for (const stream of [false, true]) {
           }),
         )
         assert.equal(envelope.caller_cwd, trustedCwd)
-        assert.deepEqual(envelope.body.crag_prompt, identityPrompt(mode))
+        assert.equal(envelope.body.crag_prompt, undefined)
         assert.deepEqual(envelope.body.messages[0].content[0], { type: 'text', text: 'caller guidance' })
         assert.equal(envelope.body.crag_model.id, 'claude-haiku-4-5-20251001')
         assert.equal(Object.hasOwn(envelope.body, 'system'), false)
         assert.equal(JSON.stringify(envelope.body).includes(trustedCwd), false)
         assert.equal(JSON.stringify(extra.outbound_body).includes(trustedCwd), false)
         assert.equal(extra.official_cc_inference, 'crag-print')
-        assert.equal(extra.crag_print.prompt_mode, mode)
+        assert.equal(extra.crag_print.prompt_mode, 'default')
       },
     )
 
@@ -711,7 +710,7 @@ for (const stream of [false, true]) {
           }),
         )
         assert.equal(envelope.caller_cwd, trustedCwd)
-        assert.deepEqual(envelope.body.crag_prompt, identityPrompt(mode))
+        assert.equal(envelope.body.crag_prompt, undefined)
         // The declaration leaves with caller_cwd; the lifted history keeps its own copy.
         assert.deepEqual(
           envelope.body.messages[0].content.slice(0, 2).map((block) => block.text),
@@ -823,7 +822,7 @@ for (const stream of [false, true]) {
         assert.equal(extra.official_cc_inference, 'crag-print')
         assert.equal(Object.hasOwn(envelope, 'caller_cwd'), false)
         if (preserved) {
-          assert.deepEqual(envelope.body.crag_prompt, identityPrompt('append'))
+          assert.equal(envelope.body.crag_prompt, undefined)
           assert.ok(envelope.body.messages[0].content.some((block) => block.text?.includes(preserved)))
         } else {
           assert.equal(Object.hasOwn(envelope.body, 'crag_prompt'), false)
@@ -849,7 +848,7 @@ for (const phase of ['before_convert', 'before_upstream']) {
     ]) {
       const { envelope } = await fixture.send(body)
       assert.equal(envelope.caller_cwd, expectedCwd)
-      assert.deepEqual(envelope.body.crag_prompt, identityPrompt('append'))
+      assert.equal(envelope.body.crag_prompt, undefined)
       assert.equal(envelope.body.messages[0].content[0].text, replacementText)
     }
   })
@@ -897,7 +896,7 @@ for (const stream of [false, true]) {
       assert.match(first.publicBody, /call-issued/)
       assert.match(first.publicBody, /"caller":\{"type":"direct"\}/)
       assert.equal(first.extra.official_cc_inference, 'crag-print')
-      assert.notEqual(JSON.parse(first.envelope.body.metadata.user_id).session_id, session)
+      assert.equal(first.envelope.body.metadata, undefined)
       const echo = stream
         ? { type: 'tool_use', id: 'client-id', name: 'lookup', input: { term: 'item' } }
         : { type: 'tool_use', id: tool.id, name: 'changed', input: { term: 'wrong' } }
@@ -909,10 +908,8 @@ for (const stream of [false, true]) {
       }
       const { envelope } = await fixture.send(continuation)
       const history = envelope.body.messages.flatMap((m) => m.content)
-      assert.deepEqual(
-        history.find((b) => b.type === 'tool_use'),
-        tool,
-      )
+      const { extension: _extension, ...allowedTool } = tool
+      assert.deepEqual(history.find((b) => b.type === 'tool_use'), allowedTool)
       assert.deepEqual(
         history.find((b) => b.type === 'tool_result'),
         { ...result, tool_use_id: tool.id },

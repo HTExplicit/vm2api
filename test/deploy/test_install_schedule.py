@@ -52,10 +52,11 @@ release_notes() { :; }
 print_login_banner() { :; }
 wait_health() { :; }
 compose() { :; }
+is_local_port_busy() { return 1; }
 sync_wrap_cli() { echo unexpected-second-sync >> "$TRACE"; }
 docker() {
   case "$*" in
-    *'test -f'*) return 0 ;;
+    info | *'test -f'*) return 0 ;;
     *) printf '%s\n' "$*" >> "$TRACE"; return "$FLEET_EXIT" ;;
   esac
 }

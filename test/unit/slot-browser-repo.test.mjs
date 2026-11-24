@@ -215,7 +215,7 @@ test('CloakBrowser migration clears Firefox web state once and preserves credent
   assert.deepEqual(db.prepare('SELECT * FROM api_endpoint_keys WHERE id = ?').get(key.id), beforeKey)
   assert.deepEqual(
     { ...db.prepare('SELECT * FROM api_endpoints WHERE id = ?').get(endpoint.id) },
-    { ...beforeEndpoint, body_policy: 'persona' },
+    { ...beforeEndpoint, body_policy: 'persona', owner_user_id: null },
   )
   assert.deepEqual(fs.readFileSync(credentialFile), credentialBytes)
   assert.equal(new OpenaiApiRepo(db).getKey(key.id).api_key, 'sk-platform-keep')

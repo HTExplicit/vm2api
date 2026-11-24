@@ -20,7 +20,9 @@ import { isReleaseTag } from './release.mjs'
 import {
   CRAG_V2_RELEASE_ASSET,
   fetchKernelReleaseMetadata,
+  geminiPayloadVersion,
   isCragPayloadTag,
+  isGeminiPayloadTag,
   openKernelReleaseAsset,
   selectCragV2Asset,
   selectKernelAsset,
@@ -41,6 +43,13 @@ const baseFor = (root, kernel) =>
 const archFor = (projectRoot, kernel, runtimeOptions) =>
   kernel === 'crag' ? cragTargetArch(projectRoot, runtimeOptions) : 'amd64'
 const CRAG_PINNED_RELEASES = [
+  {
+    tag: 'payload-2026.11.24-crag-3.1.17',
+    label: '3.1.17 Auto Mode 审查结果透传修复',
+    size: 171083280,
+    manifestSha256: '1dfcbc08d475cbc6872e03b207389be01d6207366e3f27530cb97586f6a66ed8',
+    sha256: '207fb45bf6799a91b39957f2cb42e00b61e9457b7804d30d321cc9fece84b1ab',
+  },
   {
     tag: 'payload-2026.11.23-crag-3.1.14',
     label: '3.1.14 MCP 续接恢复修复',
@@ -872,6 +881,20 @@ export function cragReleasePin(projectRoot) {
   if (!isCragPayloadTag(tag)) return null
   const pinned = CRAG_PINNED_RELEASES.find((entry) => entry.tag === tag)
   return { tag, ...(pinned?.label ? { label: pinned.label } : {}) }
+}
+
+// The deployed release pins one CRAGGemini payload under geminiDefaultLinuxAmd64.
+// Expose its tag and version so the kernel page can display and target that pin.
+export function geminiReleasePin(projectRoot) {
+  let tag
+  try {
+    tag = releasePayload(projectRoot)?.geminiDefaultLinuxAmd64?.tag
+  } catch {
+    return null
+  }
+  if (!isGeminiPayloadTag(tag)) return null
+  const version = geminiPayloadVersion(tag)
+  return version ? { tag, version } : { tag }
 }
 
 export async function pullKernelRelease(

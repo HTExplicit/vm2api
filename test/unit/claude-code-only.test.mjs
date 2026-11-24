@@ -384,9 +384,8 @@ for (const [name, texts, relocated] of [
       },
     })
     assert.equal(result.reached, true)
-    // Persona rendering still replaces the billing block.
-    assert.match(outbound.system[0].text, /^x-anthropic-billing-header:/)
-    assert.deepEqual(outbound.system.slice(1), relocated ? [identity] : body.system.slice(1))
+    // The canonical request is prepared before slot-specific persona rendering.
+    assert.deepEqual(outbound.system, relocated ? [identity] : body.system.slice(1))
     const expectedContent = relocated
       ? [{ type: 'text', text: OPENCLAW_SYSTEM }, ...body.messages[0].content]
       : body.messages[0].content
