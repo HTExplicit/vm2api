@@ -10,6 +10,7 @@ import { createServer } from '../web/node_modules/vite/dist/node/index.js'
 // not open an account browser, contact OpenAI, or create an upstream API key.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const web = path.join(root, 'web')
+const fixtureVersion = fs.readFileSync(path.join(root, 'VERSION'), 'utf8').trim()
 const output = process.env.UI_SMOKE_DIR || path.join(root, '.private', 'openai-apikey-ui-smoke')
 const executablePath =
   process.env.UI_BROWSER_EXE ||
@@ -299,7 +300,7 @@ try {
                     user: 'offline-admin',
                     role,
                     views: role === 'admin' ? undefined : ['openai-apikey'],
-                    version: '1.4.179',
+                    version: fixtureVersion,
                   },
                 })
               }
@@ -449,8 +450,8 @@ try {
       return route.fulfill({
         headers: { 'Access-Control-Allow-Origin': '*' },
         json: {
-          tag_name: 'v1.4.179',
-          html_url: 'https://github.com/HTExplicit/vm2api/releases/tag/v1.4.179',
+          tag_name: `v${fixtureVersion}`,
+          html_url: `https://github.com/HTExplicit/vm2api/releases/tag/v${fixtureVersion}`,
         },
       })
     }

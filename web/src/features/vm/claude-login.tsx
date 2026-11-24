@@ -37,6 +37,7 @@ export function ClaudeLogin({
   const [submitted, setSubmitted] = useState(false)
   const [committed, setCommitted] = useState(false)
   const terminal = useRef<LoginTerminalHandle>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
   const root = `/api/panel/vms/${encodeURIComponent(vm.id)}`
   const start = useMutation({ mutationFn: () => prepareLoginTerminal(vm) })
   const code = loginAuthCode(callback)
@@ -61,6 +62,8 @@ export function ClaudeLogin({
       setCommitted(false)
       resetConnection()
       start.mutate()
+    } else {
+      trigger.current?.focus()
     }
   }
 
@@ -86,8 +89,10 @@ export function ClaudeLogin({
         授权面板内嵌在本页：生成链接后可切到「桌面」tab 登录，再切回粘贴授权码。
       </p>
       <Button
+        ref={trigger}
         type='button'
         size='sm'
+        aria-expanded={expanded}
         disabled={disabled || start.isPending}
         onClick={() => expand(!expanded)}
       >
