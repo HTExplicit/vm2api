@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { ApiKeyStore } from '../../src/lib/admin/api-keys.mjs'
-import { closeDatabase, createDatabase, getDb, openDatabase } from '../../src/lib/db/database.mjs'
+import { closeDatabaseAsync, createDatabase, getDb, openDatabase } from '../../src/lib/db/database.mjs'
 import { UsageLogsRepo } from '../../src/lib/db/repos/usage-logs-repo.mjs'
 import { zonedDayStartMs } from '../../src/lib/core/timezone.mjs'
 import { createKeySelfHandler, decodeCursor, encodeCursor } from '../../src/lib/protocol/key-self.mjs'
@@ -262,7 +262,7 @@ test('expired and exhausted keys still read their quota and see why they are ref
 })
 
 test('every limit flag agrees with canAccept', async (t) => {
-  const { db, store, call } = setup(t)
+  const { store, call } = setup(t)
   addUser(store, 'u-cap', { concurrency: 1 })
   const now = Date.now()
   const scenarios = [
@@ -282,12 +282,9 @@ test('every limit flag agrees with canAccept', async (t) => {
     [
       'window 5h closed',
       { rate_limit_5h: 1 },
-      (rec) => {
-        store.recordUsage(rec.id, { total_cost: 5 })
-        const stale = new Date(now - 5 * 3600_000).toISOString()
-        db.prepare('UPDATE api_keys SET window_5h_start = ? WHERE id = ?').run(stale, rec.id)
-      },
+      (rec) => store.recordUsage(rec.id, { total_cost: 5 }),
       (b) => b.windows['5h'].used === 0 && b.windows['5h'].reset_at === null && !b.windows['5h'].exceeded,
+      6 * 3600_000,
     ],
     [
       'rpm full',
@@ -308,12 +305,13 @@ test('every limit flag agrees with canAccept', async (t) => {
       (b) => b.user_concurrency.exceeded && b.user_concurrency.inflight === 1,
     ],
   ]
-  for (const [label, input, arrange, flagged] of scenarios) {
+  for (const [label, input, arrange, flagged, elapsed = 0] of scenarios) {
     const rec = store.create({ name: label, ...input })
     arrange(rec)
     const fresh = store.getById(rec.id)
-    const gate = store.canAccept(fresh, now)
-    const { body } = await call('/v1/me/quota', { key: rec.key, now })
+    const at = now + elapsed
+    const gate = store.canAccept(fresh, at)
+    const { body } = await call('/v1/me/quota', { key: rec.key, now: at })
     assert.equal(body.accepting, gate.ok, label)
     assert.equal(body.blocked_by?.code ?? null, gate.ok ? null : gate.code, label)
     if (flagged) assert.ok(flagged(body), `${label}: ${JSON.stringify(body)}`)
@@ -558,8 +556,8 @@ test('self queries are rate limited per key with Retry-After', async (t) => {
 test('usage reads go through the read-only worker pool when it runs', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-key-self-pool-'))
   openDatabase({ dataDir: dir, pooled: true })
-  t.after(() => {
-    closeDatabase()
+  t.after(async () => {
+    await closeDatabaseAsync()
     fs.rmSync(dir, { recursive: true, force: true })
   })
   const { store, logs, call } = setup(t, { db: getDb(), localReads: false })

@@ -3,7 +3,7 @@
 ## 1.4.19401 — 2026-11-24
 
 - 合入[上游 v1.4.194](https://github.com/dofastted/vm2api/releases/tag/v1.4.194)，纳入 Gemini 设置、分片调度和请求兼容修复。新装默认 Gemini 载荷为 0.4.4。
-- 加入 PostgreSQL 与 Redis 支持。现有 SQLite 部署沿用原数据库与迁移账本。保留备份中的槽位文件和凭据。
+- 加入 PostgreSQL 与 Redis 支持，修复日志筛选的 SQLite 查询兼容性。现有 SQLite 部署沿用原数据库与迁移账本。保留备份中的槽位文件和凭据。
 
 ## 1.4.19101 — 2026-11-24
 

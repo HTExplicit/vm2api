@@ -125,14 +125,15 @@ test('boot_grace_min=0 restores the pre-grace behavior for operators who want it
   assert.deepEqual(disabled, ['vm-02'])
 })
 
-test('boot-grace does not touch the success path: a recovered proxy resumes its slots', (t) => {
+test('boot-grace does not touch the success path: a recovered proxy resumes its slots', async (t) => {
   const enabled = []
   const pool = makePool(t, { onEnableVm: (vmId) => enabled.push(vmId) })
   const p = addProxy(pool)
   pool.bind(p.id, 'vm-02')
   fail(pool, p, 1)
 
-  pool._applyProbeResult(p, OK)
+  t.mock.method(pool, 'probeOne', async () => OK)
+  await pool.probeById(p.id)
 
   assert.equal(p.status, 'ok')
   assert.equal(p.consecutive_failures, 0)

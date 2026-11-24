@@ -262,7 +262,7 @@ test('CRAG telemetry publishes settings and applies at idle without changing sch
     writeKernelConfig: (projectRoot, record, options) => {
       assert.equal(projectRoot, root)
       assert.equal(record.id, id)
-      assert.equal(read(vmPath).schedule_hold.reason, 'maintenance')
+      assert.equal(read(vmPath).schedule_hold, undefined)
       assert.equal(options.publish, false)
       events.push(['write-config'])
     },

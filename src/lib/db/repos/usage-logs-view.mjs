@@ -653,11 +653,11 @@ export class UsageLogsView {
   filterOptions({ owner_user_id = null } = {}) {
     const own = ownerPred(owner_user_id)
     const recentWhere = own.sql ? `WHERE ${own.sql}` : ''
-    const recent = `(SELECT * FROM usage_logs ${recentWhere} ORDER BY created_at DESC LIMIT ${RECENT_SCAN}) _recent`
+    const recent = `(SELECT * FROM usage_logs ${recentWhere} ORDER BY created_at DESC LIMIT ${RECENT_SCAN})`
     const distinct = (col, { numeric = false } = {}) =>
       this.db
         .prepare(
-          `SELECT ${col} AS v FROM ${recent} WHERE ${col} IS NOT NULL${numeric ? '' : ` AND ${col} != ''`} GROUP BY ${col} ORDER BY MAX(created_at) DESC LIMIT ${OPTION_LIMIT}`,
+          `SELECT ${col} AS v FROM ${recent} AS _recent WHERE ${col} IS NOT NULL${numeric ? '' : ` AND ${col} != ''`} GROUP BY ${col} ORDER BY MAX(created_at) DESC LIMIT ${OPTION_LIMIT}`,
         )
         .all(...own.params)
         .map((r) => r.v)

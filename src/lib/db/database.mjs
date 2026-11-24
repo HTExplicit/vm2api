@@ -131,9 +131,7 @@ function reconcileHistorical001ProxySchema(db, checksum) {
  */
 function reconcileLegacyFork054(db, files) {
   if (!files.includes('054_api_keys_allowed_models.sql') || !files.includes(CURRENT_FORK_055_NAME)) return
-  const legacy = db
-    .prepare('SELECT version, name, checksum FROM schema_migrations WHERE version = ?')
-    .get('054')
+  const legacy = db.prepare('SELECT version, name, checksum FROM schema_migrations WHERE version = ?').get('054')
   if (!legacy || legacy.name !== LEGACY_FORK_054_NAME) return
   if (!LEGACY_FORK_054_CHECKSUMS.has(legacy.checksum)) {
     throw new Error('migration 054 legacy fork checksum mismatch; refusing metadata re-key')
@@ -356,7 +354,7 @@ export async function closeDatabaseAsync() {
   flushWrites()
   armWriteBehind(null)
   stopDashboardAggregator()
-  stopSqlitePool()
+  await stopSqlitePool()
   await closeCacheRuntime().catch(() => {})
   if (_db) {
     try {
