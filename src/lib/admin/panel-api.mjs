@@ -948,7 +948,7 @@ export async function buildVmDetail({
     : await slotProcessStatus({ projectRoot: cfg.paths.project, vm, routing: routingConfig })
   const activeEngine = gpt ? null : rustHealth?.reachable ? 'rust' : null
   return ok({
-    vm: summary,
+    vm: gpt ? { ...summary, codex_access_expires_at: listed[0].codex_access_expires_at } : summary,
     proxy: summary.proxy || null,
     proxy_pool: summarizeProxyPool(proxyPool),
     billing: detail,

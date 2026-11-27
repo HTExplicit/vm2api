@@ -166,21 +166,35 @@ export function VmAccountTab(props: VmAccountTabProps) {
                 </Field>
               ) : null}
               {gpt ? (
-                <Field label='订阅到期' compact>
-                  <div className='flex flex-wrap items-center gap-2'>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span tabIndex={0} className='cursor-help'>
-                          {fmtExpiresAt(vm.chatgpt_subscription_active_until)}
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent className='max-w-xs whitespace-pre-line'>
-                        {subscriptionInfoTitle(vm)}
-                      </TooltipContent>
-                    </Tooltip>
-                    <SubscriptionRefreshButton vm={vm} />
-                  </div>
-                </Field>
+                <>
+                  <Field label='Codex 令牌到期' compact>
+                    {vm.codex_access_expires_at
+                      ? fmtExpiresAt(vm.codex_access_expires_at)
+                      : '未知'}
+                  </Field>
+                  <Field label='SIWC 令牌到期' compact>
+                    {vm.codex_siwc?.bound
+                      ? vm.codex_siwc.expires_at
+                        ? fmtExpiresAt(vm.codex_siwc.expires_at)
+                        : '未知'
+                      : '未绑定'}
+                  </Field>
+                  <Field label='订阅到期' compact>
+                    <div className='flex flex-wrap items-center gap-2'>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span tabIndex={0} className='cursor-help'>
+                            {fmtExpiresAt(vm.chatgpt_subscription_active_until)}
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent className='max-w-xs whitespace-pre-line'>
+                          {subscriptionInfoTitle(vm)}
+                        </TooltipContent>
+                      </Tooltip>
+                      <SubscriptionRefreshButton vm={vm} />
+                    </div>
+                  </Field>
+                </>
               ) : null}
               {credType === 'apikey' ? (
                 <Field label='Key' compact>
@@ -194,9 +208,11 @@ export function VmAccountTab(props: VmAccountTabProps) {
                   <Field label='Refresh' compact>
                     {vm.has_refresh ? '已绑定' : '—'}
                   </Field>
-                  <Field label='过期' compact>
-                    {fmtExpiresAt(vm.expires_at)}
-                  </Field>
+                  {gpt ? null : (
+                    <Field label='过期' compact>
+                      {fmtExpiresAt(vm.expires_at)}
+                    </Field>
+                  )}
                 </>
               )}
               {gpt ? null : (

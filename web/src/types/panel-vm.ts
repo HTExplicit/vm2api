@@ -413,6 +413,7 @@ export type ActiveUsageQueryResult = {
 
 export type Vm = {
   codex_siwc?: CodexSiwcState | null
+  codex_access_expires_at?: number | null
   id: string
   gemini?: GeminiEnvironment
   name?: string

@@ -1,6 +1,8 @@
 import { useId, useState } from 'react'
 import type { Vm } from '@/types/panel-vm'
 import { ApiError, api } from '@/lib/api'
+import { fmtExpiresAt } from '@/lib/format'
+import { useNow } from '@/hooks/use-now'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -13,6 +15,7 @@ function stateLabel(vm: Vm) {
   if (state?.status === 'reauth_required') return '需要重新绑定'
   if (state?.status === 'refresh_outcome_unknown') return '续期结果未确认'
   if (state?.status === 'refresh_pending') return '正在续期'
+  if (state?.status === 'refresh_backoff') return '等待重试续期'
   if (state?.enabled) return '已启用'
   return state?.bound ? '已绑定，当前使用普通 Codex' : '未绑定'
 }
@@ -26,6 +29,8 @@ export function CodexSiwcPanel({
 }) {
   const path = '/api/panel/vms/' + encodeURIComponent(vm.id) + '/siwc'
   const state = vm.codex_siwc
+  const now = useNow()
+  const nextRefresh = state?.next_refresh_at
   const [attempt, setAttempt] = useState<Attempt | null>(null)
   const [callback, setCallback] = useState('')
   const [browserOpen, setBrowserOpen] = useState(false)
@@ -96,9 +101,10 @@ export function CodexSiwcPanel({
           管理 ChatGPT 用量
         </a>
       </p>
-      {state?.expires_at ? (
+      {nextRefresh != null && state?.status !== 'refresh_pending' ? (
         <p className='text-xs text-muted-foreground'>
-          访问令牌到期 {new Date(state.expires_at).toLocaleString()}
+          下次续期{' '}
+          {nextRefresh <= now ? '已到续期时间' : fmtExpiresAt(nextRefresh)}
         </p>
       ) : null}
       <div className='flex flex-wrap gap-2'>

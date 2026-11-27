@@ -14,7 +14,7 @@ import { startNodeEgressSocks, stopNodeEgressSocks } from '../../src/lib/cluster
 import { handleCodexImages, handleCodexProtocol, handleCodexSearch } from '../../src/lib/protocol/handle-codex.mjs'
 import { openAIAccountHold, resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
 import { summarizeVm, getVm, persistCodexUsage } from '../../src/lib/vm/vm-registry.mjs'
-import { writeCodexAccounts } from '../../src/lib/vm/codex-slot.mjs'
+import { codexCredentialPath, readCodexAccounts, writeCodexAccounts } from '../../src/lib/vm/codex-slot.mjs'
 import { writeCodexSiwc } from '../../src/lib/vm/codex-siwc-store.mjs'
 import { resolveTestModels, runVmTestChat } from '../../src/lib/admin/vm-test-chat.mjs'
 import { buildVmDetail } from '../../src/lib/admin/panel-api.mjs'
@@ -65,6 +65,10 @@ function slot(root, id, extra = {}) {
 
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+}
+
+function renewalHits(f) {
+  return f.hits.filter(({ init }) => String(init.body).startsWith('grant_type=refresh_token'))
 }
 
 function sse(events, headers = {}) {
@@ -305,18 +309,158 @@ test('slot lifecycle can cancel an exchanging callback while holding its record 
 
 test('renewal respects the server window, single-flights a grant, and survives restart with the rotated record', async (t) => {
   const f = fixture(t)
+  const ordinaryFile = codexCredentialPath(f.root, f.vm.id)
+  const ordinaryBefore = fs.readFileSync(ordinaryFile)
   await f.bind()
-  const renewals = () => f.hits.filter(({ init }) => String(init.body).startsWith('grant_type=refresh_token'))
   f.addTime(56 * 60_000)
   await f.siwc.renew(f.vm.id)
-  assert.equal(renewals().length, 0)
+  assert.equal(renewalHits(f).length, 0)
   f.addTime(2 * 60_000)
+  const earliest = Math.floor((f.options.now() + 59 * 60_000) / 1000)
+  f.setRefresh((form) => {
+    assert.equal(form.get('client_id'), 'oaiapp_mock')
+    assert.equal(form.get('refresh_token'), 'mock-refresh')
+    return jsonResponse({
+      access_token: 'new-access',
+      refresh_token: 'new-refresh',
+      expires_in: '3600',
+      earliest_refresh_at: String(earliest),
+    })
+  })
   await Promise.all([f.siwc.renew(f.vm.id), f.siwc.renew(f.vm.id), f.siwc.renew(f.vm.id)])
-  assert.equal(renewals().length, 1)
+  assert.equal(renewalHits(f).length, 1)
   const restarted = new CodexSiwcService(f.options)
   assert.equal((await restarted.access(f.vm.id)).access_token, 'new-access')
   assert.equal(restarted.read(f.vm.id).refresh_token, 'new-refresh')
-  assert.equal(renewals().length, 1)
+  assert.equal(restarted.read(f.vm.id).scope, scope)
+  assert.equal(restarted.view(f.vm.id).next_refresh_at, earliest * 1000)
+  assert.equal(renewalHits(f).length, 1)
+
+  f.addTime(59 * 60_000)
+  f.setRefresh((form) => {
+    assert.equal(form.get('refresh_token'), 'new-refresh')
+    return jsonResponse({
+      access_token: 'newer-access',
+      refresh_token: 'newer-refresh',
+      expires_in: 3600,
+      earliest_refresh_at: 'invalid',
+    })
+  })
+  await restarted.renew(f.vm.id)
+  assert.equal(restarted.view(f.vm.id).next_refresh_at, f.options.now() + 55 * 60_000)
+  assert.equal(renewalHits(f).length, 2)
+  assert.deepEqual(fs.readFileSync(ordinaryFile), ordinaryBefore)
+})
+
+test('an expired caller joins an in-flight renewal and waits for the new access token', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const started = Promise.withResolvers()
+  const reply = Promise.withResolvers()
+  f.setRefresh(() => {
+    started.resolve()
+    return reply.promise
+  })
+  f.addTime(58 * 60_000)
+  assert.equal((await f.siwc.access(f.vm.id)).access_token, 'mock-access')
+  await started.promise
+  assert.equal(f.siwc.view(f.vm.id).status, 'refresh_pending')
+  f.addTime(3 * 60_000)
+  const expired = f.siwc.access(f.vm.id)
+  reply.resolve(jsonResponse({ access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600 }))
+  assert.equal((await expired).access_token, 'new-access')
+  assert.equal(renewalHits(f).length, 1)
+})
+
+test('proxy preflight and connection failures persist bounded backoff until rotation succeeds', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  f.addTime(58 * 60_000)
+  f.siwc.proxyPool = { snapshot: () => ({ proxies: [{ id: 'px-bound', enabled: false }] }) }
+  await f.siwc.renew(f.vm.id)
+  assert.equal(renewalHits(f).length, 0)
+  assert.equal(f.siwc.view(f.vm.id).status, 'refresh_backoff')
+  assert.equal(f.siwc.view(f.vm.id).next_refresh_at, f.options.now() + 30_000)
+
+  const restarted = new CodexSiwcService(f.options)
+  await restarted.renew(f.vm.id)
+  assert.equal(renewalHits(f).length, 0)
+  f.addTime(30_000)
+  f.setRefresh((form) => {
+    assert.equal(form.get('refresh_token'), 'mock-refresh')
+    throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED', syscall: 'connect' })
+  })
+  for (const delay of [60_000, 120_000, 240_000, 300_000, 300_000]) {
+    const count = renewalHits(f).length
+    await restarted.renew(f.vm.id)
+    assert.equal(restarted.view(f.vm.id).status, 'refresh_backoff')
+    assert.equal(restarted.view(f.vm.id).next_refresh_at, f.options.now() + delay)
+    f.addTime(delay - 1)
+    await restarted.renew(f.vm.id)
+    assert.equal(renewalHits(f).length, count + 1)
+    f.addTime(1)
+  }
+  f.setRefresh(() => jsonResponse({ access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600 }))
+  assert.equal((await restarted.access(f.vm.id)).access_token, 'new-access')
+  assert.equal(restarted.read(f.vm.id).refresh_failures, 0)
+  assert.equal(restarted.read(f.vm.id).retry_at, null)
+})
+
+test('a pending renewal result cannot overwrite a newer binding', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const started = Promise.withResolvers()
+  const reply = Promise.withResolvers()
+  f.setRefresh(() => {
+    started.resolve()
+    return reply.promise
+  })
+  f.addTime(58 * 60_000)
+  const renewal = f.siwc.renew(f.vm.id)
+  await started.promise
+  const revision = f.siwc.read(f.vm.id).revision
+  await f.bind()
+  const rebound = f.siwc.read(f.vm.id)
+  assert.notEqual(rebound.revision, revision)
+  reply.resolve(jsonResponse({ access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600, scope }))
+  await renewal
+  assert.deepEqual(f.siwc.read(f.vm.id), rebound)
+})
+
+test('a response read failure never permits replay, even with a connect error code', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  f.addTime(58 * 60_000)
+  f.setRefresh(() => ({
+    json: async () => {
+      throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED', syscall: 'connect' })
+    },
+  }))
+  await f.siwc.renew(f.vm.id)
+  assert.equal(f.siwc.view(f.vm.id).status, 'refresh_outcome_unknown')
+  assert.equal(f.siwc.view(f.vm.id).next_refresh_at, null)
+  assert.equal((await f.siwc.access(f.vm.id)).access_token, 'mock-access')
+  f.addTime(3 * 60_000)
+  await assert.rejects(f.siwc.access(f.vm.id), { code: 'siwc_reauth_required' })
+  assert.equal(renewalHits(f).length, 1)
+})
+
+test('a renewed token without the ChatGPT plan scope requires rebinding', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  f.addTime(58 * 60_000)
+  f.setRefresh(() =>
+    jsonResponse({
+      access_token: 'new-access',
+      refresh_token: 'new-refresh',
+      expires_in: 3600,
+      scope: 'openid profile offline_access',
+    }),
+  )
+  await f.siwc.renew(f.vm.id)
+  assert.equal(f.siwc.view(f.vm.id).status, 'reauth_required')
+  assert.equal(f.siwc.view(f.vm.id).next_refresh_at, null)
+  await assert.rejects(f.siwc.access(f.vm.id), { code: 'siwc_reauth_required' })
 })
 
 test('lost renewal and an interrupted process do not replay a possibly used grant', async (t) => {
@@ -583,6 +727,49 @@ test('the panel exposes only SIWC summary and limits management to administrator
   assert.equal(toggled.status, 200, JSON.stringify(toggled.body))
   assert.equal(toggled.body.data.enabled, false)
   assert.equal((await call('DELETE', 'admin')).body.data.bound, false)
+})
+
+test('GPT slot detail exposes independent Codex and SIWC expiries with either chain selected', async (t) => {
+  const f = fixture(t)
+  const [ordinary] = readCodexAccounts(f.root, f.vm.id)
+  const jwtExpiry = Math.floor(f.options.now() / 1000) + 1200
+  const storedExpiry = jwtExpiry + 700
+  const subscription = new Date((jwtExpiry + 86_400) * 1000).toISOString()
+  writeCodexAccounts(f.root, f.vm.id, [
+    {
+      ...ordinary,
+      access_token: jwt({ exp: jwtExpiry }),
+      expires_at: storedExpiry,
+      chatgpt_subscription_active_until: subscription,
+    },
+  ])
+  await f.bind()
+  const detail = async () =>
+    (
+      await buildVmDetail({
+        cfg: { paths: { project: f.root }, rewrite: {}, base_url: '' },
+        id: f.vm.id,
+        accountQuota: { config: {}, snapshot: () => ({ accounts: [] }) },
+      })
+    ).data.vm
+
+  const siwc = await detail()
+  assert.equal(siwc.codex_access_expires_at, jwtExpiry * 1000)
+  assert.equal(siwc.codex_siwc.expires_at, f.options.now() + 3600_000)
+  assert.equal(siwc.expires_at, siwc.codex_siwc.expires_at)
+  assert.equal(siwc.chatgpt_subscription_active_until, subscription)
+  await f.siwc.setEnabled(f.vm.id, false)
+  const codex = await detail()
+  assert.equal(codex.codex_access_expires_at, jwtExpiry * 1000)
+  assert.equal(codex.codex_siwc.expires_at, siwc.codex_siwc.expires_at)
+  assert.equal(codex.expires_at, storedExpiry * 1000)
+
+  writeCodexAccounts(f.root, f.vm.id, [{ ...ordinary, expires_at: storedExpiry }])
+  assert.equal((await detail()).codex_access_expires_at, storedExpiry * 1000)
+  writeCodexAccounts(f.root, f.vm.id, [ordinary])
+  assert.equal((await detail()).codex_access_expires_at, null)
+  await f.siwc.unbind(f.vm.id)
+  assert.equal((await detail()).codex_siwc.expires_at, null)
 })
 
 test('SIWC continues to respect the existing Codex usage window', async (t) => {
