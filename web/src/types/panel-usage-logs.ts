@@ -11,17 +11,25 @@
  * 仍服务于错误归集与导出，由 `types/panel-logs.ts` 描述。
  */
 
-export type FailureDiagnostics = {
-  component: 'codex-kernel'
-  phase: 'connect' | 'headers' | 'first_event' | 'stream' | 'finalize'
-  kernelRunId: string | null
-  kernelRequestId?: string | null
-  lastEventType: string | null
-  lastEventAgoMs: number | null
-  responseCommitted: boolean
-  usageState: 'missing' | 'partial' | 'final'
-  cleanupErrorCode?: string
-}
+export type FailureDiagnostics =
+  | {
+      component: 'codex-kernel'
+      phase: 'connect' | 'headers' | 'first_event' | 'stream' | 'finalize'
+      kernelRunId: string | null
+      kernelRequestId?: string | null
+      upstreamRequestId?: string | null
+      lastEventType: string | null
+      lastEventAgoMs: number | null
+      responseCommitted: boolean
+      usageState: 'missing' | 'partial' | 'final'
+      cleanupErrorCode?: string
+    }
+  | {
+      component: 'codex-siwc'
+      upstreamRequestId: string | null
+      upstreamHttpStatus: number | null
+      responseCommitted: boolean
+    }
 
 /** 安全脱敏后的标量错误诊断字段（upstream_type / #1705 续传恢复字段 / 410 reason / 风控 JEV 分数）。 */
 export type LogErrorDetails = Record<string, string | number | boolean>

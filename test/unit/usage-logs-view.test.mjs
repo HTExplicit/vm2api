@@ -84,6 +84,52 @@ function pageAll(view, filters) {
   throw new Error('paging did not terminate')
 }
 
+test('SIWC failure investigation includes muted upstream rejections and stream failures, excluding prewarms', () => {
+  const db = freshDb()
+  try {
+    const [rejected, stream, prewarm, codex] = seed(db, [
+      {
+        via: 'codex-siwc',
+        status: 400,
+        upstream_status: 400,
+        error_code: 'siwc_upstream_error',
+        final_state: 'rejected',
+      },
+      { via: 'codex-siwc', status: 200, error_code: 'siwc_upstream_stream_incomplete', final_state: 'incomplete' },
+      { via: 'siwc-prewarm', status: 200, final_state: 'siwc-prewarm', input_tokens: 0, output_tokens: 0 },
+      { via: 'codex-kernel', status: 200, final_state: 'verified' },
+    ])
+    const view = new UsageLogsView(db, { mutedErrorClasses: ['request'] })
+    const filters = { via: 'codex-siwc', failed_only: true }
+    assert.deepEqual(
+      view.listBatch(filters).logs.map((row) => row.id),
+      [stream.id],
+    )
+    assert.deepEqual(
+      view.listBatch({ ...filters, include_muted: true }).logs.map((row) => row.id),
+      [stream.id, rejected.id],
+    )
+    assert.deepEqual(
+      view.listBatch({ failed_only: true, include_muted: true }).logs.map((row) => row.id),
+      [stream.id, rejected.id],
+    )
+    assert.equal(view.listBatch({ via: 'siwc-prewarm' }).logs[0].id, prewarm.id)
+    const repo = new UsageLogsRepo(db)
+    const timeline = repo.healthBuckets({ vmId: 'vm-a', now: Date.parse(codex.created_at) }).get('vm-a')
+    assert.deepEqual(
+      timeline.reduce(([success, failed], [ok, err]) => [success + ok, failed + err], [0, 0]),
+      [1, 2],
+    )
+    const ops = repo.windowStats({ since: rejected.created_at, until: codex.created_at })
+    assert.equal(ops.requests, 3)
+    assert.equal(ops.sla, 1 / 3)
+    assert.equal(view.summary({ include_muted: true }).successRequests, 1)
+    assert.equal(view.summary({}).successRequests, 1)
+  } finally {
+    db.close()
+  }
+})
+
 test('keyset paging returns every row once, newest first', () => {
   const db = freshDb()
   const rows = seed(

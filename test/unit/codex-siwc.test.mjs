@@ -662,13 +662,14 @@ test('custom tools keep the public Chat shape and full upstream call history', a
   assert.match(stream.text, /"custom":\{"input":"hello again"\}/)
 })
 
-async function listenGateway(t, f) {
+async function listenGateway(t, f, { upstreamTransport, codexOps, logs = [], maxBodyBytes = 1024 * 1024 } = {}) {
   const routingWithWs = {
     ...routing,
     websocket: { enabled: true },
     codex: {
       ...routing.codex,
       websocket: { enabled: true },
+      ...(upstreamTransport && { upstream_transport: upstreamTransport }),
       clients: { openai_compatible: 'allow', official_codex: 'allow', unknown: 'allow' },
     },
   }
@@ -687,7 +688,7 @@ async function listenGateway(t, f) {
     rewrite: { enabled: false },
     distill: { enabled: false },
     intercept: { rules: [] },
-    limits: { max_body_bytes: 1024 * 1024 },
+    limits: { max_body_bytes: maxBodyBytes },
     paths: { project: f.root, data: f.root },
   }
   const { handleProtocol } = createHandleProtocol({
@@ -695,7 +696,8 @@ async function listenGateway(t, f) {
     requireAuth,
     cfg,
     routingConfig: routingWithWs,
-    requestLog: { start: () => ({ id: 'mock-log' }), finish() {} },
+    requestLog: { start: () => ({ id: 'mock-log' }), finish: (_ctx, row) => logs.push(row) },
+    groupsRepo: { rateMultiplier: () => 1 },
     readBody: async (req) => {
       const chunks = []
       for await (const chunk of req) chunks.push(chunk)
@@ -707,9 +709,15 @@ async function listenGateway(t, f) {
     accountQuota: { sessions: null, ingestHeaders() {} },
     stats: { requests: 0, errors: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
     codexSiwc: f.siwc,
-    codexOps: { writeCodexKernelConfig: () => assert.fail('native slot must stay untouched') },
+    codexOps: codexOps || { writeCodexKernelConfig: () => assert.fail('native slot must stay untouched') },
   })
-  const ws = createResponsesWsHandler({ handleProtocol, requireAuth, json, getRouting: () => routingWithWs })
+  const ws = createResponsesWsHandler({
+    handleProtocol,
+    requireAuth,
+    json,
+    maxBodyBytes,
+    getRouting: () => routingWithWs,
+  })
   const server = http.createServer((req, res) => {
     void handleProtocol(req, res, 'openai.responses', '/v1/responses').catch((err) => res.destroy(err))
   })
@@ -721,6 +729,166 @@ async function listenGateway(t, f) {
   t.after(() => new Promise((resolve) => server.close(resolve)))
   return '127.0.0.1:' + server.address().port
 }
+
+function wsTurn(socket, body) {
+  return new Promise((resolve) => {
+    const frames = []
+    const onMessage = (message) => {
+      const frame = JSON.parse(message)
+      frames.push(frame)
+      if (['error', 'response.completed', 'response.failed'].includes(frame.type)) {
+        socket.off('message', onMessage)
+        resolve(frames)
+      }
+    }
+    socket.on('message', onMessage)
+    socket.send(JSON.stringify({ type: 'response.create', ...body }))
+  })
+}
+
+test('SIWC locally acknowledges chained WebSocket prewarms and sends only the generating continuation', {
+  timeout: 10000,
+}, async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const outgoing = []
+  f.setInference((body) => {
+    outgoing.push(body)
+    return sse([completion()])
+  })
+  const logs = []
+  const host = await listenGateway(t, f, { upstreamTransport: 'http', logs })
+  const client = new WebSocket('ws://' + host + '/v1/responses')
+  const other = new WebSocket('ws://' + host + '/v1/responses')
+  try {
+    await Promise.all([once(client, 'open'), once(other, 'open')])
+    const [created, completed] = await wsTurn(client, {
+      model,
+      generate: false,
+      input: 'first',
+      instructions: 'stay concise',
+    })
+    assert.equal(created.type, 'response.created')
+    assert.equal(completed.type, 'response.completed')
+    assert.equal(created.response.id, completed.response.id)
+    assert.deepEqual(completed.response.usage, {
+      input_tokens: 0,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 0,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: 0,
+    })
+    const [, next] = await wsTurn(client, {
+      previous_response_id: completed.response.id,
+      generate: false,
+      input: 'second',
+    })
+    assert.equal(next.type, 'response.completed')
+    assert.equal(next.response.model, model)
+    assert.equal(outgoing.length, 0)
+    assert.deepEqual(
+      logs.map((row) => [row.via, row.final_state, row.attempt_count]),
+      [
+        ['siwc-prewarm', 'siwc-prewarm', 0],
+        ['siwc-prewarm', 'siwc-prewarm', 0],
+      ],
+    )
+    const [wrongConnection] = await wsTurn(other, { model, input: 'other', previous_response_id: next.response.id })
+    assert.equal(wrongConnection.error.code, 'previous_response_not_found')
+    assert.equal(outgoing.length, 0)
+    const [generated] = await wsTurn(client, { previous_response_id: next.response.id, generate: true, input: 'third' })
+    assert.equal(generated.type, 'response.completed')
+    assert.equal(outgoing.length, 1)
+    assert.deepEqual(
+      outgoing[0].input.map((item) => item.content[0].text),
+      ['first', 'second', 'third'],
+    )
+    assert.equal(outgoing[0].instructions, 'stay concise')
+    assert.equal(outgoing[0].model, model)
+    assert.equal(Object.hasOwn(outgoing[0], 'generate'), false)
+    assert.equal(Object.hasOwn(outgoing[0], 'previous_response_id'), false)
+    assert.equal(logs.at(-1).via, 'codex-siwc')
+  } finally {
+    client.terminate()
+    other.terminate()
+  }
+})
+
+test('oversized SIWC WebSocket prewarm receives no unusable response ID', { timeout: 10000 }, async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const host = await listenGateway(t, f, { maxBodyBytes: 10 * 1024 * 1024 })
+  const client = new WebSocket('ws://' + host + '/v1/responses')
+  try {
+    await once(client, 'open')
+    const [frame] = await wsTurn(client, { model, generate: false, input: 'a'.repeat(8 * 1024 * 1024) })
+    assert.equal(frame.type, 'error')
+    assert.equal(frame.status, 413)
+    assert.equal(frame.error.code, 'prewarm_input_too_large')
+    assert.equal(f.hits.filter(({ url }) => url.endsWith('/responses')).length, 0)
+  } finally {
+    client.terminate()
+  }
+})
+
+test('SIWC does not turn HTTP generate=false into inference and reports real upstream 400s', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const prewarm = await infer(f, 'openai.responses', { generate: false, input: 'prewarm' })
+  assert.equal(prewarm.status, 400)
+  assert.equal(prewarm.payload.error.code, 'unsupported_prewarm')
+  assert.equal(f.hits.filter(({ url }) => url.endsWith('/responses')).length, 0)
+  f.setInference((body) => {
+    assert.equal(Object.hasOwn(body, 'generate'), false)
+    return new Response(JSON.stringify({ detail: 'Unsupported parameter: example' }), {
+      status: 400,
+      headers: { 'x-request-id': 'mock-upstream-400' },
+    })
+  })
+  const rejected = await infer(f, 'openai.responses', { generate: true, input: 'hello' })
+  assert.equal(rejected.status, 400)
+  assert.equal(rejected.payload.error.message, 'Unsupported parameter: example')
+  assert.equal(rejected.logBag.upstream_status, 400)
+  assert.equal(rejected.logBag.via, 'codex-siwc')
+  assert.equal(rejected.logBag.failure_diagnostics.upstreamHttpStatus, 400)
+  assert.equal(rejected.logBag.failure_diagnostics.upstreamRequestId, 'mock-upstream-400')
+})
+
+test('native Codex retains generate=false on WebSocket and rejects it on the HTTP-only upstream', {
+  timeout: 10000,
+}, async (t) => {
+  for (const upstreamTransport of ['prefer_websocket', 'http']) {
+    const f = fixture(t)
+    const nativeHops = []
+    const host = await listenGateway(t, f, {
+      upstreamTransport,
+      codexOps: {
+        writeCodexKernelConfig: () => null,
+        ensureCodexKernel: async () => ({ ok: true }),
+        streamCodexKernel: async ({ body, onEvent }) => {
+          nativeHops.push(body)
+          const terminal = completion('resp_native_prewarm')
+          await onEvent('data: ' + JSON.stringify(terminal))
+          return { ok: true, status: 200, body: terminal.response, terminalState: 'verified' }
+        },
+      },
+    })
+    const client = new WebSocket('ws://' + host + '/v1/responses')
+    try {
+      await once(client, 'open')
+      const [frame] = await wsTurn(client, { model, input: 'warmup', generate: false })
+      if (upstreamTransport === 'http') {
+        assert.equal(frame.error.code, 'unsupported_prewarm')
+        assert.equal(nativeHops.length, 0)
+      } else {
+        assert.equal(frame.response.id, 'resp_native_prewarm')
+        assert.equal(nativeHops[0].generate, false)
+      }
+    } finally {
+      client.terminate()
+    }
+  }
+})
 
 test('existing WebSocket continuation and panel test chat both reach SIWC', { timeout: 5000 }, async (t) => {
   const f = fixture(t)

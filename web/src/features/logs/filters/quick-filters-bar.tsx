@@ -4,6 +4,7 @@ import {
   Calendar,
   CalendarDays,
   RefreshCw,
+  Route,
   XCircle,
   type LucideIcon,
 } from 'lucide-react'
@@ -78,6 +79,16 @@ export function QuickFiltersBar({
     },
   ]
   const modeGroup: Preset[] = [
+    {
+      id: 'siwc',
+      label: 'SIWC',
+      icon: Route,
+      active: filters.via === 'codex-siwc',
+      toggle: () => ({
+        ...filters,
+        via: filters.via === 'codex-siwc' ? undefined : 'codex-siwc',
+      }),
+    },
     {
       id: 'debug',
       label: 'Debug 采样',

@@ -6,6 +6,26 @@ import { StatusBadge } from './log-cells'
 import { FailureDiagnosticsPanel } from './log-detail/failure-diagnostics'
 
 describe('failure display', () => {
+  it('shows the observed upstream HTTP status and request ID for SIWC', () => {
+    const row = {
+      requestId: 'request-one',
+      via: 'codex-siwc',
+      upstreamStatus: 502,
+      failureDiagnostics: {
+        component: 'codex-siwc',
+        upstreamHttpStatus: 400,
+        upstreamRequestId: 'req_mock_siwc',
+        responseCommitted: false,
+      },
+    } as UsageLogRow
+    const html = renderToStaticMarkup(<FailureDiagnosticsPanel row={row} />)
+    expect(html).toContain('SIWC 上游请求')
+    expect(html).toContain('>400<')
+    expect(html).toContain('复制上游请求 ID')
+    expect(html).toContain('req_mock_siwc')
+    expect(html).not.toContain('Codex 内核转发')
+  })
+
   it('makes a classified stream failure visible beside its original HTTP code', () => {
     const html = renderToStaticMarkup(
       <TooltipProvider>

@@ -19,6 +19,7 @@ const UNSUPPORTED_TOOLS = new Set([
 const OMIT_FIELDS = [
   'background',
   'conversation',
+  'generate',
   'max_output_tokens',
   'max_tool_calls',
   'metadata',
@@ -127,6 +128,9 @@ export async function streamSiwcResponses({
     idle = setTimeout(() => abort.abort(), idleTimeoutMs).unref()
   }
   try {
+    if ((envelope?.body || body)?.generate === false) {
+      return failure(400, 'unsupported_prewarm', 'SIWC 上游不支持 generate=false 预热。')
+    }
     combined.throwIfAborted()
     used = await siwc.access(vmId)
     const models = used.models || (await siwc.refreshModels(vmId))
@@ -162,7 +166,7 @@ export async function streamSiwcResponses({
         response.status,
         error?.code || 'siwc_upstream_error',
         error?.message || payload?.detail || 'OpenAI 未接受 SIWC 请求。',
-        { headers, siwcRevision: used.revision },
+        { headers, upstreamHttpStatus: response.status, siwcRevision: used.revision },
       )
       if (error && typeof error === 'object') Object.assign(out.body.error, error)
       return out
@@ -222,6 +226,7 @@ export async function streamSiwcResponses({
         })),
       ...timing.snapshot(),
       headers,
+      upstreamHttpStatus: response.status,
       siwcRevision: used.revision,
     }
   } catch (error) {
@@ -234,6 +239,7 @@ export async function streamSiwcResponses({
         ...timing.snapshot(),
         committed,
         headers,
+        upstreamHttpStatus: response?.status,
         siwcRevision: used?.revision,
         transportError: transport,
         terminalState: signal?.aborted ? 'cancelled' : committed ? 'incomplete' : 'rejected',

@@ -731,16 +731,18 @@ test('client disconnect aborts the in-flight handleProtocol request', async () =
   }
 })
 
-test('generate=false warmup is rejected when upstream is HTTP-only', async () => {
-  const hops = []
+test('an HTTP-only upstream still offers local prewarm to the selected protocol handler', async () => {
   const live = await listen({
     routing: {
       websocket: { enabled: true },
       codex: { websocket: { enabled: true }, upstream_transport: 'http' },
     },
     requireAuth: allowAuth,
-    async handleProtocol(req) {
-      hops.push(await readJson(req))
+    async handleProtocol(req, res) {
+      const body = await readJson(req)
+      const frames = req._kinResponsesWs.prewarm(body.model)
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''))
     },
   })
   try {
@@ -748,9 +750,9 @@ test('generate=false warmup is rejected when upstream is HTTP-only', async () =>
     opened.ws.send(
       JSON.stringify({ type: 'response.create', model: 'gpt-5.4', input: 'warmup', generate: false, store: false }),
     )
-    const frame = await nextFrame(opened.ws, (event) => event.type === 'error')
-    assert.equal(frame.error.code, 'unsupported_prewarm')
-    assert.equal(hops.length, 0)
+    const frame = await nextFrame(opened.ws, (event) => event.type === 'response.completed')
+    assert.match(frame.response.id, /^resp_prewarm_/)
+    assert.equal(frame.response.usage.total_tokens, 0)
     assert.equal(isProtocolWarmup({ generate: false, store: false }), true)
     opened.ws.close()
   } finally {
@@ -1383,7 +1385,8 @@ test('real handleProtocol: a Codex incomplete response reaches WebSocket and its
   } finally {
     opened?.ws?.close()
     await live.close()
-    fs.rmSync(root, { recursive: true, force: true })
+    keys.db.close()
+    fs.rmSync(root, { recursive: true })
   }
 })
 

@@ -1045,6 +1045,34 @@ test('risk audit counts only routed hops and looks up upstream 400s by original 
   assert.equal(view.listBatch({ request_id: original.request_id }).logs[0].id, requests[0].id)
 })
 
+test('SIWC normal logs retain observed upstream 400s and keep local 400s distinct', (t) => {
+  const store = tmpStore()
+  t.after(() => {
+    store.db.close()
+    fs.rmSync(store.dataDir, { recursive: true })
+  })
+  const upstream = logOne(store, {
+    status: 400,
+    via: 'codex-siwc',
+    upstream_status: 400,
+    error_code: 'siwc_upstream_error',
+    error_message: 'Unsupported parameter: example',
+    failure_diagnostics: { component: 'codex-siwc', upstreamHttpStatus: 400, upstreamRequestId: 'req_mock_siwc' },
+  })
+  const local = logOne(store, {
+    status: 400,
+    via: 'codex-siwc',
+    upstream_status: 400,
+    error_code: 'model_not_allowed',
+  })
+  const view = new UsageLogsView(store.db)
+  const get = (row) => view.listBatch({ request_id: row.request_id }).logs[0]
+  assert.equal(get(upstream).upstreamStatus, 400)
+  assert.equal(get(upstream).failureDiagnostics.upstreamRequestId, 'req_mock_siwc')
+  assert.equal(get(upstream).errorMessage, 'Unsupported parameter: example')
+  assert.equal(get(local).upstreamStatus, null)
+})
+
 test('protocolEntryStats counts upstreamRefusals and UsageLogsView supports via/upstream_risk_errors + JEV details', () => {
   const store = tmpStore()
   logOne(store, {
@@ -1806,11 +1834,11 @@ test('tapResponse handles all Node writeHead signatures, precedence over setHead
 
 test('normal mode persists sanitized #1705 / 410 error_details, upstream_type, and attempt correlation IDs (#1845)', (t) => {
   const store = tmpStore('normal')
+  let reopened
   t.after(() => {
-    try {
-      store.db.close()
-    } catch {}
-    fs.rmSync(store.dataDir, { recursive: true, force: true })
+    reopened?.db.close()
+    store.db.close()
+    fs.rmSync(store.dataDir, { recursive: true })
   })
 
   const ctx409 = store.start(
@@ -1906,8 +1934,7 @@ test('normal mode persists sanitized #1705 / 410 error_details, upstream_type, a
   // Normal mode writes no debug log, yet error_details & attempt IDs persist across reopen.
   assert.equal(store.listDebug({ limit: 5 }).length, 0)
 
-  const reopened = new RequestLogStore({ dataDir: store.dataDir, mode: 'normal' })
-  t.after(() => reopened.db.close())
+  reopened = new RequestLogStore({ dataDir: store.dataDir, mode: 'normal' })
   const q = reopened.queryNormal({ q: 'partial_provider_output_nonretryable' })
   assert.equal(q.total, 1)
   assert.equal(q.items[0].upstream_type, 'partial_provider_output_nonretryable')

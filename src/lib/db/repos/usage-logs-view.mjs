@@ -17,6 +17,7 @@ import { THIRD_PARTY_CLIENT_SESSION_ID, modelMismatch } from '../../protocol/log
 import {
   ERROR_PRED,
   PROMPT_TOKENS_SQL,
+  SIWC_PREWARM_PRED,
   SUCCESS_PRED,
   ownerPred,
   totalTokens as rowTotalTokens,
@@ -40,7 +41,7 @@ const EXPORT_LIMIT_MAX = 5000
 /** Newest rows an export reads when classes must be filtered in JS. */
 const EXPORT_SCAN_CAP = 10000
 const DEFAULT_VIA = 'go-worker-pool'
-const FAILED_ONLY_PRED = `((status IS NULL OR status < 200 OR status >= 300) OR (final_state IS NOT NULL AND final_state != '' AND final_state != 'verified') OR ${ERROR_PRED})`
+const FAILED_ONLY_PRED = `(NOT ${SIWC_PREWARM_PRED} AND ((status IS NULL OR status < 200 OR status >= 300) OR (final_state IS NOT NULL AND final_state != '' AND final_state != 'verified') OR ${ERROR_PRED}))`
 
 const BLOCKED_STATES = {
   distill_blocked: 'distill',
@@ -642,7 +643,7 @@ export class UsageLogsView {
     let ttftN = 0
     for (const r of rows) {
       if (r.error_class) acc.errors++
-      else if (r.status != null && r.status < 400) acc.success++
+      else if (r.status != null && r.status < 400 && r.final_state !== 'siwc-prewarm') acc.success++
       acc.cost += num(r.total_cost)
       acc.actual_cost += num(r.actual_cost)
       for (const k of [

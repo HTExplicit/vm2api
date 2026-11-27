@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { RequestResponseModelDisplay } from './log-cells'
 import { SummaryTab } from './log-detail/summary-tab'
+import { statusBadgeLabel } from './log-display'
 
 const historicalRow: UsageLogRow = {
   id: 'old-log',
@@ -78,6 +79,34 @@ function cell(overrides: Partial<UsageLogRow> = {}) {
 }
 
 describe('requested and returned model display', () => {
+  it.each([
+    ['codex-siwc', 200, 'verified', 'SIWC'],
+    ['codex-siwc', 400, 'rejected', 'SIWC'],
+    ['codex-siwc', 200, 'incomplete', 'SIWC'],
+    ['codex-kernel', 200, 'verified', 'Codex'],
+    ['siwc-prewarm', 200, 'siwc-prewarm', 'SIWC 预热'],
+  ] as const)(
+    'shows persisted %s beside the model for HTTP %s',
+    (via, statusCode, finalState, label) => {
+      const html = cell({
+        via,
+        statusCode,
+        finalState,
+        vmId: 'slot-a',
+        attemptCount: via === 'siwc-prewarm' ? 0 : 1,
+      })
+      expect(html).toContain(`>${label}</span>`)
+    }
+  )
+
+  it('leaves unknown routes and pre-admission failures unlabelled', () => {
+    expect(cell()).not.toContain('data-slot="badge"')
+    expect(
+      cell({ via: 'codex-kernel', statusCode: 429, attemptCount: 0 })
+    ).not.toContain('data-slot="badge"')
+    expect(statusBadgeLabel(200, 'siwc-prewarm', null)).toBe('预热完成')
+  })
+
   it('uses the historical model only for a missing request name and keeps the upstream return unknown', () => {
     const html = cell({ originalModel: null })
     expect(html).toContain('legacy-model')

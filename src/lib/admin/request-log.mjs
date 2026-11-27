@@ -787,7 +787,8 @@ export class RequestLogStore {
         ? 400
         : Number.isInteger(extra.audit_upstream_error_status) && extra.audit_upstream_error_status >= 400
           ? extra.audit_upstream_error_status
-          : Number(extra.upstream_status) === 400
+          : Number(extra.upstream_status) === 400 &&
+              !(extra.via === 'codex-siwc' && extra.failure_diagnostics?.upstreamHttpStatus === 400)
             ? null
             : (extra.upstream_status ?? null),
       upstream_400_message: extra.audit_upstream_400_message

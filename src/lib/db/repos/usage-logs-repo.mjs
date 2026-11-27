@@ -27,6 +27,7 @@ import {
   SUCCESS_PRED,
   SLA_ERROR_PRED,
   SLA_SUCCESS_PRED,
+  SIWC_PREWARM_PRED,
   ownerPred,
   PROMPT_TOKENS_SQL,
   TOTAL_TOKENS_SQL,
@@ -1769,10 +1770,10 @@ export class UsageLogsRepo {
   windowStats({ since = null, until = null, owner_user_id = null } = {}) {
     const { cond, params } = timeCond(since, until)
     const own = ownerPred(owner_user_id)
-    let where = cond
+    let where = cond ? `${cond} AND NOT ${SIWC_PREWARM_PRED}` : `WHERE NOT ${SIWC_PREWARM_PRED}`
     const allParams = [...params]
     if (own.sql) {
-      where = where ? `${where} AND ${own.sql}` : `WHERE ${own.sql}`
+      where += ` AND ${own.sql}`
       allParams.push(...own.params)
     }
     const counts = this.db

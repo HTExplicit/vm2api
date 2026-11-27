@@ -796,7 +796,10 @@ export function SummaryTab({
       ) : null}
       {row.stream &&
       ['incomplete', 'transport_error'].includes(row.finalState || '') &&
-      row.failureDiagnostics?.usageState !== 'final' ? (
+      !(
+        row.failureDiagnostics?.component === 'codex-kernel' &&
+        row.failureDiagnostics.usageState === 'final'
+      ) ? (
         <p className='text-sm text-muted-foreground'>
           响应未完整结束，当前 Token 和费用可能缺失或仅包含部分用量；0
           不代表实际无消耗。

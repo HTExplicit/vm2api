@@ -4,7 +4,10 @@ import { formatDuration } from '@/lib/usage-format'
 import { Button } from '@/components/ui/button'
 import { copyText } from '../log-display'
 
-const PHASES: Record<FailureDiagnostics['phase'], string> = {
+const PHASES: Record<
+  Extract<FailureDiagnostics, { component: 'codex-kernel' }>['phase'],
+  string
+> = {
   connect: '连接内核',
   headers: '等待响应头',
   first_event: '等待首个协议事件',
@@ -50,6 +53,32 @@ function Field({
 
 export function FailureDiagnosticsPanel({ row }: { row: UsageLogRow }) {
   const diagnostic = row.failureDiagnostics
+  if (row.via === 'codex-siwc' || diagnostic?.component === 'codex-siwc') {
+    const siwc = diagnostic?.component === 'codex-siwc' ? diagnostic : null
+    const status = siwc?.upstreamHttpStatus ?? row.upstreamStatus
+    const upstreamRequestId = diagnostic?.upstreamRequestId ?? null
+    if (status == null && !upstreamRequestId) return null
+    return (
+      <section className='space-y-3' aria-label='请求诊断'>
+        <h4 className='text-sm font-semibold'>请求诊断</h4>
+        <dl className='space-y-2 text-xs'>
+          <Field label='观测环节' value='SIWC 上游请求' />
+          <Field
+            label='上游状态'
+            value={status == null ? null : String(status)}
+          />
+          {siwc ? (
+            <Field
+              label='已开始向客户端输出'
+              value={siwc.responseCommitted ? '是' : '否'}
+            />
+          ) : null}
+          <Field label='请求 ID' value={row.requestId} copyable />
+          <Field label='上游请求 ID' value={upstreamRequestId} copyable />
+        </dl>
+      </section>
+    )
+  }
   if (!diagnostic) return null
   return (
     <section className='space-y-3' aria-label='请求诊断'>

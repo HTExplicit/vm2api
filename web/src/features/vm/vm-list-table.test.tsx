@@ -95,6 +95,41 @@ describe('VM scheduling priority', () => {
 })
 
 describe('VM row interaction and health', () => {
+  it('shows the configured GPT route in the table and both card sizes', () => {
+    const siwc = {
+      enabled: true,
+      status: 'reauth_required',
+      bound: true,
+      has_token: false,
+      expires_at: null,
+      next_refresh_at: null,
+      models: null,
+    }
+    const vm: Vm = {
+      id: 'route-test',
+      platform: 'openai',
+      status: 'running',
+      codex_siwc: siwc,
+    }
+    function rack(vm: Vm, size: 's' | 'l') {
+      return renderToStaticMarkup(
+        <QueryClientProvider client={new QueryClient()}>
+          <VmRack vms={[vm]} filter='all' size={size} />
+        </QueryClientProvider>
+      )
+    }
+    for (const html of [render(vm), rack(vm, 's'), rack(vm, 'l')]) {
+      expect(html).toContain('>SIWC')
+      expect(html).toContain('需重新绑定')
+    }
+    const native = { ...vm, codex_siwc: { ...siwc, enabled: false } }
+    for (const html of [render(native), rack(native, 's'), rack(native, 'l')]) {
+      expect(html).toContain('>Codex</span>')
+      expect(html).not.toContain('需重新绑定')
+    }
+    expect(render({ platform: 'anthropic' })).not.toContain('>Codex</span>')
+  })
+
   it('shows family limits and the waiting children on a Claude root seat', () => {
     const vm: Vm = {
       id: 'vm-01',

@@ -12,7 +12,8 @@ const SLA_OK_CODES_SQL = slaOkErrorSqlList()
 const CANCEL_PRED = `((status IS NULL OR status < 400 OR status = 499) AND (final_state = 'cancelled' OR error_code IN (${IGNORED_CODES_SQL})))`
 const FAILED_STATE_PRED = `final_state IN (${FAILED_REQUEST_STATES.map((state) => `'${state}'`).join(', ')})`
 export const ERROR_PRED = `(NOT IFNULL(${CANCEL_PRED}, 0) AND (status >= 400 OR (error_code IS NOT NULL AND error_code != '') OR ${FAILED_STATE_PRED}))`
-export const SUCCESS_PRED = `(status < 400 AND NOT IFNULL(${ERROR_PRED}, 0))`
+export const SIWC_PREWARM_PRED = "(COALESCE(final_state, '') = 'siwc-prewarm')"
+export const SUCCESS_PRED = `(status < 400 AND NOT ${SIWC_PREWARM_PRED} AND NOT IFNULL(${ERROR_PRED}, 0))`
 const SLA_OK_PRED = `(status = 429 OR (error_code IS NOT NULL AND error_code != '' AND error_code IN (${SLA_OK_CODES_SQL})))`
 export const SLA_SUCCESS_PRED = `(${SUCCESS_PRED} OR ${SLA_OK_PRED})`
 export const SLA_ERROR_PRED = `(${ERROR_PRED} AND NOT (${SLA_OK_PRED}))`

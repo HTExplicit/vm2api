@@ -115,6 +115,9 @@ export function ActiveFiltersDisplay({
       label: '失败终态',
       value: '所有失败（含流式 200）',
     })
+  if (filters.via) chips.push({ key: 'via', label: '链路', value: 'SIWC' })
+  if (filters.includeMuted)
+    chips.push({ key: 'includeMuted', label: '屏蔽', value: '含已屏蔽错误' })
   if ((filters.minRetry ?? 0) > 0)
     chips.push({
       key: 'minRetry',

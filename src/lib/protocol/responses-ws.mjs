@@ -6,10 +6,11 @@
  * billing, logs). Downstream sees JSON frames, never SSE.
  */
 import { EventEmitter } from 'node:events'
+import { randomUUID } from 'node:crypto'
 import http from 'node:http'
 import { Readable } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
-import { computedUpstreamTransport, inferenceWebsocketEnabled } from './codex-route.mjs'
+import { inferenceWebsocketEnabled } from './codex-route.mjs'
 import { codexTextInput } from './codex-convert.mjs'
 import { DEFAULT_MAX_REQUEST_BYTES, inboundBodyLimit } from '../core/config.mjs'
 
@@ -181,6 +182,10 @@ export function normalizeResponsesInput(input) {
 export function expandPreviousResponse(body, snapshot) {
   const next = { ...body }
   delete next.previous_response_id
+  if (snapshot.prewarm) {
+    next.model ??= snapshot.prewarm.model
+    next.instructions ??= snapshot.prewarm.instructions
+  }
   next.input = [
     ...normalizeResponsesInput(snapshot.input),
     ...(Array.isArray(snapshot.output) ? cloneJson(snapshot.output) : []),
@@ -212,18 +217,22 @@ export function createConnectionReplay({
 
   return {
     remember(id, snapshot) {
-      if (typeof id !== 'string' || !id || !snapshot) return
-      forget(id)
+      if (typeof id !== 'string' || !id || !snapshot) return false
       const stored = {
         input: cloneJson(snapshot.input),
         output: Array.isArray(snapshot.output) ? cloneJson(snapshot.output) : [],
-        bytes: 0,
+        ...(snapshot.prewarm && { prewarm: cloneJson(snapshot.prewarm) }),
       }
-      stored.bytes = Buffer.byteLength(JSON.stringify({ id, input: stored.input, output: stored.output }))
-      items.set(id, stored)
+      const size = Buffer.byteLength(JSON.stringify({ id, ...stored }))
+      if (size > maxBytes || maxItems < 1) return false
+      forget(id)
+      const previous = order.indexOf(id)
+      if (previous !== -1) order.splice(previous, 1)
+      items.set(id, { ...stored, bytes: size })
       order.push(id)
-      bytes += stored.bytes
+      bytes += size
       evict()
+      return true
     },
     resolve(previousId) {
       if (!previousId) return { ok: true, known: false }
@@ -238,9 +247,43 @@ export function createConnectionReplay({
           }),
         }
       }
-      return { ok: true, known: true, snapshot: { input: stored.input, output: stored.output } }
+      const { input, output, prewarm } = stored
+      return { ok: true, known: true, snapshot: { input, output, ...(prewarm && { prewarm }) } }
     },
   }
+}
+
+function prepareLocalPrewarm(replay, body, model) {
+  const id = 'resp_prewarm_' + randomUUID()
+  const prewarm = { model: body.model || model, instructions: body.instructions }
+  if (!replay.remember(id, { input: body.input, output: [], prewarm })) return null
+  const response = {
+    id,
+    object: 'response',
+    created_at: Math.floor(Date.now() / 1000),
+    model,
+    background: false,
+    output: [],
+    error: null,
+  }
+  return [
+    { type: 'response.created', sequence_number: 0, response: { ...response, status: 'in_progress' } },
+    {
+      type: 'response.completed',
+      sequence_number: 1,
+      response: {
+        ...response,
+        status: 'completed',
+        usage: {
+          input_tokens: 0,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens: 0,
+          output_tokens_details: { reasoning_tokens: 0 },
+          total_tokens: 0,
+        },
+      },
+    },
+  ]
 }
 
 function headerMap(headers = {}) {
@@ -573,18 +616,6 @@ export function createResponsesWsHandler({
             )
             continue
           }
-          if (isProtocolWarmup(decoded.body) && computedUpstreamTransport(routing) === 'http') {
-            sendFrame(
-              ws,
-              responsesWsErrorFrame({
-                status: 400,
-                type: 'invalid_request_error',
-                code: 'unsupported_prewarm',
-                message: 'generate=false warmup requires upstream WebSocket',
-              }),
-            )
-            continue
-          }
           let hopBody = { ...decoded.body, stream: true }
           const previousId = typeof hopBody.previous_response_id === 'string' ? hopBody.previous_response_id.trim() : ''
           if (previousId) {
@@ -598,7 +629,17 @@ export function createResponsesWsHandler({
           activeResponseId = null
           activeHopCompleted = false
           const req = createProtocolReq(upgradeReq, hopBody)
-          req._kinResponsesWs = { replayExpanded: !!previousId }
+          let localPrewarm = false
+          req._kinResponsesWs = {
+            replayExpanded: !!previousId,
+            prewarm: isProtocolWarmup(decoded.body)
+              ? (model) => {
+                  const events = prepareLocalPrewarm(replay, hopBody, model)
+                  localPrewarm = !!events
+                  return events
+                }
+              : null,
+          }
           currentReq = req
           let hopClientAborted = false
           const res = createProtocolRes()
@@ -654,7 +695,7 @@ export function createResponsesWsHandler({
             // A warmup settles with an id the client may continue from, so it
             // enters the replay cache like any other hop. The cache still lives
             // only on this connection: `store` never turns into persistence.
-            if (snap) {
+            if (snap && !localPrewarm) {
               replay.remember(snap.id, { input: hopBody.input, output: snap.output })
             }
             continue
