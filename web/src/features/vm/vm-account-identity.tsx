@@ -12,6 +12,7 @@ import {
   slotRawEmail,
 } from '@/lib/vm-kind'
 import { claudeTier } from '@/lib/vm-status'
+import { GptRouteBadge } from '@/components/gpt-route-badge'
 import { ActiveVmBadge } from '@/features/vm/active-vm-badge'
 import { CodexQuotaSampleStatus } from '@/features/vm/codex-quota-sample-status'
 import { OpenaiPlanBadge } from '@/features/vm/openai-plan-badge'
@@ -33,6 +34,17 @@ export function PlatformMark({ vm }: { vm: Vm }) {
   )
 }
 
+export function VmGptRoute({ vm }: { vm: Vm }) {
+  if (!isCodexVm(vm)) return null
+  const siwc = vm.codex_siwc
+  return (
+    <GptRouteBadge
+      via={siwc?.enabled ? 'codex-siwc' : 'codex-kernel'}
+      reauth={siwc?.enabled && siwc.status === 'reauth_required'}
+    />
+  )
+}
+
 export function VmAccountIdentity({ vm }: { vm: Vm }) {
   const email = slotRawEmail(vm)
   const registration = credentialRegistrationOf(vm)
@@ -50,6 +62,7 @@ export function VmAccountIdentity({ vm }: { vm: Vm }) {
         >
           {clipLabel(vm.name || vm.id, 16)}
         </span>
+        <VmGptRoute vm={vm} />
       </div>
       <div className='flex min-w-0 items-center gap-1.5'>
         <div

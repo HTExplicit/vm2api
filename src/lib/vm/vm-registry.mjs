@@ -120,6 +120,7 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     org_uuid: kind.kind === 'codex' ? codex?.chatgpt_account_id || null : vm.claude?.org_uuid || null,
     has_token: kind.kind === 'codex' ? !!credential?.has_token : hasAccessPresence(vm.claude),
     expires_at: kind.kind === 'codex' ? credential?.expires_at || null : vm.claude?.expires_at || null,
+    ...(codex ? { codex_access_expires_at: codex.access_expires_at } : {}),
     refreshed_at:
       kind.kind === 'codex' ? vm.codex?.usage?.snapshot?.updated_at || null : vm.claude?.refreshed_at || null,
     oauth_source: kind.kind === 'codex' ? 'codex-credentials' : vm.claude?.source || null,

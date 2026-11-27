@@ -23,6 +23,7 @@ import {
 import { decodeJwtPayload, openaiClaimsFromIdToken, openaiIdentityFromOauthTokens } from '../oauth/openai-jwt.mjs'
 import { openaiAuthBlock, resetOpenaiAuth } from '../oauth/openai-auth-state.mjs'
 import { applyUnschedulable } from '../pool/schedule-state.mjs'
+import { expiresAtToMs } from '../oauth/oauth-credentials.mjs'
 
 export { isCodexVm }
 
@@ -527,6 +528,12 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
   const usage = codexUsageWithSample(Object.keys(extra).length ? extra : previous.snapshot || {}, previous)
   const hasAccess = !!(first.access_token || vm.codex?.has_access)
   const hasRefresh = !!(first.refresh_token || vm.codex?.has_refresh)
+  const storedExpiry = first.expires_at || vm.codex?.expires_at || null
+  const jwtExpiry = decodeJwtPayload(first.access_token || first.accessToken)?.exp
+  const jwtExpiryMs = typeof jwtExpiry === 'number' ? jwtExpiry * 1000 : 0
+  const codexExpiry = [jwtExpiryMs, expiresAtToMs(first.expires_at), expiresAtToMs(vm.codex?.expires_at)].find(
+    (ms) => ms > 0 && ms <= 8.64e15,
+  )
   const subscription = codexSubscriptionView(first, vm)
   return {
     platform: 'openai',
@@ -534,7 +541,8 @@ export function summarizeCodexSlot(projectRoot, vm = {}) {
     has_token: hasAccess || hasRefresh,
     has_refresh: hasRefresh,
     email: first.email || vm.codex?.email || vm.email || null,
-    expires_at: first.expires_at || vm.codex?.expires_at || null,
+    expires_at: storedExpiry,
+    access_expires_at: codexExpiry ?? null,
     chatgpt_account_id: first.chatgpt_account_id || vm.codex?.chatgpt_account_id || null,
     chatgpt_subscription_active_until: subscription.active_until,
     chatgpt_plan_type: first.chatgpt_plan_type || null,

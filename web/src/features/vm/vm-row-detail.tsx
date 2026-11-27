@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
 import { fmtResetClock, resetCountdown } from '@/lib/fable-status'
@@ -12,8 +13,8 @@ import {
   SLOT_BG,
   SLOT_LABEL,
 } from '@/lib/vm-health'
-import { poolStatus, scheduleStateLabel } from '@/lib/vm-status'
 import { slotRawEmail } from '@/lib/vm-kind'
+import { poolStatus, scheduleStateLabel } from '@/lib/vm-status'
 import {
   usageAccountForVm,
   vmCacheHitPct,
@@ -202,7 +203,32 @@ function HealthCard({ vm }: { vm: Vm }) {
           </div>
           {!fromList ? (
             <div className='mt-3 border-t pt-2'>
-              <div className={cn(KV_LABEL, 'mb-1 font-medium')}>主要错误</div>
+              <div
+                className={cn(
+                  KV_LABEL,
+                  'mb-1 flex items-center justify-between gap-2 font-medium'
+                )}
+              >
+                <span>主要错误</span>
+                {perms.admin &&
+                s.err > 0 &&
+                startMs != null &&
+                Number.isFinite(startMs) ? (
+                  <Link
+                    to='/logs'
+                    search={{
+                      vmId: vm.id,
+                      startTime: startMs,
+                      endTime: startMs + slots * slotMin * 60_000 + 1,
+                      failedOnly: true,
+                      includeMuted: true,
+                    }}
+                    className='text-primary underline-offset-2 hover:underline'
+                  >
+                    查看失败日志
+                  </Link>
+                ) : null}
+              </div>
               {q.data?.top_errors?.length ? (
                 q.data.top_errors.map((e) => (
                   <div
@@ -545,9 +571,7 @@ export function VmRowDetail({
       <div className='mb-2 flex flex-wrap items-center justify-between gap-2'>
         {vm.gemini ? (
           <div className='flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground'>
-            <span>
-              {slotRawEmail(vm) || '未提供邮箱'}
-            </span>
+            <span>{slotRawEmail(vm) || '未提供邮箱'}</span>
             <span>{vm.gemini.account?.plan || 'Gemini'}</span>
             <span>
               {vm.gemini.models_discovered

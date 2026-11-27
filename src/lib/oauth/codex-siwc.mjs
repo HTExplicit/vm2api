@@ -5,6 +5,7 @@ import {
   codexSiwcPath,
   readCodexSiwc,
   sameSiwcOwner,
+  siwcCanRenew,
   siwcHasAccess,
   siwcRefreshDue,
   summarizeCodexSiwc,
@@ -28,7 +29,8 @@ const DYNAMIC_CLIENT = 'dynamic_agent_client'
 const PLAN_SCOPE = 'chatgpt.tokens.use.direct'
 const SCOPES = 'openid profile email offline_access resource.invoke ' + PLAN_SCOPE
 const BIND_TTL = 5 * 60_000
-const RENEWAL_BACKOFF = 5 * 60_000
+const RENEWAL_BACKOFF_START = 30_000
+const RENEWAL_BACKOFF_MAX = 5 * 60_000
 const REJECTED_GRANTS = new Set([
   'invalid_grant',
   'invalid_refresh_token',
@@ -38,7 +40,9 @@ const REJECTED_GRANTS = new Set([
   'refresh_token_reused',
   'invalid_client',
 ])
-const NOT_SENT = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH'])
+const DNS_NOT_SENT = new Set(['ENOTFOUND', 'EAI_AGAIN'])
+const CONNECT_NOT_SENT = new Set(['ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH'])
+const REFRESH_NOT_SENT = Symbol('refresh_not_sent')
 
 function issue(code, publicMessage, status = 400) {
   return Object.assign(new Error(publicMessage), { code, publicMessage, status })
@@ -53,8 +57,26 @@ function nonce() {
 }
 
 function instant(value) {
-  if (typeof value === 'number' && Number.isFinite(value)) return value * 1000
-  return Date.parse(value || '') || null
+  const text = typeof value === 'string' ? value.trim() : ''
+  const ms = typeof value === 'number' || /^\d+(\.\d+)?$/.test(text) ? Number(value) * 1000 : Date.parse(text)
+  return Number.isFinite(ms) && ms > 0 && ms <= 8.64e15 ? ms : null
+}
+
+function wasNotSent(error) {
+  if (DNS_NOT_SENT.has(error?.code)) return true
+  // node-fetch v2 preserves the error code but can wrap the connect syscall in its reason text.
+  return (
+    CONNECT_NOT_SENT.has(error?.code) &&
+    (error.syscall === 'connect' || String(error.message).includes('reason: connect ' + error.code + ' '))
+  )
+}
+
+function renewalBackoff(record, now) {
+  const previous =
+    Number.isSafeInteger(record.refresh_failures) && record.refresh_failures > 0 ? record.refresh_failures : 0
+  const failures = Math.min(previous + 1, 5)
+  const delay = Math.min(RENEWAL_BACKOFF_MAX, RENEWAL_BACKOFF_START * 2 ** (failures - 1))
+  return { state: 'ready', refresh_failures: failures, retry_at: now + delay }
 }
 
 function parseCallback(raw, attempt) {
@@ -124,28 +146,36 @@ function verifiedEmail(identity) {
 }
 
 function tokenFields(payload, now, previous = {}) {
-  const scope = payload?.scope ?? previous.scope
-  const ttl = Number(payload?.expires_in)
+  const scope = Object.hasOwn(payload || {}, 'scope') ? payload.scope : previous.scope
+  const rawTtl = payload?.expires_in
+  const ttl = typeof rawTtl === 'number' || typeof rawTtl === 'string' ? Number(rawTtl) : NaN
+  const expiresAt = now + ttl * 1000
   if (
-    !payload?.access_token ||
-    !payload.refresh_token ||
-    !Number.isFinite(ttl) ||
+    typeof payload?.access_token !== 'string' ||
+    !payload.access_token.trim() ||
+    typeof payload.refresh_token !== 'string' ||
+    !payload.refresh_token.trim() ||
+    !Number.isSafeInteger(ttl) ||
     ttl <= 0 ||
-    !String(scope || '')
-      .split(/\s+/)
-      .includes(PLAN_SCOPE)
+    expiresAt > 8.64e15 ||
+    typeof scope !== 'string' ||
+    !scope.trim()
   ) {
     throw issue('siwc_grant_incomplete', 'OpenAI 未返回可续期的 ChatGPT 计划授权。请重新绑定。')
+  }
+  if (!scope.split(/\s+/).includes(PLAN_SCOPE)) {
+    throw issue('siwc_plan_scope_missing', 'OpenAI 授权缺少 ChatGPT 计划权限，请重新绑定。')
   }
   return {
     access_token: payload.access_token,
     refresh_token: payload.refresh_token,
-    expires_at: now + ttl * 1000,
+    expires_at: expiresAt,
     earliest_refresh_at: instant(payload.earliest_refresh_at),
     scope,
     state: 'ready',
     access_rejected: false,
     retry_at: null,
+    refresh_failures: 0,
   }
 }
 
@@ -183,27 +213,40 @@ export class CodexSiwcService {
     return summarizeCodexSiwc(this.read(vmId), owner, this.now())
   }
 
-  request(vmId, url, options = {}) {
-    const { vm } = this.slot(vmId)
+  slotExit(vm) {
     const proxyUrl = resolveSlotOAuthProxy(vm, this.proxyPool)
-    return this.fetchImpl(
-      url,
-      { ...options, redirect: 'manual', ...(proxyUrl ? { agent: createProxyAgent(proxyUrl) } : {}) },
-      { vmId, proxyUrl },
-    )
+    return { proxyUrl, agent: proxyUrl ? createProxyAgent(proxyUrl) : undefined }
   }
 
-  async postToken(vmId, fields) {
-    const response = await this.request(vmId, TOKEN_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-      body: new URLSearchParams({ ...fields, resource: SIWC_RESOURCE }).toString(),
-      signal: AbortSignal.timeout(15_000),
-    })
+  request(vmId, url, options = {}, { proxyUrl, agent } = this.slotExit(this.slot(vmId).vm)) {
+    return this.fetchImpl(url, { ...options, redirect: 'manual', ...(agent ? { agent } : {}) }, { vmId, proxyUrl })
+  }
+
+  async postToken(vmId, fields, exit) {
+    let response
+    try {
+      response = await this.request(
+        vmId,
+        TOKEN_URL,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+          body: new URLSearchParams({ ...fields, resource: SIWC_RESOURCE }).toString(),
+          signal: AbortSignal.timeout(15_000),
+        },
+        exit,
+      )
+    } catch (error) {
+      if (exit && wasNotSent(error)) {
+        throw Object.assign(new Error('SIWC refresh could not connect'), { code: REFRESH_NOT_SENT })
+      }
+      throw error
+    }
     const payload = await response.json()
     if (!response.ok) {
       const proof = typeof payload?.error === 'string' ? payload.error : payload?.error?.code
-      const code = REJECTED_GRANTS.has(proof) ? proof : 'siwc_token_exchange_failed'
+      const rejected = (response.status === 400 || response.status === 401) && REJECTED_GRANTS.has(proof)
+      const code = rejected ? proof : 'siwc_token_exchange_failed'
       throw issue(code, 'OpenAI 未完成 SIWC 换票。', response.status)
     }
     return payload
@@ -382,7 +425,7 @@ export class CodexSiwcService {
     if (!sameSiwcOwner(record?.owner, owner) || (enabled && !record.enabled) || record.state === 'unbound') {
       throw needSignIn()
     }
-    const canRefresh = record.refresh_token && !['reauth_required', 'refresh_outcome_unknown'].includes(record.state)
+    const canRefresh = siwcCanRenew(record)
     if (canRefresh && (record.state === 'refresh_pending' || siwcRefreshDue(record) <= this.now())) {
       const renewal = this.renew(vmId)
       if (!siwcHasAccess(record, this.now())) {
@@ -396,7 +439,7 @@ export class CodexSiwcService {
       throw needSignIn()
     }
     if (siwcHasAccess(record, this.now())) return record
-    if (['refresh_outcome_unknown', 'reauth_required'].includes(record.state) || !record.refresh_token) {
+    if (!siwcCanRenew(record)) {
       throw needSignIn()
     }
     throw issue('siwc_refresh_pending', 'SIWC 正在等待可续期的时间。', 503)
@@ -413,43 +456,63 @@ export class CodexSiwcService {
   async performRenewal(vmId) {
     const claim = await this.locked(vmId, () => {
       const record = this.read(vmId)
-      if (!record || !sameSiwcOwner(record.owner, this.slot(vmId).owner)) return null
+      if (!record) return null
+      const { vm, owner } = this.slot(vmId)
+      if (!sameSiwcOwner(record.owner, owner)) return null
       if (record.state === 'refresh_pending') {
-        this.write(vmId, { ...record, state: 'refresh_outcome_unknown' })
+        // A pending record without a live flight may have already spent its refresh token.
+        this.write(vmId, { ...record, state: 'refresh_outcome_unknown', retry_at: null })
         return null
       }
-      if (record.state !== 'ready' || !record.refresh_token || siwcRefreshDue(record) > this.now()) return null
-      // Resolve the exit before claiming. An unavailable binding cannot send a refresh.
-      resolveSlotOAuthProxy(this.slot(vmId).vm, this.proxyPool)
-      return this.write(vmId, { ...record, state: 'refresh_pending' })
+      if (!siwcCanRenew(record) || siwcRefreshDue(record) > this.now()) return null
+      let exit
+      try {
+        exit = this.slotExit(vm)
+      } catch {
+        this.write(vmId, { ...record, ...renewalBackoff(record, this.now()) })
+        return null
+      }
+      return { record: this.write(vmId, { ...record, state: 'refresh_pending' }), exit }
     })
-    if (!claim || this.read(vmId)?.revision !== claim.revision) return
+    if (!claim) return
+    const { record, exit } = claim
+    const stillClaimed = (current) =>
+      current?.state === 'refresh_pending' &&
+      current.revision === record.revision &&
+      current.refresh_token === record.refresh_token
+    if (!stillClaimed(this.read(vmId))) return
     let patch
     try {
-      const payload = await this.postToken(vmId, {
-        grant_type: 'refresh_token',
-        client_id: claim.client_id,
-        refresh_token: claim.refresh_token,
-      })
-      patch = tokenFields(payload, this.now(), claim)
+      const payload = await this.postToken(
+        vmId,
+        {
+          grant_type: 'refresh_token',
+          client_id: record.client_id,
+          refresh_token: record.refresh_token,
+        },
+        exit,
+      )
+      patch = tokenFields(payload, this.now(), record)
     } catch (error) {
-      if (REJECTED_GRANTS.has(error.code)) {
+      if (REJECTED_GRANTS.has(error?.code) || error?.code === 'siwc_plan_scope_missing') {
         patch = {
           state: 'reauth_required',
           access_token: null,
           refresh_token: null,
           id_token: null,
+          retry_at: null,
+          refresh_failures: 0,
           ...(error.code === 'invalid_client' ? { client_id: null } : {}),
         }
-      } else if (NOT_SENT.has(error.code)) {
-        patch = { state: 'ready', retry_at: this.now() + RENEWAL_BACKOFF }
+      } else if (error?.code === REFRESH_NOT_SENT) {
+        patch = renewalBackoff(record, this.now())
       } else {
-        patch = { state: 'refresh_outcome_unknown' }
+        patch = { state: 'refresh_outcome_unknown', retry_at: null }
       }
     }
     await this.locked(vmId, () => {
       const current = this.read(vmId)
-      if (current?.revision !== claim.revision || current?.state !== 'refresh_pending') return
+      if (!stillClaimed(current)) return
       const vm = this.getVm(vmId)
       if (!vm || !isCodexVm(vm) || !sameSiwcOwner(current.owner, this.slot(vmId).owner)) return
       this.write(vmId, { ...current, ...patch })

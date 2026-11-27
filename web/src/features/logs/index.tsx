@@ -222,7 +222,12 @@ export function LogsPage() {
     errorClass
       ? `错误类 ${ERROR_CLASS_META[errorClass]?.label || errorClass}`
       : null,
-    !errorClass && muted.length ? `不含 ${muted.length} 个已屏蔽类` : null,
+    apiFilters.includeMuted
+      ? '含已屏蔽错误'
+      : !errorClass && muted.length
+        ? `不含 ${muted.length} 个已屏蔽类`
+        : null,
+    filters.via ? '链路 SIWC' : null,
     filters.model ? `模型 ${filters.model}` : null,
     filters.sessionId ? `会话 ${filters.sessionId}` : null,
     filters.endpoint ? `端点 ${filters.endpoint}` : null,
@@ -262,6 +267,9 @@ export function LogsPage() {
           />
         ) : null}
         {filterCount > 0 ? <UsageLogsStatsPanel filters={apiFilters} /> : null}
+        {apiFilters.includeMuted ? (
+          <p className='text-xs text-muted-foreground'>含已屏蔽错误</p>
+        ) : null}
         <Collapsible open={isFilterOpen} onOpenChange={setIsFilterOpen}>
           <div className='flex items-center justify-between gap-3'>
             <CollapsibleTrigger asChild>

@@ -67,7 +67,7 @@ import {
   vmSchedulableProps,
 } from '@/features/vm/schedulable-switch'
 import { riskFg, RISK_SOLID, riskLevel } from '@/features/vm/usage-meter'
-import { PlatformMark } from '@/features/vm/vm-account-identity'
+import { PlatformMark, VmGptRoute } from '@/features/vm/vm-account-identity'
 import { VmActionMenu } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
 import {
@@ -590,6 +590,7 @@ function ProdCell({ vm }: { vm: Vm }) {
       >
         {clipLabel(vm.name || vm.id, 16)}
       </span>
+      <VmGptRoute vm={vm} />
       {plan && plan !== '—' ? (
         <span
           className={cn(

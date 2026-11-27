@@ -41,8 +41,13 @@ export function siwcModelAvailable(models, model) {
 }
 
 export function siwcRefreshDue(record) {
-  const accessDue = record.access_rejected || !record.access_token ? 0 : (record.expires_at || 0) - REFRESH_LEAD_MS
+  const accessDue =
+    record.access_rejected || !record.access_token ? 0 : Math.max(0, (record.expires_at || 0) - REFRESH_LEAD_MS)
   return Math.max(accessDue, record.earliest_refresh_at || 0, record.retry_at || 0)
+}
+
+export function siwcCanRenew(record) {
+  return !!(record?.client_id && record.refresh_token && ['ready', 'refresh_pending'].includes(record.state))
 }
 
 export function siwcHasAccess(record, now) {
@@ -55,15 +60,18 @@ export function summarizeCodexSiwc(record, owner, now = Date.now()) {
   if (!record) return null
   const bound = sameSiwcOwner(record.owner, owner) && !!record.client_id && record.state !== 'unbound'
   const access = bound && siwcHasAccess(record, now)
-  const renewable =
-    bound && !!record.refresh_token && !['reauth_required', 'refresh_outcome_unknown'].includes(record.state)
+  const renewable = bound && siwcCanRenew(record)
   let status = bound ? record.state : 'unbound'
+  if (status === 'ready' && renewable && record.retry_at > now) status = 'refresh_backoff'
   if (record.enabled && (!bound || (!access && !renewable))) status = 'reauth_required'
   return {
     enabled: record.enabled === true,
     bound,
     status,
-    expires_at: bound ? record.expires_at || null : null,
+    expires_at:
+      bound && Number.isFinite(record.expires_at) && record.expires_at > 0 && record.expires_at <= 8.64e15
+        ? record.expires_at
+        : null,
     next_refresh_at: renewable ? siwcRefreshDue(record) : null,
     has_token: access || renewable,
     has_refresh: renewable,

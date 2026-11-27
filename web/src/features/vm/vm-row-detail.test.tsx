@@ -21,6 +21,29 @@ vi.mock('@tanstack/react-query', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@tanstack/react-query')>()),
   useQuery: controls.query,
 }))
+vi.mock('@tanstack/react-router', () => ({
+  Link: ({
+    to,
+    search,
+    children,
+  }: {
+    to: string
+    search: Record<string, string | number | boolean>
+    children: string
+  }) => (
+    <a
+      href={
+        to +
+        '?' +
+        new URLSearchParams(
+          Object.entries(search).map(([key, value]) => [key, String(value)])
+        )
+      }
+    >
+      {children}
+    </a>
+  ),
+}))
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   api: controls.api,
@@ -127,6 +150,14 @@ describe('VM row cost breakdown', () => {
 })
 
 describe('VM row request health', () => {
+  it('links admins to every failure for the slot and active health range', () => {
+    const html = section(render(), '请求健康')
+    expect(html).toContain(
+      `/logs?vmId=slot+%2F+one&amp;startTime=${NOW - 86400_000}&amp;endTime=${NOW + 1}&amp;failedOnly=true&amp;includeMuted=true`
+    )
+    expect(html).toContain('查看失败日志')
+  })
+
   it('enables the explicit 24h SLA query for admins and preserves its request identity', async () => {
     const html = section(render(), '请求健康')
     expect(controls.query).toHaveBeenCalledTimes(1)

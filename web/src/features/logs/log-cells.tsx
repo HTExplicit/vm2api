@@ -6,6 +6,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { GptRouteBadge } from '@/components/gpt-route-badge'
 import { ModelVendorIcon } from '@/components/model-vendor-icon'
 import {
   copyText,
@@ -110,6 +111,16 @@ export function ThinkingEffortDisplay({ effort }: { effort: string | null }) {
 
 export function RequestResponseModelDisplay({ row }: { row: UsageLogRow }) {
   const requestedModel = row.originalModel ?? row.model
+  const hasAttempt = Boolean(row.vmId && (row.attemptCount ?? 0) > 0)
+  const via =
+    row.via === 'siwc-prewarm' || (row.via === 'codex-siwc' && row.vmId)
+      ? row.via
+      : hasAttempt &&
+          ['codex-kernel', 'codex-search', 'codex-images'].includes(
+            row.via ?? ''
+          )
+        ? 'codex-kernel'
+        : null
   return (
     <div className='flex min-w-0 flex-col leading-4'>
       <div className='flex min-w-0 items-center gap-1.5'>
@@ -126,6 +137,7 @@ export function RequestResponseModelDisplay({ row }: { row: UsageLogRow }) {
         >
           请求：{requestedModel ?? '未知'}
         </span>
+        {via ? <GptRouteBadge via={via} /> : null}
       </div>
       <span
         className={cn(

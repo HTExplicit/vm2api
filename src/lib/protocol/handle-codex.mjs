@@ -11,7 +11,7 @@ import { getVm, listVms, persistCodexUsage, summarizeVm, syncCodexQuotaSchedule 
 import { listVmRecordFiles, readJsonCached } from '../vm/vm-file.mjs'
 import { readCodexSiwc } from '../vm/codex-siwc-store.mjs'
 import { formatSiwcBody, siwcRequestProblem, streamSiwcResponses } from '../transport/siwc-responses.mjs'
-import { isCodexProtocolAllowed, isCodexVm, normalizeCodexRouting } from './codex-route.mjs'
+import { computedUpstreamTransport, isCodexProtocolAllowed, isCodexVm, normalizeCodexRouting } from './codex-route.mjs'
 import { keyAllowsVm, keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
 import { ownerScopeFromRequest, pinnedVmIdFromRequest, vmMatchesOwnerScope } from '../admin/resource-owner.mjs'
 import { normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
@@ -85,6 +85,7 @@ import {
   CLIENT_POOL_UNAVAILABLE_MESSAGE,
   ErrorCode,
   retryAfterSeconds,
+  sanitizeErrorToken,
 } from '../core/errors.mjs'
 import { applyOpenaiWashLog } from './openai-wash.mjs'
 import { appendOpenAiSystemPrompt } from './openai-system-prompt.mjs'
@@ -1101,10 +1102,64 @@ export async function handleCodexProtocol({
       // means the 403 is already written.
       if (accountGate) {
         logBag.vm_id = vm.id
-        const blocked = await accountGate(scopeAccountFromVm(vm))
-        if (blocked) {
+        try {
+          if (await accountGate(scopeAccountFromVm(vm))) {
+            lease.release()
+            return
+          }
+        } catch (error) {
           lease.release()
-          return
+          throw error
+        }
+      }
+      const useSiwc = readCodexSiwc(projectRoot, vm.id)?.enabled === true
+      const prewarm = req._kinResponsesWs?.prewarm
+      if (
+        protocol === 'openai.responses' &&
+        (useSiwc ? inbound?.generate === false : prewarm && computedUpstreamTransport(routing) === 'http')
+      ) {
+        try {
+          if (useSiwc) {
+            logBag.vm_id = vm.id
+            logBag.via = 'codex-siwc'
+          }
+          if (!useSiwc || !prewarm) {
+            stats.errors++
+            logBag.error_code = 'unsupported_prewarm'
+            logBag.error_message = useSiwc
+              ? 'SIWC 仅支持在客户端 WebSocket 上执行 generate=false 预热。'
+              : 'generate=false warmup requires upstream WebSocket'
+            return json(res, 400, {
+              error: {
+                type: 'invalid_request_error',
+                code: logBag.error_code,
+                message: logBag.error_message,
+                param: 'generate',
+              },
+            })
+          }
+          const events = prewarm(converted.body.model)
+          if (!events) {
+            stats.errors++
+            logBag.error_code = 'prewarm_input_too_large'
+            logBag.error_message = '预热上下文超过 WebSocket 续接缓存上限。'
+            return json(res, 413, {
+              error: {
+                type: 'invalid_request_error',
+                code: logBag.error_code,
+                message: logBag.error_message,
+                param: 'input',
+              },
+            })
+          }
+          logBag.via = 'siwc-prewarm'
+          logBag.final_state = 'siwc-prewarm'
+          logBag.usage = { input_tokens: 0, output_tokens: 0 }
+          writeSSEHeaders(res)
+          for (const event of events) res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+          return res.end()
+        } finally {
+          lease.release()
         }
       }
       const stickyKeys = picked.stickyKeys?.length ? picked.stickyKeys : picked.sessionKey ? [picked.sessionKey] : []
@@ -1134,8 +1189,8 @@ export async function handleCodexProtocol({
       }
       let attemptKind = 'failed'
       try {
-        const useSiwc = readCodexSiwc(projectRoot, vm.id)?.enabled === true
         logBag.via = useSiwc ? 'codex-siwc' : 'codex-kernel'
+        logBag.failure_diagnostics = null
         if (chatSse) chatSse.nativeCustomTools = useSiwc
         const localExit = isLocalEgressProxy(vm.proxy)
         const pelicanTest = isPelicanTestRequest(req)
@@ -1416,13 +1471,19 @@ export async function handleCodexProtocol({
           : (result?.firstByteMs ?? null)
         logBag.generation_ms = result?.generationMs ?? null
         logBag.failure_diagnostics = result?.failureDiagnostics ? { ...result.failureDiagnostics, kernelRunId } : null
-        const upstreamRequestId = useSiwc ? result.headers?.['x-request-id'] : null
-        if (upstreamRequestId) {
-          logBag.failure_diagnostics = { ...logBag.failure_diagnostics, upstreamRequestId }
+        if (useSiwc) {
+          const upstreamRequestId = sanitizeErrorToken(result?.headers?.['x-request-id'])
+          if (upstreamRequestId || !result?.ok) {
+            logBag.failure_diagnostics = {
+              component: 'codex-siwc',
+              upstreamRequestId,
+              upstreamHttpStatus: result?.upstreamHttpStatus ?? null,
+              responseCommitted: result?.committed === true,
+            }
+          }
         }
         if (Number(result?.status) === 400 && protocol === 'openai.responses') {
           logBag.failure_diagnostics = {
-            ...logBag.failure_diagnostics,
             ...logBag.failure_diagnostics,
             kernelRunId,
             responsesHistory: codexToolHistorySummary(outboundBody, req),

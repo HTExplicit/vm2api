@@ -3,7 +3,14 @@ import { describe, expect, it, vi } from 'vitest'
 import { ActiveFiltersDisplay } from './filters/active-filters-display'
 import { QuickFiltersBar } from './filters/quick-filters-bar'
 import { StatusFilters } from './filters/status-filters'
-import type { LogsFilterState } from './search'
+import {
+  filtersToApi,
+  filtersToSearch,
+  searchToFilters,
+  usageLogFiltersQuery,
+  validateLogsSearch,
+  type LogsFilterState,
+} from './search'
 
 vi.mock('@/components/ui/select', () => ({
   Select: ({ value, children }: { value?: string; children?: unknown }) => (
@@ -55,6 +62,28 @@ describe('non-2xx log filter wording', () => {
 })
 
 describe('failed-only filter includes committed 200 streaming failures (#1213)', () => {
+  it('includes muted entries for the SIWC investigation only', () => {
+    const filters = searchToFilters(
+      validateLogsSearch({ via: 'codex-siwc', failedOnly: true })
+    )
+    expect(filtersToSearch(filters)).toEqual({
+      via: 'codex-siwc',
+      failedOnly: true,
+    })
+    const query = usageLogFiltersQuery(filtersToApi(filters, ['request']))
+    expect(query.get('via')).toBe('codex-siwc')
+    expect(query.get('failed_only')).toBe('1')
+    expect(query.get('include_muted')).toBe('1')
+    expect(query.has('exclude_error_class')).toBe(false)
+    expect(
+      filtersToApi({ failedOnly: true }, ['request']).excludeErrorClass
+    ).toBe('request')
+    const quick = renderToStaticMarkup(
+      <QuickFiltersBar filters={filters} onChange={() => {}} />
+    )
+    expect(quick).toMatch(/aria-pressed="true"[^>]*>[\s\S]*?>SIWC</)
+  })
+
   it('exposes the 所有失败 preset alongside 仅非 2xx and renders its active chip', () => {
     const filters: LogsFilterState = { failedOnly: true }
     const quick = renderToStaticMarkup(

@@ -14,7 +14,7 @@ import { startNodeEgressSocks, stopNodeEgressSocks } from '../../src/lib/cluster
 import { handleCodexImages, handleCodexProtocol, handleCodexSearch } from '../../src/lib/protocol/handle-codex.mjs'
 import { openAIAccountHold, resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
 import { summarizeVm, getVm, persistCodexUsage } from '../../src/lib/vm/vm-registry.mjs'
-import { writeCodexAccounts } from '../../src/lib/vm/codex-slot.mjs'
+import { codexCredentialPath, readCodexAccounts, writeCodexAccounts } from '../../src/lib/vm/codex-slot.mjs'
 import { writeCodexSiwc } from '../../src/lib/vm/codex-siwc-store.mjs'
 import { resolveTestModels, runVmTestChat } from '../../src/lib/admin/vm-test-chat.mjs'
 import { buildVmDetail } from '../../src/lib/admin/panel-api.mjs'
@@ -65,6 +65,10 @@ function slot(root, id, extra = {}) {
 
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+}
+
+function renewalHits(f) {
+  return f.hits.filter(({ init }) => String(init.body).startsWith('grant_type=refresh_token'))
 }
 
 function sse(events, headers = {}) {
@@ -305,18 +309,158 @@ test('slot lifecycle can cancel an exchanging callback while holding its record 
 
 test('renewal respects the server window, single-flights a grant, and survives restart with the rotated record', async (t) => {
   const f = fixture(t)
+  const ordinaryFile = codexCredentialPath(f.root, f.vm.id)
+  const ordinaryBefore = fs.readFileSync(ordinaryFile)
   await f.bind()
-  const renewals = () => f.hits.filter(({ init }) => String(init.body).startsWith('grant_type=refresh_token'))
   f.addTime(56 * 60_000)
   await f.siwc.renew(f.vm.id)
-  assert.equal(renewals().length, 0)
+  assert.equal(renewalHits(f).length, 0)
   f.addTime(2 * 60_000)
+  const earliest = Math.floor((f.options.now() + 59 * 60_000) / 1000)
+  f.setRefresh((form) => {
+    assert.equal(form.get('client_id'), 'oaiapp_mock')
+    assert.equal(form.get('refresh_token'), 'mock-refresh')
+    return jsonResponse({
+      access_token: 'new-access',
+      refresh_token: 'new-refresh',
+      expires_in: '3600',
+      earliest_refresh_at: String(earliest),
+    })
+  })
   await Promise.all([f.siwc.renew(f.vm.id), f.siwc.renew(f.vm.id), f.siwc.renew(f.vm.id)])
-  assert.equal(renewals().length, 1)
+  assert.equal(renewalHits(f).length, 1)
   const restarted = new CodexSiwcService(f.options)
   assert.equal((await restarted.access(f.vm.id)).access_token, 'new-access')
   assert.equal(restarted.read(f.vm.id).refresh_token, 'new-refresh')
-  assert.equal(renewals().length, 1)
+  assert.equal(restarted.read(f.vm.id).scope, scope)
+  assert.equal(restarted.view(f.vm.id).next_refresh_at, earliest * 1000)
+  assert.equal(renewalHits(f).length, 1)
+
+  f.addTime(59 * 60_000)
+  f.setRefresh((form) => {
+    assert.equal(form.get('refresh_token'), 'new-refresh')
+    return jsonResponse({
+      access_token: 'newer-access',
+      refresh_token: 'newer-refresh',
+      expires_in: 3600,
+      earliest_refresh_at: 'invalid',
+    })
+  })
+  await restarted.renew(f.vm.id)
+  assert.equal(restarted.view(f.vm.id).next_refresh_at, f.options.now() + 55 * 60_000)
+  assert.equal(renewalHits(f).length, 2)
+  assert.deepEqual(fs.readFileSync(ordinaryFile), ordinaryBefore)
+})
+
+test('an expired caller joins an in-flight renewal and waits for the new access token', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const started = Promise.withResolvers()
+  const reply = Promise.withResolvers()
+  f.setRefresh(() => {
+    started.resolve()
+    return reply.promise
+  })
+  f.addTime(58 * 60_000)
+  assert.equal((await f.siwc.access(f.vm.id)).access_token, 'mock-access')
+  await started.promise
+  assert.equal(f.siwc.view(f.vm.id).status, 'refresh_pending')
+  f.addTime(3 * 60_000)
+  const expired = f.siwc.access(f.vm.id)
+  reply.resolve(jsonResponse({ access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600 }))
+  assert.equal((await expired).access_token, 'new-access')
+  assert.equal(renewalHits(f).length, 1)
+})
+
+test('proxy preflight and connection failures persist bounded backoff until rotation succeeds', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  f.addTime(58 * 60_000)
+  f.siwc.proxyPool = { snapshot: () => ({ proxies: [{ id: 'px-bound', enabled: false }] }) }
+  await f.siwc.renew(f.vm.id)
+  assert.equal(renewalHits(f).length, 0)
+  assert.equal(f.siwc.view(f.vm.id).status, 'refresh_backoff')
+  assert.equal(f.siwc.view(f.vm.id).next_refresh_at, f.options.now() + 30_000)
+
+  const restarted = new CodexSiwcService(f.options)
+  await restarted.renew(f.vm.id)
+  assert.equal(renewalHits(f).length, 0)
+  f.addTime(30_000)
+  f.setRefresh((form) => {
+    assert.equal(form.get('refresh_token'), 'mock-refresh')
+    throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED', syscall: 'connect' })
+  })
+  for (const delay of [60_000, 120_000, 240_000, 300_000, 300_000]) {
+    const count = renewalHits(f).length
+    await restarted.renew(f.vm.id)
+    assert.equal(restarted.view(f.vm.id).status, 'refresh_backoff')
+    assert.equal(restarted.view(f.vm.id).next_refresh_at, f.options.now() + delay)
+    f.addTime(delay - 1)
+    await restarted.renew(f.vm.id)
+    assert.equal(renewalHits(f).length, count + 1)
+    f.addTime(1)
+  }
+  f.setRefresh(() => jsonResponse({ access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600 }))
+  assert.equal((await restarted.access(f.vm.id)).access_token, 'new-access')
+  assert.equal(restarted.read(f.vm.id).refresh_failures, 0)
+  assert.equal(restarted.read(f.vm.id).retry_at, null)
+})
+
+test('a pending renewal result cannot overwrite a newer binding', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const started = Promise.withResolvers()
+  const reply = Promise.withResolvers()
+  f.setRefresh(() => {
+    started.resolve()
+    return reply.promise
+  })
+  f.addTime(58 * 60_000)
+  const renewal = f.siwc.renew(f.vm.id)
+  await started.promise
+  const revision = f.siwc.read(f.vm.id).revision
+  await f.bind()
+  const rebound = f.siwc.read(f.vm.id)
+  assert.notEqual(rebound.revision, revision)
+  reply.resolve(jsonResponse({ access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600, scope }))
+  await renewal
+  assert.deepEqual(f.siwc.read(f.vm.id), rebound)
+})
+
+test('a response read failure never permits replay, even with a connect error code', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  f.addTime(58 * 60_000)
+  f.setRefresh(() => ({
+    json: async () => {
+      throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED', syscall: 'connect' })
+    },
+  }))
+  await f.siwc.renew(f.vm.id)
+  assert.equal(f.siwc.view(f.vm.id).status, 'refresh_outcome_unknown')
+  assert.equal(f.siwc.view(f.vm.id).next_refresh_at, null)
+  assert.equal((await f.siwc.access(f.vm.id)).access_token, 'mock-access')
+  f.addTime(3 * 60_000)
+  await assert.rejects(f.siwc.access(f.vm.id), { code: 'siwc_reauth_required' })
+  assert.equal(renewalHits(f).length, 1)
+})
+
+test('a renewed token without the ChatGPT plan scope requires rebinding', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  f.addTime(58 * 60_000)
+  f.setRefresh(() =>
+    jsonResponse({
+      access_token: 'new-access',
+      refresh_token: 'new-refresh',
+      expires_in: 3600,
+      scope: 'openid profile offline_access',
+    }),
+  )
+  await f.siwc.renew(f.vm.id)
+  assert.equal(f.siwc.view(f.vm.id).status, 'reauth_required')
+  assert.equal(f.siwc.view(f.vm.id).next_refresh_at, null)
+  await assert.rejects(f.siwc.access(f.vm.id), { code: 'siwc_reauth_required' })
 })
 
 test('lost renewal and an interrupted process do not replay a possibly used grant', async (t) => {
@@ -585,6 +729,49 @@ test('the panel exposes only SIWC summary and limits management to administrator
   assert.equal((await call('DELETE', 'admin')).body.data.bound, false)
 })
 
+test('GPT slot detail exposes independent Codex and SIWC expiries with either chain selected', async (t) => {
+  const f = fixture(t)
+  const [ordinary] = readCodexAccounts(f.root, f.vm.id)
+  const jwtExpiry = Math.floor(f.options.now() / 1000) + 1200
+  const storedExpiry = jwtExpiry + 700
+  const subscription = new Date((jwtExpiry + 86_400) * 1000).toISOString()
+  writeCodexAccounts(f.root, f.vm.id, [
+    {
+      ...ordinary,
+      access_token: jwt({ exp: jwtExpiry }),
+      expires_at: storedExpiry,
+      chatgpt_subscription_active_until: subscription,
+    },
+  ])
+  await f.bind()
+  const detail = async () =>
+    (
+      await buildVmDetail({
+        cfg: { paths: { project: f.root }, rewrite: {}, base_url: '' },
+        id: f.vm.id,
+        accountQuota: { config: {}, snapshot: () => ({ accounts: [] }) },
+      })
+    ).data.vm
+
+  const siwc = await detail()
+  assert.equal(siwc.codex_access_expires_at, jwtExpiry * 1000)
+  assert.equal(siwc.codex_siwc.expires_at, f.options.now() + 3600_000)
+  assert.equal(siwc.expires_at, siwc.codex_siwc.expires_at)
+  assert.equal(siwc.chatgpt_subscription_active_until, subscription)
+  await f.siwc.setEnabled(f.vm.id, false)
+  const codex = await detail()
+  assert.equal(codex.codex_access_expires_at, jwtExpiry * 1000)
+  assert.equal(codex.codex_siwc.expires_at, siwc.codex_siwc.expires_at)
+  assert.equal(codex.expires_at, storedExpiry * 1000)
+
+  writeCodexAccounts(f.root, f.vm.id, [{ ...ordinary, expires_at: storedExpiry }])
+  assert.equal((await detail()).codex_access_expires_at, storedExpiry * 1000)
+  writeCodexAccounts(f.root, f.vm.id, [ordinary])
+  assert.equal((await detail()).codex_access_expires_at, null)
+  await f.siwc.unbind(f.vm.id)
+  assert.equal((await detail()).codex_siwc.expires_at, null)
+})
+
 test('SIWC continues to respect the existing Codex usage window', async (t) => {
   const f = fixture(t)
   await f.bind()
@@ -662,13 +849,14 @@ test('custom tools keep the public Chat shape and full upstream call history', a
   assert.match(stream.text, /"custom":\{"input":"hello again"\}/)
 })
 
-async function listenGateway(t, f) {
+async function listenGateway(t, f, { upstreamTransport, codexOps, logs = [], maxBodyBytes = 1024 * 1024 } = {}) {
   const routingWithWs = {
     ...routing,
     websocket: { enabled: true },
     codex: {
       ...routing.codex,
       websocket: { enabled: true },
+      ...(upstreamTransport && { upstream_transport: upstreamTransport }),
       clients: { openai_compatible: 'allow', official_codex: 'allow', unknown: 'allow' },
     },
   }
@@ -687,7 +875,7 @@ async function listenGateway(t, f) {
     rewrite: { enabled: false },
     distill: { enabled: false },
     intercept: { rules: [] },
-    limits: { max_body_bytes: 1024 * 1024 },
+    limits: { max_body_bytes: maxBodyBytes },
     paths: { project: f.root, data: f.root },
   }
   const { handleProtocol } = createHandleProtocol({
@@ -695,7 +883,8 @@ async function listenGateway(t, f) {
     requireAuth,
     cfg,
     routingConfig: routingWithWs,
-    requestLog: { start: () => ({ id: 'mock-log' }), finish() {} },
+    requestLog: { start: () => ({ id: 'mock-log' }), finish: (_ctx, row) => logs.push(row) },
+    groupsRepo: { rateMultiplier: () => 1 },
     readBody: async (req) => {
       const chunks = []
       for await (const chunk of req) chunks.push(chunk)
@@ -707,9 +896,15 @@ async function listenGateway(t, f) {
     accountQuota: { sessions: null, ingestHeaders() {} },
     stats: { requests: 0, errors: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
     codexSiwc: f.siwc,
-    codexOps: { writeCodexKernelConfig: () => assert.fail('native slot must stay untouched') },
+    codexOps: codexOps || { writeCodexKernelConfig: () => assert.fail('native slot must stay untouched') },
   })
-  const ws = createResponsesWsHandler({ handleProtocol, requireAuth, json, getRouting: () => routingWithWs })
+  const ws = createResponsesWsHandler({
+    handleProtocol,
+    requireAuth,
+    json,
+    maxBodyBytes,
+    getRouting: () => routingWithWs,
+  })
   const server = http.createServer((req, res) => {
     void handleProtocol(req, res, 'openai.responses', '/v1/responses').catch((err) => res.destroy(err))
   })
@@ -721,6 +916,166 @@ async function listenGateway(t, f) {
   t.after(() => new Promise((resolve) => server.close(resolve)))
   return '127.0.0.1:' + server.address().port
 }
+
+function wsTurn(socket, body) {
+  return new Promise((resolve) => {
+    const frames = []
+    const onMessage = (message) => {
+      const frame = JSON.parse(message)
+      frames.push(frame)
+      if (['error', 'response.completed', 'response.failed'].includes(frame.type)) {
+        socket.off('message', onMessage)
+        resolve(frames)
+      }
+    }
+    socket.on('message', onMessage)
+    socket.send(JSON.stringify({ type: 'response.create', ...body }))
+  })
+}
+
+test('SIWC locally acknowledges chained WebSocket prewarms and sends only the generating continuation', {
+  timeout: 10000,
+}, async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const outgoing = []
+  f.setInference((body) => {
+    outgoing.push(body)
+    return sse([completion()])
+  })
+  const logs = []
+  const host = await listenGateway(t, f, { upstreamTransport: 'http', logs })
+  const client = new WebSocket('ws://' + host + '/v1/responses')
+  const other = new WebSocket('ws://' + host + '/v1/responses')
+  try {
+    await Promise.all([once(client, 'open'), once(other, 'open')])
+    const [created, completed] = await wsTurn(client, {
+      model,
+      generate: false,
+      input: 'first',
+      instructions: 'stay concise',
+    })
+    assert.equal(created.type, 'response.created')
+    assert.equal(completed.type, 'response.completed')
+    assert.equal(created.response.id, completed.response.id)
+    assert.deepEqual(completed.response.usage, {
+      input_tokens: 0,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 0,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: 0,
+    })
+    const [, next] = await wsTurn(client, {
+      previous_response_id: completed.response.id,
+      generate: false,
+      input: 'second',
+    })
+    assert.equal(next.type, 'response.completed')
+    assert.equal(next.response.model, model)
+    assert.equal(outgoing.length, 0)
+    assert.deepEqual(
+      logs.map((row) => [row.via, row.final_state, row.attempt_count]),
+      [
+        ['siwc-prewarm', 'siwc-prewarm', 0],
+        ['siwc-prewarm', 'siwc-prewarm', 0],
+      ],
+    )
+    const [wrongConnection] = await wsTurn(other, { model, input: 'other', previous_response_id: next.response.id })
+    assert.equal(wrongConnection.error.code, 'previous_response_not_found')
+    assert.equal(outgoing.length, 0)
+    const [generated] = await wsTurn(client, { previous_response_id: next.response.id, generate: true, input: 'third' })
+    assert.equal(generated.type, 'response.completed')
+    assert.equal(outgoing.length, 1)
+    assert.deepEqual(
+      outgoing[0].input.map((item) => item.content[0].text),
+      ['first', 'second', 'third'],
+    )
+    assert.equal(outgoing[0].instructions, 'stay concise')
+    assert.equal(outgoing[0].model, model)
+    assert.equal(Object.hasOwn(outgoing[0], 'generate'), false)
+    assert.equal(Object.hasOwn(outgoing[0], 'previous_response_id'), false)
+    assert.equal(logs.at(-1).via, 'codex-siwc')
+  } finally {
+    client.terminate()
+    other.terminate()
+  }
+})
+
+test('oversized SIWC WebSocket prewarm receives no unusable response ID', { timeout: 10000 }, async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const host = await listenGateway(t, f, { maxBodyBytes: 10 * 1024 * 1024 })
+  const client = new WebSocket('ws://' + host + '/v1/responses')
+  try {
+    await once(client, 'open')
+    const [frame] = await wsTurn(client, { model, generate: false, input: 'a'.repeat(8 * 1024 * 1024) })
+    assert.equal(frame.type, 'error')
+    assert.equal(frame.status, 413)
+    assert.equal(frame.error.code, 'prewarm_input_too_large')
+    assert.equal(f.hits.filter(({ url }) => url.endsWith('/responses')).length, 0)
+  } finally {
+    client.terminate()
+  }
+})
+
+test('SIWC does not turn HTTP generate=false into inference and reports real upstream 400s', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const prewarm = await infer(f, 'openai.responses', { generate: false, input: 'prewarm' })
+  assert.equal(prewarm.status, 400)
+  assert.equal(prewarm.payload.error.code, 'unsupported_prewarm')
+  assert.equal(f.hits.filter(({ url }) => url.endsWith('/responses')).length, 0)
+  f.setInference((body) => {
+    assert.equal(Object.hasOwn(body, 'generate'), false)
+    return new Response(JSON.stringify({ detail: 'Unsupported parameter: example' }), {
+      status: 400,
+      headers: { 'x-request-id': 'mock-upstream-400' },
+    })
+  })
+  const rejected = await infer(f, 'openai.responses', { generate: true, input: 'hello' })
+  assert.equal(rejected.status, 400)
+  assert.equal(rejected.payload.error.message, 'Unsupported parameter: example')
+  assert.equal(rejected.logBag.upstream_status, 400)
+  assert.equal(rejected.logBag.via, 'codex-siwc')
+  assert.equal(rejected.logBag.failure_diagnostics.upstreamHttpStatus, 400)
+  assert.equal(rejected.logBag.failure_diagnostics.upstreamRequestId, 'mock-upstream-400')
+})
+
+test('native Codex retains generate=false on WebSocket and rejects it on the HTTP-only upstream', {
+  timeout: 10000,
+}, async (t) => {
+  for (const upstreamTransport of ['prefer_websocket', 'http']) {
+    const f = fixture(t)
+    const nativeHops = []
+    const host = await listenGateway(t, f, {
+      upstreamTransport,
+      codexOps: {
+        writeCodexKernelConfig: () => null,
+        ensureCodexKernel: async () => ({ ok: true }),
+        streamCodexKernel: async ({ body, onEvent }) => {
+          nativeHops.push(body)
+          const terminal = completion('resp_native_prewarm')
+          await onEvent('data: ' + JSON.stringify(terminal))
+          return { ok: true, status: 200, body: terminal.response, terminalState: 'verified' }
+        },
+      },
+    })
+    const client = new WebSocket('ws://' + host + '/v1/responses')
+    try {
+      await once(client, 'open')
+      const [frame] = await wsTurn(client, { model, input: 'warmup', generate: false })
+      if (upstreamTransport === 'http') {
+        assert.equal(frame.error.code, 'unsupported_prewarm')
+        assert.equal(nativeHops.length, 0)
+      } else {
+        assert.equal(frame.response.id, 'resp_native_prewarm')
+        assert.equal(nativeHops[0].generate, false)
+      }
+    } finally {
+      client.terminate()
+    }
+  }
+})
 
 test('existing WebSocket continuation and panel test chat both reach SIWC', { timeout: 5000 }, async (t) => {
   const f = fixture(t)

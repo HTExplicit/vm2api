@@ -30,7 +30,7 @@ export function statusBadgeClass(
   finalState: string | null | undefined = null,
   errorClass: string | null = null
 ): string {
-  if (finalState === 'cancelled')
+  if (finalState === 'cancelled' || finalState === 'siwc-prewarm')
     return 'bg-gray-100 text-gray-700 border-gray-300 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-600'
   if (
     statusCode != null &&
@@ -74,6 +74,7 @@ function isFailedTerminal(state: string | null | undefined): boolean {
     !!state &&
     state !== 'verified' &&
     state !== 'started' &&
+    state !== 'siwc-prewarm' &&
     state !== 'cancelled'
   )
 }
@@ -84,6 +85,7 @@ export function isSuccessfulRequest(
   return (
     isSuccessStatus(row.statusCode) &&
     row.finalState !== 'cancelled' &&
+    row.finalState !== 'siwc-prewarm' &&
     !isFailedTerminal(row.finalState) &&
     !row.errorClass
   )
@@ -95,6 +97,7 @@ export function statusBadgeLabel(
   errorLabel: string | null
 ): string {
   if (finalState === 'cancelled') return '已取消'
+  if (finalState === 'siwc-prewarm') return '预热完成'
   if (errorLabel) return errorLabel
   if (isFailedTerminal(finalState))
     return terminalStateLabel(finalState) || '请求失败'
@@ -379,6 +382,7 @@ export function selectionReasonLabel(reason: string | null): string | null {
 
 const TERMINAL_STATE_LABELS: Record<string, string> = {
   verified: '成功',
+  'siwc-prewarm': '预热完成',
   incomplete: '响应未完整结束',
   transport_error: '传输错误',
   cancelled: '已取消',

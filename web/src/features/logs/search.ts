@@ -21,6 +21,8 @@ export type LogsSearch = {
   statusCode?: number | '!200'
   /** 筛选所有失败请求（含流式 200 失败终态）。 */
   failedOnly?: boolean
+  via?: 'codex-siwc'
+  includeMuted?: boolean
   model?: string
   /** 发送与上游返回模型均已知且名称不同。 */
   mismatch?: boolean
@@ -48,6 +50,8 @@ export type LogsFilterState = {
   excludeStatus200?: boolean
   errorsOnly?: boolean
   failedOnly?: boolean
+  via?: 'codex-siwc'
+  includeMuted?: boolean
   model?: string
   mismatch?: boolean
   endpoint?: string
@@ -97,6 +101,8 @@ export function validateLogsSearch(
     endTime: search.endTime == null ? undefined : int(search.endTime),
     statusCode,
     failedOnly: flag(search.failedOnly),
+    via: search.via === 'codex-siwc' ? search.via : undefined,
+    includeMuted: flag(search.includeMuted),
     model: str(search.model),
     mismatch: flag(search.mismatch),
     endpoint: str(search.endpoint),
@@ -123,6 +129,8 @@ export function searchToFilters(search: LogsSearch): LogsFilterState {
     excludeStatus200: exclude || undefined,
     errorsOnly: search.kind === 'error' || undefined,
     failedOnly: search.failedOnly,
+    via: search.via,
+    includeMuted: search.includeMuted,
     model: search.model,
     mismatch: search.mismatch,
     endpoint: search.endpoint,
@@ -147,6 +155,8 @@ export function filtersToSearch(filters: LogsFilterState): LogsSearch {
   else if (filters.statusCode != null) out.statusCode = filters.statusCode
   if (filters.errorsOnly) out.kind = 'error'
   if (filters.failedOnly) out.failedOnly = true
+  if (filters.via) out.via = filters.via
+  if (filters.includeMuted) out.includeMuted = true
   if (filters.model) out.model = filters.model
   if (filters.mismatch) out.mismatch = true
   if (filters.endpoint) out.endpoint = filters.endpoint
@@ -179,9 +189,15 @@ export function filtersToApi(
   if (filters.errorsOnly) out.errorsOnly = true
   if (filters.mismatch) out.responseModelMismatch = true
   if (filters.failedOnly) out.failedOnly = true
+  if (filters.via) out.via = filters.via
   if (filters.minRetry != null && filters.minRetry > 0)
     out.minAttemptCount = filters.minRetry + 1
   if (filters.errorClass) out.errorClass = filters.errorClass
+  else if (
+    filters.includeMuted ||
+    (filters.via === 'codex-siwc' && filters.failedOnly)
+  )
+    out.includeMuted = true
   else if (muted.length) out.excludeErrorClass = muted.join(',')
   if (filters.debugOnly) out.debugOnly = true
   if (filters.startTime != null)
@@ -240,6 +256,8 @@ export function activeFilterCount(filters: LogsFilterState): number {
   if (filters.statusCode != null || filters.excludeStatus200) count++
   if (filters.errorsOnly) count++
   if (filters.failedOnly) count++
+  if (filters.via) count++
+  if (filters.includeMuted) count++
   if (filters.model) count++
   if (filters.mismatch) count++
   if (filters.endpoint) count++

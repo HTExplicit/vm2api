@@ -156,7 +156,12 @@ function VmDetailBody({
   const proxies = useQuery({ ...proxiesQueryOptions(), enabled: perms.admin })
   const detail = useQuery({
     ...vmQueryOptions(id),
-    refetchInterval: wantedTab === 'seed' ? 2000 : false,
+    refetchInterval: (query) => {
+      if (wantedTab === 'seed') return 2000
+      return wantedTab === 'account' && isCodexVm(query.state.data?.vm)
+        ? 30_000
+        : false
+    },
   })
   const seed = useQuery({
     ...vmSeedQueryOptions(id),

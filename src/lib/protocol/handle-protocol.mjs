@@ -58,7 +58,7 @@ import { costColumnsFromUsage } from '../admin/pricing.mjs'
 import { detectInboundPlatform } from './platform-detect.mjs'
 import { canonicalImageToolModel } from './image-tool-models.mjs'
 import { imageModelAnswer, imageModelStreamError, imagesRequestFromTurn } from './image-model-bridge.mjs'
-import { normalizeCodexRouting } from './codex-route.mjs'
+import { computedUpstreamTransport, normalizeCodexRouting } from './codex-route.mjs'
 import { applyCodexInboundModelRewrite } from './codex-model-mapping.mjs'
 import { hasClaudeCode1mSuffix } from './context-1m.mjs'
 import {
@@ -1626,6 +1626,23 @@ export function createHandleProtocol(deps) {
         if (!apiPicked.ok) return unavailable()
         if (apiOpenAI && validateApiOpenAIRequest(protocol, apiInbound)) return unavailable()
       }
+    }
+    if (
+      req._kinResponsesWs?.prewarm &&
+      computedUpstreamTransport(getRouting()) === 'http' &&
+      (platform.platform !== 'openai' || inferenceBackend === 'api')
+    ) {
+      stats.errors++
+      logBag.error_code = 'unsupported_prewarm'
+      logBag.error_message = 'generate=false warmup requires upstream WebSocket'
+      return json(res, 400, {
+        error: {
+          type: 'invalid_request_error',
+          code: logBag.error_code,
+          message: logBag.error_message,
+          param: 'generate',
+        },
+      })
     }
     if (platform.platform === 'openai' && inferenceBackend !== 'api') {
       const routing = getRouting() || {}
