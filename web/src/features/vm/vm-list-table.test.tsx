@@ -470,6 +470,28 @@ describe('VM account column kernel label', () => {
 })
 
 describe('VM list summary and toggles', () => {
+  it.each(['s', 'l'] as const)(
+    'shows Codex session capacity on %s rack cards without Claude seats',
+    (size) => {
+      const vm: Vm = {
+        id: 'vm-codex',
+        platform: 'openai',
+        status: 'running',
+        has_token: true,
+        seats_max: null,
+        sessions: { active: 0, max: 8 },
+      }
+      const html = renderToStaticMarkup(
+        <QueryClientProvider client={new QueryClient()}>
+          <VmRack vms={[vm]} filter='all' size={size} />
+        </QueryClientProvider>
+      )
+      expect(html).toContain('title="GPT 会话数 / 上限"')
+      expect(html).toContain('>会话</span>')
+      expect(html).toContain('>0</b>/8')
+    }
+  )
+
   it('renders the fleet summary and both list toggles', () => {
     const buckets = Array.from({ length: 48 }, (_, i): [number, number] =>
       i === 47 ? [9, 1] : [0, 0]

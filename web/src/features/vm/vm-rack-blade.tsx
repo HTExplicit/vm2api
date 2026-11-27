@@ -7,6 +7,7 @@ import {
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
 import { Download, LifeBuoy, Link2, RefreshCw } from 'lucide-react'
+import { sessionCapOf } from '@/lib/fable-status'
 import { fmtAgo, fmtNum, fmtUsd } from '@/lib/format'
 import {
   geminiAccountStatus,
@@ -224,9 +225,7 @@ export function GeminiSlotStatus({
 }
 
 /**
- * 席位容量：一条按「已用 / 设置上限」缩放的定宽条。
- * 已用只含正在跑的请求，以及已排在这台 VM 上的后续请求。对话结束即释放。
- * 悬浮列出实际占着槽的 session。上限可设到 20，容量条宽度与上限无关。
+ * 按已用和上限显示 Claude 席位、Gemini 容量或 GPT 会话数。
  */
 export function VmSeats({
   vm,
@@ -235,9 +234,10 @@ export function VmSeats({
   vm: Vm
   compact?: boolean
 }) {
-  if (vm.seats_max == null) return null
-  const used = Number(vm.seats_used) || 0
-  const max = Number(vm.seats_max) || 0
+  const sessions = vm.seats_max == null ? sessionCapOf(vm) : null
+  const max = sessions?.max ?? vm.seats_max
+  if (max == null) return null
+  const used = sessions?.active ?? (Number(vm.seats_used) || 0)
   const grace = Math.min(used, Number(vm.seats_grace) || 0)
   const queued = Number(vm.queue_depth) || 0
   const share = (n: number) => (max > 0 ? Math.min(100, (n / max) * 100) : 0)
@@ -245,9 +245,9 @@ export function VmSeats({
   return (
     <span
       className='inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap'
-      title={seatTitle(vm)}
+      title={sessions ? 'GPT 会话数 / 上限' : seatTitle(vm)}
     >
-      {compact ? null : <span>席位</span>}
+      {sessions ? <span>会话</span> : compact ? null : <span>席位</span>}
       <span
         aria-hidden='true'
         className={cn(
