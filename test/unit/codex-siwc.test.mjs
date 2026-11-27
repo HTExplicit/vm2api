@@ -12,6 +12,7 @@ import { Response } from 'node-fetch'
 import { CodexSiwcService, SIWC_REDIRECT_URI, SIWC_RESOURCE } from '../../src/lib/oauth/codex-siwc.mjs'
 import { startNodeEgressSocks, stopNodeEgressSocks } from '../../src/lib/cluster/node-egress-socks.mjs'
 import { handleCodexImages, handleCodexProtocol, handleCodexSearch } from '../../src/lib/protocol/handle-codex.mjs'
+import { CODEX_SEARCH_URL } from '../../src/lib/protocol/codex-models.mjs'
 import { openAIAccountHold, resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
 import { summarizeVm, getVm, persistCodexUsage } from '../../src/lib/vm/vm-registry.mjs'
 import { codexCredentialPath, readCodexAccounts, writeCodexAccounts } from '../../src/lib/vm/codex-slot.mjs'
@@ -600,30 +601,150 @@ test('the node local-exit forwarder is used for bind, catalog and inference', as
   assert.ok(f.hits.every(({ exit }) => exit.proxyUrl === forwarder.url('node-a')))
 })
 
-test('unsupported tools and standalone routes never use either credential on a pinned SIWC slot', async (t) => {
+test('unsupported tools and standalone images never use either credential on a pinned SIWC slot', async (t) => {
   const f = fixture(t)
   await f.bind()
   const result = await infer(f, 'openai.responses', { input: 'hello', tools: [{ type: 'image_generation' }] })
   assert.equal(result.status, 400)
   assert.equal(result.payload.error.code, 'siwc_unsupported_capability')
-  for (const route of [handleCodexImages, handleCodexSearch]) {
-    const answer = await route({
-      req: { headers: { 'x-kin-vm': f.vm.id }, apiKeyKind: 'master' },
-      res: {},
-      json: (_res, status, payload) => ({ status, payload }),
-      body: { model },
-      kind: 'generations',
-      projectRoot: f.root,
-      stats: { errors: 0 },
-      logBag: {},
-      ops: {
-        postCodexJson: () => assert.fail('ordinary image hop'),
-        postCodexSearch: () => assert.fail('ordinary search hop'),
+  const answer = await handleCodexImages({
+    req: { headers: { 'x-kin-vm': f.vm.id }, apiKeyKind: 'master' },
+    res: {},
+    json: (_res, status, payload) => ({ status, payload }),
+    body: { model },
+    kind: 'generations',
+    projectRoot: f.root,
+    stats: { errors: 0 },
+    logBag: {},
+    ops: { postCodexJson: () => assert.fail('ordinary image hop') },
+  })
+  assert.equal(answer.payload.error.code, 'siwc_unsupported_capability')
+  assert.equal(f.hits.filter(({ url }) => url.endsWith('/responses')).length, 0)
+})
+
+async function searchOnSlot(f, { pin, key, fetchImpl = () => assert.fail('unexpected search hop'), refresh } = {}) {
+  const logBag = {}
+  const response = await handleCodexSearch({
+    req: {
+      headers: pin ? { 'x-kin-vm': pin } : {},
+      apiKeyKind: key ? 'managed' : 'master',
+      apiKeyRecord: key,
+    },
+    res: {},
+    json: (_res, status, payload) => ({ status, payload }),
+    body: { model: 'gpt-6.1-sol', commands: { search_query: [{ q: 'search fixture' }] } },
+    projectRoot: f.root,
+    stats: { requests: 0, errors: 0, by_route: {} },
+    logBag,
+    ops: { fetchImpl, refresh },
+  })
+  return { ...response, logBag }
+}
+
+test('automatic and pinned search use the ordinary OAuth grant of the selected SIWC slot', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const before = f.siwc.read(f.vm.id)
+  for (const pin of [null, f.vm.id]) {
+    let calls = 0
+    const search = await searchOnSlot(f, {
+      pin,
+      fetchImpl: async (url, options) => {
+        calls++
+        assert.equal(url, CODEX_SEARCH_URL)
+        assert.equal(options.headers.authorization, 'Bearer ordinary-access-' + f.vm.id)
+        assert.equal(options.headers['chatgpt-account-id'], 'workspace-' + f.vm.id)
+        assert.equal(JSON.parse(options.body).model, 'gpt-6.1-sol')
+        return jsonResponse({ results: [{ type: 'text_result' }] })
       },
     })
-    assert.equal(answer.payload.error.code, 'siwc_unsupported_capability')
+    assert.equal(search.status, 200)
+    assert.deepEqual(search.payload.results, [{ type: 'text_result' }])
+    assert.equal(search.logBag.vm_id, f.vm.id)
+    assert.equal(search.logBag.via, 'codex-search')
+    assert.equal(search.logBag.attempt_count, 1)
+    assert.equal(calls, 1)
   }
-  assert.equal(f.hits.filter(({ url }) => url.endsWith('/responses')).length, 0)
+  const responses = await infer(f, 'openai.responses', { input: 'hello', stream: false }, { pin: null })
+  assert.equal(responses.status, 200)
+  assert.equal(responses.logBag.via, 'codex-siwc')
+  assert.deepEqual(f.siwc.read(f.vm.id), before)
+})
+
+test('search refreshes only the ordinary grant of an SIWC slot on a 401', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const before = f.siwc.read(f.vm.id)
+  const tokensUsed = []
+  let refreshes = 0
+  const search = await searchOnSlot(f, {
+    fetchImpl: async (_url, options) => {
+      const auth = options.headers.authorization
+      tokensUsed.push(auth)
+      return auth === 'Bearer rotated-access'
+        ? jsonResponse({ results: [] })
+        : jsonResponse({ error: { code: 'token_expired' } }, 401)
+    },
+    refresh: async ({ refreshToken }) => {
+      refreshes++
+      assert.equal(refreshToken, 'ordinary-refresh-' + f.vm.id)
+      return { ok: true, access_token: 'rotated-access', refresh_token: 'rotated-refresh' }
+    },
+  })
+  assert.equal(search.status, 200)
+  assert.deepEqual(tokensUsed, ['Bearer ordinary-access-' + f.vm.id, 'Bearer rotated-access'])
+  assert.equal(refreshes, 1)
+  assert.equal(readCodexAccounts(f.root, f.vm.id)[0].refresh_token, 'rotated-refresh')
+  assert.deepEqual(f.siwc.read(f.vm.id), before)
+})
+
+test('missing or rejected ordinary credentials block search while SIWC inference remains available', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const [ordinary] = readCodexAccounts(f.root, f.vm.id)
+  writeCodexAccounts(f.root, f.vm.id, [{ ...ordinary, access_token: '', refresh_token: '' }])
+  const missing = await searchOnSlot(f)
+  assert.equal(missing.status, 503)
+  assert.equal(missing.payload.error.code, 'no_codex_vm')
+  assert.match(missing.logBag.error_message, /普通 Codex 凭据/)
+  assert.equal((await searchOnSlot(f, { pin: f.vm.id })).payload.error.code, 'credential_blocked')
+
+  const expiredAccess = jwt({ exp: Math.floor(Date.now() / 1000) - 60 })
+  writeCodexAccounts(f.root, f.vm.id, [{ ...ordinary, access_token: expiredAccess, refresh_token: '' }])
+  assert.equal((await searchOnSlot(f)).payload.error.code, 'no_codex_vm')
+  assert.equal((await searchOnSlot(f, { pin: f.vm.id })).payload.error.code, 'credential_blocked')
+
+  writeCodexAccounts(f.root, f.vm.id, [{ ...ordinary, refresh_token: '' }])
+  const rejected = await searchOnSlot(f, {
+    fetchImpl: async () => jsonResponse({ error: { code: 'token_revoked' } }, 401),
+  })
+  assert.equal(rejected.status, 401)
+  assert.equal((await searchOnSlot(f, { pin: f.vm.id })).payload.error.code, 'credential_blocked')
+  const responses = await infer(f, 'openai.responses', { input: 'hello', stream: false }, { pin: null })
+  assert.equal(responses.status, 200)
+  assert.equal(responses.logBag.via, 'codex-siwc')
+})
+
+test('SIWC search respects the scheduler, slot model allowlist, and key and owner scopes', async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const recordFile = path.join(f.root, 'vms', f.vm.id + '.json')
+  const confined = await searchOnSlot(f, { key: { group_type: 'openai', allowed_vms: ['another-slot'] } })
+  assert.equal(confined.payload.error.code, 'no_codex_vm')
+
+  fs.writeFileSync(recordFile, JSON.stringify({ ...f.vm, owner_user_id: 'tenant-slot-owner' }))
+  const crossTenant = await searchOnSlot(f, { pin: f.vm.id })
+  assert.equal(crossTenant.payload.error.code, 'key_group_mismatch')
+
+  fs.writeFileSync(recordFile, JSON.stringify({ ...f.vm, policy: { allowed_models: [model] } }))
+  assert.equal((await searchOnSlot(f)).payload.error.code, 'model_not_allowed')
+
+  fs.writeFileSync(recordFile, JSON.stringify({ ...f.vm, schedulable: false, schedule_off: true }))
+  assert.equal((await searchOnSlot(f)).payload.error.code, 'no_codex_vm')
+
+  fs.writeFileSync(recordFile, JSON.stringify({ ...f.vm, status: 'stopped' }))
+  assert.equal((await searchOnSlot(f)).payload.error.code, 'no_codex_vm')
+  assert.equal((await searchOnSlot(f, { pin: f.vm.id })).payload.error.code, 'vm_stopped')
 })
 
 test('an uncommitted SIWC 429 allows another eligible slot, with Retry-After applied to the first slot', async (t) => {

@@ -53,6 +53,7 @@ import {
   captureOpenaiAuth,
   isOpenaiAuthCurrent,
   isOpenaiCredentialCurrent,
+  openaiAuthBlock,
   readOpenaiAuthBlock,
   recordOpenaiAuthResult,
 } from '../oauth/openai-auth-state.mjs'
@@ -284,15 +285,17 @@ function pickCodexCandidatesWithPool(
     pinVmId = undefined,
     siwcBody = body,
     nativeOnly = false,
+    forSearch = false,
   } = {},
 ) {
   // The caller resolves the pin when it knows the key owner's role; alone, only the master key pins.
   const pin = pinVmId === undefined ? pinnedVmIdFromRequest(req) : pinVmId
   const owner = ownerScope || ownerScopeFromRequest(req)
   const model = body?.model || null
-  const unsupported = siwcRequestProblem(siwcBody, nativeOnly)
+  const unsupported = forSearch ? null : siwcRequestProblem(siwcBody, nativeOnly)
   const unsupportedPick = { error: 'siwc_unsupported_capability', ...unsupported, ids: [], candidates: [] }
   const routingPolicy = normalizeCodexRouting(routing.codex || routing).quota
+  const summarizeCandidate = forSearch ? summarizeCodexSearchSlot : summarizeVm
   const scope = keyScope || keyScopeFromRequest(req)
   const poolDenial = vmPoolDenial(scope)
   if (poolDenial) {
@@ -313,11 +316,16 @@ function pickCodexCandidatesWithPool(
     }
     const vm = getVm(projectRoot, pin)
     if (!vm || !isCodexVm(vm)) return { picked: { error: 'platform_mismatch', pin, ids: [] }, poolVms: [] }
-    if (!keyAllowsVm(scope, vm)) return { picked: { error: 'key_group_mismatch', pin, ids: [] }, poolVms: [] }
-    const enabled = readCodexSiwc(projectRoot, vm.id)?.enabled
+    if (!keyAllowsVm(scope, vm) || (forSearch && !vmMatchesOwnerScope(vm, owner))) {
+      return { picked: { error: 'key_group_mismatch', pin, ids: [] }, poolVms: [] }
+    }
+    const enabled = !forSearch && readCodexSiwc(projectRoot, vm.id)?.enabled
     if (enabled && unsupported) return { picked: { ...unsupportedPick, pin }, poolVms: [] }
-    const slot = enabled ? summarizeVm(vm, projectRoot, routing) : vm
+    const slot = forSearch || enabled ? summarizeCandidate(vm, projectRoot, routing) : vm
     if (!codexSlotAllowsModel(slot, model)) return { picked: { error: 'model_not_allowed', pin, ids: [] }, poolVms: [] }
+    if (forSearch && !hasCodexSearchCredential(slot, Date.now())) {
+      return { picked: { error: 'credential_blocked', pin, ids: [] }, poolVms: [] }
+    }
     const ordered = orderCodexSessionSlots([slot], {
       pin,
       excluded,
@@ -340,7 +348,7 @@ function pickCodexCandidatesWithPool(
     const changed = isCodexVm(vm) && syncCodexQuotaSchedule(projectRoot, vm, { policy: routingPolicy }).changed
     try {
       if (changed) vm = getVm(projectRoot, vm.id)
-      if (vm) vms.push(summarizeVm(vm, projectRoot, { codex: { quota: routingPolicy } }))
+      if (vm) vms.push(summarizeCandidate(vm, projectRoot, { codex: { quota: routingPolicy } }))
     } catch {
       // Match listVms: an unreadable record does not remove the rest of the pool.
     }
@@ -385,7 +393,7 @@ function pickCodexCandidatesWithPool(
       poolVms: vms,
     }
   }
-  return { picked: { ...ordered, sessionKey, stickyKeys }, poolVms: vms }
+  return { picked: { ...ordered, sessionKey, stickyKeys }, poolVms: forSearch ? scopedVms : vms }
 }
 
 /**
@@ -512,14 +520,13 @@ function blockedCodexResult(block = { error: 'credential_blocked' }) {
   }
 }
 
-function liveCodexAdmissionBlock(projectRoot, vmId, routing) {
+function liveCodexAdmissionBlock(projectRoot, vmId, routing, forSearch = false) {
   const vm = getVm(projectRoot, vmId)
   if (!vm) return { error: 'no_codex_vm' }
-  return codexAdmissionBlock(
-    summarizeVm(vm, projectRoot, routing),
-    Date.now(),
-    normalizeCodexRouting(routing.codex).quota,
-  )
+  const now = Date.now()
+  const slot = forSearch ? summarizeCodexSearchSlot(vm, projectRoot, routing) : summarizeVm(vm, projectRoot, routing)
+  if (forSearch && !hasCodexSearchCredential(slot, now)) return { error: 'credential_blocked' }
+  return codexAdmissionBlock(slot, now, normalizeCodexRouting(routing.codex).quota)
 }
 
 /** Idle SOCKS / first hop 502 is retryable only before any SSE byte is committed. */
@@ -614,7 +621,8 @@ function inspectCodexVmForRefresh(projectRoot, vmId, req, opts = {}, livePolicy 
     return null
   }
   if (!raw || !isCodexVm(raw)) return null
-  const summary = summarizeVm(raw, projectRoot, { codex: { quota: livePolicy } })
+  const summarizeCandidate = opts.forSearch ? summarizeCodexSearchSlot : summarizeVm
+  const summary = summarizeCandidate(raw, projectRoot, { codex: { quota: livePolicy } })
   if (!vmMatchesOwnerScope(summary, owner) || !keyAllowsVm(scope, summary)) return null
   return raw.codex ? { ...summary, codex: raw.codex } : summary
 }
@@ -1780,6 +1788,25 @@ function searchCredentials(projectRoot, vm) {
   }
 }
 
+function summarizeCodexSearchSlot(vm, projectRoot, routing) {
+  const summary = summarizeVm(vm, projectRoot, routing)
+  if (!isCodexVm(vm)) return summary
+  const { first, access, refresh } = searchCredentials(projectRoot, vm)
+  return {
+    ...summary,
+    has_token: !!(access || refresh),
+    has_refresh: !!refresh,
+    expires_at: summary.codex_access_expires_at,
+    auth_block: openaiAuthBlock(vm, first),
+    // The existing stop gate still applies to SIWC slots. Search uses the ordinary grant and slot model policy.
+    codex_siwc: summary.codex_siwc?.enabled ? { enabled: true } : null,
+  }
+}
+
+function hasCodexSearchCredential(slot, now) {
+  return slot.has_token && (slot.has_refresh || !slot.expires_at || slot.expires_at > now)
+}
+
 /**
  * Access token to retry with after a 401/403. The kernel refreshes the same rotating
  * refresh token on its own, so first adopt a token it wrote meanwhile; otherwise refresh
@@ -1839,7 +1866,8 @@ async function postCodexJson({
   refresh = refreshCodexAccessToken,
   routing = {},
 }) {
-  const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
+  const forSearch = url === CODEX_SEARCH_URL
+  const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing, forSearch)
   if (blocked) {
     const result = blockedCodexResult(blocked)
     return { ...result, text: JSON.stringify(result.body), headers: {} }
@@ -1849,9 +1877,9 @@ async function postCodexJson({
   const doFetch = fetchImpl || makeProxyFetch(proxyUrl, timeoutMs, { maxMs: timeoutMs })
   const creds = searchCredentials(projectRoot, vm)
   let auth = captureOpenaiAuth(projectRoot, vm.id, creds.first)
-  const source = url === CODEX_SEARCH_URL ? 'search' : 'images'
+  const source = forSearch ? 'search' : 'images'
   const send = async (access, recovering = false) => {
-    const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
+    const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing, forSearch)
     if (blocked && !(recovering && blocked.error === 'credential_blocked')) {
       const result = blockedCodexResult(blocked)
       return { ...result, text: JSON.stringify(result.body), headers: {}, auth: auth && { ...auth } }
@@ -1965,6 +1993,7 @@ export async function handleCodexSearch({
   const reject = (status, type, code, message) => {
     stats.errors++
     logBag.error_code = code
+    logBag.error_message = message
     return json(res, status, { error: { type, code, message } })
   }
   const codex = normalizeCodexRouting(routing.codex)
@@ -1994,7 +2023,7 @@ export async function handleCodexSearch({
     excluded: new Set(),
     ownerScope,
     routing,
-    nativeOnly: true,
+    forSearch: true,
   }
   const deadline = Date.now() + codexWaitTimeoutMs(routing)
   const gone = clientGoneSignal(req, res)
@@ -2014,13 +2043,21 @@ export async function handleCodexSearch({
           return
         }
         if (last) break
+        if (admitted.picked.error === 'no_codex_vm') {
+          return reject(
+            503,
+            'api_error',
+            'no_codex_vm',
+            '没有可调度的 Codex 搜索槽位，请检查普通 Codex 凭据和调度设置。',
+          )
+        }
         return rejectCodexAdmission({ res, json, stats, logBag, picked: admitted.picked, model: outbound.model })
       }
       try {
         const vm = getVm(projectRoot, admitted.vmId)
         pickOpts.excluded.add(admitted.vmId)
-        if (!vm || !isCodexVm(vm) || readCodexSiwc(projectRoot, vm.id)?.enabled) continue
-        const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing)
+        if (!vm || !isCodexVm(vm)) continue
+        const blocked = liveCodexAdmissionBlock(projectRoot, vm.id, routing, true)
         if (blocked) {
           const result = blockedCodexResult(blocked)
           last = { ...result, text: JSON.stringify(result.body), headers: {} }
