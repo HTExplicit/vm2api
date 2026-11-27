@@ -23,7 +23,7 @@ import {
   reportOpenAIAttempt,
   resetOpenAIAccountRuntime,
 } from '../../src/lib/pool/openai-account-runtime.mjs'
-import { upsertCodexAccount } from '../../src/lib/vm/codex-slot.mjs'
+import { markCodexGrantDead, persistCodexCredentialState, upsertCodexAccount } from '../../src/lib/vm/codex-slot.mjs'
 import {
   captureOpenaiAuth,
   readOpenaiAuthBlock,
@@ -1481,14 +1481,14 @@ test('invalid_grant 401 is NOT grant death (rotation race false positive)', () =
     isCodexGrantDead({ ok: false, status: 401, body: { error: { code: 'invalid_grant' } } }),
     false,
   )
-  // 普通 401 仍走 5 分钟 hold
+  // 普通 401 由凭据状态管理，无需附加内存冷却。
   const now = 1_700_000_000_000
   assert.deepEqual(
     codexFailureHold(
       { ok: false, status: 401, committed: false, body: { error: { code: 'invalid_grant' } } },
       now,
     ),
-    { until: now + 5 * 60_000, reason: 'oauth_401' },
+    null,
   )
 })
 

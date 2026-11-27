@@ -653,7 +653,7 @@ function cwdRequest(stream, fields = {}) {
 unixTest('public CRAG handler preserves folded controls through normalization and client scrubbing', async (t) => {
   const fixture = await protocolKernelFixture(t, { health: printHealth, staleHealth: ordinaryHealth })
   const longMarker = { type: 'ephemeral', ttl: '1h', scope: 'global' }
-  const shortMarker = { type: 'ephemeral' }
+  const shortMarker = { type: 'ephemeral', ttl: '5m' }
   const format = { type: 'json_schema', schema: { type: 'object', properties: {}, additionalProperties: false } }
   const input = cwdRequest(false, {
     model: 'claude-haiku-5-5',
@@ -940,8 +940,7 @@ for (const stream of [false, true]) {
       }
       const { envelope } = await fixture.send(continuation)
       const history = envelope.body.messages.flatMap((m) => m.content)
-      const { extension: _extension, ...allowedTool } = tool
-      assert.deepEqual(history.find((b) => b.type === 'tool_use'), allowedTool)
+      assert.deepEqual(history.find((b) => b.type === 'tool_use'), tool)
       assert.deepEqual(
         history.find((b) => b.type === 'tool_result'),
         { ...result, tool_use_id: tool.id },

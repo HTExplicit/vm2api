@@ -1610,8 +1610,7 @@ async function streamGoWorkerRaw({
           buffer += decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
           let newline
           while ((newline = buffer.indexOf('\n')) >= 0) {
-            let sourceLine = buffer.slice(0, newline).replace(/\r$/, '')
-            if (sseRestorer) sourceLine = await sseRestorer.line(sourceLine)
+            const sourceLine = buffer.slice(0, newline).replace(/\r$/, '')
             buffer = buffer.slice(newline + 1)
             // CLI diagnostics share the internal stream, never the caller's SSE.
             if (sourceLine.startsWith('event:'))

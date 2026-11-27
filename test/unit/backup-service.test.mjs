@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import { EventEmitter } from 'node:events'
+import { Worker } from 'node:worker_threads'
 import { spawnSync } from 'node:child_process'
 import { openDatabase, closeDatabase, getDb, getDbPath } from '../../src/lib/db/database.mjs'
 import { SettingsRepo } from '../../src/lib/db/repos/settings-repo.mjs'
@@ -823,11 +824,11 @@ test('P2-14: restoreBackup awaits async onRestored and resyncs redaction runtime
   assert.equal(fakeChild.killed, true, 'old kin-redact child must be stopped when restored config disables redaction')
   assert.deepEqual(redactionStatus(), { enabled: false, ready: true, error: null })
 
-  // Async onRestored rejection must reject restoreBackup and clear isRestoring.
+  // A failed rebind keeps protocol traffic paused until the operator recovers.
   svc.onRestored(async () => {
     await Promise.resolve()
     throw new Error('async rebind failed')
   })
   await assert.rejects(svc.restoreBackup(rec.id), /async rebind failed/)
-  assert.equal(svc.isRestoring, false)
+  assert.equal(svc.isRestoring, true)
 })

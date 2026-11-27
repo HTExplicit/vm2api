@@ -466,7 +466,7 @@ export function createHandleProtocol(deps) {
       : result?.via === 'redaction'
         ? makeError({
             type: result.status === 413 ? ErrorType.INVALID_REQUEST : ErrorType.API,
-            code: originalCode,
+            code: explicitCode,
             message: originalMessage,
             status: result.status || 503,
             ...(result.status === 413 ? { details: { retryable: false } } : {}),
@@ -479,10 +479,10 @@ export function createHandleProtocol(deps) {
     if (
       result?.via === 'api-kernel' &&
       result?.status === 404 &&
-      originalCode === 'model_not_found' &&
+      explicitCode === 'model_not_found' &&
       !result.endpointId
     ) {
-      mapped.body.error.code = originalCode
+      mapped.body.error.code = explicitCode
     }
     if (mapped.body.error.code === ErrorCode.POOL_OVERLOADED && result?.poolReason === 'subagent_limit') {
       mapped.body.error.details = { reason: result.poolReason }
@@ -790,7 +790,7 @@ export function createHandleProtocol(deps) {
       const gate = apiKeyStore.acquire(managedKey)
       if (!gate.ok) {
         stats.errors++
-        return json(res, gate.status, keyGateErrorBody(gate))
+        return respondKeyGateError(res, gate)
       }
     }
     const clientAbort = bindClientAbort(req, res)
@@ -1868,7 +1868,7 @@ export function createHandleProtocol(deps) {
             : toClaudeMessages(protocol, ctx.body, {
                 rewrite: rewriteEnabled,
                 model_map: false,
-                preserve_content_shape: officialPassthrough,
+                preserve_content_shape: accountApiBackend ? officialInbound : officialPassthrough,
                 onSystemBlock:
                   inferenceBackend !== 'api' && !officialPassthrough
                     ? trackCallerSystemBlock(ctx.body?.system, callerEnvironment)

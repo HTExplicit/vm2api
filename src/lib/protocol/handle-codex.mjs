@@ -474,6 +474,7 @@ export function codexFailureHold(result, now = Date.now()) {
     )
   )
     return null
+  if (isCodexGrantDead(result)) return { until: Number.MAX_SAFE_INTEGER, reason: 'oauth_revoked' }
   if (status === 401 || code === 'credential_blocked') return null
   if (status === 403) return { until: now + 5 * 60_000, reason: 'permission_denied' }
   if (codexQuotaFailure(result) === 'quota_exhausted') return null
@@ -1529,6 +1530,12 @@ export async function handleCodexProtocol({
           return res.end()
         }
         if (currentCredential) reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
+        if (currentCredential && !useSiwc && !policyRefusal && isCodexGrantDead(result)) {
+          markCodexGrantDead(projectRoot, vm.id, {
+            description: result.body?.error?.message || 'oauth_revoked',
+            status: result.status,
+          })
+        }
         if (
           !policyRefusal &&
           isOpenaiCredentialCurrent(hopAuth) &&
@@ -1724,7 +1731,8 @@ function refreshSearchAccess(projectRoot, vm, usedAccess, { proxyUrl, fetchImpl,
   if (!now.refresh) return null
   let pending = searchRefreshes.get(vm.id)
   if (!pending) {
-    pending = (async () => {
+    pending = withCredentialRefreshLock('codex:' + vm.id, async () => {
+      if (!isOpenaiCredentialCurrent(auth)) return null
       const tok = await refresh({ refreshToken: now.refresh, proxyUrl, fetchImpl })
       if (!tok?.ok || !tok.access_token) {
         recordOpenaiAuthResult(auth, {
@@ -1738,12 +1746,12 @@ function refreshSearchAccess(projectRoot, vm, usedAccess, { proxyUrl, fetchImpl,
       if (!isOpenaiCredentialCurrent(auth)) return null
       upsertCodexAccount(projectRoot, vm.id, {
         access_token: tok.access_token,
-        refresh_token: tok.refresh_token || again.refresh || now.refresh,
-        id_token: tok.id_token || latest.id_token || now.first.id_token,
-        expires_at: tok.expires_at || latest.expires_at || now.first.expires_at,
+        refresh_token: tok.refresh_token || now.refresh,
+        id_token: tok.id_token || now.first.id_token,
+        expires_at: tok.expires_at || now.first.expires_at,
       })
       return { access: tok.access_token, auth: captureOpenaiAuth(projectRoot, vm.id) }
-    })().finally(() => searchRefreshes.delete(vm.id))
+    }).finally(() => searchRefreshes.delete(vm.id))
     searchRefreshes.set(vm.id, pending)
   }
   return pending

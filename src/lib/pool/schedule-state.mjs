@@ -88,8 +88,10 @@ const RESTRICTED_NEW_SESSION = [
  */
 const STATELESS = [
   /^(distill_blocked|policy_blocked|crag_policy_blocked|crag_opaque_429|refusal_guard|hard_regex.*|jev.*|decision_model.*)$/,
-  /^(content_filter_refusal|content_policy_refusal|usage_policy_refusal|third_party_client|invalid_request|thinking_incompatible|entitlement_required|http_\d+)$/,
+  /^(content_filter_refusal|content_policy_refusal|usage_policy_refusal|third_party_client|invalid_request|invalid_request_schema|thinking_incompatible|entitlement_required|http_\d+)$/,
   /_repairable$/,
+  /^(missing_reset_timing|pre_reset_generation|pre_reset_probed_at|pre_reset_started_at)$/,
+
   /^(concurrency_limit|concurrency_disabled|rpm_limit|slot_busy|quota_band_inflight|refresh_pending)$/,
   /^(model_cooldown|fable_cooldown|fable_concurrency|fable_timeout|fable_plan_denied|fable_credits_required|fable_rate_limited|fable_requires_max|model_not_allowed|platform_mismatch|codex_vm)$/,
   /^(quota_guard_request_too_large|no_eligible_accounts|pool_overload_cooldown|pool_rate_limited|rate_limited_request|vm_unschedulable)$/,

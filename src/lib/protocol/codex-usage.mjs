@@ -191,38 +191,25 @@ function ownDefined(obj, key) {
 
 export function extraToCodexSnapshot(extra = {}) {
   if (!extra || typeof extra !== 'object') return emptySnapshot()
-  const primaryWindow = ownDefined(extra, 'codex_primary_window_minutes')
-    ? extra.codex_primary_window_minutes
-    : extra.codex_7d_window_minutes
-  const secondaryWindow = ownDefined(extra, 'codex_secondary_window_minutes')
-    ? extra.codex_secondary_window_minutes
-    : extra.codex_5h_window_minutes
+  const primaryId = codexWindowIdFromMinutes(extra.codex_primary_window_minutes)
+  const secondaryId = codexWindowIdFromMinutes(extra.codex_secondary_window_minutes)
+  const primaryAlias = primaryId === '5h' || (!primaryId && secondaryId === '7d') ? '5h' : '7d'
+  const secondaryAlias = primaryAlias === '5h' ? '7d' : '5h'
+  const fields = (role, alias) => {
+    const value = (field) => {
+      const key = 'codex_' + role + '_' + field
+      return ownDefined(extra, key) ? extra[key] : extra['codex_' + alias + '_' + field]
+    }
+    return {
+      [role + '_used_percent']: num(value('used_percent')),
+      [role + '_reset_after_seconds']: int(value('reset_after_seconds')),
+      [role + '_window_minutes']: int(value('window_minutes')),
+      [role + '_reset_at']: value('reset_at') || null,
+    }
+  }
   return {
-    primary_used_percent: num(
-      ownDefined(extra, 'codex_primary_used_percent') ? extra.codex_primary_used_percent : extra.codex_7d_used_percent,
-    ),
-    primary_reset_after_seconds: int(
-      ownDefined(extra, 'codex_primary_reset_after_seconds')
-        ? extra.codex_primary_reset_after_seconds
-        : extra.codex_7d_reset_after_seconds,
-    ),
-    primary_window_minutes: int(primaryWindow),
-    primary_reset_at:
-      (ownDefined(extra, 'codex_primary_reset_at') ? extra.codex_primary_reset_at : extra.codex_7d_reset_at) || null,
-    secondary_used_percent: num(
-      ownDefined(extra, 'codex_secondary_used_percent')
-        ? extra.codex_secondary_used_percent
-        : extra.codex_5h_used_percent,
-    ),
-    secondary_reset_after_seconds: int(
-      ownDefined(extra, 'codex_secondary_reset_after_seconds')
-        ? extra.codex_secondary_reset_after_seconds
-        : extra.codex_5h_reset_after_seconds,
-    ),
-    secondary_window_minutes: int(secondaryWindow),
-    secondary_reset_at:
-      (ownDefined(extra, 'codex_secondary_reset_at') ? extra.codex_secondary_reset_at : extra.codex_5h_reset_at) ||
-      null,
+    ...fields('primary', primaryAlias),
+    ...fields('secondary', secondaryAlias),
     primary_over_secondary_percent: num(extra.codex_primary_over_secondary_percent),
     updated_at: extra.codex_usage_updated_at || extra.updated_at || null,
   }
@@ -480,7 +467,7 @@ export function codexUsageWithSample(extra, previous = {}, { sampledAt = null, p
     const sampleExtra = { codex_usage_updated_at: sampledAt }
     for (const key of ['5h', '7d']) {
       const measured = current.windows.find((window) => window.id === key)
-      const window = measured.used_percent != null ? measured : old?.windows?.find((item) => item.id === key)
+      const window = measured?.used_percent != null ? measured : old?.windows?.find((item) => item.id === key)
       if (!window) continue
       sampleExtra[`codex_${key}_used_percent`] = window.used_percent
       sampleExtra[`codex_${key}_reset_at`] = window.reset_at

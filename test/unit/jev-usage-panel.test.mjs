@@ -8,7 +8,7 @@ import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
 import { SettingsRepo } from '../../src/lib/db/repos/settings-repo.mjs'
 import { JevUsageRepo } from '../../src/lib/db/repos/jev-usage-repo.mjs'
 import { normalizeJevUsage } from '../../src/lib/protocol/jev-usage.mjs'
-import { applyJevPatch, publicJevKeys } from '../../src/lib/protocol/jev-intercept.mjs'
+import { applyJevPatch, classifyJev, publicJevKeys, resumeJevKeys } from '../../src/lib/protocol/jev-intercept.mjs'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 
 test('JEV actual panel route enforces roles, sanitization and pagination', async (t) => {

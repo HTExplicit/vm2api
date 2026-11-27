@@ -92,6 +92,8 @@ test('new shop migrations preserve existing orders and apply once after the publ
     '071_crag_shop_device_host.sql',
     '072_crag_shop_activation_error.sql',
     '073_multi_tier_key_permissions.sql',
+    '074_log_error_details_and_hop_correlation.sql',
+    '075_usage_logs_advisor_billing.sql',
   ])
   assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '061' ORDER BY version").all(), ledger)
   for (const old of before) {
