@@ -1,5 +1,9 @@
+import { useQueryClient } from '@tanstack/react-query'
 import type { UsageAccountRow } from '@/types/panel-usage'
 import type { Vm } from '@/types/panel-vm'
+import { Download, RefreshCw } from 'lucide-react'
+import { toast } from 'sonner'
+import { api } from '@/lib/api'
 import { supportsOfficialCc } from '@/lib/cred-type'
 import {
   expiresAtToMs,
@@ -11,6 +15,14 @@ import { cn } from '@/lib/utils'
 import { isCodexVm } from '@/lib/vm-kind'
 import { vmCostLedger } from '@/lib/vm-usage'
 import { useNow } from '@/hooks/use-now'
+import { Button } from '@/components/ui/button'
+import type { GeminiEnvironment } from '@/features/import/gemini-environments'
+import {
+  geminiResource,
+  syncGeminiEnvironment,
+  useGeminiBusy,
+  useGeminiMutation,
+} from '@/features/import/gemini-operations'
 import { ActiveUsageAction } from '@/features/vm/active-usage-action'
 import { ClaudeResetActions } from '@/features/vm/claude-reset-actions'
 import { CodexCreditSummary } from '@/features/vm/codex-credit-summary'
@@ -99,8 +111,138 @@ function WindowRow({
   )
 }
 
-/** GPT 槽：刷新额度和积分 / 使用重置券；Claude 完整 OAuth：原生限额查询 / 重置。 */
+function observationPercent(value: number | null | undefined) {
+  return value == null || !Number.isFinite(value)
+    ? '未知'
+    : `${(value * 100).toFixed(0)}%`
+}
+
+/** Mutable stored state, not raw query receipts; shown only on divergence or staleness. */
+export function ClaudeQuotaObservations({ vm, now }: { vm: Vm; now: number }) {
+  const observations = vm.quota_observations
+  const official = observations?.official
+  if (isCodexVm(vm) || !official) return null
+  const windows = ['5h', '7d'] as const
+  const isStale = (
+    sample: { reset?: string | null; stale?: boolean } | null | undefined
+  ) => {
+    const reset = expiresAtToMs(sample?.reset)
+    return Boolean(
+      sample?.stale || (reset != null && reset > 0 && reset <= now)
+    )
+  }
+  const different = windows.some((key) => {
+    const measured = official[key]?.utilization
+    const displayed = key === '5h' ? vm.utilization_5h : vm.utilization_7d
+    return measured != null && displayed != null && measured !== displayed
+  })
+  const hasStale = windows.some((key) => isStale(official[key]))
+  if (!different && !hasStale) return null
+  return (
+    <details
+      className='min-w-0 text-[11px] text-muted-foreground'
+      data-row-actions
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      <summary className='cursor-pointer'>
+        官方侧存储：5H {observationPercent(official['5h']?.utilization)} · 7D{' '}
+        {observationPercent(official['7d']?.utilization)}
+        {different ? ' · 与当前展示不同' : ''}
+      </summary>
+      <div className='mt-1 grid gap-1 break-words'>
+        {windows.map((key) => (
+          <div key={key}>
+            {key.toUpperCase()}
+            {(
+              [
+                ['官方侧存储', official[key]],
+                ['保守合并记录', observations.passive[key]],
+              ] as const
+            ).map(([label, sample]) => {
+              const stale = isStale(sample)
+              return (
+                <p key={label}>
+                  {label}：{observationPercent(sample?.utilization)}
+                  {stale ? '（陈旧）' : ''} · 状态 {sample?.status || '未知'} ·
+                  重置 {sample?.reset || '未知'} ·{' '}
+                  {sample?.sampled_at || '窗口采样时间未知'}
+                </p>
+              )
+            })}
+          </div>
+        ))}
+        <p>
+          官方侧保留时间：{official.updated_at || '未知'}
+          （不保证对应单窗口采样；重置后可能被响应头校正，并非官方查询原始回执，不改变保守调度规则）。
+        </p>
+      </div>
+    </details>
+  )
+}
+
+function GeminiQuotaActions({ vm }: { vm: Vm }) {
+  const qc = useQueryClient()
+  const busy = useGeminiBusy()
+  const env = vm.gemini
+  const action = useGeminiMutation({
+    mutationFn: (kind: 'refresh' | 'models') =>
+      api<GeminiEnvironment>(`${geminiResource(vm.id)}/${kind}`, {
+        method: 'POST',
+      }),
+    onSuccess: async (updated, kind) => {
+      await syncGeminiEnvironment(qc, updated)
+      toast.success(
+        kind === 'refresh' ? '已刷新 Gemini 账号与额度' : '已拉取可用模型'
+      )
+    },
+    onError: (error: Error) => toast.error(error.message),
+  })
+  if (!env) return null
+  const canRefresh =
+    (env.auth_state === 'authorized' || env.auth_state === 'reauth_required') &&
+    env.proxy_ready !== false
+  const canModels = env.auth_state === 'authorized' && env.proxy_ready !== false
+  return (
+    <div
+      data-row-actions
+      className='flex flex-wrap items-center gap-1'
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      <Button
+        type='button'
+        size='sm'
+        variant='ghost'
+        className='h-6 gap-1 px-1.5 text-[11px] text-muted-foreground'
+        disabled={busy || !canRefresh}
+        loading={action.isPending && action.variables === 'refresh'}
+        title='刷新上游账号状态与配额窗口'
+        onClick={() => action.mutate('refresh')}
+      >
+        <RefreshCw className='size-3' />
+        刷新数据
+      </Button>
+      <Button
+        type='button'
+        size='sm'
+        variant='ghost'
+        className='h-6 gap-1 px-1.5 text-[11px] text-muted-foreground'
+        disabled={busy || !canModels}
+        loading={action.isPending && action.variables === 'models'}
+        title='从上游重新拉取可调用模型列表'
+        onClick={() => action.mutate('models')}
+      >
+        <Download className='size-3' />
+        拉取模型
+      </Button>
+    </div>
+  )
+}
+
+/** GPT 槽：刷新额度和积分 / 使用重置券；Claude 完整 OAuth：原生限额查询 / 重置；Gemini：刷新数据 / 拉取模型。 */
 export function VmQuotaActions({ vm, now }: { vm: Vm; now: number }) {
+  if (vm.gemini) return <GeminiQuotaActions vm={vm} />
   return isCodexVm(vm) ? (
     <OpenaiQuotaActions vm={vm} compact now={now} />
   ) : (

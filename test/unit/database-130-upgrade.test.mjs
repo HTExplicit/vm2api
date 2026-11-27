@@ -85,6 +85,8 @@ test('the fork appends migrations to the 13601 ledger and allows rollback', (t) 
     '071_crag_shop_device_host.sql',
     '072_crag_shop_activation_error.sql',
     '073_multi_tier_key_permissions.sql',
+    '074_log_error_details_and_hop_correlation.sql',
+    '075_usage_logs_advisor_billing.sql',
   ]
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-fork-migrations-'))
   t.after(() => fs.rmSync(root, { recursive: true }))
@@ -128,7 +130,13 @@ test('the fork appends migrations to the 13601 ledger and allows rollback', (t) 
       appended,
     )
     assert.deepEqual(reopened.prepare(settingsQuery).all(), settings)
-    assert.deepEqual(reopened.prepare(usageQuery).get(), usage)
+    assert.deepEqual({ ...reopened.prepare(usageQuery).get() }, {
+      ...usage,
+      upstream_type: null,
+      error_details: null,
+      advisor_usage: null,
+      advisor_cost: null,
+    })
     assert.equal(reopened.prepare('SELECT session_id FROM refusal_session_blocks').get().session_id, 'fixture-session')
     assert.equal(reopened.prepare('PRAGMA quick_check').get().quick_check, 'ok')
   } finally {

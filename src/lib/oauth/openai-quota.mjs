@@ -4,7 +4,7 @@
  * agent-identity recovery.
  */
 import crypto from 'node:crypto'
-import { getVm, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
+import { getVm, syncCodexQuotaSchedule, patchVmRecord } from '../vm/vm-registry.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { isLocalEgressProxy } from '../vm/egress.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
@@ -13,16 +13,19 @@ import {
   upsertCodexAccount,
   persistCodexQuotaSnapshot,
   markCodexQuotaRefreshPending,
+  markCodexGrantDead,
 } from '../vm/codex-slot.mjs'
 import {
   buildCodexUsageView,
   extraToCodexSnapshot,
   hasSpendableCodexCredits,
   normalizeCodexCredits,
+  normalizeCodexExtra,
 } from '../protocol/codex-usage.mjs'
 import { CODEX_OAUTH_ORIGINATOR, makeProxyFetch, refreshCodexAccessToken } from '../protocol/codex-models.mjs'
 import { openaiIdentityFromJwt } from './openai-jwt.mjs'
 import { expiresAtToMs } from './oauth-credentials.mjs'
+import { withCredentialRefreshLock } from '../transport/go-worker-client.mjs'
 import { codexQuotaWindowReason, isCodexSlotParked } from '../pool/codex-slot-pool.mjs'
 import { openAIAccountHold } from '../pool/openai-account-runtime.mjs'
 import { activeHoursOf, evaluateActiveHours } from '../pool/active-hours.mjs'
@@ -132,7 +135,7 @@ export function extraFromRateLimit(rateLimit = {}, now = Date.now()) {
     if (!window) continue
     for (const [key, value] of Object.entries(window)) extra[`codex_${role}_${key}`] = value
   }
-  return extra
+  return normalizeCodexExtra(extra)
 }
 
 function creditExpiresAt(row = {}) {
@@ -313,34 +316,49 @@ async function quotaFetch(
 
 async function rotateIfNeeded(slot, projectRoot, vmId, fetchImpl) {
   if (!slot.refresh) return slot
-  const tok = await refreshCodexAccessToken({
-    refreshToken: slot.refresh,
-    proxyUrl: slot.proxyUrl,
-    fetchImpl,
-    timeoutMs: OPENAI_QUOTA_TIMEOUT_MS,
-  })
-  if (!tok.ok) {
-    recordOpenaiAuthResult(slot.auth, {
-      status: tok.status,
-      error: tok.error,
-      source: 'oauth_refresh',
-      message: 'GPT OAuth 刷新失败，请重新导入',
+  return withCredentialRefreshLock('codex:' + vmId, async () => {
+    const account = readCodexAccounts(projectRoot, vmId)[0] || {}
+    const auth = captureOpenaiAuth(projectRoot, vmId, account)
+    if (!isOpenaiCredentialCurrent(slot.auth)) {
+      return { ...slot, access: account.access_token, refresh: account.refresh_token, auth }
+    }
+    const tok = await refreshCodexAccessToken({
+      refreshToken: slot.refresh,
+      proxyUrl: slot.proxyUrl,
+      fetchImpl,
+      timeoutMs: OPENAI_QUOTA_TIMEOUT_MS,
     })
-    return { ...slot, rotateError: tok.error || 'refresh_failed' }
-  }
-  if (!isOpenaiCredentialCurrent(slot.auth)) return { ...slot, rotateError: 'credential_changed' }
-  upsertCodexAccount(projectRoot, vmId, {
-    access_token: tok.access_token,
-    refresh_token: tok.refresh_token,
-    id_token: tok.id_token || slot.first.id_token,
-    expires_at: tok.expires_at || slot.first.expires_at,
+    if (!tok.ok) {
+      const recorded = recordOpenaiAuthResult(auth, {
+        status: tok.status,
+        error: tok.error,
+        source: 'oauth_refresh',
+        message: 'GPT OAuth 刷新失败，请重新导入',
+      })
+      if (recorded && tok.error === 'oauth_revoked') markCodexGrantDead(projectRoot, vmId, tok)
+      return { ...slot, rotateError: tok.error || 'refresh_failed' }
+    }
+    if (!isOpenaiCredentialCurrent(auth)) return { ...slot, rotateError: 'credential_changed' }
+
+    const expiresAt = tok.expires_at || account.expires_at
+    upsertCodexAccount(projectRoot, vmId, {
+      access_token: tok.access_token,
+      refresh_token: tok.refresh_token,
+      id_token: tok.id_token || account.id_token,
+      expires_at: expiresAt,
+    })
+    if (expiresAt) {
+      patchVmRecord(projectRoot, vmId, (vm) => {
+        vm.codex.expires_at = expiresAt
+      })
+    }
+    return {
+      ...slot,
+      access: tok.access_token,
+      refresh: tok.refresh_token || slot.refresh,
+      auth: captureOpenaiAuth(projectRoot, vmId),
+    }
   })
-  return {
-    ...slot,
-    access: tok.access_token,
-    refresh: tok.refresh_token || slot.refresh,
-    auth: captureOpenaiAuth(projectRoot, vmId),
-  }
 }
 
 function publicUsage(extra, resetCredits, credits, usagePayload = {}) {
@@ -619,6 +637,10 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
     if (!current.access || current.rotateError) {
       if (current.rotateError === 'credential_changed')
         return fail('credential_changed', '账号或凭据已更新，请重试', 409)
+      // 吊销（token_revoked）与普通刷新失败分开说，面板可据此显示具体状态。
+      if (current.rotateError === 'oauth_revoked') {
+        return fail('oauth_revoked', 'GPT OAuth 凭证已被吊销，需重新授权导入', 502)
+      }
       return fail(current.rotateError || 'refresh_failed', 'GPT OAuth 刷新失败，请重新导入', 502)
     }
     pack = await run(current.access)
@@ -710,6 +732,9 @@ export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
     if (!current.access || current.rotateError) {
       if (current.rotateError === 'credential_changed')
         return fail('credential_changed', '账号或凭据已更新，请重试', 409)
+      if (current.rotateError === 'oauth_revoked') {
+        return fail('oauth_revoked', 'GPT OAuth 凭证已被吊销，需重新授权导入', 502)
+      }
       return fail(current.rotateError || 'refresh_failed', 'GPT OAuth 刷新失败，请重新导入', 502)
     }
     res = await consume(current.access)

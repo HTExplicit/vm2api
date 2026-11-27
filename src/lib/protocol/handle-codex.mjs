@@ -24,6 +24,7 @@ import {
   assembleCodexBodyFromSse,
   codexBodyToAnthropicMessage,
   restoreCodexChatCustomTools,
+  codexCompatibleFunctionTools,
   isToolArgumentsError,
   toCodexResponses,
 } from './codex-convert.mjs'
@@ -47,7 +48,7 @@ import {
 import { isLocalEgressProxy } from '../vm/egress.mjs'
 import { vmNodeId } from '../cluster/placement.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
-import { openaiUsageAccountId, readCodexAccounts, upsertCodexAccount } from '../vm/codex-slot.mjs'
+import { openaiUsageAccountId, readCodexAccounts, upsertCodexAccount, persistCodexCredentialState, markCodexGrantDead } from '../vm/codex-slot.mjs'
 import {
   captureOpenaiAuth,
   isOpenaiAuthCurrent,
@@ -88,7 +89,7 @@ import {
 import { applyOpenaiWashLog } from './openai-wash.mjs'
 import { appendOpenAiSystemPrompt } from './openai-system-prompt.mjs'
 import { canonicalImageToolModel, imageGenerationTools } from './image-tool-models.mjs'
-import { isImageToolModelEnabled } from './gpt-model-policy.mjs'
+import { isImageToolModelEnabled, resolveGptFastAlias } from './gpt-model-policy.mjs'
 import { sessionIdForLog } from './log-fields.mjs'
 import { redactHeaders } from '../admin/request-log.mjs'
 import {
@@ -99,6 +100,8 @@ import {
   resolveOutboundSessionId,
 } from '../identity/identity-rewrite.mjs'
 import { clientIp } from '../pool/sticky-router.mjs'
+import { withCredentialRefreshLock } from '../transport/go-worker-client.mjs'
+import { compileWithProtoFront, protoFrontMode, transcodeWithProtoFront } from '../transport/proto-front-client.mjs'
 
 // Official Codex client headers for ChatGPT Responses. Auth is attached by the kernel.
 const CODEX_KERNEL_HEADER_ALLOWLIST = Object.freeze([
@@ -440,6 +443,20 @@ export function isRetryableCodexTransport(result) {
 }
 
 /**
+ * Grant-death 签名：OpenAI 吊销回 `error.code=token_revoked` /
+ * "Encountered invalidated oauth token"。与 claude 池 GRANT_DEAD 词表对齐，
+ * 但不含 invalid_grant——那是轮换竞态的常见假阳性（旧 RT 重放），
+ * refreshCodexAccessToken 的严格分类同样把它留给 refresh_rejected。
+ */
+export function isCodexGrantDead(result) {
+  if (!result || result.ok === true) return false
+  const status = Number(result.status) || 0
+  if (status !== 401 && status !== 403) return false
+  const hay = `${result.body?.error?.code || ''} ${result.body?.error?.message || ''} ${result.error_code || ''}`
+  return /token_revoked|invalidated oauth token|token has been revoked|oauth_revoked/i.test(hay)
+}
+
+/**
  * Short process-local hold for an account that just failed upstream. This is
  * not the operator scheduling switch: it expires by itself and keeps the next
  * request from spending another turn on a rate-limited account. Authentication
@@ -457,6 +474,7 @@ export function codexFailureHold(result, now = Date.now()) {
     )
   )
     return null
+  if (isCodexGrantDead(result)) return { until: Number.MAX_SAFE_INTEGER, reason: 'oauth_revoked' }
   if (status === 401 || code === 'credential_blocked') return null
   if (status === 403) return { until: now + 5 * 60_000, reason: 'permission_denied' }
   if (codexQuotaFailure(result) === 'quota_exhausted') return null
@@ -848,8 +866,10 @@ export async function handleCodexProtocol({
   cfg = null,
   siwc = null,
 }) {
+  const pfMode = protoFrontMode()
   const codex = normalizeCodexRouting(routing.codex)
-  const allowed = isCodexProtocolAllowed(protocol, { codex })
+  const allowed =
+    pfMode === 'go' && protocol === 'google.gemini' ? { ok: true } : isCodexProtocolAllowed(protocol, { codex })
   if (!allowed.ok) {
     stats.errors++
     logBag.via = 'codex-kernel'
@@ -871,7 +891,89 @@ export async function handleCodexProtocol({
       error: { type: 'permission_error', code: restriction.code, message: restriction.message },
     })
   }
-  const converted = toCodexResponses(protocol, ctx.body, codex.convert)
+  let pfCompile = null
+  if (pfMode === 'go') {
+    try {
+      pfCompile = await compileWithProtoFront({
+        cfg: cfg || { paths: { project: projectRoot } },
+        inboundProtocol: protocol,
+        targetFamily: 'codex_kernel',
+        reqPath: ctx.path,
+        headers: req.headers,
+        body: ctx.body,
+        routing,
+        routeModel: ctx.body?.model || '',
+        routeStream:
+          protocol === 'google.gemini' ? String(ctx?.path || '').includes(':streamGenerateContent') : undefined,
+      })
+      if (pfCompile) {
+        logBag.hop_meta = {
+          ...logBag.hop_meta,
+          proto_front: {
+            mode: pfCompile.mode || null,
+            decision: pfCompile.decision || null,
+            stripped_fields: pfCompile.stripped_fields || [],
+          },
+        }
+      }
+    } catch (err) {
+      logBag.hop_meta = { ...logBag.hop_meta, proto_front_error: err?.code || err?.message || 'error' }
+    }
+  } else if (pfMode === 'shadow') {
+    void compileWithProtoFront({
+      cfg: cfg || { paths: { project: projectRoot } },
+      inboundProtocol: protocol,
+      targetFamily: 'codex_kernel',
+      reqPath: ctx.path,
+      headers: req.headers,
+      body: ctx.body,
+      routing,
+      routeModel: ctx.body?.model || '',
+    })
+      .then((shadowRes) => {
+        logBag.hop_meta = {
+          ...logBag.hop_meta,
+          proto_front_shadow: { ok: shadowRes?.ok === true, mode: shadowRes?.mode, decision: shadowRes?.decision },
+        }
+      })
+      .catch(() => {})
+  }
+  let converted
+  if (pfMode === 'go' && pfCompile) {
+    const fast = resolveGptFastAlias(ctx.body?.model)
+    if (fast.kind === 'unavailable') {
+      converted = { ok: false, code: fast.reason === 'base_disabled' ? 'model_disabled' : 'model_fast_unavailable' }
+    } else if (!pfCompile.ok) {
+      stats.errors++
+      logBag.via = 'codex-kernel'
+      logBag.error_code = pfCompile.code || 'codex_convert_failed'
+      return json(
+        res,
+        pfCompile.status || 400,
+        pfCompile.error_body || {
+          error: {
+            type: 'invalid_request_error',
+            code: logBag.error_code,
+            message: 'request could not be converted to Codex Responses',
+          },
+        },
+      )
+    } else {
+      const goBody = pfCompile.outbound_body
+      if (fast.kind === 'fast') {
+        const parts = String(goBody.model || '')
+          .trim()
+          .split('/')
+          .filter(Boolean)
+        if (parts.length) parts[parts.length - 1] = fast.base
+        goBody.model = parts.join('/')
+        goBody.service_tier = fast.service_tier
+      }
+      converted = { ok: true, converted: pfCompile.mode !== 'passthrough', body: goBody }
+    }
+  } else {
+    converted = toCodexResponses(protocol, ctx.body, codex.convert)
+  }
   if (!converted.ok) {
     stats.errors++
     logBag.via = 'codex-kernel'
@@ -909,7 +1011,13 @@ export async function handleCodexProtocol({
     })
   }
   // Upstream Codex always streams; the caller still chooses JSON versus SSE.
-  const stream = isClientStream(inbound || ctx.body, req.headers) && ctx.body?.stream !== false
+  const stream =
+    protocol === 'google.gemini'
+      ? String(ctx?.path || '').includes(':streamGenerateContent')
+      : isClientStream(inbound || ctx.body, req.headers) && ctx.body?.stream !== false
+  const useGoEgress =
+    pfMode === 'go' &&
+    (protocol === 'anthropic.messages' || protocol === 'google.gemini' || (protocol === 'openai.completions' && stream))
   const inboundSession = sessionFrom(req, converted.body)
   const sessionMode = outboundSessionMode(routing)
   const callerSession = extractCallerSession({
@@ -953,6 +1061,7 @@ export async function handleCodexProtocol({
   let attempts = 0
   let switches = 0
   let counted = false
+  let compatibleTools = null
   try {
     for (;;) {
       const admitted = await admitCodexCandidate(projectRoot, req, pickOpts, {
@@ -1072,7 +1181,7 @@ export async function handleCodexProtocol({
         }
         hops += 1
         logBag.vm_id = vm.id
-        logBag.attempt_count = hops
+        logBag.attempt_count += 1
         logBag.usage_account_id = openaiUsageAccountId(searchCredentials(projectRoot, vm).accountId)
         const chunks = []
         const nameSseEvent = createResponsesSseEventNamer()
@@ -1091,7 +1200,19 @@ export async function handleCodexProtocol({
           firstUserIdentity,
           clientIp: clientIp(req),
           userAgent: req.headers?.['user-agent'] || '',
-          epoch: `${attemptStartedAt}:${vm.id}:${hops}`,
+          // Borrowing does not move the home pin, so the attempt clock cannot
+          // identify the borrower's session. Scope it to this home generation.
+          epoch:
+            picked.home === stickyBound?.vmId && stickyBound?.sessionId && vm.id !== picked.home
+              ? JSON.stringify([
+                  'codex-borrow',
+                  picked.sessionKey,
+                  stickyBound.vmId,
+                  stickyBound.sessionId,
+                  stickyBound.generation,
+                  vm.id,
+                ])
+              : `${attemptStartedAt}:${vm.id}:${hops}`,
         }
         // passthrough forwards an explicit inbound session verbatim; without
         // one it still derives the deterministic seed instead of sending null.
@@ -1105,7 +1226,7 @@ export async function handleCodexProtocol({
           previous_response_id: inboundSession.previous_response_id,
         }
         logBag.outbound_session_id = sessionIdForLog(outboundSessionId)
-        const outboundBody = applyCodexRebuildBody({ ...promptedBody, stream: true }, outboundSessionId, sessionMode)
+        let outboundBody = applyCodexRebuildBody({ ...promptedBody, ...(!useSiwc && compatibleTools && { tools: compatibleTools }), stream: true }, outboundSessionId, sessionMode)
         const outboundHeaders = useSiwc ? {} : codexKernelHeaders(req.headers, outboundBody, session)
         if (captureOutbound) logBag.outbound_body = useSiwc ? formatSiwcBody(outboundBody) : outboundBody
         logBag.outbound_headers = redactHeaders(outboundHeaders)
@@ -1159,6 +1280,7 @@ export async function handleCodexProtocol({
               routing,
               redactionPrincipal: req.apiKeyRecord?.id || (req.apiKeyKind === 'master' ? 'master' : ''),
               redactionSession: String(req.headers?.['x-session-id'] || inboundSession.session_id || ''),
+              gatewayRequestId: res?._kinRequestId || null,
               body: outboundBody,
               reqHeaders: req.headers,
               envelope: {
@@ -1197,7 +1319,7 @@ export async function handleCodexProtocol({
               if (seen) streamedUsage = mergeUsage(streamedUsage, seen)
               const imageGen = imageGenUsageFromSseLine(line)
               if (imageGen) streamedImageUsage = imageGen
-              if (!stream) {
+              if (!stream || useGoEgress) {
                 chunks.push(line)
                 return
               }
@@ -1224,8 +1346,38 @@ export async function handleCodexProtocol({
               if (named) res.write(named)
             },
           })
-        let result = await runHop()
-        let policyRefusal = afterHop?.(result)
+        const runAttempt = async () => {
+          let result = await runHop()
+          let policyRefusal = afterHop?.(result)
+          const error = result?.body?.error
+          if (
+            !useSiwc &&
+            !compatibleTools &&
+            !policyRefusal &&
+            !result?.ok &&
+            Number(result?.status) === 400 &&
+            error?.code === 'invalid_json_schema' &&
+            /^Invalid schema for 'tools\[\d+\]\.parameters': Unsatisfiable schema:/.test(error.message || '') &&
+            !result.committed &&
+            !result.transportError &&
+            !hopEmitted &&
+            !res.headersSent &&
+            !gone.signal.aborted &&
+            attempts < failoverBudget.maxAttempts
+          ) {
+            compatibleTools = codexCompatibleFunctionTools(outboundBody.tools)
+            if (compatibleTools) {
+              attempts += 1
+              logBag.attempt_count += 1
+              outboundBody = { ...outboundBody, tools: compatibleTools }
+              if (captureOutbound) logBag.outbound_body = outboundBody
+              result = await runHop()
+              policyRefusal = afterHop?.(result)
+            }
+          }
+          return { result, policyRefusal }
+        }
+        let { result, policyRefusal } = await runAttempt()
         // A transient seat-local failure gets the same account up to N retries
         // before the request spends a switch. 401/403/429 are never retried here:
         // they are credential/account state and must move to another seat.
@@ -1243,12 +1395,13 @@ export async function handleCodexProtocol({
           sameAccountRetries += 1
           attempts += 1
           hops += 1
-          logBag.attempt_count = hops
+          logBag.attempt_count += 1
           logBag.codex_same_account_retried = sameAccountRetries
           await new Promise((resolve) => setTimeout(resolve, sameRetryDelayMs))
           hopEmitted = false
-          result = await runHop()
-          policyRefusal = afterHop?.(result)
+          const retried = await runAttempt()
+          result = retried.result
+          policyRefusal = retried.policyRefusal
         }
         if (policyRefusal && policyRefusal !== 'upstream:billing_refusal') {
           const failure = upstreamRiskClientError(policyRefusal, res._kinRequestId)
@@ -1280,6 +1433,9 @@ export async function handleCodexProtocol({
           result.status = 502
           result.terminalState = 'incomplete'
           result.body = { error: conversionError }
+        }
+        if (result?.hopRequestId) {
+          logBag.hop_meta = { ...logBag.hop_meta, hop_request_id: result.hopRequestId }
         }
         if (result?.transport_retried) logBag.transport_retried = true
         if (result?.reasoning_history_retried) {
@@ -1319,6 +1475,17 @@ export async function handleCodexProtocol({
           logBag.upstream_model = converted.body.model
           if (hops > 1) logBag.codex_failed_over = true
           if (!stream) {
+            if (useGoEgress) {
+              const tc = await transcodeWithProtoFront({
+                cfg: cfg || { paths: { project: projectRoot } },
+                upstreamProtocol: 'openai.responses',
+                inboundProtocol: protocol,
+                model: converted.body.model,
+                stream: false,
+                payload: chunks.join(''),
+              })
+              if (tc?.ok && tc.body) return json(res, 200, JSON.parse(tc.body))
+            }
             if (protocol === 'openai.responses' && result.body?.status === 'incomplete')
               return json(res, 200, result.body)
             let body
@@ -1346,10 +1513,29 @@ export async function handleCodexProtocol({
             }
             return json(res, 200, body)
           }
+          if (useGoEgress) {
+            const tc = await transcodeWithProtoFront({
+              cfg: cfg || { paths: { project: projectRoot } },
+              upstreamProtocol: 'openai.responses',
+              inboundProtocol: protocol,
+              model: converted.body.model,
+              stream: true,
+              payload: chunks.join(''),
+            })
+            if (!res.headersSent) writeSSEHeaders(res)
+            if (tc?.ok && tc.body) res.write(tc.body)
+            return res.end()
+          }
           if (!res.headersSent) writeSSEHeaders(res)
           return res.end()
         }
         if (currentCredential) reportOpenAIAttempt(vm.id, attemptKind, result?.ttftMs ?? null)
+        if (currentCredential && !useSiwc && !policyRefusal && isCodexGrantDead(result)) {
+          markCodexGrantDead(projectRoot, vm.id, {
+            description: result.body?.error?.message || 'oauth_revoked',
+            status: result.status,
+          })
+        }
         if (
           !policyRefusal &&
           isOpenaiCredentialCurrent(hopAuth) &&
@@ -1545,7 +1731,8 @@ function refreshSearchAccess(projectRoot, vm, usedAccess, { proxyUrl, fetchImpl,
   if (!now.refresh) return null
   let pending = searchRefreshes.get(vm.id)
   if (!pending) {
-    pending = (async () => {
+    pending = withCredentialRefreshLock('codex:' + vm.id, async () => {
+      if (!isOpenaiCredentialCurrent(auth)) return null
       const tok = await refresh({ refreshToken: now.refresh, proxyUrl, fetchImpl })
       if (!tok?.ok || !tok.access_token) {
         recordOpenaiAuthResult(auth, {
@@ -1564,7 +1751,7 @@ function refreshSearchAccess(projectRoot, vm, usedAccess, { proxyUrl, fetchImpl,
         expires_at: tok.expires_at || now.first.expires_at,
       })
       return { access: tok.access_token, auth: captureOpenaiAuth(projectRoot, vm.id) }
-    })().finally(() => searchRefreshes.delete(vm.id))
+    }).finally(() => searchRefreshes.delete(vm.id))
     searchRefreshes.set(vm.id, pending)
   }
   return pending
@@ -1661,6 +1848,25 @@ function postCodexSearch(args) {
 function isSearchFailover(out) {
   const status = Number(out?.status) || 0
   return status === 0 || status === 401 || status === 402 || status === 403 || status === 429 || status >= 500
+}
+
+/**
+ * search/images JSON 端点的 grant-death 写盘（与主请求路径同语义）：
+ * 401 响应体命中吊销文案 → 落盘摘池，防止死号继续换槽烧上游 401。
+ */
+export function parkCodexGrantDeadIfHit(projectRoot, vmId, last) {
+  if (Number(last?.status) !== 401) return
+  const parsed = parseJson(last.text)
+  if (!isCodexGrantDead({ ok: false, status: last.status, body: parsed || null })) return
+  try {
+    persistCodexCredentialState(projectRoot, vmId, { error: 'oauth_revoked' })
+    markCodexGrantDead(projectRoot, vmId, {
+      description: parsed?.error?.message || parsed?.error?.code || null,
+      status: last.status,
+    })
+  } catch {
+    /* 写盘 best-effort；换槽逻辑继续 */
+  }
 }
 
 function parseJson(text) {

@@ -46,6 +46,29 @@ H1 尚不支持撤回绑定。删除已绑定槽后，控制面保留已确认�
 
 本机 KVM 的宿主订阅进程计入统一的运行额度；其 relay 缺失、不可连接或健康响应不能证明内部令牌认证时，计为未知。无法确认在额度内时拒绝新的宿主授权请求，不把未知运行情况当作零占用。
 
+## Guest 启动脚本升级（`kin-guest-setup`）
+
+KVM 来宾的 9p 挂载、`kincli` 用户与 payload 软链由 `kin-guest-setup.service` 在**每次来宾启动**时执行。cidata seed 在 **kin-kvm runner 容器每次启动**时由 `kin-kvm-entry` 的 `write_seed()` 生成：把镜像内 `/opt/kin-kvm/guest/`（`docker/kin-kvm/Dockerfile` 的 `COPY guest/`）打进 `seed.iso`。只升级 Node 控制面**不会**替换已存在槽位的 runner 容器，容器内仍是旧镜像里的 guest 脚本。
+
+面板 **停槽 / 起槽**（`POST /vms/:id/stop`、`/start`）与 **恢复服务**（`slot-recovery.mjs`：`stopSlot` → `docker stop`，再 `powerOnSlot` → `docker start`）**不会**重建 runner：`vm-runtime.mjs` 的 `shouldReplaceSlotContainer` 对已停止容器仅当 `recreate: true`、镜像名不等或网络/运行时变更等条件满足时才 `docker rm`；对已存在容器比较的是 `Config.Image` 与目录中的期望标签（如 `ghcr.io/dofastted/kin-kvm-ubuntu:24.04`），同一标签下 **pull 新 digest 不会触发替换**。`ensureSlotImage`（`docker pull`）仅在**新建** runner 容器路径调用，普通 `docker start` 不会拉取镜像。
+
+要让 seed 携带新 `kin-guest-setup`：**先**使槽位 runner 跑在新 kin-kvm 镜像上（`.github/workflows/guest-images.yml` 在 push `main` 且改动 `docker/kin-kvm/**` 时构建，或由 workflow_dispatch 触发；`release.yml` 不构建该镜像）。宿主 `docker pull` 对应 `kin-kvm-*` 标签后，须 **重建 runner 容器**（`docker rm` 后由控制面重新创建）。仓库内会带 `recreate: true` 的路径包括：`POST /api/panel/vms/:id/reset`（会销毁容器并按模式重建，默认还会清空家目录，一般不用于仅换 runner）、`/wrap-cli/sync` 的 `mode: "traits"` 重建、以及 `reloadSlotWorker` 在判定 `slotWorkerNeedsRecreate` 时触发的替换。若面板无合适入口，可按 [DEPLOY.md](DEPLOY.md) 的 KVM 说明维护窗口操作：**停槽 → `docker pull` → `docker rm -f` 该槽 runner 容器（`vms/<id>/run` 与 `vms/<id>/kvm` 磁盘绑定保留）→ 再起槽**，新建容器路径会 `ensureSlotImage` 并打包当前镜像内的 guest 文件。
+
+首次 cloud-init 由 `user-data` 的 `runcmd` 调用 `install-guest.sh`（instance-id 按 overlay 稳定时 **只跑一次**），把 `kin-guest-setup` 安装到来宾磁盘 `/usr/local/sbin`。此后 seed 更新**不会**自动覆盖磁盘上的脚本；仓库无其它自动升级路径。`mount_9p` 在路径已是挂载点时直接返回，不会改 `cache=`；因此 `systemctl restart kin-guest-setup.service`（含 `kin-crag-apparmor` 为恢复 `slot.env` 触发的重启）不能单独把 `kinhome`/`kinclaude` 换成 `cache=none`（#1877）。
+
+**新建来宾 overlay**（新 qcow、首次 cloud-init）：前提是槽位 runner 容器已经来自**含新 guest 脚本的 kin-kvm 镜像**；否则首次 `install-guest.sh` 仍会装旧脚本。
+
+**已有来宾磁盘**（保留 `vms/<id>/kvm` overlay）在 runner 已换新镜像后：
+
+1. 在来宾内从当前 cidata 重装脚本：`install -m 0755 /mnt/cidata/kin-guest-setup /usr/local/sbin/kin-guest-setup`（需先挂载只读 cidata，逻辑同 `kin-guest-setup` / `install-guest.sh`）。
+2. 让 9p 按新 `cache=` 冷挂载：来宾内 **`reboot`**（在 runner 内对 QEMU 来宾做一次完整重启），或停掉来宾后由 runner 再起；**不要**指望面板「恢复服务」、停槽起槽或仅 `restart kin-guest-setup` 代替上述步骤。重装脚本后不在来宾内 reboot、也不清空挂载点，则旧 `cache=mmap` 可能仍在。
+
+进入来宾执行重装：控制面与运维脚本经 runner 容器的 **`kin-guest-exec`**（SSH 至来宾 root，见 `docker/kin-kvm/kin-guest-exec` 与 [DEPLOY.md](DEPLOY.md)）；有权限时也可 `docker exec` 进入 kin-kvm runner 后调用该命令。
+
+与 `kin-crag-apparmor` 经控制面下发、下次 CRAG 启动应用的 tmpfs drop-in（#1741 / #1838）不同，`kin-guest-setup` 的挂载选项取决于来宾磁盘上的脚本与冷启动挂载路径。
+
+**未在 KVM 来宾实测的风险**：`cache=none` 下，对可写 9p 共享的 `MAP_SHARED` `mmap` 在部分内核/客户端上可能返回 `EINVAL`；各 CLI 尚未在 KVM 来宾环境做完整回归，升级后应观察配置保存与会话续跑是否正常。
+
 ## AppArmor 与原生 Claude 启动权限
 
 Ubuntu 24.04 等启用了 `kernel.apparmor_restrict_unprivileged_userns=1` 的 guest 中，CRAG V2 健康检查可能正常，但实际请求仍报 `Claude native launch failed (guest identity requires user/mount namespaces and bind-mount permissions): Permission denied`。原生 Claude 的 guest identity 需要创建用户、挂载命名空间并执行 bind mount；AppArmor 的默认非特权用户命名空间策略可能阻止这些操作。

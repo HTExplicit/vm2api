@@ -40,11 +40,19 @@ test('deploy/replace-db-to-pg.sh enforces pre-stop dependency/connectivity check
   assert.match(script, /--pg-runtime/)
   assert.match(script, /--local-data/)
   assert.match(script, /--check-deps/)
+  assert.match(script, /--preflight/)
   assert.match(script, /--no-install-deps/)
   assert.match(script, /--auto-pull/)
   assert.match(script, /--dry-run/)
   assert.match(script, /--rollback/)
   assert.match(script, /--status/)
+  assert.match(script, /systemd_env_get/)
+  assert.match(script, /ensure_host_migrator_script/)
+  assert.match(script, /run_sqlite_preflight/)
+  assert.match(script, /EnvironmentFile=/)
+  assert.match(script, /\.env\.postgres/)
+  assert.match(script, /--maxmemory 256mb --maxmemory-policy allkeys-lru/)
+  assert.match(script, /GRANT ALL ON SCHEMA public/)
   assert.match(script, /ensure_base_host_deps/)
   assert.match(script, /ensure_docker_runtime/)
   assert.match(script, /ensure_native_pg_redis_deps/)
@@ -61,6 +69,10 @@ test('deploy/replace-db-to-pg.sh enforces pre-stop dependency/connectivity check
   // Must NEVER use loose substring container matching that could hit another Postgres container on host
   assert.doesNotMatch(script, /--filter "name=postgres"/)
   assert.match(script, /name=\^\/\$\{fallback_name\}\$/)
+  // Systemd mode must resolve unit KIN_API_KEY before falling back to stale .env VM2API_API_KEY
+  assert.match(script, /systemd_env_get KIN_API_KEY/)
+  // Rollback trap must stop an already-started control plane before restarting onto SQLite
+  assert.match(script, /cleanup_on_failure\(\)[\s\S]*stop_control_plane "\$MODE" "\$BG_ACTIVE"[\s\S]*start_control_plane "\$MODE" "\$BG_ACTIVE" 1/)
 })
 
 test('deploy/install.sh auto-installs PG dependencies, guards SQLite upgrades, and exposes PG flags + db-migrate', () => {
@@ -95,7 +107,9 @@ test('deploy/install-pg.sh provides a unified one-click PG installer and seamles
   assert.match(script, /db-rollback/)
   assert.match(script, /db-status/)
   assert.match(script, /--check-deps/)
+  assert.match(script, /--preflight/)
   assert.match(script, /--dry-run/)
+  assert.match(script, /is_systemd_host/)
 })
 
 test('deploy/bluegreen/bg-deploy.sh guards PG migrations, uses --no-deps, and preserves local PG/Redis during --bootstrap', () => {

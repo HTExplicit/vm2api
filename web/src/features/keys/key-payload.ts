@@ -8,8 +8,10 @@ export const KEY_ALLOWED_MODELS_MAX = 200
 
 export type KeyLimitsDraft = {
   name: string
-  category: 'oauth' | 'api'
+  category: 'oauth' | 'api' | 'all'
   api_endpoint_id?: string
+  permission_tier?: 'platform' | 'tenant' | 'resource'
+  owner_id?: string | null
   max_concurrency: number
   quota_requests: number
   quota_usd: number
@@ -67,17 +69,20 @@ export function keyLimitsPayload(
     quota_usd: nonNegative(draft.quota_usd, 'USD 额度'),
     rpm: nonNegative(draft.rpm, 'RPM'),
   }
-  // 账号 API key 使用 API 后端，账号勾选范围仍由分组保存。
   const isApi = draft.category === 'api' && draft.group_type !== 'openai_apikey'
-  if (isAdmin)
-    body.category =
-      draft.group_type === 'openai_apikey' ? 'api' : draft.category
+  const allowsEndpoint = isApi || draft.category === 'all'
+  const allowTenantEmptyVms =
+    draft.permission_tier === 'tenant' &&
+    Boolean(String(draft.owner_id || '').trim())
   if (draft.group_type === 'gemini' && (!isAdmin || isApi)) {
     throw new Error('Gemini 平台只允许管理员创建宿主机 OAuth 密钥')
   }
-  if (isAdmin && isApi && draft.api_endpoint_id !== undefined) {
+  // API 直连与混合模式只有管理员可以设置
+  if (isAdmin) body.category = draft.group_type === 'openai_apikey' ? 'api' : draft.category
+  if (isAdmin && allowsEndpoint && draft.api_endpoint_id !== undefined) {
     const endpointId = draft.api_endpoint_id.trim()
-    if (mode === 'create' && !endpointId) throw new Error('请选择 API 渠道')
+    if (isApi && mode === 'create' && !endpointId)
+      throw new Error('请选择 API 渠道')
     body.api_endpoint_id = endpointId || null
   }
   if (isAdmin && draft.group_type === 'pool' && !isApi) {
@@ -98,6 +103,8 @@ export function keyLimitsPayload(
     }
     if (
       !isApi &&
+      draft.category !== 'all' &&
+      !allowTenantEmptyVms &&
       group_type !== 'all' &&
       group_type !== 'gemini' &&
       allowed_vms.length === 0

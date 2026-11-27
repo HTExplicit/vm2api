@@ -484,6 +484,16 @@ test(
         )
         if (pathname === '/api/panel/crag-subscription')
           return respond({ ready: false, state: 'unavailable' })
+        if (pathname === '/api/panel/crag-subscription/orders')
+          return respond({
+            host_id: 'offline-host',
+            product: 'crag',
+            orders: [],
+            vouchers: [],
+            total: 0,
+            limit: 50,
+            offset: 0,
+          })
         if (pathname === '/api/panel/crag-shop/activation-targets')
           return respond({ targets: [] })
         if (pathname === '/api/panel/vms') return respond({ items: [] })

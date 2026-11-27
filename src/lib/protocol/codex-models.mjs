@@ -277,6 +277,10 @@ export async function refreshCodexAccessToken(opts = {}) {
     const status = Number(res?.status) || 0
     const payload = await readFetchBody(res)
     const oauthError = typeof payload?.error === 'string' ? payload.error : payload?.error?.code
+    const blob = [oauthError, payload?.error_description, payload?.error?.message].filter(Boolean).join(' ')
+    if ((status === 401 || status === 403) && /token_revoked|invalidated oauth token|token has been revoked|oauth_revoked/i.test(blob)) {
+      return { ok: false, error: 'oauth_revoked', status, revoked: true, description: payload?.error_description || payload?.error || null }
+    }
     if (
       /^(invalid_grant|oauth_invalid_grant|oauth_revoked|token_revoked|refresh_token_reused|refresh_token_invalid)$/.test(
         oauthError || '',

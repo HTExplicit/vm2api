@@ -10,12 +10,15 @@ import { SettingRow } from '@/components/setting-row'
 import { AccountBrowserSection } from './account-browser-section'
 import { OpenaiApiBalanceSection } from './openai-api-balance-section'
 import { OpenaiQuotaSection } from './openai-quota-section'
+import {
+  DEFAULT_CODEX_USER_AGENT as DEFAULT_USER_AGENT,
+  codexCatalogVersionError,
+} from './routing-draft'
 import { ChipGroup, PaneSection } from './scheduler-controls'
 
 type Block = Record<string, unknown>
 type Transport = 'prefer_websocket' | 'http'
 
-const DEFAULT_USER_AGENT = 'codex_cli_rs/0.170.0 (linux x86_64)'
 const TRANSPORT_OPTIONS: [Transport, string][] = [
   ['prefer_websocket', '优先 WebSocket'],
   ['http', '仅 HTTP'],
@@ -41,6 +44,7 @@ export function OpenaiPane({
   onOpenaiApiChange,
   saving = false,
   pending = false,
+  pendingQuotaCards,
 }: {
   websocket: Block
   codex: Block
@@ -50,6 +54,9 @@ export function OpenaiPane({
   onOpenaiApiChange: (next: OpenaiApiConfig) => void
   saving?: boolean
   pending?: boolean
+  pendingQuotaCards?: Partial<
+    Record<'gates' | 'concurrency' | 'rpm' | 'sessions', boolean>
+  >
 }) {
   const routeOn = codex.enabled !== false
   const globalWs = asBlock(websocket).enabled !== false
@@ -209,6 +216,23 @@ export function OpenaiPane({
           <section className='min-w-0 space-y-2'>
             <h4 className='text-xs font-medium text-muted-foreground'>入口</h4>
             <div className='divide-y'>
+              <SettingRow
+                label='官方 Codex 请求体透传'
+                desc={
+                  codex.official_passthrough !== false
+                    ? '开：仅经校验的官方 Codex CLI /v1/responses 请求体走透传快路径（仍剥离身份字段并重建会话）；第三方与跨协议一律走 IR 归一化。'
+                    : '关：官方 Codex 客户端也强制走统一 IR 归一与字段裁剪，不透传原始请求体。'
+                }
+              >
+                <Switch
+                  checked={codex.official_passthrough !== false}
+                  disabled={saving}
+                  onCheckedChange={(official_passthrough) =>
+                    update({ official_passthrough })
+                  }
+                  aria-label='官方 Codex 请求体透传'
+                />
+              </SettingRow>
               <SettingRow label='/v1/responses' desc='ChatGPT native。'>
                 <Switch
                   checked={responsesOn}
@@ -255,6 +279,7 @@ export function OpenaiPane({
         quota={quota}
         saving={saving}
         pending={pending}
+        pendingCards={pendingQuotaCards}
         onChange={(patch) =>
           update({
             quota: {
@@ -301,42 +326,68 @@ export function OpenaiPane({
               aria-label='运行环境 Analytics 上报'
             />
           </SettingRow>
-          <SettingRow
-            label='Codex 目录客户端版本'
-            desc='auto 取官方 @openai/codex 版本并缓存，失败用已验证的 0.170.0。'
-          >
-            <Input
-              className='w-28'
-              maxLength={20}
-              value={String(codex.catalog_client_version ?? 'auto')}
-              placeholder='auto'
-              disabled={saving}
-              aria-label='Codex 目录客户端版本'
-              onChange={(e) =>
-                update({
-                  catalog_client_version: e.target.value || 'auto',
-                })
-              }
-            />
-          </SettingRow>
+          <div className='space-y-1.5 py-3'>
+            <SettingRow
+              label='Codex 目录客户端版本'
+              desc='auto 取官方 @openai/codex 版本并缓存，失败用已验证的 0.170.0；也可填写语义版本号（如 0.170.0），失焦或保存时若为空自动恢复 auto。'
+            >
+              <Input
+                className='w-32'
+                maxLength={20}
+                value={
+                  codex.catalog_client_version == null
+                    ? 'auto'
+                    : String(codex.catalog_client_version)
+                }
+                placeholder='auto'
+                disabled={saving}
+                aria-label='Codex 目录客户端版本'
+                aria-invalid={
+                  !!codexCatalogVersionError(codex.catalog_client_version)
+                }
+                onChange={(e) =>
+                  update({
+                    catalog_client_version: e.target.value,
+                  })
+                }
+                onBlur={(e) =>
+                  update({
+                    catalog_client_version: e.target.value.trim() || 'auto',
+                  })
+                }
+              />
+            </SettingRow>
+            {codexCatalogVersionError(codex.catalog_client_version) ? (
+              <p role='alert' className='text-xs text-destructive'>
+                {codexCatalogVersionError(codex.catalog_client_version)}
+              </p>
+            ) : null}
+          </div>
           <div className='space-y-2 py-3'>
             <div className='space-y-0.5'>
               <Label htmlFor='codex-user-agent'>上游 User-Agent</Label>
               <p className='text-xs text-muted-foreground'>
-                缺省为 {DEFAULT_USER_AGENT}。空输入会回到缺省，避免保存失败。
+                缺省为 {DEFAULT_USER_AGENT}。失焦或保存时若为空会自动恢复缺省。
               </p>
             </div>
             <Input
               id='codex-user-agent'
               className='w-full min-w-0 font-mono text-xs'
-              value={String(codex.user_agent ?? DEFAULT_USER_AGENT)}
+              value={
+                codex.user_agent == null
+                  ? DEFAULT_USER_AGENT
+                  : String(codex.user_agent)
+              }
               placeholder={DEFAULT_USER_AGENT}
               disabled={saving}
               spellCheck={false}
               autoComplete='off'
               aria-label='上游 User-Agent'
-              onChange={(e) =>
-                update({ user_agent: e.target.value || DEFAULT_USER_AGENT })
+              onChange={(e) => update({ user_agent: e.target.value })}
+              onBlur={(e) =>
+                update({
+                  user_agent: e.target.value.trim() || DEFAULT_USER_AGENT,
+                })
               }
             />
           </div>

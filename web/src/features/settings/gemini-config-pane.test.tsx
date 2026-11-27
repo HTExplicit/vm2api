@@ -6,11 +6,7 @@ import type {
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { GeminiConfigPane } from './gemini-config-pane'
-import {
-  SETTINGS_NAV_GROUPS,
-  SETTINGS_TABS,
-  settingsTabId,
-} from './navigation'
+import { SETTINGS_NAV_GROUPS, SETTINGS_TABS, settingsTabId } from './navigation'
 
 type ReactQuery = {
   useQueryClient: typeof useQueryClient
@@ -22,10 +18,16 @@ vi.mock('@tanstack/react-router', () => ({
   Link: ({
     children,
     className,
+    hash,
   }: {
     children: React.ReactNode
     className?: string
-  }) => <a className={className}>{children}</a>,
+    hash?: string
+  }) => (
+    <a className={className} data-hash={hash}>
+      {children}
+    </a>
+  ),
 }))
 
 vi.mock('@tanstack/react-query', async (importOriginal) => ({
@@ -87,9 +89,9 @@ describe('settings Gemini entry & scheduling config pane', () => {
       true
     )
     expect(ops?.items.some((item) => item.id === 'gemini')).toBe(true)
-    expect(
-      SETTINGS_TABS.find(([id]) => id === 'gemini-config')?.[1]
-    ).toBe('Gemini')
+    expect(SETTINGS_TABS.find(([id]) => id === 'gemini-config')?.[1]).toBe(
+      'Gemini'
+    )
     expect(SETTINGS_TABS.find(([id]) => id === 'gemini')?.[1]).toBe(
       'Gemini 维护'
     )
@@ -112,9 +114,12 @@ describe('settings Gemini entry & scheduling config pane', () => {
     expect(html).toContain('分片接管 · 50/进程')
     expect(html).toContain('shard-0')
     expect(html).toContain('入口与协议准入')
+    expect(html).toContain('官方 Gemini 请求体透传')
     expect(html).toContain('调度策略与粘性会话')
     expect(html).toContain('单 CRAGGemini 多账号接管与并发')
     expect(html).toContain('单账号默认会话上限')
+    expect(html).toContain('502 自动打入不可调度')
+    expect(html).toContain('账号定时状态检查间隔')
     expect(html).toContain('资格警告定时探测间隔')
     expect(html).toContain('CRAGGemini 性能配置')
     expect(html).toContain('aria-label="CRAGGemini 性能配置"')
@@ -152,5 +157,22 @@ describe('settings Gemini entry & scheduling config pane', () => {
     expect(selectedTitleFor(16, 64)).toBe('高')
     expect(selectedTitleFor(1, 4)).toBe('初')
     expect(selectedTitleFor(8, 32)).toBe('高')
+  })
+
+  it('aligns disabled 403 copy, sticky ttl=0 wording, and maintenance section hash', () => {
+    const html = renderToStaticMarkup(
+      <GeminiConfigPane
+        value={{
+          enabled: false,
+          sticky: { enabled: true, ttl_seconds: 0 },
+        }}
+        onChange={vi.fn()}
+      />
+    )
+    expect(html).toContain('返回 403（gemini_disabled）')
+    expect(html).not.toContain('返回 503')
+    expect(html).toContain('设为 0 时不保留跨请求粘性绑定')
+    expect(html).toContain('>不保留<')
+    expect(html).toContain('data-hash="gemini-maintenance"')
   })
 })

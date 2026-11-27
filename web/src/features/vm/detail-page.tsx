@@ -27,7 +27,7 @@ import {
   weeklySplitInfo,
 } from '@/lib/fable-status'
 import { usedPctOf } from '@/lib/format'
-import { compactEmail, isCodexVm } from '@/lib/vm-kind'
+import { isCodexVm, slotDisplayTitle } from '@/lib/vm-kind'
 import {
   accountStatus,
   claudeTier,
@@ -168,7 +168,7 @@ function VmDetailBody({
     detail.data?.vm?.resolved_dataplane === 'crag'
   const seedUploadLog = useQuery({
     ...vmSeedUploadLogQueryOptions(id),
-    enabled: perms.admin && wantedTab === 'seed' && seedDebug && !cragTelemetry,
+    enabled: perms.admin && wantedTab === 'seed' && seedDebug,
     refetchInterval: seedDebug && wantedTab === 'seed' ? 2000 : false,
   })
   usePoolSeatStream()
@@ -403,10 +403,10 @@ function VmDetailBody({
   )
   const todayInput = Number(
     acc.today_input_tokens ??
-      vm.today_input_tokens ??
-      acc.tokens_in ??
-      vm.tokens_in ??
-      0
+    vm.today_input_tokens ??
+    acc.tokens_in ??
+    vm.tokens_in ??
+    0
   )
   const todayHit = cacheHitPct(todayInput, todayReadCache, todayWriteCache)
   const today = vmTodayCounts(vm, data.billing)
@@ -423,10 +423,7 @@ function VmDetailBody({
         : ''
 
   return (
-    <PageHeader
-      title={vm.name || (vm.email ? compactEmail(vm.email, 28) : vm.id)}
-      fluid
-    >
+    <PageHeader title={slotDisplayTitle(vm)} fluid>
       <QueryGate
         loading={detail.isLoading && !listVm}
         error={detail.error}

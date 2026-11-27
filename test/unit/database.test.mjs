@@ -183,12 +183,17 @@ test('migration 053 adds unknown observed models without rewriting historical mo
       usage_account_id,
       upstream_status,
       upstream_400_message,
+      upstream_type,
+      error_details,
+      advisor_usage,
+      advisor_cost,
       ...after
     } = db.prepare('SELECT * FROM usage_logs WHERE id = ?').get('log-legacy')
     assert.equal(failure_diagnostics_json, null)
     assert.equal(usage_account_id, null)
     assert.equal(sent_model, null)
     assert.equal(upstream_response_model, null)
+    for (const field of [upstream_type, error_details, advisor_usage, advisor_cost]) assert.equal(field, null)
     assert.deepEqual(after, before)
     assert.deepEqual(applyMigrations(db, { migrationsDir: migrations }), [])
   } finally {
@@ -271,6 +276,8 @@ test('migration 059 onward preserves the published 9102 ledger, browser state an
       '071_crag_shop_device_host.sql',
       '072_crag_shop_activation_error.sql',
       '073_multi_tier_key_permissions.sql',
+      '074_log_error_details_and_hop_correlation.sql',
+      '075_usage_logs_advisor_billing.sql',
     ])
     assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '059' ORDER BY version").all(), ledger)
     for (const table of preservedTables)
@@ -591,6 +598,8 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       '071_crag_shop_device_host.sql',
       '072_crag_shop_activation_error.sql',
       '073_multi_tier_key_permissions.sql',
+      '074_log_error_details_and_hop_correlation.sql',
+      '075_usage_logs_advisor_billing.sql',
     ])
     const { risk_review_enabled, body_policy, owner_user_id, ...after } = db
       .prepare('SELECT * FROM api_endpoints WHERE id = ?')
@@ -705,7 +714,12 @@ test('migration 072 upgrades pre-072 crag_shop_orders in place with NULL activat
       VALUES ('legacy-pinned', 'panel:admin', 'req-072', 'quarter', 'alipay', 1, 'fulfilled', 1, '3m', 59900, 10,
               'vm-1', ?)`).run('a'.repeat(64))
     const applied = applyMigrations(db, { migrationsDir: src })
-    assert.deepEqual(applied, ['072_crag_shop_activation_error.sql', '073_multi_tier_key_permissions.sql'])
+    assert.deepEqual(applied, [
+      '072_crag_shop_activation_error.sql',
+      '073_multi_tier_key_permissions.sql',
+      '074_log_error_details_and_hop_correlation.sql',
+      '075_usage_logs_advisor_billing.sql',
+    ])
     assert.deepEqual(applyMigrations(db, { migrationsDir: src }), [])
     const row = db
       .prepare(

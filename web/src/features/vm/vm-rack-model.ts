@@ -127,7 +127,7 @@ export function zoneCounts(vms: Vm[]): Record<VmZone, number> {
 
 // ---------- 单台额度窗口 ----------
 
-export type WindowKey = '5h' | '7d' | 'fable'
+export type WindowKey = '5h' | '7d' | 'fable' | (string & {})
 
 /** 只描述额度占用；费用与 token 走 `vmCostLedger`，两处不重复。 */
 export type WindowReadout = {
@@ -141,7 +141,24 @@ export type WindowReadout = {
   durationMs?: number | null
 }
 
-/** 5H → 7D → Fable；无读数的 Fable 窗口展示探测状态。 */
+function clampCodexPercent(value: unknown): number | null {
+  if (value == null || value === '') return null
+  const n = Number(value)
+  if (!Number.isFinite(n)) return null
+  return Math.max(0, Math.min(100, n))
+}
+
+function hasCustomCodexWindows(vm: Vm): boolean {
+  const rows = vm.codex_usage?.windows
+  return Boolean(
+    isCodexVm(vm) &&
+    Array.isArray(rows) &&
+    rows.length > 0 &&
+    rows.some((w) => w?.id && w.id !== '5h' && w.id !== '7d')
+  )
+}
+
+/** 5H → 7D → Fable；Codex 若含非 5h/7d 实际周期（如 24h）则按实际窗口展示；Gemini API Key 无订阅窗口。 */
 export function vmWindows(vm: Vm): WindowReadout[] {
   const display = codexQuotaDisplayVm(vm)
   const codex = isCodexVm(vm)
@@ -154,6 +171,43 @@ export function vmWindows(vm: Vm): WindowReadout[] {
       minutes > 0
       ? minutes * 60_000
       : null
+  }
+  if (vm.gemini) {
+    if (vm.gemini.auth_method === 'api_key') return []
+    const probed = (w: '5h' | '7d') =>
+      vm.has_token && windowProbed(vm, w) ? usedPctOf(vm, w) : null
+    return [
+      {
+        key: '5h',
+        label: '5H',
+        pct: probed('5h'),
+        note: null,
+        reset: vm.reset_5h,
+      },
+      {
+        key: '7d',
+        label: '7D',
+        pct: probed('7d'),
+        note: null,
+        reset: vm.reset_7d,
+      },
+    ]
+  }
+  if (hasCustomCodexWindows(vm)) {
+    return (vm.codex_usage?.windows || []).map((w) => {
+      const id = String(w.id || w.label || 'window')
+      const pct = vm.has_token ? clampCodexPercent(w.used_percent) : null
+      return {
+        key: id,
+        label: String(w.label || id).toUpperCase(),
+        pct,
+        note: null,
+        reset:
+          w.reset_at ??
+          (id === '5h' ? vm.reset_5h : id === '7d' ? vm.reset_7d : null),
+        durationMs: w.window_minutes != null && w.window_minutes > 0 ? w.window_minutes * 60_000 : null,
+      }
+    })
   }
   const probed = (w: '5h' | '7d') =>
     vm.has_token && windowProbed(display, w) ? usedPctOf(display, w) : null
@@ -190,7 +244,7 @@ export function vmWindows(vm: Vm): WindowReadout[] {
 
 /**
  * 刀片主体画什么：读数表，或一句说明加一步动作。
- * `unprobed` = 有凭证但 5h / 7d 都没有实测值——画 0% 会冒充「还很空」。
+ * `unprobed` = 有凭证但没有任何窗口实测值——画 0% 会冒充「还很空」。
  */
 export type BladeState = 'live' | 'dead' | 'vacant' | 'unprobed'
 
@@ -198,8 +252,19 @@ export function bladeState(vm: Vm): BladeState {
   const zone = zoneOf(vm)
   if (zone === 'dead') return 'dead'
   if (zone === 'none' || !vm.has_token) return 'vacant'
+  if (vm.gemini) {
+    if (vm.gemini.auth_method === 'api_key') return 'live'
+    return windowProbed(vm, '5h') || windowProbed(vm, '7d')
+      ? 'live'
+      : 'unprobed'
+  }
   const display = codexQuotaDisplayVm(vm)
-  if (!windowProbed(display, '5h') && !windowProbed(display, '7d'))
+  const anyCodex = Boolean(
+    display.codex_usage?.windows?.some(
+      (w) => clampCodexPercent(w.used_percent) != null
+    )
+  )
+  if (!windowProbed(display, '5h') && !windowProbed(display, '7d') && !anyCodex)
     return 'unprobed'
   return 'live'
 }

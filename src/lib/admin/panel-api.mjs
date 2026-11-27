@@ -12,6 +12,7 @@ import { THINKING_DISPLAY_MODES } from '../protocol/thinking.mjs'
 import { normalizeRedaction } from '../redaction/policy.mjs'
 import { redactionStatus } from '../redaction/runtime.mjs'
 import { normalizeGeminiRouting } from '../gemini/routing-config.mjs'
+import { CRAGGEMINI_PERSONA_PRESETS, CRAGGEMINI_SYSTEM_PROMPT_MAX } from '../gemini/system-prompt.mjs'
 import { readSlotProcessStatus } from '../vm/slot-process-status.mjs'
 import { openaiUsageAccountId } from '../vm/codex-slot.mjs'
 import os from 'node:os'
@@ -26,6 +27,7 @@ import {
   persistVmSubscription,
   isCodexVm,
   migrateVmSchedule,
+  markUnschedulable,
 } from '../vm/vm-registry.mjs'
 import { clearRecoverableVmCooldown, markVmRefreshError } from '../oauth/oauth-credentials.mjs'
 import {
@@ -43,7 +45,7 @@ import { queryOpenaiQuota, resetOpenaiQuota } from '../oauth/openai-quota.mjs'
 import { openaiAuthBlock } from '../oauth/openai-auth-state.mjs'
 import { queryClaudeResetCredits, redeemClaudeResetCredit } from '../oauth/claude-reset-credits.mjs'
 import { canOfficialUsage, credentialModeOfVm, isSetupTokenMode } from '../oauth/credential-mode.mjs'
-import { getUsageCache } from '../oauth/usage-cache.mjs'
+import { attachUsageFetchMeta, getUsageCache, getUsageFetchMeta } from '../oauth/usage-cache.mjs'
 import { makeError, ErrorType, ErrorCode } from '../core/errors.mjs'
 import { filterVmsForPanel } from './resource-owner.mjs'
 import { nodePlatform } from '../cluster/placement.mjs'
@@ -52,6 +54,7 @@ import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { pickScheduleFields } from '../pool/schedule-state.mjs'
 import { socksProxyFamily, normalizeSocksHost } from '../vm/socks-address.mjs'
 import { accountTierKey, isNearLimit, normalizeTiers, resolveTierPolicy } from '../pool/quota-tiers.mjs'
+import { isOrganizationDisabledUsageResult } from '../pool/upstream-error-policy.mjs'
 import { mergeBatchGroupConfig } from '../pool/batch-group.mjs'
 import { applyVmQuotaConfig, applyVmQuotaPolicy, vmQuotaOverrideOf, vmQuotaView } from '../pool/vm-quota-override.mjs'
 import { GATE_OPEN, gatePolicyFields, gateZone, quotaGateOf } from '../pool/quota-gate.mjs'
@@ -458,15 +461,21 @@ export function validatePersonaRoutingPatch(body = {}) {
   }
   if (compat.craggemini_persona_preset != null && String(compat.craggemini_persona_preset).trim() !== '') {
     const raw = String(compat.craggemini_persona_preset).trim()
-    if (raw !== 'official_full' && raw !== 'zero') {
-      problems.push(`craggemini_persona_preset 必须是 official_full / zero，收到 ${raw}`)
+    if (!CRAGGEMINI_PERSONA_PRESETS.includes(raw)) {
+      problems.push(`craggemini_persona_preset 必须是 ${CRAGGEMINI_PERSONA_PRESETS.join(' / ')}，收到 ${raw}`)
     }
   }
   if (compat.craggemini_system_prompt != null) {
     if (typeof compat.craggemini_system_prompt !== 'string') {
       problems.push('craggemini_system_prompt 必须是字符串')
-    } else if (compat.craggemini_system_prompt.length > 32_768) {
-      problems.push('craggemini_system_prompt 超过 32768 字符')
+    } else if (compat.craggemini_system_prompt.length > CRAGGEMINI_SYSTEM_PROMPT_MAX) {
+      problems.push(`craggemini_system_prompt 超过 ${CRAGGEMINI_SYSTEM_PROMPT_MAX} 字符`)
+    }
+  }
+  if (compat.craggemini_prompt_normalization != null && String(compat.craggemini_prompt_normalization).trim() !== '') {
+    const raw = String(compat.craggemini_prompt_normalization).trim()
+    if (raw !== 'auto' && raw !== 'strict' && raw !== 'off') {
+      problems.push(`craggemini_prompt_normalization 必须是 auto / strict / off，收到 ${raw}`)
     }
   }
   if (Object.hasOwn(compat, 'openai_system_prompt')) {
@@ -1087,7 +1096,17 @@ export async function buildClaudeResetQuery({ cfg, id, transport, now } = {}) {
   })
 }
 
-export async function buildClaudeResetRedeem({ cfg, id, idempotencyKey, card, transport, now } = {}) {
+export async function buildClaudeResetRedeem({
+  cfg,
+  accountQuota = null,
+  usageCache = null,
+  id,
+  idempotencyKey,
+  card,
+  transport,
+  now,
+} = {}) {
+  const clock = typeof now === 'function' ? now : () => Date.now()
   const result = await redeemClaudeResetCredit({
     projectRoot: cfg.paths.project,
     vmId: id,
@@ -1095,6 +1114,24 @@ export async function buildClaudeResetRedeem({ cfg, id, idempotencyKey, card, tr
     card,
     ...(transport ? { transport } : {}),
     ...(now ? { now } : {}),
+    onResetConfirmed: accountQuota?.recordQuotaReset
+      ? ({ accountId, receiptAccountId, operationId, cleared, at, replayed }) => {
+          // A replayed receipt created before a slot was rebound must not affect the new account.
+          if (!accountId || !receiptAccountId || receiptAccountId !== accountId) return
+          const recorded = accountQuota.recordQuotaReset(accountId, {
+            cleared,
+            at,
+            operationId,
+            now: clock(),
+            replayed,
+          })
+          if (recorded?.applied) {
+            try {
+              ;(usageCache || getUsageCache()).clear(accountId)
+            } catch {}
+          }
+        }
+      : null,
   })
   if (!result.ok) return claudeResetFail(result)
   return ok({
@@ -1126,13 +1163,19 @@ function applyFableProbeResult(accountQuota, accountId, found) {
   accountQuota.repo.save(saved)
   return found.tier
 }
+/** A 403 org refusal in the official /usage probe: park like the runtime 401/403 path. */
+function organizationDisabledProbe(result = {}) {
+  return isOrganizationDisabledUsageResult(result)
+}
 function fatalUsageCredentialFailure(result = {}) {
   if (result?.ok === true || result?.usage_scope_missing) return false
   const status = Number(result?.usage_status || result?.status || 0)
   const text = String(result?.usage_error || result?.error || result?.fable?.error || '').toLowerCase()
   return (
     status === 401 ||
-    /oauth_revoked|token has been revoked|invalid_grant|oauth_invalid_grant|refresh token not found/.test(text)
+    /oauth_revoked|token has been revoked|token_revoked|invalidated oauth token|invalid_grant|oauth_invalid_grant|refresh token not found/.test(
+      text,
+    )
   )
 }
 
@@ -1144,6 +1187,7 @@ export async function buildProbeOne({
   usageCache = null,
   hop = true,
   fableProbe = probeFableEntitlement,
+  codexQuotaQuery = queryOpenaiQuota,
   routingConfig = {},
 } = {}) {
   const vm = getVm(cfg.paths.project, id)
@@ -1158,12 +1202,24 @@ export async function buildProbeOne({
     )
   }
   if (isCodexVm(vm)) {
-    const result = await queryOpenaiQuota({
+    const result = await codexQuotaQuery({
       projectRoot: cfg.paths.project,
       vmId: id,
       rotate: true,
       policy: normalizeCodexRouting(routingConfig.codex).quota,
     })
+    // Codex 探测结果同样写回账号行 unified.last_probe（claude 池现成的闭环，
+    // codex 路径原先只写槽 json 不写账号行——面板 last_probe 恒空=「未探测」假象，
+    // 探测失败也无从在面板归因）。成功/失败都记，失败带 error 文案。
+    // source 用 vm-oauth-usage：USAGE_PROBE_SOURCES 判定集合认这个标签。
+    try {
+      accountQuota?.recordLastProbe?.(id, {
+        ok: !!result.ok,
+        source: 'vm-oauth-usage',
+        at: result.fetched_at || new Date().toISOString(),
+        ...(result.ok ? {} : { error: result.message || result.error || 'GPT quota probe failed', status: result.status || null }),
+      })
+    } catch {}
     if (!result.ok) return gptQuotaFail(result)
     return ok({
       vm_id: id,
@@ -1241,8 +1297,31 @@ export async function buildProbeOne({
         probed_at: new Date().toISOString(),
         ...(headerProbe ? { ...headerProbe, error: null } : {}),
       }
-    : await cache.load(accountId, () => probeAccount({ exec, vm, includeFable }), { force: !!force })
-  if (fatalUsageCredentialFailure(result)) {
+    : await cache.load(
+        accountId,
+        async () => {
+          const startedAt = Date.now()
+          const resetGenerations = accountQuota.resetGenerations?.(accountId) || null
+          const probed = await probeAccount({ exec, vm, includeFable })
+          return attachUsageFetchMeta(probed, { startedAt, resetGenerations })
+        },
+        { force: !!force },
+      )
+  // The probe heard the same org refusal the runtime 400/401/403 classifier
+  // parks on: park now, without waiting for real traffic to trip it again.
+  // Operator-only re-enable, identical to the runtime path (four-state model).
+  // Checked BEFORE the bare-401 fatal branch: an org-disabled 401 must not be
+  // recorded as oauth_revoked ("凭证吊销" would be a wrong panel verdict).
+  if (organizationDisabledProbe(result)) {
+    try {
+      markUnschedulable(cfg.paths.project, id, 'organization_disabled', {
+        status: Number(result.usage_status || result.status) || null,
+        message: String(result.usage_error?.message || result.usage_error || result.error || '').slice(0, 500),
+        account_id: accountId || null,
+        at: new Date().toISOString(),
+      })
+    } catch {}
+  } else if (fatalUsageCredentialFailure(result)) {
     try {
       markVmRefreshError(path.join(cfg.paths.project, 'vms', `${id}.json`), {
         error: {
@@ -1256,7 +1335,13 @@ export async function buildProbeOne({
   const profile = [result, acc?.unified, vm.claude, vm].find(
     (record) => record?.account_tier_source === 'profile' && ['pro', 'max'].includes(record.account_tier),
   )
-  if (!skipHop) accountQuota.ingestOAuthUsage(accountId, result)
+  if (!skipHop) {
+    const fetchMeta = getUsageFetchMeta(result)
+    accountQuota.ingestOAuthUsage(accountId, result, {
+      ...(fetchMeta?.startedAt != null ? { startedAt: fetchMeta.startedAt } : {}),
+      ...(fetchMeta?.resetGenerations ? { resetGenerations: fetchMeta.resetGenerations } : {}),
+    })
+  }
   if (result.subscription_type) {
     persistVmSubscription(cfg.paths.project, id, result, {
       accountUuid: vm.claude?.account_uuid,
@@ -1314,12 +1399,16 @@ export async function buildProbeOne({
     accountQuota.setAccountTier(accountId, tier, { source: 'usage' })
     persistAccountTier(cfg.paths.project, id, tier, { source: 'usage' })
   }
+  // The org-refusal park above rewrote vm.json; re-read so the probe response
+  // does not report the just-parked slot as still schedulable.
+  const vmFresh = organizationDisabledProbe(result) ? getVm(cfg.paths.project, id) : null
+  const vmView = vmFresh || vm
   const availability = evaluateAccount({
-    vm,
+    vm: vmView,
     account: after || {},
     hasToken: true,
-    hasRefresh: !!(vm.has_refresh || vm.claude?.has_refresh),
-    schedulable: vm.schedulable !== false,
+    hasRefresh: !!(vmView.has_refresh || vmView.claude?.has_refresh),
+    schedulable: vmView.schedulable !== false,
     lastProbe: qAfter.last_probe,
     probeSource: qAfter.probe_source,
     quota: qAfter,
@@ -1659,6 +1748,29 @@ function activeFableCreditsRequired(unified, now = Date.now()) {
   return { model: mark.model || null, at: mark.at || null, until: mark.until }
 }
 
+// Display-only snapshots. Do not promote legacy aliases or aggregate update times
+// to fresh per-window observations, and do not feed this projection into admission.
+function quotaObservations(u) {
+  const window = (w) => {
+    if (!w || typeof w !== 'object') return null
+    const value = w.utilization == null || w.utilization === '' ? null : Number(w.utilization)
+    return {
+      utilization: value != null && Number.isFinite(value) ? value : null,
+      status: typeof w.status === 'string' ? w.status : null,
+      reset: w.reset || w.resets_at || null,
+      sampled_at: w.sampled_at || null,
+      stale: w.stale === true,
+    }
+  }
+  return {
+    official: u.official
+      ? { updated_at: u.official.updated_at || null, '5h': window(u.official['5h']), '7d': window(u.official['7d']) }
+      : null,
+    // This store can also contain copies from official usage; it is not raw headers.
+    passive: { '5h': window(u.headers?.['5h']), '7d': window(u.headers?.['7d']) },
+  }
+}
+
 export function quotaFromAccount(acc, quotaConfig) {
   const u = acc?.unified || {}
   const listed = listQuotaFromHeaders(u)
@@ -1690,6 +1802,7 @@ export function quotaFromAccount(acc, quotaConfig) {
   const effectiveStatus5 = o5Limited ? 'rejected' : listed.status_5h || o5.status || null
   const effectiveStatus7 = o7Limited ? 'rejected' : listed.status_7d || o7.status || null
   const q = {
+    quota_observations: quotaObservations(u),
     utilization_5h: effectiveU5,
     utilization_7d: effectiveU7,
     utilization_7d_sonnet: sonnet.utilization != null ? Number(sonnet.utilization) : null,
@@ -2145,6 +2258,8 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     // Window state on its own: availability may carry a stronger reason (cool, quota).
     active_hours_active: activeHours ? activeHoursState.active : null,
     claude_code_version: v.claude_code_version,
+    quota_observations:
+      isCodex || acc?.account_id !== (v.account_uuid || v.claude?.account_uuid || v.id) ? null : q.quota_observations,
     utilization_5h: u5,
     utilization_7d: u7,
     utilization_7d_sonnet: isCodex ? null : q.utilization_7d_sonnet,
@@ -2349,7 +2464,9 @@ function findRuntime(accountQuota, vm, snap = null) {
       const leftover =
         leftoverKey &&
         (!cred.has_access ||
-          /refresh_token_missing|invalid_grant|worker_unhealthy/.test(err + String(state.status || '')))
+          /refresh_token_missing|invalid_grant|token_revoked|invalidated oauth token|worker_unhealthy/.test(
+          err + String(state.status || '')
+        ))
       const live = !!(vm.has_refresh || vm.has_token || vm.account_uuid)
       if (leftover && live) continue
       return freshenRuntimeState(state, vm, repo)
@@ -2381,7 +2498,10 @@ function freshenRuntimeState(state, vm, repo = null) {
   }
   const cred = state.worker_status?.credential
   const lastError = String(state.worker_status?.last_error || state.worker_status?.error || '')
-  const leftover = /invalid_grant|refresh token not found|oauth_revoked|credential_refresh_failed/i.test(lastError)
+  const leftover =
+    /invalid_grant|refresh token not found|oauth_revoked|credential_refresh_failed|token_revoked|invalidated oauth token/i.test(
+      lastError
+    )
   const wMs = expiresAtToMs(cred?.expires_at)
   const vMs = expiresAtToMs(vm.expires_at)
   const liveMs = Math.max(wMs || 0, vMs || 0)

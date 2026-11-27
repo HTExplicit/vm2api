@@ -4,8 +4,10 @@ import type { WindowEstimate } from './panel-pricing'
 export type CodexUsageView = {
   windows?: Array<{
     id?: string
+    label?: string
     used_percent?: number | null
     reset_at?: string | null
+    reset_after_seconds?: number | null
     window_minutes?: number | null
   }>
   quota?: {
@@ -161,12 +163,12 @@ export type VmCodexCredits = {
 
 export type CragLicenseStatus = {
   status:
-    | 'unlicensed'
-    | 'valid'
-    | 'expired'
-    | 'not_yet_valid'
-    | 'invalid'
-    | 'unconfigured'
+  | 'unlicensed'
+  | 'valid'
+  | 'expired'
+  | 'not_yet_valid'
+  | 'invalid'
+  | 'unconfigured'
   valid: boolean
   vm_id: string
   /** offline: CRAGU1 universal code. online: device-bound CRAGL1. */
@@ -193,13 +195,13 @@ export type CragLicenseResponse = {
 export type VmTelemetryState = {
   enabled: boolean
   state:
-    | 'disabled'
-    | 'idle'
-    | 'waiting_credentials'
-    | 'waiting_egress'
-    | 'uploading'
-    | 'error'
-    | 'unsupported'
+  | 'disabled'
+  | 'idle'
+  | 'waiting_credentials'
+  | 'waiting_egress'
+  | 'uploading'
+  | 'error'
+  | 'unsupported'
   pending_events: number
   last_upload_at: string | null
   last_error: string | null
@@ -209,7 +211,10 @@ export type CragTelemetryState = {
   state: 'launch_policy'
   enabled: boolean | null
   error: string | null
-  upload_confirmed: false
+  upload_confirmed: boolean
+  upload_supported?: boolean
+  last_upload_at?: string | null
+  last_error?: string | null
 }
 
 export type VmKernelHealth = {
@@ -354,6 +359,58 @@ export type CodexSiwcState = {
   models: { id: string; name: string; visible: boolean }[] | null
 }
 
+export type QuotaObservation = {
+  utilization: number | null
+  status: string | null
+  reset: string | null
+  sampled_at: string | null
+  stale: boolean
+}
+
+export type ActiveUsageRetentionReason =
+  | 'settle_window'
+  | 'inflight'
+  | 'newer_headers'
+  | 'reset_boundary'
+  | 'official_leftover_limit'
+
+export type ActiveUsageRetainedWindow = {
+  window: '5h' | '7d' | '7d_oi'
+  reason: ActiveUsageRetentionReason
+  official_utilization: number | null
+  retained_utilization: number | null
+  official_updated_at: string | null
+  header_sampled_at: string | null
+  settle_remaining_ms: number
+}
+
+export type ActiveUsageQueryResult = {
+  vm_id: string
+  source: string
+  probed_at?: string | null
+  five_hour?: {
+    utilization?: number | null
+    status?: string | null
+    resets_at?: string | null
+  } | null
+  seven_day?: {
+    utilization?: number | null
+    status?: string | null
+    resets_at?: string | null
+  } | null
+  seven_day_oi?: {
+    utilization?: number | null
+    status?: string | null
+    resets_at?: string | null
+  } | null
+  reconciled?: boolean
+  force_reconcile?: boolean
+  reconciled_windows?: Array<'5h' | '7d' | '7d_oi'>
+  retained_windows?: ActiveUsageRetainedWindow[]
+  can_force_reconcile?: boolean
+  settle_remaining_ms?: number
+}
+
 export type Vm = {
   codex_siwc?: CodexSiwcState | null
   id: string
@@ -424,10 +481,20 @@ export type Vm = {
     reason: string
     detail?: Record<string, unknown> | null
   } | null
-  /** Claude 单元熔断（Codex 为 null）。连续 5xx 达阈值后打开，到期只放 1 个探测。 */
+  /** Claude 单元熔断（Codex 为 null）。连续 400/403/5xx 达阈值后打开，到期只放 1 个探测。 */
   circuit?: VmCircuit | null
   cooldown_until?: number
   cooldown_reason?: string
+  /** Mutable stored quota state: official windows may be reconciled from headers. */
+  quota_observations?: {
+    official:
+    | ({ updated_at: string | null } & Record<
+      '5h' | '7d',
+      QuotaObservation | null
+    >)
+    | null
+    passive: Record<'5h' | '7d', QuotaObservation | null>
+  } | null
   utilization_5h?: number | null
   utilization_7d?: number | null
   utilization_7d_oi?: number
@@ -561,14 +628,14 @@ export type Vm = {
   quota_inherited?: VmQuotaView | null
   /** OpenAI 的生效额度与限制原因；不包含 Claude 分档/weekly split。 */
   openai_quota_policy?:
-    | (OpenAIQuotaPolicy & {
-        reason: string | null
-        restricted_until: number | null
-        concurrency_override: boolean
-        rpm_override: boolean
-        sessions_override: boolean
-      })
-    | null
+  | (OpenAIQuotaPolicy & {
+    reason: string | null
+    restricted_until: number | null
+    concurrency_override: boolean
+    rpm_override: boolean
+    sessions_override: boolean
+  })
+  | null
   /** 当前有效调度等级；自动模式范围 1～7，手动模式范围 1～10。 */
   schedule_level?: number
   /** 调度等级来源；缺失时按自动模式展示。 */
@@ -811,16 +878,16 @@ export type VmDetailPayload = {
   proxy?: VmProxySnap | null
   account?: Record<string, unknown> | null
   billing?:
-    | (Record<string, unknown> & {
-        by_model?: VmBillingModelRow[]
-        usage_stats?: VmUsageStats | null
-        window_5h?: VmBillingPeriod | null
-        window_7d?: VmBillingPeriod | null
-        prev_window_5h?: VmClosedWindow | null
-        prev_window_7d?: VmClosedWindow | null
-        window_5h_projection?: VmWindowProjection | null
-      })
-    | null
+  | (Record<string, unknown> & {
+    by_model?: VmBillingModelRow[]
+    usage_stats?: VmUsageStats | null
+    window_5h?: VmBillingPeriod | null
+    window_7d?: VmBillingPeriod | null
+    prev_window_5h?: VmClosedWindow | null
+    prev_window_7d?: VmClosedWindow | null
+    window_5h_projection?: VmWindowProjection | null
+  })
+  | null
   [key: string]: unknown
 }
 

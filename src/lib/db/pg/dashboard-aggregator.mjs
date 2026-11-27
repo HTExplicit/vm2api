@@ -7,9 +7,15 @@
  * `usage_dashboard_hourly_models` under a PG advisory lock.
  */
 
+import { ignoredErrorSqlList } from '../../admin/error-class.mjs'
+
 const AGG_LOCK_KEY = 'vm2api_dashboard_aggregator_v1'
 const DEFAULT_INTERVAL_MS = 60_000
+const OUTBOX_RETENTION_HOURS = 24
+const IGNORED_CODES_SQL = ignoredErrorSqlList()
+const AGG_ERROR_PRED = `(u.status >= 400 OR (u.error_code IS NOT NULL AND u.error_code <> '' AND u.error_code NOT IN (${IGNORED_CODES_SQL})))`
 
+let kickoff = null
 let timer = null
 let running = false
 
@@ -92,7 +98,7 @@ export async function runDashboardAggregation(pool, { fullBackfill = false } = {
           SELECT
             date_trunc('hour', u.created_at::timestamptz) AS bucket_start,
             COUNT(*)::bigint AS total_requests,
-            SUM(CASE WHEN u.status >= 400 OR (u.error_code IS NOT NULL AND u.error_code <> '') THEN 1 ELSE 0 END)::bigint AS error_requests,
+            SUM(CASE WHEN ${AGG_ERROR_PRED} THEN 1 ELSE 0 END)::bigint AS error_requests,
             COALESCE(SUM(u.input_tokens), 0)::bigint AS input_tokens,
             COALESCE(SUM(u.output_tokens), 0)::bigint AS output_tokens,
             COALESCE(SUM(u.cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
@@ -145,7 +151,7 @@ export async function runDashboardAggregation(pool, { fullBackfill = false } = {
           SELECT
             (u.created_at::timestamptz AT TIME ZONE 'UTC')::date AS bucket_date,
             COUNT(*)::bigint AS total_requests,
-            SUM(CASE WHEN u.status >= 400 OR (u.error_code IS NOT NULL AND u.error_code <> '') THEN 1 ELSE 0 END)::bigint AS error_requests,
+            SUM(CASE WHEN ${AGG_ERROR_PRED} THEN 1 ELSE 0 END)::bigint AS error_requests,
             COALESCE(SUM(u.input_tokens), 0)::bigint AS input_tokens,
             COALESCE(SUM(u.output_tokens), 0)::bigint AS output_tokens,
             COALESCE(SUM(u.cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
@@ -199,7 +205,7 @@ export async function runDashboardAggregation(pool, { fullBackfill = false } = {
             date_trunc('hour', u.created_at::timestamptz) AS bucket_start,
             COALESCE(NULLIF(u.model, ''), '__unknown__') AS model,
             COUNT(*)::bigint AS total_requests,
-            SUM(CASE WHEN u.status >= 400 OR (u.error_code IS NOT NULL AND u.error_code <> '') THEN 1 ELSE 0 END)::bigint AS error_requests,
+            SUM(CASE WHEN ${AGG_ERROR_PRED} THEN 1 ELSE 0 END)::bigint AS error_requests,
             COALESCE(SUM(u.input_tokens), 0)::bigint AS input_tokens,
             COALESCE(SUM(u.output_tokens), 0)::bigint AS output_tokens,
             COALESCE(SUM(u.cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
@@ -242,10 +248,26 @@ export async function runDashboardAggregation(pool, { fullBackfill = false } = {
       )
 
       await client.query('COMMIT')
+
+      // Prune stale outbox rows under the same advisory lock so outbox tables stay bounded.
+      let outboxPruned = 0
+      try {
+        const [schedPrune, authPrune] = await Promise.all([
+          client.query(
+            `DELETE FROM scheduler_outbox WHERE created_at < NOW() - INTERVAL '${OUTBOX_RETENTION_HOURS} hours'`,
+          ),
+          client.query(
+            `DELETE FROM auth_cache_invalidation_outbox WHERE created_at < NOW() - INTERVAL '${OUTBOX_RETENTION_HOURS} hours'`,
+          ),
+        ])
+        outboxPruned = (Number(schedPrune.rowCount) || 0) + (Number(authPrune.rowCount) || 0)
+      } catch {}
+
       return {
         skipped: false,
         hourlyBuckets: hourlyRes.rowCount || 0,
         dailyBuckets: dailyRes.rowCount || 0,
+        outboxPruned,
         latestAt: String(latestRow.created_at),
       }
     } catch (err) {
@@ -279,13 +301,20 @@ export function startDashboardAggregator(pool, { intervalMs = DEFAULT_INTERVAL_M
     }
   }
   // Initial non-blocking catch-up after startup settles
-  const kickoff = setTimeout(tick, 5_000)
+  kickoff = setTimeout(() => {
+    kickoff = null
+    void tick()
+  }, 5_000)
   kickoff.unref?.()
   timer = setInterval(tick, Math.max(10_000, Number(intervalMs) || DEFAULT_INTERVAL_MS))
   timer.unref?.()
 }
 
 export function stopDashboardAggregator() {
+  if (kickoff) {
+    clearTimeout(kickoff)
+    kickoff = null
+  }
   if (timer) {
     clearInterval(timer)
     timer = null

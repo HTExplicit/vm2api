@@ -23,6 +23,8 @@ import { OutboundReference } from './outbound-reference'
 import {
   cchEnabledFromCompat,
   ccEntrypointFromCompat,
+  cragDropForeignThinkingFromCompat,
+  cragDropForeignThinkingToCompat,
   sessionIdleTtlFromInference,
   thinkingDisplayFromCompat,
 } from './protocol-authority'
@@ -242,7 +244,7 @@ export function ProtocolPane({
       >
         <SettingRow
           label='cc_entrypoint'
-          desc='保存后写入各 Claude 槽 kernel.json，cli-node 下次请求读取。'
+          desc='仅作用于 cli-node / cli-hop 请求头改写（完整 CRAG v2 原生 CLI 槽不使用该覆盖）。保存后写入各 Claude 槽 kernel.json，cli-node 下次请求读取。'
         >
           <ChipGroup
             label='cc_entrypoint'
@@ -281,6 +283,34 @@ export function ProtocolPane({
             aria-label='隐藏的 thinking 改为返回摘要'
           />
         </SettingRow>
+        <SettingRow
+          label='CRAG print 丢弃外来 thinking'
+          desc={
+            cragDropForeignThinkingFromCompat(compat) === 'all'
+              ? '全部：不是本账号签发的块都丢（含签名无记录的）。签名记录不完整时（清库、记录开始前的老会话）会误丢本账号 thinking 并让提示缓存失效。'
+              : cragDropForeignThinkingFromCompat(compat) === 'foreign_only'
+                ? '仅他账号：只丢明确记在别账号名下的块；签名无记录的保留，换槽后不必先撞一次签名 400。'
+                : '关：原样重放调用方历史，等上游回 thinking 签名 400 再修。'
+          }
+        >
+          <ChipGroup
+            label='CRAG print 丢弃外来 thinking'
+            value={cragDropForeignThinkingFromCompat(compat)}
+            options={[
+              ['off', '关'],
+              ['foreign_only', '仅他账号'],
+              ['all', '全部'],
+            ]}
+            onChange={(mode) =>
+              onCompatChange({
+                ...compat,
+                crag_drop_foreign_thinking: cragDropForeignThinkingToCompat(
+                  mode as 'off' | 'foreign_only' | 'all'
+                ),
+              })
+            }
+          />
+        </SettingRow>
       </PaneSection>
       <PaneSection
         icon={Scaling}
@@ -289,7 +319,7 @@ export function ProtocolPane({
       >
         <SettingRow
           label='窗口'
-          desc='跟随模型时，Opus / Sonnet / Haiku 5.x 使用 1M，其余模型使用 200K。'
+          desc='跟随模型时，以模型目录（model catalog）中各模型的默认上下文窗口为准（含默认 1M 的 4.6 / 4.7 / 5.x / Fable / Mythos 等模型）。'
         >
           <ChipGroup
             label='Auto compact 窗口'
@@ -312,14 +342,14 @@ export function ProtocolPane({
       <PaneSection
         icon={Clock3}
         title='CCH 统一附加'
-        desc='出站 billing 的 cch。开启后缺失也补，不区分试用或订阅。'
+        desc='仅作用于 cli-node / cli-hop 出站 billing 的 cch 改写（完整 CRAG v2 槽由原生 CLI 自行生成）。开启后缺失也补，不区分试用或订阅。'
       >
         <SettingRow
           label='强制附加 CCH'
           desc={
             cch
-              ? '开：出站补齐 cch；试用号缺失也写。保存后热写入各槽 kernel.json，不重启 CLI。'
-              : '关：固定发送 cch=00000;（5 个 0），不计算摘要。'
+              ? '开：cli-node / cli-hop 出站补齐 cch；试用号缺失也写。保存后热写入各槽 kernel.json，不重启 CLI。'
+              : '关：cli-node / cli-hop 固定发送 cch=00000;（5 个 0），不计算摘要。'
           }
         >
           <Switch
@@ -334,12 +364,12 @@ export function ProtocolPane({
       <PaneSection
         icon={Clock3}
         title='原生 sticky 槽'
-        desc='kernel 里 CLI 槽空闲回收。不是流空闲超时，也不是粘性页的账号绑定 TTL。'
+        desc='仅控制 cli-node / cli-hop 原生 CLI 槽的空闲进程回收（完整 CRAG v2 槽不按此项回收空闲会话）。不是流空闲超时，也不是粘性页的账号绑定 TTL。'
       >
         <StepperSetting
           id='inference-session-idle-ttl'
           label='槽空闲超时'
-          desc='从最后一次任务完成开始计时，活动请求不回收。保存后热生效，不重启内核。'
+          desc='从最后一次任务完成开始计时，活动请求不回收；完整 CRAG v2 槽不按此项回收。保存后热生效，不重启内核。'
           value={sessionIdleTtlFromInference(inference)}
           min={SESSION_IDLE_TTL_SECONDS_MIN}
           max={SESSION_IDLE_TTL_SECONDS_MAX}

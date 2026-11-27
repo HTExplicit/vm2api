@@ -46,6 +46,7 @@ import {
   type CragOrderActivationRecovery,
 } from '@/features/vm/crag-subscription-errors'
 import {
+  cragHostOrdersQueryOptions,
   cragHostStatusQueryOptions,
   vmCragLicenseQueryOptions,
   vmsListQueryOptions,
@@ -60,6 +61,7 @@ import {
   type CragPlan,
   type Presentation,
 } from './crag-catalog'
+import { CragCloudOrdersPanel } from './crag-cloud-orders'
 import {
   CragCommerce,
   CragPaymentButtons,
@@ -77,19 +79,79 @@ export type { CragPlan, Presentation } from './crag-catalog'
 
 const shopRoot = '/api/panel/crag-shop'
 const hostRoot = '/api/panel/crag-subscription'
-const catalogIntervalMs = 25_000
-const catalogTimeoutMs = 12_000
+const catalogIntervalMs = 60_000
+const catalogTimeoutMs = 15_000
+const catalogFocusMinGapMs = 10_000
+const catalogCachePrefix = 'vm2api:crag-shop:catalog:v1:'
 type Catalog = {
   plans: CragPlan[]
   payment_methods: Method[]
   commerce?: CommerceRules
   presentation?: Presentation
   revision?: number
+  catalog_hash?: string
+  stale?: boolean
 }
+type CatalogResponse =
+  | Catalog
+  | {
+      unchanged: true
+      catalog_hash?: string
+      stale?: boolean
+    }
 type CatalogState =
   | { status: 'loading' }
   | { status: 'ready'; data: Catalog }
   | { status: 'error' }
+
+const isCatalogHash = (value: unknown): value is string =>
+  typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
+
+function catalogStorageKey(device: boolean) {
+  return `${catalogCachePrefix}${device ? 'device' : 'panel'}`
+}
+
+function readCachedCatalog(device: boolean): Catalog | null {
+  try {
+    if (typeof localStorage === 'undefined') return null
+    const raw = localStorage.getItem(catalogStorageKey(device))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as unknown
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      Array.isArray(parsed) ||
+      !Array.isArray((parsed as Catalog).plans) ||
+      !Array.isArray((parsed as Catalog).payment_methods)
+    ) {
+      return null
+    }
+    return parsed as Catalog
+  } catch {
+    return null
+  }
+}
+
+function writeCachedCatalog(device: boolean, data: Catalog) {
+  try {
+    if (typeof localStorage === 'undefined') return
+    const { stale: _stale, ...snapshot } = data
+    localStorage.setItem(catalogStorageKey(device), JSON.stringify(snapshot))
+  } catch {
+    // Ignore storage quota or restricted browser mode failures.
+  }
+}
+
+function defaultPlanSku(data: Catalog): string | undefined {
+  const visiblePlans = data.plans.filter((plan) => plan.enabled !== false)
+  if (!visiblePlans.length && !data.commerce) return undefined
+  return (
+    visiblePlans.find((plan) => plan.remaining !== 0)?.sku ??
+    (data.commerce && data.commerce.custom_enabled !== false
+      ? 'custom'
+      : visiblePlans[0]?.sku)
+  )
+}
 type Order = {
   sku: string
   term: CragPlan['term'] | null
@@ -386,6 +448,61 @@ function HostSummary({
   )
 }
 
+const CRAGR1_VOUCHER_RE = /^CRAGR1\.[A-Za-z0-9_-]{43}$/
+
+type GeminiSubscriptionRedeemResult = {
+  active: boolean
+  slot_limit: number | 'unlimited'
+  available_slots?: number | null
+  quota_grants?: Array<{ expires_at: number; slot_limit?: number | null }>
+}
+
+const GEMINI_FALLBACK_DISPLAYABLE_ERRORS = new Set([
+  'host_redeem_conflict',
+  'issuer_mismatch',
+  'payload_key_unknown',
+  'payload_key_conflict',
+  'auth_forbidden',
+  'slot_limit_reached',
+  'renewal_unavailable',
+  'host_transfer_cooldown',
+  'request_conflict',
+  'invalid_request',
+  'not_found',
+  'gemini_subscription_busy',
+  'gemini_subscription_sync_pending',
+  'gemini_subscription_package_unready',
+  'gemini_subscription_authority_unavailable',
+  'gemini_subscription_invalid_entitlement',
+  'gemini_subscription_invalid_voucher',
+  'license_unconfigured',
+  'license_invalid',
+])
+
+function isGeminiSubscriptionRedeemResult(
+  value: unknown
+): value is GeminiSubscriptionRedeemResult {
+  return (
+    Boolean(value) &&
+    typeof value === 'object' &&
+    typeof (value as { active?: unknown }).active === 'boolean' &&
+    ((value as { slot_limit?: unknown }).slot_limit === 'unlimited' ||
+      typeof (value as { slot_limit?: unknown }).slot_limit === 'number')
+  )
+}
+
+function formatGeminiRedeemSuccess(result: GeminiSubscriptionRedeemResult) {
+  const limitLabel =
+    result.slot_limit === 'unlimited' ? '不限' : String(result.slot_limit)
+  const availableLabel =
+    result.available_slots != null ? String(result.available_slots) : '—'
+  const stackedSuffix =
+    result.quota_grants && result.quota_grants.length > 1
+      ? `，当前已叠加 ${result.quota_grants.length} 张有效兑换码`
+      : ''
+  return `已自动识别为 CRAGGemini 兑换码：宿主订阅已激活（席位额度 ${limitLabel}，可用席位 ${availableLabel}${stackedSuffix}），不占用 Claude CRAG 槽位。请为需要的 Google OAuth 环境绑定席位。`
+}
+
 function HostOverview({
   host,
   onUpdated,
@@ -398,7 +515,9 @@ function HostOverview({
   const [upgradeFailed, setUpgradeFailed] = useState(false)
   const [code, setCode] = useState('')
   const [notice, setNotice] = useState<{ text: string; error?: true }>()
-  const [action, setAction] = useState<'redeem' | 'recover' | 'upgrade'>()
+  const [action, setAction] = useState<
+    'redeem' | 'recover' | 'upgrade' | 'rebuild-identity'
+  >()
   const [packageChanged, setPackageChanged] = useState(false)
   const [confirmRecovery, setConfirmRecovery] = useState(false)
   const operating = useRef(false)
@@ -454,6 +573,7 @@ function HostOverview({
     setAction(operation)
     setNotice(undefined)
     const { queryKey } = cragHostStatusQueryOptions()
+    let handledByGemini = false
     try {
       const next = await api<CragHostStatus>(`${hostRoot}/${operation}`, {
         method: 'POST',
@@ -485,14 +605,57 @@ function HostOverview({
         })
       }
     } catch (error) {
-      setPackageChanged(
+      const canFallbackToGemini =
+        operation === 'redeem' &&
+        CRAGR1_VOUCHER_RE.test(redemptionCode) &&
         isApiError(error) &&
-          error.code === 'crag_subscription_host_package_changed'
-      )
-      setConfirmRecovery(false)
-      setNotice({ text: hostRedemptionError(error), error: true })
+        (error.code === 'redeem_unavailable' ||
+          error.code === 'crag_subscription_host_package_unready' ||
+          error.code === 'crag_subscription_host_identity_unavailable')
+      if (canFallbackToGemini) {
+        try {
+          const geminiResult = await api<GeminiSubscriptionRedeemResult>(
+            '/api/panel/gemini/crag-subscription/redeem',
+            {
+              method: 'POST',
+              body: JSON.stringify({ redemption_code: redemptionCode }),
+            }
+          )
+          if (isGeminiSubscriptionRedeemResult(geminiResult)) {
+            handledByGemini = true
+            setPackageChanged(false)
+            setConfirmRecovery(false)
+            setCode('')
+            setNotice({ text: formatGeminiRedeemSuccess(geminiResult) })
+            await qc.invalidateQueries({
+              queryKey: geminiInventoryOptions().queryKey,
+            })
+          }
+        } catch (geminiError) {
+          if (
+            isApiError(geminiError) &&
+            geminiError.code &&
+            GEMINI_FALLBACK_DISPLAYABLE_ERRORS.has(geminiError.code)
+          ) {
+            handledByGemini = true
+            setPackageChanged(false)
+            setConfirmRecovery(false)
+            setNotice({ text: geminiError.message, error: true })
+          }
+        }
+      }
+      if (!handledByGemini) {
+        setPackageChanged(
+          isApiError(error) &&
+            error.code === 'crag_subscription_host_package_changed'
+        )
+        setConfirmRecovery(false)
+        setNotice({ text: hostRedemptionError(error), error: true })
+      }
     } finally {
-      await qc.invalidateQueries({ queryKey })
+      if (!handledByGemini) {
+        await qc.invalidateQueries({ queryKey })
+      }
       operating.current = false
       setAction(undefined)
     }
@@ -517,6 +680,31 @@ function HostOverview({
       setAction(undefined)
     }
   }
+  async function rebuildIdentity() {
+    if (operating.current) return
+    operating.current = true
+    setAction('rebuild-identity')
+    setNotice(undefined)
+    const { queryKey } = cragHostStatusQueryOptions()
+    try {
+      const next = await api<CragHostStatus>(`${hostRoot}/rebuild-identity`, {
+        method: 'POST',
+        body: '{}',
+      })
+      qc.setQueryData(queryKey, next)
+      setNotice({
+        text: '已为本机重建设备标识。请重新提交原兑换码或使用原订单号迁移恢复订阅。',
+      })
+      onUpdated()
+    } catch (error) {
+      setNotice({ text: hostRedemptionError(error), error: true })
+    } finally {
+      await qc.invalidateQueries({ queryKey })
+      operating.current = false
+      setAction(undefined)
+    }
+  }
+
   const probeFailed = status?.target_probe_failed && !status.ready
   return (
     <section
@@ -539,10 +727,24 @@ function HostOverview({
         </Button>
       </div>
       {status?.credential_recovery ? (
-        <p role='alert' className='text-sm text-destructive'>
-          {cragCredentialRecoveryFaults[status.credential_recovery] ??
-            cragSubscriptionErrors.auth_forbidden}
-        </p>
+        <div className='space-y-2'>
+          <p role='alert' className='text-sm text-destructive'>
+            {cragCredentialRecoveryFaults[status.credential_recovery] ??
+              cragSubscriptionErrors.auth_forbidden}
+          </p>
+          {status.credential_recovery === 'host_id_collision' ||
+          status.credential_recovery === 'not_activated' ? (
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              disabled={host.isFetching || !!action}
+              onClick={() => void rebuildIdentity()}
+            >
+              {action === 'rebuild-identity' ? '重建中…' : '重建设备标识'}
+            </Button>
+          ) : null}
+        </div>
       ) : null}
       {status ? (
         <>
@@ -707,9 +909,9 @@ function HostOverview({
             className='text-sm text-muted-foreground'
           >
             每张码从兑换时独立计时，未到期额度相加；不绑定、不启动 VM。 Claude
-            订阅码增加本机槽位；CRAGGemini 订阅码（CRAGR1.…）请点击右上角「兑换
-            CRAGGemini」兑换，旧版 CGG1- 码也可直接在此兑换，不占用 Claude
-            槽位。
+            订阅码增加本机槽位；CRAGGemini 兑换码（CRAGR1.… 或旧版
+            CGG1-）也可直接在此自动识别兑换（或点右上角「兑换
+            CRAGGemini」），不占用 Claude 槽位。
           </p>
           <Button type='submit' size='sm' disabled={!code.trim() || !!action}>
             {action === 'redeem' ? '正在兑换…' : '兑换到本机'}
@@ -720,7 +922,8 @@ function HostOverview({
             </strong>
             1 个月 / 10 槽兑换码（¥100，¥10/槽，支持多码叠加）；首批测试支持 7
             天 / 10 槽测试兑换码（单码可用 100 次，不同宿主机各 1
-            次、同机幂等）。请点右上角「兑换 CRAGGemini」完成兑换。
+            次、同机幂等）。可直接在此输入兑换，或点右上角「兑换
+            CRAGGemini」完成兑换。
           </div>
         </form>
       ) : null}
@@ -786,6 +989,12 @@ function useHostStatus(enabled: boolean) {
   })
 }
 
+type OverviewContext = {
+  channels: readonly Method[]
+  busy: boolean
+  onRenewOrder: (orderId: string, amountMinor: number, method: Method) => void
+}
+
 export function CragSubscriptionPage() {
   const me = useQuery(meQueryOptions())
   const isAdmin = me.data?.role === 'admin' && !me.isError
@@ -799,7 +1008,18 @@ export function CragSubscriptionPage() {
       host={host.isError ? undefined : host.data}
       overview={
         isAdmin
-          ? (onUpdated) => <HostOverview host={host} onUpdated={onUpdated} />
+          ? (onUpdated, ctx) => (
+              <div className='space-y-6'>
+                <CragCloudOrdersPanel
+                  host={host.isError ? undefined : host.data}
+                  channels={ctx.channels}
+                  busy={ctx.busy}
+                  onRenewOrder={ctx.onRenewOrder}
+                  onHostChanged={onUpdated}
+                />
+                <HostOverview host={host} onUpdated={onUpdated} />
+              </div>
+            )
           : null
       }
     />
@@ -929,15 +1149,20 @@ function ShopOrders({
   isAdmin: boolean
   host?: CragHostStatus
   owner: string
-  overview: ((onUpdated: () => void) => ReactNode) | null
+  overview: ((onUpdated: () => void, ctx: OverviewContext) => ReactNode) | null
 }) {
   const qc = useQueryClient()
   const request = device ? cragDeviceApi : api
   const root = device ? '' : shopRoot
+  const cachedCatalog = readCachedCatalog(device)
   const [applied, setApplied] = useState<string[]>([])
-  const [catalog, setCatalog] = useState<CatalogState>({ status: 'loading' })
+  const [catalog, setCatalog] = useState<CatalogState>(
+    cachedCatalog
+      ? { status: 'ready', data: cachedCatalog }
+      : { status: 'loading' }
+  )
   const [catalogRevision, setCatalogRevision] = useState(0)
-  const refreshCatalog = useRef<(() => void) | null>(null)
+  const refreshCatalog = useRef<((force?: boolean) => void) | null>(null)
   const [orders, setOrders] = useState<Order[]>()
   const [offset, setOffset] = useState(0)
   const [nextOffset, setNextOffset] = useState<number | null>(null)
@@ -945,7 +1170,9 @@ function ShopOrders({
   const [ordersFailed, setOrdersFailed] = useState(false)
   const [loading, setLoading] = useState(true)
   const [revision, refresh] = useState(0)
-  const [planSku, setPlanSku] = useState<string>()
+  const [planSku, setPlanSku] = useState<string | undefined>(
+    cachedCatalog ? defaultPlanSku(cachedCatalog) : undefined
+  )
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const [problem, setProblem] = useState('')
@@ -1005,51 +1232,92 @@ function ShopOrders({
 
   useEffect(() => {
     let active: { controller: AbortController; timeout: number } | undefined
+    const initial = readCachedCatalog(device)
+    let currentHash = isCatalogHash(initial?.catalog_hash)
+      ? initial.catalog_hash
+      : undefined
+    let hasReady = initial !== null
+    let lastCheckedAt = 0
 
-    function loadCatalog() {
+    function loadCatalog(force = false) {
       // Focus, interval and manual refresh share one bounded request.
       if (active) return
+      const now = Date.now()
+      if (
+        !force &&
+        hasReady &&
+        lastCheckedAt > 0 &&
+        now - lastCheckedAt < catalogFocusMinGapMs
+      ) {
+        return
+      }
       const controller = new AbortController()
       const timeout = window.setTimeout(() => {
         active = undefined
         controller.abort()
-        setCatalog({ status: 'error' })
+        setCatalog((current) =>
+          current.status === 'ready' ? current : { status: 'error' }
+        )
       }, catalogTimeoutMs)
       const catalogRequest = { controller, timeout }
       active = catalogRequest
 
-      void request<Catalog>(`${root}/plans`, {
+      const params = new URLSearchParams()
+      if (currentHash) params.set('hash', currentHash)
+      if (force) params.set('refresh', '1')
+      const suffix = params.toString() ? `?${params.toString()}` : ''
+
+      void request<CatalogResponse>(`${root}/plans${suffix}`, {
         signal: controller.signal,
         cache: 'no-store',
       })
         .then((data) => {
           if (active !== catalogRequest) return
+          lastCheckedAt = Date.now()
           if (
-            !Array.isArray(data?.plans) ||
-            !Array.isArray(data?.payment_methods)
+            data &&
+            typeof data === 'object' &&
+            'unchanged' in data &&
+            data.unchanged === true
           ) {
-            setCatalog({ status: 'error' })
+            if (isCatalogHash(data.catalog_hash)) {
+              currentHash = data.catalog_hash
+            }
             return
           }
-          setCatalog({ status: 'ready', data })
-          setCatalogRevision((current) => current + 1)
-          const visiblePlans = data.plans.filter(
-            (plan) => plan.enabled !== false
-          )
-          if (visiblePlans.length || data.commerce) {
-            // Keep the buyer's choice across refreshes, even while payment is closed.
-            setPlanSku(
-              (sku) =>
-                sku ??
-                visiblePlans.find((plan) => plan.remaining !== 0)?.sku ??
-                (data.commerce && data.commerce.custom_enabled !== false
-                  ? 'custom'
-                  : visiblePlans[0]?.sku)
+          const catalogData = data as Catalog
+          if (
+            !Array.isArray(catalogData?.plans) ||
+            !Array.isArray(catalogData?.payment_methods)
+          ) {
+            setCatalog((current) =>
+              current.status === 'ready' ? current : { status: 'error' }
             )
+            return
+          }
+          const nextHash = isCatalogHash(catalogData.catalog_hash)
+            ? catalogData.catalog_hash
+            : undefined
+          if (hasReady && nextHash && nextHash === currentHash) {
+            return
+          }
+          currentHash = nextHash
+          hasReady = true
+          writeCachedCatalog(device, catalogData)
+          setCatalog({ status: 'ready', data: catalogData })
+          setCatalogRevision((current) => current + 1)
+          const fallbackSku = defaultPlanSku(catalogData)
+          if (fallbackSku !== undefined) {
+            // Keep the buyer's choice across refreshes, even while payment is closed.
+            setPlanSku((sku) => sku ?? fallbackSku)
           }
         })
         .catch(() => {
-          if (active === catalogRequest) setCatalog({ status: 'error' })
+          if (active === catalogRequest) {
+            setCatalog((current) =>
+              current.status === 'ready' ? current : { status: 'error' }
+            )
+          }
         })
         .finally(() => {
           window.clearTimeout(timeout)
@@ -1058,18 +1326,25 @@ function ShopOrders({
     }
 
     function onVisible() {
-      if (document.visibilityState === 'visible') loadCatalog()
+      if (document.visibilityState === 'visible') loadCatalog(false)
     }
 
-    refreshCatalog.current = loadCatalog
-    loadCatalog()
-    const interval = window.setInterval(loadCatalog, catalogIntervalMs)
-    window.addEventListener('focus', loadCatalog)
+    function onFocus() {
+      loadCatalog(false)
+    }
+
+    refreshCatalog.current = (force = false) => loadCatalog(force)
+    loadCatalog(false)
+    const interval = window.setInterval(
+      () => loadCatalog(false),
+      catalogIntervalMs
+    )
+    window.addEventListener('focus', onFocus)
     document.addEventListener('visibilitychange', onVisible)
     return () => {
       refreshCatalog.current = null
       window.clearInterval(interval)
-      window.removeEventListener('focus', loadCatalog)
+      window.removeEventListener('focus', onFocus)
       document.removeEventListener('visibilitychange', onVisible)
       if (active) {
         window.clearTimeout(active.timeout)
@@ -1077,7 +1352,7 @@ function ShopOrders({
         active = undefined
       }
     }
-  }, [request, root])
+  }, [device, request, root])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -1120,6 +1395,21 @@ function ShopOrders({
           setOrdersFailed(false)
           setOrdersProblem('')
           setLoading(false)
+          if (
+            isAdmin &&
+            mine.orders.some(
+              (item) =>
+                item.status === 'fulfilled' &&
+                item.activation?.state === 'active'
+            )
+          ) {
+            void qc.invalidateQueries({
+              queryKey: cragHostStatusQueryOptions().queryKey,
+            })
+            void qc.invalidateQueries({
+              queryKey: cragHostOrdersQueryOptions().queryKey,
+            })
+          }
         },
         (error: unknown) => {
           if (signal.aborted) return
@@ -1276,7 +1566,7 @@ function ShopOrders({
             error.code === 'shop_activation_target_unavailable'
           )
             void targets.refetch()
-          refreshCatalog.current?.()
+          refreshCatalog.current?.(true)
           throw error
         })
         if (order.status === 'pending' && order.url && order.data) {
@@ -1385,7 +1675,14 @@ function ShopOrders({
     paymentMethod: Method,
     price?: number
   ) {
-    if (!canOrder || !channels.includes(paymentMethod) || busy) return
+    const lockedOrderRenewal =
+      selection.sku === 'renewal' && !!selection.renew_order_id
+    if (
+      (!canOrder && !lockedOrderRenewal) ||
+      !channels.includes(paymentMethod) ||
+      busy
+    )
+      return
     const activation_target =
       isAdmin && selection.sku !== 'renewal' && targetVmId
         ? { vm_id: targetVmId }
@@ -1398,6 +1695,7 @@ function ShopOrders({
       last.slots === selection.slots &&
       last.months === selection.months &&
       last.coupon === selection.coupon &&
+      last.renew_order_id === selection.renew_order_id &&
       last.payment_method === paymentMethod &&
       last.expected_amount_minor === price &&
       last.activation_target?.vm_id === activation_target?.vm_id
@@ -1677,7 +1975,7 @@ function ShopOrders({
                 type='button'
                 size='sm'
                 variant='ghost'
-                onClick={() => refreshCatalog.current?.()}
+                onClick={() => refreshCatalog.current?.(true)}
               >
                 刷新套餐
               </Button>
@@ -1968,7 +2266,8 @@ function ShopOrders({
                             <span>{device ? '到账状态' : '激活状态'}</span>
                             <StatusMark
                               tone={
-                                device && order.activation.state === 'active'
+                                order.activation.state === 'active' &&
+                                (device || !order.activation.vm_id)
                                   ? {
                                       key: 'active',
                                       cls: 'ok',
@@ -2292,7 +2591,16 @@ function ShopOrders({
                 </div>
               ) : null}
             </section>
-            {overview?.(() => refresh((n) => n + 1))}
+            {overview?.(() => refresh((n) => n + 1), {
+              channels,
+              busy,
+              onRenewOrder: (orderId, amountMinor, method) =>
+                createOrder(
+                  { sku: 'renewal', renew_order_id: orderId },
+                  method,
+                  amountMinor
+                ),
+            })}
           </div>
         </div>
       </div>

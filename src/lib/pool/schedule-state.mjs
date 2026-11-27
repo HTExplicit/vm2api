@@ -29,6 +29,7 @@ const UNSCHEDULABLE_REASONS = Object.freeze({
   proxy_required: '未绑代理',
   proxy_desynced: '代理失配',
   runtime_start_failed: '启动失败',
+  maintenance_failed: '自动维护失败',
   circuit_escalated: '熔断升级',
   legacy_unknown: '待确认',
   vm_stopped: '已关机',
@@ -50,6 +51,7 @@ const HOLD_REASONS = Object.freeze({
 const RESTRICTED_SLOT = [
   { match: /^quota_5h/, text: '5h 限制' },
   { match: /^quota_7d/, text: '7d 限制' },
+  { match: /^quota_(\d+[mhd])/, text: (reason) => `${reason.match(/^quota_(\d+[mhd])/)[1]} 限制` },
   { match: /^(account_quota_exhausted|rate_limited|rate_limited_unknown|rpm_limited)$/, text: '限流中' },
   { match: /^[a-z]+_rate_limited$/, text: '限流中' },
   { match: /^(weekly_split_|fable_split|regular_split|fable_quota)/, text: '周额度切分' },
@@ -86,8 +88,10 @@ const RESTRICTED_NEW_SESSION = [
  */
 const STATELESS = [
   /^(distill_blocked|policy_blocked|crag_policy_blocked|crag_opaque_429|refusal_guard|hard_regex.*|jev.*|decision_model.*)$/,
-  /^(content_filter_refusal|content_policy_refusal|usage_policy_refusal|third_party_client|invalid_request|thinking_incompatible|entitlement_required|http_\d+)$/,
+  /^(content_filter_refusal|content_policy_refusal|usage_policy_refusal|third_party_client|invalid_request|invalid_request_schema|thinking_incompatible|entitlement_required|http_\d+)$/,
   /_repairable$/,
+  /^(missing_reset_timing|pre_reset_generation|pre_reset_probed_at|pre_reset_started_at)$/,
+
   /^(concurrency_limit|concurrency_disabled|rpm_limit|slot_busy|quota_band_inflight|refresh_pending)$/,
   /^(model_cooldown|fable_cooldown|fable_concurrency|fable_timeout|fable_plan_denied|fable_credits_required|fable_rate_limited|fable_requires_max|model_not_allowed|platform_mismatch|codex_vm)$/,
   /^(quota_guard_request_too_large|no_eligible_accounts|pool_overload_cooldown|pool_rate_limited|rate_limited_request|vm_unschedulable)$/,
@@ -110,7 +114,10 @@ export function stateOfReason(reason) {
     return { state: 'restricted', scope: 'slot', soft: false, text: HOLD_REASONS[code] }
   }
   for (const row of RESTRICTED_SLOT) {
-    if (row.match.test(code)) return { state: 'restricted', scope: 'slot', soft: false, text: row.text }
+    if (row.match.test(code)) {
+      const text = typeof row.text === 'function' ? row.text(code) : row.text
+      return { state: 'restricted', scope: 'slot', soft: false, text }
+    }
   }
   for (const row of RESTRICTED_NEW_SESSION) {
     if (row.match.test(code)) return { state: 'restricted', scope: 'new_session', soft: row.soft, text: row.text }
@@ -237,7 +244,7 @@ export function applyClearHold(vm, reason, { tag = null, now = Date.now() } = {}
 // Former maintenance holds (removed): such records go back to the pool.
 const LEGACY_MAINTENANCE = /^(maintenance|kernel_update|[a-z_]*_worker_reload)$/
 const LEGACY_PROXY_HOLD = /(egress_down|proxy_probe_failed|\|proxy=)/
-const LEGACY_DROP = /^(quota_5h|quota_7d|account_quota_exhausted|rate_limited|quota_refresh_failed)/
+const LEGACY_DROP = /^(quota_\d+[mhd]|account_quota_exhausted|rate_limited|quota_refresh_failed)/
 const LEGACY_START_FAILED = /runtime start failed|start|boot|container|docker|kernel/i
 
 /**

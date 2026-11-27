@@ -41,7 +41,7 @@
 | `persona_preset` | `official_full` | 使用独立的完整官方模板；`official` 保留原有官方提示词 |
 | `overlay_preset` | `off` | 不向首条 user 注入 overlay |
 | `persona_park` | `false` | 与 `overlay_preset=off` 对齐 |
-| `cache_ttl` | `1h` | 平台新增 marker 的缺省 TTL；`x-kin-cache-ttl` 参与首次会话选择。调用方合法 `1h`、`5m`、`1h → 5m` 及省略 TTL 均保留，不按菜单值统一改写 |
+| `cache_ttl` | `1h` | 非透传请求缺失 TTL 与平台新增 marker 的缺省 TTL；`x-kin-cache-ttl` 参与首次会话选择。调用方显式 `1h`、`5m`、`1h → 5m` 保留；官方透传保留调用方缺失 TTL |
 
 **official / official_full 模板**统一采用 2.1.303 OAuth 抓包中的 harness + guidance；顶层 `system` 只装提示词与调用方 `caller_system`。Environment 放入 `messages[].role=system`，不打缓存点，不混入顶层提示词。身份和 billing 入口跟随 `cc_entrypoint`。所有档位均使用 2.1.303，不再提供单独的 `official_303` 选项；旧值读写时归一为 `official_full`，旧开关和模板迁移到完整版，已有明确的完整版配置优先。
 
@@ -58,6 +58,7 @@
 - `persona_env_instructions_presets`：完整版长环境说明，缺 map/key 视为关。
 - `persona_timezone_presets` / `persona_locale_presets`：独立加载槽位时区 / locale，缺 map/key 视为关。`persona_env_presets=false` 同时停用所有生成的环境消息，包括模型附加句；调用方已有 `role=system` 原文保留。
 - `persona_hide_presets`：整档 usage 遮罩（billing / identity / agent / Environment 等 `hide:true` 块）。缺 key 时依次回落旧全局 `persona_hides`、该档模板的 `hide` 标记（默认 zero 开、其余关）。槽位单独指定人设时读该槽位档的开关；cli-hop 0注入 关掉后 CLI billing + Environment 计入 usage。
+- `usage_passthrough_presets`：对外完整透传上游 usage，开启后不扣除人设、环境、常驻约束或网关注入工具 token，适合经 NewAPI 等下游面向客户计费；缺 map/key 默认关闭。按档及槽位生效档分别设置。
 
 native cli-hop 优先完整保留 Node 已组装、带 billing 的 wire system，不在后面重加槽内 Environment。Node 关闭当前档 Environment 时，CLI 预处理保留调用方环境原文，HTTP 出站也跳过槽位时区刷新；没有调用方环境就不发送 Environment 块。启用时沿用原有槽位环境规则。调用方真正的 `You are an agent for Claude Code...` 和 `Notes:` 不会被当作自产内容删除。无 Node billed wire system 的独立 CLI fallback 仍沿用自己的布局，不在本次修改范围；槽位必须使用支持 wire-system 保留的 CLI 产物，旧 ELF 不会因修改控制面配置而自动更新。
 
@@ -97,7 +98,13 @@ Go worker JSON 透传，不必因人设重建 worker。
 
 `routing.compatibility.preserve_pruned_tool_results: true` 可为槽位推理开启 DSH 工具结果裁剪保护；缺省关闭，API 直连端点不启用。它不会修改客户端配置或路由粘性。
 
-`routing.compatibility.crag_drop_foreign_thinking: true` 让 CRAG print 在发出前丢掉不是本账号签发的 thinking 块（`thinking_signature_owners` 里没有记录或记在别的账号上）；命中进行中的工具循环时清掉循环内 thinking 并关闭 thinking，结果记在 `hop_meta.thinking_owner_crag`。缺省关闭：签名记录不完整时（清库、记录开始前的老会话）会误丢本账号的 thinking，并让提示缓存失效。
+`routing.compatibility.crag_drop_foreign_thinking` 让 CRAG print 在发出前丢掉不是本账号签发的 thinking 块，三态：
+
+- `false`（缺省）：不丢，原样重放调用方历史，等上游回 thinking 签名 400 再修。
+- `'foreign_only'`：只丢 `thinking_signature_owners` 里**记在别账号**上的块；没有记录的保留。换槽后不必先撞一次签名 400，也不会因签名记录不完整（清库、记录开始前的老会话）误丢本账号的 thinking。
+- `true`：记在别账号上的、以及**没有记录**的块一并丢。记录不完整时会误丢本账号的 thinking 并让提示缓存失效。
+
+命中进行中的工具循环时清掉循环内 thinking 并关闭 thinking。结果记在 `hop_meta.thinking_owner_crag`（`mode` 为生效档位，`unknown_kept` 为 `foreign_only` 下保留的无记录块数）。面板在「协议 → thinking 显示」里三档可切。
 
 DSH 在压缩压力下会把旧工具结果改为前4096码点、固定middle-pruned标记和后1024码点。开启后，网关在同一认证密钥、严格的DSH `session-UUID`、模型和完整历史前缀内，仅恢复精确等于该裁剪结果的旧文本。必须有此前完整verified且未重试的请求作为原文基线；仅收到keepalive、取消、失败或不完整流不会提交原文。真正的历史编辑、删消息、工具参数变化及摘要替换不还原。
 
@@ -184,13 +191,13 @@ CRAG 声明 `provider_managed_tools_v1` 且支持对应工具时使用独立的 
 3. 更早的型号仍逐块过滤：签名短于 24、空签名、dummy 签名删掉，合法签名块留下。`redacted_thinking` 不看 `data`，只在签名达到 24 字符时留。
 4. 保留路径（cli-hop 首跳，以及默认 HTTP hop）不走上面的拆链，只在 `stripInvalidThinkingBlocks` 的这一支里处理：`redacted_thinking` 不看 `data` 和签名，原样留。`thinking` 只有签名可用（非空、不少于 24、非 dummy）才留，空正文也留；缺失、空、短于 24、dummy 的删掉，不再补 `signature: ""`。不走保留路径时，`redacted_thinking` 仍按上面第 2、3 条删。当前没有按账号归属过滤签名的步骤。
 
-HTTP hop 与 cli-hop（`prepareCliHopBody`）共用内容预过滤，但缓存职责不同。cli-hop 首跳保留签名可用的 thinking 指纹，没有可用签名的删掉；签名修复重试才清除其余块。官方家族开启 `official_cc_passthrough` 时，Node 保留 system/tools/messages 的 caller marker、显式 TTL、缺失 TTL 和位置，不添点、不裁剪；超过四点、thinking marker、非法 TTL 或 5m（含缺失）后出现 1h，在调度前返回 `400 invalid_cache_control`。
+HTTP hop 与 cli-hop（`prepareCliHopBody`）共用内容预过滤，但缓存职责不同。cli-hop 首跳保留签名可用的 thinking 指纹，没有可用签名的删掉；签名修复重试才清除其余块。官方家族开启 `official_cc_passthrough` 时，合法的 caller marker、显式 TTL、缺失 TTL 和位置原样保留；若出现超过四点、thinking marker、嵌套 `tool_result.content` 断点、非法 TTL 或 `5m`（含缺失）后出现 `1h`，由统一缓存整流（`repairCacheBreakpoints` / `protofront`）自动纠错而不直接返回 `400 invalid_cache_control`。若 CRAG 内核在调度前因原生历史锚点或系统块不匹配拒绝（`CRAG_CACHE_CONTROL`），策略层触发 `cache_control_repairable` 单次同账号修复重试：剥离调用方 `cache_control`、保留 thinking 块，由 CRAG 按会话 TTL 重新打点。
 
-关闭透传或非官方请求仍按所选人设组装。保留的 caller marker 不再统一改写 TTL：显式 `1h` 保留 `1h`，显式 `5m` 保留 `5m`，合法的 `1h → 5m` 各自保留；省略 TTL 的已有 marker 保持省略，语义为隐式 `5m`。HTTP hop 的 `preserve_client=true` 也保留已有 message marker；无 message marker 时，才按配置补最后消息及 `messages.length>=4` 时倒数第二 user 的点。
+关闭透传或非官方请求仍按所选人设组装。调用方显式 TTL 保留：显式 `1h` 保留 `1h`，显式 `5m` 保留 `5m`，合法的 `1h → 5m` 各自保留；省略 `ttl` 的缺省 marker 在渲染与入核前按 Web `compatibility.cache_ttl`（会话 pin 值）补齐（前面已有显式 `5m` 时补 `5m`，避免 `5m → 1h` 逆序）。HTTP hop 的 `preserve_client=true` 保留已有 message marker 位置并补齐缺失 TTL；无 message marker 时，才按配置补最后消息及 `messages.length>=4` 时倒数第二 user 的点。
 
-平台新增的缺省 marker 使用入站会话 pin 值（菜单选 `5m` 且请求没有另选时，新增点使用 `5m`），不覆盖 caller 或模板显式 TTL。按 `tools → system → messages → 顶层自动缓存` 检查顺序；Node 整流只把非法 TTL 修正为本次缺省值，并把 `5m`（含省略 TTL）之后非法出现的 `1h` 降为 `5m`，此前合法 marker 不动。模板自产点仍遵守剩余预算，超额时优先删 tools、system 尾部的自产点；非法模板返回 request-scoped 400，零上游执行，不换号、不冷却。
+平台新增的缺省 marker 使用入站会话 pin 值（菜单选 `5m` 且请求没有另选时，新增点使用 `5m`），不覆盖 caller 或模板显式 TTL。按 `tools → system → messages → 顶层自动缓存` 检查顺序；Node 整流将缺失或非法 TTL 补为本次缺省值，并把 `5m` 之后非法出现的 `1h` 降为 `5m`，此前合法显式 marker 不动。模板自产点仍遵守剩余预算；非法模板返回 request-scoped 400，零上游执行，不换号、不冷却。
 
-识别为官方 Claude Code 家族但未开 `official_cc_passthrough` 时，请求与第三方一样先剥离成标准 Anthropic 结构，再按槽位档重写 system；识别本身不再保留入站 system。人设组装保留下来的 caller marker 适用上述 TTL 规则，不再把缺失 TTL 当作菜单选择后补齐。只有协议页打开透传，官方家族才跳过剥离与重写，按前文 `official_cc_passthrough` 的规则处理。入站请求头不能跳过剥离。
+识别为官方 Claude Code 家族但未开 `official_cc_passthrough` 时，请求与第三方一样先剥离成标准 Anthropic 结构，再按槽位档重写 system；识别本身不再保留入站 system。凡经重写的入站（官方家族与第三方客户端一样），不写 `ttl` 的 marker 都表示未选择，渲染前按会话 pin 值（Web `compatibility.cache_ttl`）补齐，CRAG V3 同时发送 `preserve_cache_breakpoints: false` 与 `cache_ttl`，cli-hop、CRAG、HTTP hop 与 API 直连一致。只有协议页打开透传（或 API 端点显式启用 `body_policy=caller`），才跳过补齐并按 `official_cc_passthrough` 保留调用方缺失 TTL。入站请求头不能跳过剥离。
 
 native CLI 对已有缓存 marker 的 wire system 直接保留块边界、显式 TTL 和省略 TTL，wire tools / messages 同样保留。仅对 CLI 自有 marker 补 TTL，优先请求显式 TTL（混合时 5m）→ slot `kernel.json.default_cache_ttl` → 1h，并按保留内容占用后的剩余预算裁剪。Rust kernel 不增删 marker、不重打 last、不自动降级 TTL。HTTP hop 与 native envelope 的日志/计费保留上游真实 5m/1h 分桶；仅缺少分桶的用量或 message_delta 超过既有分桶的增量使用缺省 TTL 归类。Node 对象不等于最终 wire，源码验证也不等于已发布或部署新 CLI 二进制。
 

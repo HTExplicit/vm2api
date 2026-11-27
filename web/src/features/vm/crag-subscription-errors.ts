@@ -50,6 +50,16 @@ export const cragSubscriptionErrors: Record<string, string> = {
  *
  * 查不到就回落到上表，所以这里只写确实有分歧的码。
  */
+export const cragHostMigrateErrors: Record<string, string> = {
+  not_found: '未在原宿主机 ID 下找到可迁移的订阅、兑换券或历史订单。',
+  auth_forbidden:
+    '归属校验未通过：请核对原宿主机 ID，以及属于该宿主机的历史订单号或原兑换码。',
+  crag_subscription_invalid_request:
+    '请输入有效的原宿主机 ID（不能与本机相同）及原订单号或兑换码。',
+  invalid_request:
+    '请输入有效的原宿主机 ID（不能与本机相同）及原订单号或兑换码。',
+}
+
 export const cragOrderClaimErrors: Record<string, string> = {
   not_found:
     '没有找到这个订单号对应的兑换券。请核对原订单上的订单号；若这张券是在「按订单号迁移」上线前兑换的，请改用原券码迁移。',

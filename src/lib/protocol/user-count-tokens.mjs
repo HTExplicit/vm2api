@@ -23,7 +23,7 @@ import {
   isClaudeCodeFamilyRequest,
 } from '../identity/claude-code-only.mjs'
 import { canCountTokens, canOfficialUsage, credentialModeOfVm, isApiKeyMode } from '../oauth/credential-mode.mjs'
-import { getUsageCache } from '../oauth/usage-cache.mjs'
+import { attachUsageFetchMeta, getUsageCache, getUsageFetchMeta } from '../oauth/usage-cache.mjs'
 import { probeAccount } from '../oauth/usage-probe.mjs'
 import { isOfficialUsageRateLimited, shouldHopOfficialUsage } from '../oauth/crs-usage-probe.mjs'
 import { countTokensViaWorker } from '../transport/go-worker-client.mjs'
@@ -313,7 +313,10 @@ export async function handleUserCountTokens(req, res, deps) {
     }
   }
   const gate = await blockCountTokensBeforeHop(req, parsed.body, { ...deps, rawInbound: inbound })
-  if (gate?.error) return json(res, gate.error.status, gate.error.body)
+  if (gate?.error) {
+    if (gate.error.retryAfterSec) res.setHeader?.('retry-after', String(gate.error.retryAfterSec))
+    return json(res, gate.error.status, gate.error.body)
+  }
   const peeked = await peekCurrentAccount({
     poolScheduler: typeof deps.getPoolScheduler === 'function' ? deps.getPoolScheduler() : deps.poolScheduler,
     stickyRouter: deps.stickyRouter,
@@ -329,7 +332,10 @@ export async function handleUserCountTokens(req, res, deps) {
       rawInbound: inbound,
       account: scopeAccountFromVm(peeked.vm, findAccount(deps.accountQuota, peeked.vm)?.unified),
     })
-    if (again?.error) return json(res, again.error.status, again.error.body)
+    if (again?.error) {
+      if (again.error.retryAfterSec) res.setHeader?.('retry-after', String(again.error.retryAfterSec))
+      return json(res, again.error.status, again.error.body)
+    }
   }
   const mode = credentialModeOfVm(peeked.vm)
   if (!canCountTokens(mode)) {
@@ -396,13 +402,22 @@ export async function resolveUsageWindows({
   const cache = usageCache || getUsageCache()
   let result
   try {
-    result = await cache.load(accountId, () => probe({ exec, vm, includeFable: false }))
+    result = await cache.load(accountId, async () => {
+      const startedAt = Date.now()
+      const resetGenerations = accountQuota?.resetGenerations?.(accountId) || null
+      const probed = await probe({ exec, vm, includeFable: false })
+      return attachUsageFetchMeta(probed, { startedAt, resetGenerations })
+    })
   } catch {
     return { listed, source }
   }
   if (!result || isOfficialUsageRateLimited(result)) return { listed, source }
   try {
-    accountQuota?.ingestOAuthUsage?.(accountId, result)
+    const fetchMeta = getUsageFetchMeta(result)
+    accountQuota?.ingestOAuthUsage?.(accountId, result, {
+      ...(fetchMeta?.startedAt != null ? { startedAt: fetchMeta.startedAt } : {}),
+      ...(fetchMeta?.resetGenerations ? { resetGenerations: fetchMeta.resetGenerations } : {}),
+    })
   } catch {}
   const next = accountQuota?.repo?.get?.(accountId) || acc
   listed = listQuotaFromHeaders(next?.unified || {})

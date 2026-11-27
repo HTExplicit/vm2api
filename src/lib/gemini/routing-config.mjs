@@ -7,6 +7,7 @@ export const GEMINI_STRATEGIES = Object.freeze(['balanced', 'fill', 'round_robin
 
 export const DEFAULT_GEMINI_ROUTING = Object.freeze({
   enabled: true,
+  official_passthrough: true,
   protocols: Object.freeze({
     'google.gemini': Object.freeze({ mode: 'native', enabled: true }),
     'anthropic.messages': Object.freeze({ mode: 'convert', enabled: true }),
@@ -30,6 +31,7 @@ export const DEFAULT_GEMINI_ROUTING = Object.freeze({
     circuit_failure_threshold: 3,
     circuit_open_ms: 30_000,
     eligibility_probe_interval_secs: 180,
+    account_check_interval_secs: 300,
   }),
   sticky: Object.freeze({
     enabled: true,
@@ -39,6 +41,7 @@ export const DEFAULT_GEMINI_ROUTING = Object.freeze({
     max_account_switches: 3,
     quota_cooldown_ms: 60_000,
     account_cooldown_ms: 300_000,
+    unschedulable_on_502: true,
   }),
   shm: Object.freeze({
     require_shm: true,
@@ -86,6 +89,7 @@ export function validateGeminiRoutingPatch(body = {}) {
   const gem = asObject(body.gemini)
   if (!gem) throw typedError('gemini 必须是对象', 'invalid_gemini_routing')
   validateBoolean(gem, 'enabled', 'gemini', 'invalid_gemini_routing')
+  validateBoolean(gem, 'official_passthrough', 'gemini', 'invalid_gemini_routing')
 
   if (Object.hasOwn(gem, 'protocols') && gem.protocols !== undefined) {
     const protocols = asObject(gem.protocols)
@@ -131,10 +135,7 @@ export function validateGeminiRoutingPatch(body = {}) {
         throw typedError('gemini.pool.session_idle_ttl_secs 必须是 0 或 10 到 86400 之间的整数', 'invalid_gemini_pool')
       }
     }
-    if (
-      Object.hasOwn(pool, 'eligibility_probe_interval_secs') &&
-      pool.eligibility_probe_interval_secs !== undefined
-    ) {
+    if (Object.hasOwn(pool, 'eligibility_probe_interval_secs') && pool.eligibility_probe_interval_secs !== undefined) {
       const interval = pool.eligibility_probe_interval_secs
       if (
         typeof interval !== 'number' ||
@@ -143,6 +144,19 @@ export function validateGeminiRoutingPatch(body = {}) {
       ) {
         throw typedError(
           'gemini.pool.eligibility_probe_interval_secs 必须是 0 或 30 到 3600 之间的整数',
+          'invalid_gemini_pool',
+        )
+      }
+    }
+    if (Object.hasOwn(pool, 'account_check_interval_secs') && pool.account_check_interval_secs !== undefined) {
+      const interval = pool.account_check_interval_secs
+      if (
+        typeof interval !== 'number' ||
+        !Number.isInteger(interval) ||
+        (interval !== 0 && (interval < 60 || interval > 3_600))
+      ) {
+        throw typedError(
+          'gemini.pool.account_check_interval_secs 必须是 0 或 60 到 3600 之间的整数',
           'invalid_gemini_pool',
         )
       }
@@ -169,6 +183,7 @@ export function validateGeminiRoutingPatch(body = {}) {
     validateIntRange(failover, 'max_account_switches', 0, 20, 'gemini.failover', 'invalid_gemini_failover')
     validateIntRange(failover, 'quota_cooldown_ms', 5_000, 3_600_000, 'gemini.failover', 'invalid_gemini_failover')
     validateIntRange(failover, 'account_cooldown_ms', 10_000, 3_600_000, 'gemini.failover', 'invalid_gemini_failover')
+    validateBoolean(failover, 'unschedulable_on_502', 'gemini.failover', 'invalid_gemini_failover')
   }
 
   if (Object.hasOwn(gem, 'shm') && gem.shm !== undefined) {
@@ -220,15 +235,15 @@ export function normalizeGeminiRouting(raw = {}) {
   const maxSessions = clampInt(rawPool.max_sessions_per_account, 1, 64, defPool.max_sessions_per_account)
   const minWarm = Math.min(maxConc, clampInt(rawPool.min_warm_slots, 0, 16, defPool.min_warm_slots))
   const rawTtl = rawPool.session_idle_ttl_secs
-  const idleTtl =
-    rawTtl === 0
-      ? 0
-      : clampInt(rawTtl, 10, 86_400, defPool.session_idle_ttl_secs)
+  const idleTtl = rawTtl === 0 ? 0 : clampInt(rawTtl, 10, 86_400, defPool.session_idle_ttl_secs)
   const rawProbeInterval = rawPool.eligibility_probe_interval_secs
   const eligibilityProbeInterval =
-    rawProbeInterval === 0
+    rawProbeInterval === 0 ? 0 : clampInt(rawProbeInterval, 30, 3_600, defPool.eligibility_probe_interval_secs)
+  const rawAccountCheckInterval = rawPool.account_check_interval_secs
+  const accountCheckInterval =
+    rawAccountCheckInterval === 0
       ? 0
-      : clampInt(rawProbeInterval, 30, 3_600, defPool.eligibility_probe_interval_secs)
+      : clampInt(rawAccountCheckInterval, 60, 3_600, defPool.account_check_interval_secs)
   const pool = {
     strategy: GEMINI_STRATEGIES.includes(rawPool.strategy) ? rawPool.strategy : defPool.strategy,
     accounts_per_daemon: clampInt(rawPool.accounts_per_daemon, 1, 256, defPool.accounts_per_daemon),
@@ -245,6 +260,7 @@ export function normalizeGeminiRouting(raw = {}) {
     circuit_failure_threshold: clampInt(rawPool.circuit_failure_threshold, 0, 20, defPool.circuit_failure_threshold),
     circuit_open_ms: clampInt(rawPool.circuit_open_ms, 1_000, 600_000, defPool.circuit_open_ms),
     eligibility_probe_interval_secs: eligibilityProbeInterval,
+    account_check_interval_secs: accountCheckInterval,
   }
 
   const rawSticky = asObject(src.sticky) || {}
@@ -260,6 +276,10 @@ export function normalizeGeminiRouting(raw = {}) {
     max_account_switches: clampInt(rawFailover.max_account_switches, 0, 20, defFailover.max_account_switches),
     quota_cooldown_ms: clampInt(rawFailover.quota_cooldown_ms, 5_000, 3_600_000, defFailover.quota_cooldown_ms),
     account_cooldown_ms: clampInt(rawFailover.account_cooldown_ms, 10_000, 3_600_000, defFailover.account_cooldown_ms),
+    unschedulable_on_502:
+      rawFailover.unschedulable_on_502 !== undefined
+        ? rawFailover.unschedulable_on_502 !== false
+        : defFailover.unschedulable_on_502,
   }
 
   const rawShm = asObject(src.shm) || {}
@@ -272,6 +292,7 @@ export function normalizeGeminiRouting(raw = {}) {
 
   return {
     enabled: src.enabled !== false,
+    official_passthrough: src.official_passthrough !== false,
     protocols,
     pool,
     sticky,

@@ -60,7 +60,6 @@ function computePulse(vms: Vm[], accounts?: UsageAccountRow[]): Pulse {
 
   for (const vm of vms) {
     counts[zoneOf(vm)] += 1
-    if (vm.gemini) continue
     const quota = codexQuotaDisplayVm(vm)
     if (vm.has_token && windowProbed(quota, '7d')) {
       const remain = Math.max(0, 100 - usedPctOf(quota, '7d'))
@@ -156,7 +155,6 @@ export function FleetPulse({
   className?: string
 }) {
   const pulse = useMemo(() => computePulse(vms, accounts), [vms, accounts])
-  const hasGemini = vms.some((vm) => !!vm.gemini)
   const segments = ZONES.filter((z) => pulse.counts[z.key] > 0)
   const focused = filter !== 'all'
   const headroomMax = Math.max(...pulse.headroom, 1)
@@ -225,7 +223,7 @@ export function FleetPulse({
       </Cell>
 
       <Cell
-        title={hasGemini ? '普通槽 7 天窗口余量' : '7 天窗口余量'}
+        title='7 天窗口余量'
         className='xl:col-span-2'
         meta={
           <span className='text-[13px] leading-none font-[590] tracking-[-0.01em] tabular-nums'>
@@ -282,7 +280,7 @@ export function FleetPulse({
       </Cell>
 
       <Cell
-        title={hasGemini ? '普通槽今日消耗 · 北京时间' : '今日消耗 · 北京时间'}
+        title='今日消耗 · 北京时间'
         className='xl:col-span-2'
         meta={
           <span className='text-[11px] text-muted-foreground tabular-nums'>
@@ -310,7 +308,7 @@ export function FleetPulse({
       </Cell>
 
       <Cell
-        title={hasGemini ? '普通槽 7 天窗口成败' : '7 天窗口成败'}
+        title='7 天窗口成败'
         className='sm:col-span-2 xl:col-span-2'
         meta={
           <span className='text-[11px] text-muted-foreground tabular-nums'>

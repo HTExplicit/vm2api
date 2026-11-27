@@ -249,6 +249,27 @@ const REFUSAL_GUARD_MESSAGES = Object.freeze({
   upstream: 'Anthropic refused this request under its usage policy. Do not retry this request.',
 })
 
+/**
+ * Disguised overload response (HTTP 429 + Retry-After) used for temporary
+ * JEV risk-control cooldowns so clients back off without probing the gate.
+ */
+export function makePolicyOverloadError({ requestId, retryAfterSec = 600 } = {}) {
+  const secs =
+    Number.isFinite(Number(retryAfterSec)) && Number(retryAfterSec) > 0
+      ? Math.max(1, Math.ceil(Number(retryAfterSec)))
+      : 600
+  return {
+    ...makeError({
+      type: ErrorType.OVERLOADED,
+      code: ErrorCode.POOL_OVERLOADED,
+      message: CLIENT_POOL_BUSY_MESSAGE,
+      status: 429,
+      request_id: requestId,
+    }),
+    retryAfterSec: secs,
+  }
+}
+
 /** Policy refusals are request rejections, not login failures or transient service failures. */
 export function makeRefusalGuardError({
   requestId,
@@ -526,14 +547,14 @@ export function incompleteAssistantClientError(result = {}) {
  * reached the client (#1215). Capacity errors are excluded on purpose: a 429/529
  * carries the panel's own Retry-After and a client is meant to come back.
  */
-const PARTIAL_CONTINUATION_DETAIL_KEYS = [
+export const PARTIAL_CONTINUATION_DETAIL_KEYS = Object.freeze([
   'prior_reason',
   'interrupted_at',
   'retry_after_sec',
   'recovery_attempts',
   'max_recoveries',
   'recovery_exhausted',
-]
+])
 
 function partialContinuationRelayDetails(body) {
   const src = body?.error?.details
@@ -552,6 +573,194 @@ function partialContinuationRelayDetails(body) {
   return picked
 }
 
+export const CONTINUATION_GONE_REASONS = new Set(['waiting_expired', 'handoff_expired', 'receipt_expired', 'cancelled'])
+
+const SAFE_ERROR_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/
+const SECRET_PREFIX_RE = /^(?:sk-(?:ant|kin|vm)-|AIza|eyJ)/i
+const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/
+const GENERIC_UPSTREAM_TYPES = new Set(['error', 'api_error', 'upstream_error'])
+const ERROR_DETAILS_MAX_BYTES = 1024
+
+/** Strict bounded identifier sanitizer for log error taxonomy fields (never prompts or secrets). */
+export function sanitizeErrorToken(value, maxLen = 128) {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  const limit = Math.min(128, Math.max(1, Number(maxLen) || 128))
+  if (!trimmed || trimmed.length > limit) return null
+  if (!SAFE_ERROR_TOKEN_RE.test(trimmed)) return null
+  if (SECRET_PREFIX_RE.test(trimmed)) return null
+  return trimmed
+}
+
+function sanitizeInterruptedAt(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.trunc(value)
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed.length <= 64 && ISO_TIMESTAMP_RE.test(trimmed) && Number.isFinite(Date.parse(trimmed))) {
+      return trimmed
+    }
+  }
+  return null
+}
+
+/**
+ * Strictly allowlist and bound scalar diagnostic metadata persisted onto normal
+ * `usage_logs` and `request_attempts` rows. Drops arbitrary/nested fields,
+ * raw prompts, and secret-shaped tokens.
+ */
+export function sanitizeErrorDetailsForLog(rawDetails, { status = null, upstreamType = null } = {}) {
+  const src = rawDetails && typeof rawDetails === 'object' && !Array.isArray(rawDetails) ? rawDetails : {}
+  const out = {}
+  const upType = sanitizeErrorToken(src.upstream_type ?? upstreamType, 128)
+  if (upType) out.upstream_type = upType
+  const upCode = sanitizeErrorToken(src.upstream_code, 128)
+  if (upCode) out.upstream_code = upCode
+  if (typeof src.retryable === 'boolean') out.retryable = src.retryable
+
+  if (Number(status) === 410) {
+    if (typeof src.reason === 'string' && CONTINUATION_GONE_REASONS.has(src.reason)) {
+      out.reason = src.reason
+    }
+  } else {
+    const reason = sanitizeErrorToken(src.reason, 128)
+    if (reason) out.reason = reason
+  }
+
+  const priorReason = sanitizeErrorToken(src.prior_reason, 128)
+  if (priorReason) out.prior_reason = priorReason
+  const interruptedAt = sanitizeInterruptedAt(src.interrupted_at)
+  if (interruptedAt != null) out.interrupted_at = interruptedAt
+  if (typeof src.retry_after_sec === 'number' && Number.isFinite(src.retry_after_sec) && src.retry_after_sec >= 0) {
+    out.retry_after_sec = src.retry_after_sec
+  }
+  if (Number.isSafeInteger(src.recovery_attempts) && src.recovery_attempts >= 0) {
+    out.recovery_attempts = src.recovery_attempts
+  }
+  if (Number.isSafeInteger(src.max_recoveries) && src.max_recoveries >= 0) {
+    out.max_recoveries = src.max_recoveries
+  }
+  if (typeof src.recovery_exhausted === 'boolean') {
+    out.recovery_exhausted = src.recovery_exhausted
+  }
+
+  const source = sanitizeErrorToken(src.source, 64)
+  if (source) out.source = source
+  const blockedBy = sanitizeErrorToken(src.blocked_by, 64)
+  if (blockedBy) out.blocked_by = blockedBy
+  const stream = sanitizeErrorToken(src.stream, 32)
+  if (stream) out.stream = stream
+  if (typeof src.gate_miss === 'boolean') out.gate_miss = src.gate_miss
+  const riskBucket = sanitizeErrorToken(src.risk_bucket, 32)
+  if (riskBucket) out.risk_bucket = riskBucket
+  const punishment = sanitizeErrorToken(src.punishment, 64)
+  if (punishment) out.punishment = punishment
+  for (const [key, value] of Object.entries(src)) {
+    if (!/^jev_score_[a-z][a-z0-9_-]{0,31}$/.test(key)) continue
+    const num = Number(value)
+    if (Number.isFinite(num) && num >= 0 && num <= 1) out[key] = Math.round(num * 1000) / 1000
+  }
+
+  if (!Object.keys(out).length) return null
+  if (Buffer.byteLength(JSON.stringify(out), 'utf8') > ERROR_DETAILS_MAX_BYTES) {
+    const compact = {}
+    for (const key of [
+      'upstream_type',
+      'retryable',
+      'reason',
+      'prior_reason',
+      'interrupted_at',
+      'retry_after_sec',
+      'recovery_attempts',
+      'max_recoveries',
+      'recovery_exhausted',
+      'gate_miss',
+      'risk_bucket',
+      'punishment',
+    ]) {
+      if (Object.hasOwn(out, key)) compact[key] = out[key]
+    }
+    return Object.keys(compact).length ? compact : null
+  }
+  return out
+}
+
+/**
+ * Resolve logged `error_code` without letting a generic `'upstream_error'` fallback
+ * hide a more specific mapped code or upstream error type (e.g. CRAG 409
+ * `partial_provider_output_nonretryable` or 410 `upstream_invalid_request`).
+ */
+export function resolveLoggedErrorCode({
+  explicitCode = null,
+  mappedCode = null,
+  upstreamType = null,
+  fallbackCode = null,
+} = {}) {
+  const explicit = sanitizeErrorToken(explicitCode, 128)
+  const mapped = sanitizeErrorToken(mappedCode, 128)
+  const upType = sanitizeErrorToken(upstreamType, 128)
+  const fallback = sanitizeErrorToken(fallbackCode, 128)
+  if (mapped === ErrorCode.REFUSAL_GUARD || mapped === ErrorCode.THIRD_PARTY_CLIENT) return mapped
+  if (explicit) return explicit
+  if (mapped && mapped !== ErrorCode.UPSTREAM_ERROR) return mapped
+  if (upType && !GENERIC_UPSTREAM_TYPES.has(upType)) return upType
+  if (fallback && fallback !== ErrorCode.UPSTREAM_ERROR) return fallback
+  return mapped || fallback || null
+}
+
+/**
+ * Extract safe `upstream_type` and allowlisted scalar `error_details` from a hop
+ * result (and optional mapped client error) for normal-mode logs and attempts.
+ */
+export function extractErrorLogFields(result = null, mappedError = null) {
+  const body = result?.body
+  const status = mappedError?.status ?? result?.status ?? null
+  const rawType = sanitizeErrorToken(upstreamErrorType(body), 128)
+  const mappedDetails =
+    mappedError?.body?.error?.details &&
+    typeof mappedError.body.error.details === 'object' &&
+    !Array.isArray(mappedError.body.error.details)
+      ? mappedError.body.error.details
+      : null
+  const rawDetails =
+    body?.error?.details && typeof body.error.details === 'object' && !Array.isArray(body.error.details)
+      ? body.error.details
+      : null
+  const upstreamType = sanitizeErrorToken(mappedDetails?.upstream_type ?? rawType, 128)
+
+  let candidate
+  if (mappedDetails) {
+    candidate = {
+      ...mappedDetails,
+      ...(body?.error?.upstream_code && !mappedDetails.upstream_code
+        ? { upstream_code: body.error.upstream_code }
+        : {}),
+      ...(mappedDetails.reason == null && Number(status) !== 410 && rawDetails?.reason != null
+        ? { reason: rawDetails.reason }
+        : {}),
+    }
+  } else {
+    const terminal = terminalRelayDetails(status, body)
+    candidate = {
+      ...(rawDetails || {}),
+      ...terminal,
+      ...(body?.error?.upstream_code ? { upstream_code: body.error.upstream_code } : {}),
+    }
+    if (
+      Number(status) === 429 ||
+      Number(status) === 529 ||
+      rawType === 'rate_limit_error' ||
+      rawType === 'overloaded_error'
+    ) {
+      delete candidate.retryable
+    }
+  }
+
+  return {
+    upstream_type: upstreamType,
+    error_details: sanitizeErrorDetailsForLog(candidate, { status, upstreamType }),
+  }
+}
+
 function terminalRelayDetails(status, body) {
   // CRAG names a submission whose partial output cannot be replayed with this
   // exact type. The verdict is the kernel's own, so the 409 carrying it is as
@@ -562,11 +771,24 @@ function terminalRelayDetails(status, body) {
   if (status === 409 && body?.error?.type === 'partial_provider_output_nonretryable') {
     return { ...partialContinuationRelayDetails(body), retryable: false }
   }
-  if (body?.error?.details?.retryable === false) return { retryable: false }
+  // CRAG terminal continuation conflicts cannot clear by replaying the same
+  // submission; mark non-retryable so SDKs stop auto-retrying (x-should-retry: false).
+  if (
+    status === 409 &&
+    (body?.error?.type === 'refused_continuation_conflict' || body?.error?.type === 'tool_continuation_account_changed')
+  ) {
+    return { retryable: false }
+  }
   // 410 Gone is terminal by definition. An expired tool continuation cannot be
-  // revived, so every retry of the same hop can only answer 410 again; saying so
-  // does not infer *why* it expired, which stays the kernel's to report.
-  if (status === 410) return { retryable: false }
+  // revived, so every retry of the same hop can only answer 410 again; forward
+  // only allowlisted kernel-supplied expiration reasons (#1215).
+  if (status === 410) {
+    const reason = body?.error?.details?.reason
+    return typeof reason === 'string' && CONTINUATION_GONE_REASONS.has(reason)
+      ? { retryable: false, reason }
+      : { retryable: false }
+  }
+  if (body?.error?.details?.retryable === false) return { retryable: false }
   return {}
 }
 

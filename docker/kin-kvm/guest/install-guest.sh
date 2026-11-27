@@ -1,8 +1,10 @@
 #!/bin/sh
-# First boot only (cloud-init runcmd). Copies units/scripts from cidata,
-# installs 9p kernel modules when the cloud image omitted them, enables
-# systemd units. A single reboot is allowed if a new kernel/modules package
-# was installed.
+# First boot only (cloud-init runcmd; see guest/user-data). Copies units/scripts
+# from cidata into /usr/local/sbin and /etc/systemd/system — not re-run on later
+# boots when instance-id is stable. New cidata requires a recreated kin-kvm runner
+# container (not stop/start alone); see docs/crag-kvm.md «Guest 启动脚本升级».
+# Installs 9p kernel modules when the cloud image omitted them, enables systemd
+# units. A single reboot is allowed if a new kernel/modules package was installed.
 set -eu
 
 log() { echo "kin-guest-install: $*" >&2; }

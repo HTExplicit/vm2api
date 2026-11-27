@@ -895,6 +895,145 @@ describe('CRAG buyer presentation and activation wire', () => {
     }
   )
 
+  it('auto-detects CRAGGemini CRAGR1 vouchers when Claude redemption returns redeem_unavailable', async () => {
+    const code = `CRAGR1.${'g'.repeat(43)}`
+    vi.mocked(api)
+      .mockRejectedValueOnce(
+        new ApiError('not a claude code', 404, 'redeem_unavailable')
+      )
+      .mockResolvedValueOnce({
+        active: true,
+        slot_limit: 10,
+        used_slots: 0,
+        available_slots: 10,
+      })
+
+    render()
+    fillHostCode(code)
+    submitHostCode()
+    await settle()
+
+    expect(api).toHaveBeenNthCalledWith(
+      1,
+      '/api/panel/crag-subscription/redeem',
+      {
+        method: 'POST',
+        body: JSON.stringify({ redemption_code: code }),
+      }
+    )
+    expect(api).toHaveBeenNthCalledWith(
+      2,
+      '/api/panel/gemini/crag-subscription/redeem',
+      {
+        method: 'POST',
+        body: JSON.stringify({ redemption_code: code }),
+      }
+    )
+    const html = render()
+    expect(html).toContain('已自动识别为 CRAGGemini 兑换码')
+    expect(html).toContain('席位额度 10，可用席位 10')
+    expect(html).not.toContain(code)
+    expect(state.hostInput?.value).toBe('')
+    expect(state.setQueryData).not.toHaveBeenCalled()
+    expect(state.invalidateQueries).toHaveBeenCalledExactlyOnceWith({
+      queryKey: ['panel', 'gemini-environments'],
+    })
+  })
+
+  it('auto-detects CRAGGemini CRAGR1 vouchers even when Claude package is unready', async () => {
+    const code = `CRAGR1.${'h'.repeat(43)}`
+    vi.mocked(api)
+      .mockRejectedValueOnce(
+        new ApiError(
+          'no claude pkg',
+          409,
+          'crag_subscription_host_package_unready'
+        )
+      )
+      .mockResolvedValueOnce({
+        active: true,
+        slot_limit: 10,
+        used_slots: 0,
+        available_slots: 10,
+      })
+
+    render()
+    fillHostCode(code)
+    submitHostCode()
+    await settle()
+
+    expect(api).toHaveBeenCalledTimes(2)
+    expect(render()).toContain('已自动识别为 CRAGGemini 兑换码')
+    expect(state.hostInput?.value).toBe('')
+    expect(state.invalidateQueries).toHaveBeenCalledExactlyOnceWith({
+      queryKey: ['panel', 'gemini-environments'],
+    })
+  })
+
+  it('surfaces CRAGGemini-specific error when fallback identifies a conflicting Gemini voucher', async () => {
+    const code = `CRAGR1.${'k'.repeat(43)}`
+    vi.mocked(api)
+      .mockRejectedValueOnce(
+        new ApiError('not claude', 404, 'redeem_unavailable')
+      )
+      .mockRejectedValueOnce(
+        new ApiError(
+          '该 CRAGR1 兑换码已绑定到其他宿主机。',
+          409,
+          'host_redeem_conflict'
+        )
+      )
+
+    render()
+    fillHostCode(code)
+    submitHostCode()
+    await settle()
+
+    const html = render()
+    expect(html).toContain('该 CRAGR1 兑换码已绑定到其他宿主机。')
+    expect(state.hostInput?.value).toBe(code)
+  })
+
+  it('surfaces gemini_subscription_package_unready instead of masking it with Claude redeem_unavailable', async () => {
+    const code = `CRAGR1.${'p'.repeat(43)}`
+    vi.mocked(api)
+      .mockRejectedValueOnce(
+        new ApiError('not claude', 404, 'redeem_unavailable')
+      )
+      .mockRejectedValueOnce(
+        new ApiError(
+          '宿主机尚未安装可信的 CRAGGemini 加密载荷，请前往「设置 → Gemini 维护」安装或修复后再试。',
+          409,
+          'gemini_subscription_package_unready'
+        )
+      )
+
+    render()
+    fillHostCode(code)
+    submitHostCode()
+    await settle()
+
+    const html = render()
+    expect(html).toContain('宿主机尚未安装可信的 CRAGGemini 加密载荷')
+    expect(html).not.toContain('此码不可用于本机订阅或已失效')
+    expect(state.hostInput?.value).toBe(code)
+  })
+
+  it('does not try CRAGGemini fallback when Claude already recognizes the voucher as conflicting', async () => {
+    const code = `CRAGR1.${'m'.repeat(43)}`
+    vi.mocked(api).mockRejectedValueOnce(
+      new ApiError('claude conflict', 409, 'host_redeem_conflict')
+    )
+
+    render()
+    fillHostCode(code)
+    submitHostCode()
+    await settle()
+
+    expect(api).toHaveBeenCalledTimes(1)
+    expect(render()).toContain('此码与当前宿主机或订阅不匹配')
+  })
+
   it('lets only admins recover a pending host sync without resubmitting a code', async () => {
     const pending = { state: 'sync_pending', ready: false } as const
     state.hostStatus = pending
@@ -1355,6 +1494,7 @@ describe('CRAG buyer presentation and activation wire', () => {
     const overview = html.slice(html.indexOf('id="crag-host-overview"'))
     expect(overview).toContain('role="alert"')
     expect(overview).toContain('/etc/machine-id')
+    expect(overview).toContain('重建设备标识')
   })
 })
 
@@ -1463,5 +1603,141 @@ describe('CRAG 买家页消费 presentation.layout', () => {
       featuredSku: null,
       featuredLabel: null,
     })
+  })
+})
+
+describe('CRAG 画布本地缓存、哈希跳过与防超时加载', () => {
+  const hash1 = '1'.repeat(64)
+  const hash2 = '2'.repeat(64)
+
+  function makeStorage(initial: Record<string, string> = {}) {
+    const store = new Map(Object.entries(initial))
+    return {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        store.set(key, value)
+      },
+      removeItem: (key: string) => {
+        store.delete(key)
+      },
+      snapshot: () => Object.fromEntries(store),
+    }
+  }
+
+  function stubBrowserEnv() {
+    vi.stubGlobal('window', {
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })
+    vi.stubGlobal('document', {
+      visibilityState: 'visible',
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })
+  }
+
+  it('首屏直接从 localStorage 回填缓存画布，哈希不变时不覆盖状态也不刷新修订', async () => {
+    state.values = []
+    const storage = makeStorage({
+      'vm2api:crag-shop:catalog:v1:panel': JSON.stringify({
+        ...catalog,
+        catalog_hash: hash1,
+        presentation: { title: '缓存画布标题', plans_title: '缓存套餐区' },
+      }),
+    })
+    vi.stubGlobal('localStorage', storage)
+    stubBrowserEnv()
+    vi.mocked(api).mockResolvedValueOnce({
+      unchanged: true,
+      catalog_hash: hash1,
+    })
+
+    // First render uses hydrated cache directly (no loading skeleton!).
+    const html = render()
+    expect(html).toContain('缓存画布标题')
+    expect(html).toContain('缓存套餐区')
+    expect(html).not.toContain('正在查询套餐')
+
+    // Run catalog effect (index 1: 0=pageshow, 1=catalog, 2=orders).
+    const catalogEffect = vi.mocked(useEffect).mock.calls[1]?.[0]
+    const cleanup = catalogEffect?.()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(api).toHaveBeenCalledWith(
+      `/api/panel/crag-shop/plans?hash=${hash1}`,
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    // Unchanged hash preserves catalog state and does not bump catalogRevision.
+    expect(state.values[1]).toMatchObject({
+      status: 'ready',
+      data: { catalog_hash: hash1 },
+    })
+    expect(state.values[2]).toBe(0)
+    if (typeof cleanup === 'function') cleanup()
+  })
+
+  it('已缓存画布在刷新超时或报错时不被清空，只有新哈希到来才更新本地缓存', async () => {
+    vi.useFakeTimers()
+    state.values = []
+    const storage = makeStorage({
+      'vm2api:crag-shop:catalog:v1:panel': JSON.stringify({
+        ...catalog,
+        catalog_hash: hash1,
+        presentation: { title: '旧版缓存画布' },
+      }),
+    })
+    vi.stubGlobal('localStorage', storage)
+    stubBrowserEnv()
+
+    // First fetch hangs and triggers catalog timeout.
+    vi.mocked(api).mockImplementationOnce(
+      (_path, opts) =>
+        new Promise((_resolve, reject) => {
+          opts?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('timeout', 'AbortError'))
+          )
+        })
+    )
+    render()
+    const catalogEffect = vi.mocked(useEffect).mock.calls[1]?.[0]
+    const cleanup = catalogEffect?.()
+    await vi.advanceTimersByTimeAsync(15_000)
+
+    // Timeout must NOT wipe out the already-rendered cached canvas.
+    expect(state.values[1]).toMatchObject({
+      status: 'ready',
+      data: { presentation: { title: '旧版缓存画布' } },
+    })
+    expect(render()).toContain('旧版缓存画布')
+    expect(render()).not.toContain('暂时无法确认可售套餐')
+
+    // Manual refresh passes refresh=1 and updates cache when hash changes.
+    vi.mocked(api).mockResolvedValueOnce({
+      ...catalog,
+      catalog_hash: hash2,
+      presentation: { title: '新版发布画布' },
+    })
+    click('刷新套餐')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(api).toHaveBeenLastCalledWith(
+      `/api/panel/crag-shop/plans?hash=${hash1}&refresh=1`,
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(state.values[1]).toMatchObject({
+      status: 'ready',
+      data: { catalog_hash: hash2, presentation: { title: '新版发布画布' } },
+    })
+    expect(state.values[2]).toBe(1)
+    expect(storage.snapshot()['vm2api:crag-shop:catalog:v1:panel']).toContain(
+      '新版发布画布'
+    )
+    if (typeof cleanup === 'function') cleanup()
   })
 })

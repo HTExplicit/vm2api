@@ -3,6 +3,7 @@ import type { ApiEndpoint } from '@/types/panel-api-endpoints'
 import type { ApiKeyItem, VmPool } from '@/types/panel-keys'
 import type { Vm } from '@/types/panel-vm'
 import { formatBalanceAmount } from '@/lib/decimal-display'
+import { slotDisplayTitle, slotRawEmail } from '@/lib/vm-kind'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -132,8 +133,12 @@ export function KeyLimitsDialog({
         category:
           group === 'openai_apikey' || initial.category === 'api'
             ? 'api'
-            : 'oauth',
+            : initial.category === 'all'
+              ? 'all'
+              : 'oauth',
         api_endpoint_id: initial.api_endpoint_id || '',
+        permission_tier: initial.permission_tier,
+        owner_id: initial.owner_id,
         max_concurrency: Number(initial.max_concurrency ?? 20),
         quota_requests: Number(initial.quota_requests ?? 0),
         quota_usd: Number(initial.quota_usd ?? 0),
@@ -229,8 +234,10 @@ export function KeyLimitsDialog({
                 onValueChange={(v) =>
                   setDraft((d) => ({
                     ...d,
-                    category: v === 'api' ? 'api' : 'oauth',
-                    api_endpoint_id: v === 'api' ? d.api_endpoint_id : '',
+                    category:
+                      v === 'api' ? 'api' : v === 'all' ? 'all' : 'oauth',
+                    api_endpoint_id:
+                      v === 'api' || v === 'all' ? d.api_endpoint_id : '',
                     group_type:
                       v === 'oauth' && d.group_type === 'openai_apikey'
                         ? 'openai'
@@ -253,6 +260,9 @@ export function KeyLimitsDialog({
                 <SelectContent>
                   <SelectItem value='oauth'>OAuth 槽位</SelectItem>
                   <SelectItem value='api'>API 直连</SelectItem>
+                  {draft.category === 'all' || initial?.category === 'all' ? (
+                    <SelectItem value='all'>全部（OAuth + API）</SelectItem>
+                  ) : null}
                 </SelectContent>
               </Select>
             </Field>
@@ -538,8 +548,8 @@ export function KeyLimitsDialog({
                             </span>
                           ) : (
                             <>
-                              <span className='truncate'>
-                                {vm.name || vm.email || vm.id}
+                              <span className='truncate' title={slotRawEmail(vm) || undefined}>
+                                {slotDisplayTitle(vm)}
                               </span>
                               <span className='font-mono text-xs text-muted-foreground'>
                                 {vm.id}

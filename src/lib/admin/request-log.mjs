@@ -1,5 +1,5 @@
 /**
- * SQLite-backed request logs for access, usage, and billing.
+ * Database-backed request logs (PostgreSQL / SQLite) for access, usage, and billing.
  *
  * Modes:
  *   off    — no writes
@@ -18,14 +18,15 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { redactSecrets } from '../core/security.mjs'
-import { hasReadPool, resolveStoreDb } from '../db/database.mjs'
+import { sanitizeErrorDetailsForLog, sanitizeErrorToken } from '../core/errors.mjs'
+import { hasReadPool, resolveStoreDb, withSavepoint } from '../db/database.mjs'
 import { usageRead } from '../db/sqlite-pool.mjs'
 import { enqueueWrite, writeBehindArmed } from '../db/write-behind.mjs'
 import { UsageLogsRepo } from '../db/repos/usage-logs-repo.mjs'
 import { classifyRequestError, resolveMutedErrorClasses } from './error-class.mjs'
-import { costColumnsFromUsage, normalizeUsage } from './pricing.mjs'
+import { advisorUsageFromIterations, costColumnsFromUsage, normalizeUsage } from './pricing.mjs'
 import { disjointOpenaiUsage } from '../protocol/openai-usage.mjs'
-import { REASONING_EFFORTS, sessionIdForLog } from '../protocol/log-fields.mjs'
+import { REASONING_EFFORTS, modelMismatch, sessionIdForLog } from '../protocol/log-fields.mjs'
 
 /** Persist the token a client actually sent — only for failed ingress auth. */
 export function presentedApiKeyForLog(token) {
@@ -36,10 +37,68 @@ export function presentedApiKeyForLog(token) {
 
 const MODES = new Set(['off', 'normal', 'debug'])
 
+export const LOGGING_RETAIN_DAYS_MIN = 1
+export const LOGGING_RETAIN_DAYS_MAX = 90
+export const LOGGING_MAX_MB_MIN = 0
+export const LOGGING_MAX_MB_MAX = 102400
+
 const DEFAULT_RETAIN_DAYS = 7
 const DEFAULT_DEBUG_RETAIN_DAYS = 3
 const DEFAULT_MAX_MB = 2048
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000
+
+function loggingValidationError(message) {
+  const error = new TypeError(message)
+  error.code = 'invalid_logging_config'
+  return error
+}
+
+function parseStrictBoundedInt(raw, min, max, field) {
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < min || raw > max) {
+    throw loggingValidationError(`${field} 必须是 ${min}–${max} 的整数`)
+  }
+  return raw
+}
+
+/** PUT /api/panel/routing strict check for logging retention and debug payload bounds. */
+export function validateLoggingRoutingPatch(body = {}, currentLogging = {}) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return
+  if (!Object.prototype.hasOwnProperty.call(body, 'logging')) return
+  const logging = body.logging
+  if (!logging || typeof logging !== 'object' || Array.isArray(logging)) {
+    throw loggingValidationError('logging 必须是对象')
+  }
+  if (Object.prototype.hasOwnProperty.call(logging, 'mode')) {
+    if (typeof logging.mode !== 'string' || !MODES.has(logging.mode.trim().toLowerCase())) {
+      throw loggingValidationError('logging.mode 必须是 off / normal / debug')
+    }
+  }
+  const hasRetain = Object.prototype.hasOwnProperty.call(logging, 'retain_days')
+  const hasDebugRetain = Object.prototype.hasOwnProperty.call(logging, 'debug_retain_days')
+  const current = normalizeLoggingConfig(currentLogging || {})
+  const retainDays = hasRetain
+    ? parseStrictBoundedInt(
+        logging.retain_days,
+        LOGGING_RETAIN_DAYS_MIN,
+        LOGGING_RETAIN_DAYS_MAX,
+        'logging.retain_days',
+      )
+    : current.retain_days
+  const debugRetainDays = hasDebugRetain
+    ? parseStrictBoundedInt(
+        logging.debug_retain_days,
+        LOGGING_RETAIN_DAYS_MIN,
+        LOGGING_RETAIN_DAYS_MAX,
+        'logging.debug_retain_days',
+      )
+    : current.debug_retain_days
+  if ((hasRetain || hasDebugRetain) && debugRetainDays > retainDays) {
+    throw loggingValidationError('logging.debug_retain_days 不能大于 logging.retain_days')
+  }
+  if (Object.prototype.hasOwnProperty.call(logging, 'max_mb')) {
+    parseStrictBoundedInt(logging.max_mb, LOGGING_MAX_MB_MIN, LOGGING_MAX_MB_MAX, 'logging.max_mb')
+  }
+}
 
 function clampInt(value, min, max, fallback) {
   if (value == null || value === '') return fallback
@@ -226,6 +285,7 @@ const PRICED_COLUMN_KEYS = [
   'cache_creation_cost',
   'web_search_cost',
   'image_cost',
+  'advisor_cost',
   'total_cost',
   'pricing_model',
   'price_source',
@@ -256,6 +316,7 @@ function costColumnsForLog(usage, model, extra = {}) {
     cache_creation_cost: priced.cache_creation_cost ?? null,
     web_search_cost: priced.web_search_cost ?? null,
     image_cost: priced.image_cost ?? null,
+    advisor_cost: priced.advisor_cost ?? null,
     total_cost: priced.total_cost ?? null,
     pricing_model: priced.pricing_model ?? null,
     price_source: priced.price_source ?? null,
@@ -266,17 +327,39 @@ function costColumnsForLog(usage, model, extra = {}) {
   }
 }
 
-/** Legacy request/upstream comparison; independent of the observed response model. */
-function modelMismatch(requested, upstream) {
-  if (!requested || !upstream) return null
-  const norm = (m) =>
-    String(m)
-      .split('/')
-      .filter(Boolean)
-      .pop()
-      .replace(/\[1m\]$/i, '')
-      .toLowerCase()
-  return norm(requested) === norm(upstream) ? 0 : 1
+function appendCapturedHeader(target, rawKey, value) {
+  if (rawKey == null || value === undefined) return
+  const key = String(rawKey).trim().toLowerCase()
+  if (!key) return
+  if (Object.hasOwn(target, key)) {
+    const prev = target[key]
+    target[key] = Array.isArray(prev) ? [...prev, value] : [prev, value]
+  } else {
+    target[key] = value
+  }
+}
+
+function normalizeWriteHeadHeaders(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const out = {}
+  if (Array.isArray(raw)) {
+    if (raw.length > 0 && Array.isArray(raw[0])) {
+      for (const pair of raw) {
+        if (Array.isArray(pair) && pair.length >= 2) appendCapturedHeader(out, pair[0], pair[1])
+      }
+    } else {
+      for (let i = 0; i + 1 < raw.length; i += 2) {
+        appendCapturedHeader(out, raw[i], raw[i + 1])
+      }
+    }
+  } else {
+    for (const [k, v] of Object.entries(raw)) {
+      if (v === undefined) continue
+      const key = String(k).trim().toLowerCase()
+      if (key) out[key] = v
+    }
+  }
+  return Object.keys(out).length ? out : null
 }
 
 function redactHeaders(headers = {}) {
@@ -582,6 +665,23 @@ export class RequestLogStore {
       captured.body += text.slice(0, Math.max(0, room))
       captured.truncated = true
     }
+    let writeHeadStatus = null
+    let writeHeadHeaders = null
+    if (typeof res.writeHead === 'function') {
+      const writeHead = res.writeHead
+      res.writeHead = function tappedWriteHead(statusCode, statusMessage, headers) {
+        let rawHeaders = null
+        if (typeof statusMessage === 'string') rawHeaders = headers
+        else if (statusMessage != null) rawHeaders = statusMessage
+        else if (headers != null) rawHeaders = headers
+        const out = writeHead.apply(this, arguments)
+        const parsedStatus = Number(statusCode)
+        if (Number.isInteger(parsedStatus) && parsedStatus > 0) writeHeadStatus = parsedStatus
+        const normalized = normalizeWriteHeadHeaders(rawHeaders)
+        if (normalized) writeHeadHeaders = { ...(writeHeadHeaders || {}), ...normalized }
+        return out
+      }
+    }
     const write = res.write
     const end = res.end
     res.write = function tappedWrite(chunk, encoding, cb) {
@@ -593,9 +693,17 @@ export class RequestLogStore {
       return end.call(this, chunk, encoding, cb)
     }
     res.once('finish', () => {
-      captured.status = res.statusCode || null
+      captured.status = res.statusCode || writeHeadStatus || null
       try {
-        captured.headers = redactHeaders(res.getHeaders?.() || {})
+        const merged = {}
+        const fromSetHeader = res.getHeaders?.() || {}
+        for (const [k, v] of Object.entries(fromSetHeader)) {
+          if (v === undefined) continue
+          const key = String(k).trim().toLowerCase()
+          if (key) merged[key] = v
+        }
+        if (writeHeadHeaders) Object.assign(merged, writeHeadHeaders)
+        captured.headers = redactHeaders(merged)
       } catch {}
     })
   }
@@ -607,6 +715,37 @@ export class RequestLogStore {
   finish(ctx, extra = {}) {
     if (!ctx || ctx.mode === 'off') return null
     const duration_ms = Math.max(0, Date.now() - (ctx.t0 || Date.now()))
+    if (extra.merge_into_request_id) {
+      const parentId = String(extra.merge_into_request_id).trim()
+      if (parentId) {
+        const continuation =
+          ctx.mode === 'debug'
+            ? {
+                request_id: ctx.request_id,
+                ts: new Date().toISOString(),
+                duration_ms,
+                ...(extra.tool_continuation && typeof extra.tool_continuation === 'object'
+                  ? extra.tool_continuation
+                  : {}),
+              }
+            : null
+        const persistMerge = () => {
+          try {
+            withSavepoint(this.repo.db, 'reqlog_merge', () => {
+              this.repo.mergeToolContinuation(parentId, { durationMs: duration_ms, continuation })
+            })
+          } catch {}
+        }
+        const memParent = this._mem.find((item) => item?.request_id === parentId)
+        if (memParent) {
+          memParent.duration_ms = (Number(memParent.duration_ms) || 0) + duration_ms
+        }
+        if (writeBehindArmed()) enqueueWrite(persistMerge)
+        else persistMerge()
+      }
+      return null
+    }
+    if (extra.skip_log) return null
     const usage = normalizeUsage(disjointOpenaiUsage(extra.usage || {}) || {})
     const breakdown = cacheCreationBreakdown(usage)
     const webSearch = extra.web_search_requests ?? webSearchRequestsOf(usage)
@@ -628,6 +767,11 @@ export class RequestLogStore {
       speed: extra.speed ?? usage.speed,
       requested_speed: extra.requested_speed ?? usage.requested_speed,
     }
+    const upstreamType = sanitizeErrorToken(extra.upstream_type ?? extra.error_details?.upstream_type, 128)
+    const errorDetails = sanitizeErrorDetailsForLog(extra.error_details, {
+      status: extra.status ?? null,
+      upstreamType,
+    })
     const summary = {
       id: 'log_' + crypto.randomBytes(6).toString('hex'),
       request_id: ctx.request_id,
@@ -641,9 +785,11 @@ export class RequestLogStore {
       status: extra.status ?? null,
       upstream_status: extra.audit_upstream_400
         ? 400
-        : Number(extra.upstream_status) === 400
-          ? null
-          : (extra.upstream_status ?? null),
+        : Number.isInteger(extra.audit_upstream_error_status) && extra.audit_upstream_error_status >= 400
+          ? extra.audit_upstream_error_status
+          : Number(extra.upstream_status) === 400
+            ? null
+            : (extra.upstream_status ?? null),
       upstream_400_message: extra.audit_upstream_400_message
         ? String(extra.audit_upstream_400_message).slice(0, 300)
         : null,
@@ -661,6 +807,8 @@ export class RequestLogStore {
       error_code: extra.error_code || null,
       error_message: extra.error_message ? String(extra.error_message).slice(0, 300) : null,
       failure_diagnostics: extra.failure_diagnostics || null,
+      upstream_type: upstreamType,
+      error_details: errorDetails,
       user_agent: ctx.user_agent,
       ip: ctx.ip,
       api_key_presented: extra.api_key_presented ? presentedApiKeyForLog(extra.api_key_presented) : null,
@@ -696,6 +844,12 @@ export class RequestLogStore {
       image_usage: extra.image_usage ? JSON.stringify(extra.image_usage) : null,
       image_input_tokens: imageTokenCount(extra.image_usage?.input_tokens),
       image_output_tokens: imageTokenCount(extra.image_usage?.output_tokens),
+      advisor_usage: (() => {
+        const detail = Array.isArray(extra.advisor_usage)
+          ? extra.advisor_usage
+          : advisorUsageFromIterations(billedUsage)
+        return detail?.length ? JSON.stringify(detail) : null
+      })(),
       // Ownership and billing columns
       user_id: extra.user_id ?? null,
       vm_owner_user_id: null,
@@ -714,7 +868,9 @@ export class RequestLogStore {
     const persist = () => {
       summary.vm_owner_user_id = this.repo.vmOwnerOf(extra.vm_id)
       try {
-        this.repo.insertSummaryIfAbsent(summary)
+        withSavepoint(this.repo.db, 'reqlog_sum', () => {
+          this.repo.insertSummaryIfAbsent(summary)
+        })
       } catch {}
       if (this.jsonlMirror) this._appendJsonl(summary)
       if (ctx.mode !== 'debug') return
@@ -751,7 +907,9 @@ export class RequestLogStore {
         response: ctx.response ? debugResponse(ctx.response) : null,
       }
       try {
-        this.repo.insertDebug(summary.request_id || summary.id, summary.ts, debugRec)
+        withSavepoint(this.repo.db, 'reqlog_dbg', () => {
+          this.repo.insertDebug(summary.request_id || summary.id, summary.ts, debugRec)
+        })
       } catch {}
     }
     this._mem.push(summary)
@@ -1002,6 +1160,8 @@ const EXPORT_COLUMNS = [
   'error_message',
   'failure_diagnostics',
   'error_label',
+  'upstream_type',
+  'error_details',
   'model',
   'vm_id',
   'ip',

@@ -339,6 +339,44 @@ function emptyPoolFailure(candidates, now = Date.now()) {
  */
 export const QUOTA_GUARD_DEFAULTS = { new_session_ratio: 0.85, stop_ratio: 0.95 }
 
+function quotaValidationError(message) {
+  const error = new TypeError(message)
+  error.code = 'invalid_quota_config'
+  return error
+}
+
+/** PUT /api/panel/routing strict check for quota exhaustion guard thresholds. */
+export function validateQuotaRoutingPatch(body = {}, currentQuota = {}) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return
+  if (!Object.prototype.hasOwnProperty.call(body, 'quota')) return
+  const quota = body.quota
+  if (!quota || typeof quota !== 'object' || Array.isArray(quota)) {
+    throw quotaValidationError('quota 必须是对象')
+  }
+  const hasNew = Object.prototype.hasOwnProperty.call(quota, 'exhaustion_guard_new_session')
+  const hasStop = Object.prototype.hasOwnProperty.call(quota, 'exhaustion_guard_stop')
+  if (!hasNew && !hasStop) return
+  const parseRatio = (raw, field) => {
+    if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0 || raw > 1) {
+      throw quotaValidationError(`${field} 必须是 (0, 1] 之间的数字`)
+    }
+    return raw
+  }
+  const fallbackRatio = (raw, fallback) => {
+    const n = Number(raw)
+    return Number.isFinite(n) && n > 0 && n <= 1 ? n : fallback
+  }
+  const newSession = hasNew
+    ? parseRatio(quota.exhaustion_guard_new_session, 'quota.exhaustion_guard_new_session')
+    : fallbackRatio(currentQuota?.exhaustion_guard_new_session, QUOTA_GUARD_DEFAULTS.new_session_ratio)
+  const stop = hasStop
+    ? parseRatio(quota.exhaustion_guard_stop, 'quota.exhaustion_guard_stop')
+    : fallbackRatio(currentQuota?.exhaustion_guard_stop, QUOTA_GUARD_DEFAULTS.stop_ratio)
+  if (newSession > stop) {
+    throw quotaValidationError('quota.exhaustion_guard_new_session 不能大于 quota.exhaustion_guard_stop')
+  }
+}
+
 export function quotaGuardConfigOf(quota = {}) {
   const ratio = (value, fallback) => {
     const n = Number(value)
@@ -2196,6 +2234,7 @@ export class PoolScheduler extends EventEmitter {
               probe_source: account.unified.source,
             }
           : {}
+        const runtimeWorkerStatus = knownHealth || state?.worker_status || account.worker_status || null
         const ev = evaluateAccount({
           vm,
           account: { ...account, last_used_at: lastUsedAt },
@@ -2205,11 +2244,12 @@ export class PoolScheduler extends EventEmitter {
           scheduleDisabledReason: vm.schedule_disabled_reason || null,
           lastProbe: account.last_probe || account.unified?.last_probe || null,
           probeSource: account.unified?.source || account.last_probe?.source || null,
-          workerLastError: account.worker_status?.last_error || vm.claude?.refresh_error,
+          workerLastError: runtimeWorkerStatus?.last_error || vm.claude?.refresh_error,
           refreshError: vm.claude?.refresh_error,
           expiresAt: vm.claude?.expires_at || vm.expires_at || null,
           refreshedAt: vm.claude?.refreshed_at || vm.refreshed_at || null,
-          workerCredential: account.worker_status?.credential || null,
+          workerCredential:
+            knownHealth?.credential || state?.worker_status?.credential || account.worker_status?.credential || null,
           quota,
           policy,
           cooldownUntil:
@@ -3326,6 +3366,7 @@ export class PoolScheduler extends EventEmitter {
     if (!account) return { action: 'keep', reason: null }
     const now = Date.now()
     const lastUsedAt = this.lastUsed.get(accountId) || account.last_used_at || 0
+    const runtimeWorkerStatus = state?.worker_status || account.worker_status || null
     const ev = evaluateAccount({
       vm: {
         ...vm,
@@ -3344,11 +3385,11 @@ export class PoolScheduler extends EventEmitter {
       scheduleDisabledReason: null,
       lastProbe: account.last_probe || account.unified?.last_probe || null,
       probeSource: account.unified?.source || account.last_probe?.source || null,
-      workerLastError: account.worker_status?.last_error || vm.claude?.refresh_error,
+      workerLastError: runtimeWorkerStatus?.last_error || vm.claude?.refresh_error,
       refreshError: vm.claude?.refresh_error,
       expiresAt: vm.claude?.expires_at || vm.expires_at || null,
       refreshedAt: vm.claude?.refreshed_at || vm.refreshed_at || null,
-      workerCredential: account.worker_status?.credential || null,
+      workerCredential: state?.worker_status?.credential || account.worker_status?.credential || null,
       quota: account.unified
         ? {
             ...listQuotaFromHeaders(account.unified, { now }),

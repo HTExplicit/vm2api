@@ -60,8 +60,11 @@ const USAGE_PROBE_SOURCES = new Set([
   'messages-headers',
 ])
 
+// OpenAI/codex revocations surface as error.code "token_revoked" /
+// "Encountered invalidated oauth token for user" — the same grant death
+// as Anthropic's "token has been revoked", spelled differently.
 const GRANT_DEATH =
-  /credential_refresh_failed|oauth_revoked|oauth_invalid_grant|invalid_grant/i
+  /credential_refresh_failed|oauth_revoked|oauth_invalid_grant|invalid_grant|token_revoked|invalidated oauth token/i
 
 function isTestChatProbe(vm: Vm): boolean {
   return TEST_PROBE_SOURCES.test(String(vm.last_probe?.source || ''))
@@ -124,7 +127,7 @@ function grantRevoked(vm: Vm): boolean {
       ? null
       : vm.availability?.reason,
   ]
-  return /access token has been revoked|token has been revoked|oauth_revoked/i.test(
+  return /access token has been revoked|token has been revoked|token_revoked|invalidated oauth token|oauth_revoked/i.test(
     bits.filter(Boolean).join(' ')
   )
 }
@@ -240,7 +243,7 @@ export function vmCircuitTitle(vm: Vm | undefined, now = Date.now()): string {
   if (c.state === 'half_open')
     return '熔断半开 · 下一个请求作为探测，成功即恢复'
   const sec = Math.max(1, Math.ceil(c.left / 1000))
-  return `熔断中 · 连续 ${c.failures}/${c.threshold} 次 5xx · ${sec}s 后放行探测`
+  return `熔断中 · 连续 ${c.failures}/${c.threshold} 次 400/403/5xx · ${sec}s 后放行探测`
 }
 
 function circuitTone(vm: Vm | undefined): StatusTone | null {
@@ -469,7 +472,7 @@ export function credentialStatus(vm: Vm | undefined): StatusTone {
 function leftoverQuotaOff(vm: Vm | undefined): boolean {
   if (!vm || vm.schedulable !== false || vm.schedule_manual === true)
     return false
-  return /^(quota_5h|quota_7d)/.test(String(vm.schedule_disabled_reason || ''))
+  return /^quota_\d+[mhd]/.test(String(vm.schedule_disabled_reason || ''))
 }
 
 /** 额度 / 429 / 冷却写成受限，不是操作员关。含未迁完的 leftover quota-off。 */
@@ -560,6 +563,8 @@ function restrictionLabel(vm: Vm, fallback: string): string {
   )
   if (/quota_5h/.test(reason)) return '5h 限制'
   if (/quota_7d/.test(reason)) return '7d 限制'
+  const customQuota = reason.match(/quota_(\d+[mhd])/)
+  if (customQuota) return `${customQuota[1]} 限制`
   return fallback
 }
 
@@ -735,8 +740,9 @@ export function vmRunning(vm: Vm | undefined): boolean {
   if (!vm) return false
   const s = String(vm.status || '').toLowerCase()
   if (s === 'stopped' || s === 'dead' || s === 'disabled') return false
-  if (!vm.has_token) return false
-  return Boolean(vm.active || s === 'running' || s === 'ok' || !s)
+  return Boolean(
+    vm.active || s === 'running' || s === 'ok' || (!s && vm.has_token)
+  )
 }
 
 /** Preserve the three official Pro tiers; unknown raw values pass through. */

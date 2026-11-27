@@ -8,6 +8,8 @@ import {
   GeminiOperationError,
   type GeminiInventory,
 } from './gemini-environments'
+import { geminiProxyAddress, geminiProxyOptionLabel } from './gemini-operations'
+import { GeminiProxyPanel } from './gemini-proxy-panel'
 
 vi.mock('@tanstack/react-router', () => ({
   Link: ({ children }: { children: string }) => <a>{children}</a>,
@@ -119,7 +121,7 @@ test('Gemini shows the socket failure without claiming the service is disabled',
     'admin'
   )
   expect(asAdmin).toContain('控制面无权访问 Gemini 控制 socket')
-  expect(asAdmin).toContain('设置 → Gemini：诊断与维护')
+  expect(asAdmin).toContain('设置 → Gemini 维护：诊断与维护')
   expect(asAdmin).not.toContain('创建 Gemini 环境')
 
   const asUser = showGemini(
@@ -130,7 +132,7 @@ test('Gemini shows the socket failure without claiming the service is disabled',
     'user'
   )
   expect(asUser).toContain('控制面无权访问 Gemini 控制 socket')
-  expect(asUser).toContain('请联系管理员在「设置 → Gemini」诊断与维护。')
+  expect(asUser).toContain('请联系管理员在「设置 → Gemini 维护」诊断与维护。')
   expect(asUser).not.toContain('创建 Gemini 环境')
 })
 
@@ -143,6 +145,20 @@ test('VM details distinguish missing Antigravity files from OAuth host prerequis
   expect(html).toContain('Antigravity 签名载荷不完整')
   expect(html).toContain('宿主缺少可用的 kin-egress')
   expect(html).toContain('Antigravity 额度与使用分析')
+
+  const apparmorHtml = showGemini(true, 'vm', 'oauth', {
+    payload_state: 'installed',
+    release_activated: true,
+    oauth_runtime_issue: 'gemini_sandbox_apparmor_restricted',
+  })
+  expect(apparmorHtml).toContain('AppArmor 限制了非特权 user namespace')
+
+  const sandboxHtml = showGemini(true, 'vm', 'oauth', {
+    payload_state: 'installed',
+    release_activated: true,
+    oauth_runtime_issue: 'gemini_sandbox_unavailable',
+  })
+  expect(sandboxHtml).toContain('宿主机非特权沙箱（bwrap）不可用')
 })
 
 test('Gemini import only displays eligible platform SOCKS5 and leaves inventory management to VM', () => {
@@ -150,6 +166,7 @@ test('Gemini import only displays eligible platform SOCKS5 and leaves inventory 
   expect(html).toContain('不创建虚拟机')
   expect(html).toContain('兑换当前版本的 CRAGGemini 内核')
   expect(html).toContain('Gemini API Key')
+  expect(html).toContain('导入账号 JSON / Refresh Token')
   expect(html).toContain('允许的平台代理')
   expect(html).not.toContain('租户代理')
   expect(html).not.toContain('宿主直连')
@@ -271,6 +288,62 @@ test('CRAGGemini subscription mode renders subscription status and seat bind/rel
   )
   expect(boundHtml).toContain('已绑定席位 #1')
   expect(boundHtml).toContain('释放 CRAG 席位')
+
+  const syncPendingClient = new QueryClient()
+  syncPendingClient.setQueryData(['panel', 'me'], { role: 'admin' })
+  syncPendingClient.setQueryData(['panel', 'gemini-environments'], {
+    available: true,
+    payload_state: 'installed',
+    payload_mode: 'crag_subscription',
+    release_activated: true,
+    crag_subscription: {
+      configured: true,
+      active: false,
+      product: 'craggemini',
+      host_id: 'host-1',
+      sync_pending: true,
+      version: 2,
+      revision: 2,
+      issued_at: 1_800_000_000,
+      expires_at: 1_803_000_000,
+      slot_limit: 2,
+      used_slots: 1,
+      available_slots: 0,
+      reclaim_supported: true,
+    },
+    environments: [
+      {
+        id: 'gemini-mismatch',
+        name: '载荷换签',
+        proxy_id: 'px-one',
+        auth_state: 'authorized',
+        auth_method: 'oauth',
+        runtime_ready: false,
+        billing_ready: false,
+        kernel_version: '0.4.10',
+        models: ['gemini-3-flash'],
+        models_discovered: true,
+        crag_license: {
+          product: 'craggemini',
+          status: 'invalid',
+          valid: false,
+          seat_required: true,
+          code: 'license_payload_key_mismatch',
+        },
+        account: null,
+      },
+    ],
+  })
+  const syncPendingHtml = renderToStaticMarkup(
+    <QueryClientProvider client={syncPendingClient}>
+      <GeminiEnvironments environmentId='gemini-mismatch' />
+    </QueryClientProvider>
+  )
+  expect(syncPendingHtml).toContain('CRAGGemini 宿主订阅正在同步上次变更')
+  expect(syncPendingHtml).toContain('继续同步订阅')
+  expect(syncPendingHtml).toContain('CRAGGemini 许可与当前载荷版本不匹配')
+  expect(syncPendingHtml).toContain('重新绑定 CRAG 席位')
+  expect(syncPendingHtml).not.toContain('CRAGGemini 宿主订阅未激活')
 })
 
 test('Gemini authorization challenge exposes copyable link alongside open action', () => {
@@ -312,7 +385,7 @@ test('GeminiOperationError renders remediation guidance and maintenance link for
     </QueryClientProvider>
   )
   expect(authLaunchHtml).toContain('未能拉起授权进程')
-  expect(authLaunchHtml).toContain('设置 → Gemini：诊断与维护')
+  expect(authLaunchHtml).toContain('设置 → Gemini 维护：诊断与维护')
 
   const apiKeyHtml = renderToStaticMarkup(
     <QueryClientProvider client={client}>
@@ -328,5 +401,164 @@ test('GeminiOperationError renders remediation guidance and maintenance link for
     </QueryClientProvider>
   )
   expect(apiKeyHtml).toContain('Google AI Studio 核对 API Key 有效性')
-  expect(apiKeyHtml).not.toContain('设置 → Gemini：诊断与维护')
+  expect(apiKeyHtml).not.toContain('设置 → Gemini 维护：诊断与维护')
+})
+
+test('geminiProxyOptionLabel displays IP/host, distinct exit IP, region, latency, and falls back safely', () => {
+  const base = {
+    enabled: true,
+    status: 'ok',
+    kind: 'socks5',
+    address_family: 4,
+  }
+  expect(geminiProxyAddress({ host: '45.67.89.10', port: 1080 })).toBe(
+    '45.67.89.10:1080'
+  )
+  expect(geminiProxyAddress({ host: '2001:db8::1', port: 1080 })).toBe(
+    '[2001:db8::1]:1080'
+  )
+  expect(geminiProxyAddress({})).toBeNull()
+
+  // Unlabeled direct IPv4 proxy shows IP:port instead of bare px-xxxx
+  expect(
+    geminiProxyOptionLabel({
+      ...base,
+      id: 'px-4a07ab03',
+      label: null,
+      host: '45.67.89.10',
+      port: 1080,
+    })
+  ).toBe('45.67.89.10:1080 · px-4a07ab03')
+
+  // Direct IPv4 with matching geo.ip avoids duplicating IP while showing region and latency
+  expect(
+    geminiProxyOptionLabel({
+      ...base,
+      id: 'px-4a07ab03',
+      label: null,
+      host: '45.67.89.10',
+      port: 1080,
+      geo: { ip: '45.67.89.10', country_code: 'US' },
+      latency_ms: 82,
+    })
+  ).toBe('45.67.89.10:1080 · US · 82ms · px-4a07ab03')
+
+  // Relay/domain proxy shows both host:port and probed exit IP
+  expect(
+    geminiProxyOptionLabel({
+      ...base,
+      id: 'px-relay',
+      label: '美国住宅',
+      host: 'us.relay.example',
+      port: 10800,
+      geo: { ip: '203.0.113.45', country_code: 'US' },
+      latency_ms: 115,
+    })
+  ).toBe(
+    '美国住宅 · us.relay.example:10800 · 出口 203.0.113.45 · US · 115ms · px-relay'
+  )
+
+  // Minimal fallback without host never emits ?:?
+  expect(
+    geminiProxyOptionLabel({
+      ...base,
+      id: 'px-bare',
+    })
+  ).toBe('px-bare')
+})
+
+test('Gemini import selector and proxy panel render proxy IP and exit IP for unlabeled proxies', () => {
+  const client = new QueryClient()
+  client.setQueryData(['panel', 'me'], { role: 'admin' })
+  client.setQueryData(['panel', 'gemini-environments'], {
+    available: true,
+    payload_state: 'installed',
+    environments: [
+      {
+        id: 'gemini-ip',
+        name: 'Gemini IP',
+        proxy_id: 'px-4a07ab03',
+        proxy_ready: true,
+        auth_method: 'oauth',
+        auth_state: 'authorized',
+        schedulable: true,
+        models_discovered: false,
+        models: [],
+      },
+    ],
+  })
+  client.setQueryData(['panel', 'gemini-egress-options'], {
+    proxies: [
+      {
+        id: 'px-4a07ab03',
+        label: null,
+        host: '45.67.89.10',
+        port: 1080,
+        geo: { ip: '203.0.113.45', country_code: 'US' },
+        latency_ms: 68,
+        enabled: true,
+        status: 'ok',
+        kind: 'socks5',
+        address_family: 4,
+      },
+      {
+        id: 'px-a49903b0',
+        label: null,
+        host: '198.51.100.22',
+        port: 1080,
+        enabled: true,
+        status: 'ok',
+        kind: 'socks5',
+        address_family: 4,
+      },
+    ],
+  })
+
+  const importHtml = renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <GeminiEnvironments />
+    </QueryClientProvider>
+  )
+  expect(importHtml).toContain(
+    '45.67.89.10:1080 · 出口 203.0.113.45 · US · 68ms · px-4a07ab03'
+  )
+  expect(importHtml).toContain('198.51.100.22:1080 · px-a49903b0')
+
+  const vmHtml = renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <GeminiEnvironments environmentId='gemini-ip' />
+    </QueryClientProvider>
+  )
+  expect(vmHtml).toContain(
+    '45.67.89.10:1080 · 出口 203.0.113.45 · US · 68ms · px-4a07ab03'
+  )
+
+  const proxyPanelHtml = renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <GeminiProxyPanel
+        environment={{
+          id: 'gemini-ip',
+          name: 'Gemini IP',
+          proxy_id: 'px-4a07ab03',
+          proxy_ready: true,
+          auth_method: 'oauth',
+          auth_state: 'authorized',
+          runtime_ready: true,
+          billing_ready: true,
+          kernel_version: '0.4.7',
+          created_at: null,
+          updated_at: null,
+          schedulable: true,
+          models_discovered: false,
+          models: [],
+          account: null,
+        }}
+        active
+      />
+    </QueryClientProvider>
+  )
+  expect(proxyPanelHtml).toContain('代理地址')
+  expect(proxyPanelHtml).toContain('45.67.89.10:1080')
+  expect(proxyPanelHtml).toContain('出口 IP')
+  expect(proxyPanelHtml).toContain('203.0.113.45')
 })
