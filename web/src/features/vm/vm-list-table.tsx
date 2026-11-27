@@ -448,7 +448,7 @@ const SORT_VALUE: Record<SortKey, (r: RowData) => number | null> = {
   fable: (r) => r.win.fable?.pct ?? null,
   today: (r) => r.today,
   seats: (r) =>
-    r.sessions
+    r.sessions?.max
       ? r.sessions.active / r.sessions.max
       : r.seatsMax
         ? r.seatsUsed / r.seatsMax
@@ -520,7 +520,7 @@ const COLS: Col[] = [
           )}
           title={r.sessions ? 'GPT 会话数 / 上限' : seatTitle(r.vm)}
         >
-          {used}/{max}
+          {used}/{r.sessions && max === 0 ? '不限' : max}
         </span>
       )
     },

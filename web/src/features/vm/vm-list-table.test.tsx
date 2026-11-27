@@ -479,7 +479,7 @@ describe('VM list summary and toggles', () => {
         status: 'running',
         has_token: true,
         seats_max: null,
-        sessions: { active: 0, max: 8 },
+        sessions: { active: 0, max: 0 },
       }
       const html = renderToStaticMarkup(
         <QueryClientProvider client={new QueryClient()}>
@@ -488,7 +488,7 @@ describe('VM list summary and toggles', () => {
       )
       expect(html).toContain('title="GPT 会话数 / 上限"')
       expect(html).toContain('>会话</span>')
-      expect(html).toContain('>0</b>/8')
+      expect(html).toContain('>0</b>/不限')
     }
   )
 

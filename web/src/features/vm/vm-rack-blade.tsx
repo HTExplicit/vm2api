@@ -252,6 +252,7 @@ export function VmSeats({
         aria-hidden='true'
         className={cn(
           'relative h-1.5 shrink-0 overflow-hidden rounded-full track-recessed',
+          sessions?.max === 0 && 'hidden',
           compact ? 'w-7' : 'w-12'
         )}
       >
@@ -275,7 +276,7 @@ export function VmSeats({
         >
           {used}
         </b>
-        /{max}
+        /{sessions && max === 0 ? '不限' : max}
       </span>
       {queued ? (
         <span className='font-medium text-[color:var(--status-warn)] tabular-nums'>
