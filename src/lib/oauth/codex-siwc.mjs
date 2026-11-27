@@ -98,6 +98,7 @@ function validateIdToken(token, keys, attempt, clientId, now) {
       !audience.includes(clientId) ||
       (audience.length > 1 && claims.azp !== clientId) ||
       claims.nonce !== attempt.nonce ||
+      typeof claims.sub !== 'string' ||
       !claims.sub ||
       !Number.isFinite(claims.exp) ||
       claims.exp * 1000 <= now ||
@@ -114,6 +115,12 @@ function validateIdToken(token, keys, attempt, clientId, now) {
   } catch {
     throw issue('siwc_id_token_invalid', 'OpenAI 返回的 SIWC 身份凭据校验失败。')
   }
+}
+
+function verifiedEmail(identity) {
+  return identity?.email_verified === true && typeof identity.email === 'string'
+    ? identity.email.trim().toLowerCase()
+    : ''
 }
 
 function tokenFields(payload, now, previous = {}) {
@@ -168,7 +175,7 @@ export class CodexSiwcService {
     const vm = this.getVm(vmId)
     if (!vm || !isCodexVm(vm)) throw issue('vm_not_found', 'GPT 槽位不存在。', 404)
     const account = readCodexAccounts(this.projectRoot, vmId)[0] || {}
-    return { vm, owner: codexSiwcOwner(account) }
+    return { vm, owner: codexSiwcOwner(account), account }
   }
 
   view(vmId) {
@@ -204,7 +211,7 @@ export class CodexSiwcService {
 
   start(vmId) {
     return this.locked(vmId, () => {
-      const { vm, owner } = this.slot(vmId)
+      const { vm, owner, account } = this.slot(vmId)
       if (!owner.subject) throw issue('siwc_codex_login_required', '请先为该槽位完成普通 Codex 登录。', 409)
       resolveSlotOAuthProxy(vm, this.proxyPool)
       const current = this.attempts.get(vmId)
@@ -223,6 +230,8 @@ export class CodexSiwcService {
         nonce: nonce(),
         verifier: nonce(),
         clientId,
+        siwcSubject: clientId ? record.siwc_subject || owner.subject : null,
+        codexEmail: verifiedEmail(decodeJwtPayload(account.id_token)),
         owner,
         expires_at: this.now() + BIND_TTL,
       }
@@ -287,10 +296,16 @@ export class CodexSiwcService {
       if (!jwks.ok) throw issue('siwc_jwks_unavailable', '暂时无法核验 OpenAI 授权签名。', 502)
       const identity = validateIdToken(payload.id_token, (await jwks.json()).keys, attempt, clientId, this.now())
       const workspace = identity['https://api.openai.com/auth']?.chatgpt_account_id
-      if (
-        identity.sub !== attempt.owner.subject ||
-        (workspace && attempt.owner.workspace && workspace !== attempt.owner.workspace)
-      ) {
+      let accountMatches = identity.sub === (attempt.siwcSubject || attempt.owner.subject)
+      // First-time registration can issue a subject specific to the new OAuth client.
+      if (!accountMatches && !attempt.clientId) {
+        const email = verifiedEmail(identity)
+        if (!email || !attempt.codexEmail) {
+          throw issue('siwc_account_unverified', '无法确认两个登录属于同一账号。请确认邮箱已验证后重新授权。', 409)
+        }
+        accountMatches = email === attempt.codexEmail
+      }
+      if (!accountMatches || (workspace && attempt.owner.workspace && workspace !== attempt.owner.workspace)) {
         throw issue('siwc_account_mismatch', '登录账号与槽位账号不一致。请选择此槽位原账号与工作区。', 409)
       }
       await this.locked(vmId, () => {
@@ -301,6 +316,7 @@ export class CodexSiwcService {
           enabled: true,
           owner: attempt.owner,
           client_id: clientId,
+          siwc_subject: identity.sub,
           id_token: payload.id_token,
           revision: randomUUID(),
           ...fields,
@@ -336,8 +352,8 @@ export class CodexSiwcService {
       const record = this.read(vmId)
       this.cancel(vmId)
       if (record) {
-        const { host_id, owner, client_id } = record
-        this.write(vmId, { host_id, owner, client_id, enabled: false, state: 'unbound' })
+        const { host_id, owner, client_id, siwc_subject } = record
+        this.write(vmId, { host_id, owner, client_id, siwc_subject, enabled: false, state: 'unbound' })
       }
       this.clearSiwcHold(vmId)
       return this.view(vmId)
