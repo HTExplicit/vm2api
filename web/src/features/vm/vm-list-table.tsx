@@ -25,7 +25,12 @@ import {
   Zap,
 } from 'lucide-react'
 import { credentialRegistrationOf } from '@/lib/cred-type'
-import { fmtResetClock, resetCountdown } from '@/lib/fable-status'
+import {
+  fmtResetClock,
+  resetCountdown,
+  sessionCapOf,
+  type SessionCapacity,
+} from '@/lib/fable-status'
 import { fmtAgo, fmtNum, fmtUsd } from '@/lib/format'
 import {
   geminiAccountStatus,
@@ -89,7 +94,7 @@ const ROW_INTERACTIVE =
  */
 const GRID: CSSProperties = {
   gridTemplateColumns:
-    '34px minmax(240px,1.5fr) minmax(250px,1.3fr) minmax(190px,0.95fr) repeat(3,minmax(104px,0.55fr)) 48px 46px 40px 40px 80px 60px 62px 64px 56px',
+    '34px minmax(240px,1.5fr) minmax(250px,1.3fr) minmax(190px,0.95fr) repeat(3,minmax(104px,0.55fr)) 48px 66px 40px 40px 80px 60px 62px 64px 56px',
 }
 
 /** 悬停才出现的次要信息。 */
@@ -386,6 +391,7 @@ type RowData = {
   hReq: number
   win: Partial<Record<WindowKey, WindowReadout>>
   today: number
+  sessions: SessionCapacity | null
   seatsUsed: number
   seatsMax: number | null
   queue: number
@@ -409,6 +415,7 @@ function rowData(vm: Vm, accounts?: UsageAccountRow[]): RowData {
     hReq: h.req,
     win,
     today: vmTodayStats(vm, accounts).req,
+    sessions: vm.seats_max == null ? sessionCapOf(vm) : null,
     seatsUsed: Number(vm.seats_used) || 0,
     seatsMax: vm.seats_max == null ? null : Number(vm.seats_max),
     queue: Number(vm.queue_depth) || 0,
@@ -440,7 +447,12 @@ const SORT_VALUE: Record<SortKey, (r: RowData) => number | null> = {
   '7d': (r) => r.win['7d']?.pct ?? null,
   fable: (r) => r.win.fable?.pct ?? null,
   today: (r) => r.today,
-  seats: (r) => (r.seatsMax ? r.seatsUsed / r.seatsMax : null),
+  seats: (r) =>
+    r.sessions
+      ? r.sessions.active / r.sessions.max
+      : r.seatsMax
+        ? r.seatsUsed / r.seatsMax
+        : null,
   queue: (r) => r.queue,
   inflight: (r) => r.inflight,
   spend: (r) => r.spend,
@@ -492,24 +504,26 @@ const COLS: Col[] = [
     cell: (r) => (r.today ? fmtNum(r.today) : <span className={TERT}>0</span>),
   },
   {
-    label: '席位',
+    label: '席位/会话',
     sort: 'seats',
     num: true,
-    cell: (r) =>
-      r.seatsMax == null ? (
-        <span className={TERT}>—</span>
-      ) : (
+    cell: (r) => {
+      const used = r.sessions?.active ?? r.seatsUsed
+      const max = r.sessions?.max ?? r.seatsMax
+      if (max == null) return <span className={TERT}>—</span>
+      return (
         <span
           className={cn(
-            r.seatsUsed >= r.seatsMax &&
-              r.seatsMax > 0 &&
+            used >= max &&
+              max > 0 &&
               'font-semibold text-[color:var(--status-warn)]'
           )}
-          title={seatTitle(r.vm)}
+          title={r.sessions ? 'GPT 会话数 / 上限' : seatTitle(r.vm)}
         >
-          {r.seatsUsed}/{r.seatsMax}
+          {used}/{max}
         </span>
-      ),
+      )
+    },
   },
   {
     label: '排队',
