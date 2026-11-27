@@ -36,7 +36,7 @@ test('074 log error details and hop correlation is additive even on a huge datab
   assert.equal(v.additive, true, JSON.stringify(v.reasons))
 })
 
-test('070 usage_logs advisor billing is additive even on a huge database', () => {
+test('075 usage_logs advisor billing is additive even on a huge database', () => {
   const sql = fs.readFileSync(path.join(SQLITE_DIR, '075_usage_logs_advisor_billing.sql'), 'utf8')
   const v = checkAdditive({
     ...sqlite('075_usage_logs_advisor_billing.sql', sql),

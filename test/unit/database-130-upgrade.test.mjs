@@ -130,7 +130,13 @@ test('the fork appends migrations to the 13601 ledger and allows rollback', (t) 
       appended,
     )
     assert.deepEqual(reopened.prepare(settingsQuery).all(), settings)
-    assert.deepEqual(reopened.prepare(usageQuery).get(), usage)
+    assert.deepEqual({ ...reopened.prepare(usageQuery).get() }, {
+      ...usage,
+      upstream_type: null,
+      error_details: null,
+      advisor_usage: null,
+      advisor_cost: null,
+    })
     assert.equal(reopened.prepare('SELECT session_id FROM refusal_session_blocks').get().session_id, 'fixture-session')
     assert.equal(reopened.prepare('PRAGMA quick_check').get().quick_check, 'ok')
   } finally {

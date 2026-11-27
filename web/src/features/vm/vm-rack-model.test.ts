@@ -303,7 +303,7 @@ describe('Codex custom 24h window (#1744)', () => {
         pct: 1,
         note: null,
         reset: resetAt,
-        windowMinutes: 1440,
+        durationMs: 24 * 3600_000,
       },
     ])
     expect(bladeState(slot)).toBe('live')
