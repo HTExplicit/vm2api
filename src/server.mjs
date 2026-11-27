@@ -127,7 +127,6 @@ import {
   getActiveVmId,
   holdProxyFailure,
   markUnschedulable,
-  reconcileProxyScheduleHold,
   isCodexVm,
   syncCodexQuotaSchedule,
 } from './lib/vm/vm-registry.mjs'
