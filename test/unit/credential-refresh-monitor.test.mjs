@@ -14,6 +14,7 @@ import {
   classifyCredentialRefresh,
   markVmRefreshError,
   persistOauthToVm,
+  hasRefreshPresence,
 } from '../../src/lib/oauth/oauth-credentials.mjs'
 
 const offSlot = {
@@ -375,4 +376,24 @@ test('a slot is parked for the upgrade exactly where clearUpgradeRequired looks,
   assert.equal(isUpgradeParked(nested), true)
   assert.equal(clearUpgradeRequired(onDisk(nested)), true)
   assert.equal(isUpgradeParked(topOnly), false, 'a top-level code is not something clearUpgradeRequired can clear')
+})
+
+// 协议事实锚定：OpenAI AT TTL=240h 且 RT 可重复使用，claude 式持续保活对 codex
+// 无必要且徒增 token 端点暴露（风控关联信号）。codex 槽必须留在保活网外，
+// 由流量随路轮换（rotateIfNeeded）覆盖。此测试防止回归。
+test('codex slots stay OUT of the claude keep-alive net (protocol asymmetry)', () => {
+  const codexSlot = {
+    id: 'vm-09',
+    platform: 'openai',
+    family: 'codex',
+    status: 'running',
+    schedulable: true,
+    has_refresh: true,
+    expires_at: Date.now() - 60_000, // 哪怕 AT 临期
+    proxy: { host: '127.0.0.1', port: 1080, url: 'socks5h://127.0.0.1:1080' },
+    proxy_cli_enabled: true,
+  }
+  // isCredentialRefreshTarget 读 claude 段：codex 槽（claude 段空/无 refresh）天然被挡
+  assert.equal(hasRefreshPresence(codexSlot.claude || {}), false)
+  assert.equal(isCredentialRefreshTarget(codexSlot), false)
 })

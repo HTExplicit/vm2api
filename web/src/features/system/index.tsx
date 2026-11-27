@@ -4,7 +4,6 @@ import { VIEW_TITLES } from '@/config/nav'
 import type { Dashboard } from '@/types/panel-overview'
 import { toast } from 'sonner'
 import { api, patchVm } from '@/lib/api'
-import { protocolPersonaSaveToast } from '@/lib/persona-template'
 import { cn } from '@/lib/utils'
 import { isCodexVm } from '@/lib/vm-kind'
 import { PageHeader } from '@/components/page-header'
@@ -15,14 +14,22 @@ import { routingQueryOptions } from '@/features/settings/queries'
 import { SaveBar } from '@/features/settings/save-bar'
 import { SettingsSkeleton } from '@/features/settings/settings-skeleton'
 import { CragPrintPanel } from '@/features/system/crag-print-panel'
-import { CragGeminiPanel } from '@/features/system/craggemini-panel'
+import {
+  CragGeminiPanel,
+  cragGeminiPromptProblem,
+} from '@/features/system/craggemini-panel'
 import { SystemPromptWorkspace } from '@/features/system/prompt-workspace'
-import { compatibilityPatch, isOpenAiPromptOnlyPatch } from './compat-patch'
 import {
   DEFAULT_OPENAI_SYSTEM_PROMPT,
   OpenAiPromptPanel,
   type OpenAiSystemPrompt,
 } from './openai-prompt-panel'
+import {
+  compatibilityPatch,
+  isOpenAiPromptOnlyPatch,
+  systemPromptSaveToast,
+  type SystemPromptKernelSet,
+} from './compat-patch'
 
 type RoutingSaveResult = {
   compatibility?: Record<string, unknown>
@@ -43,7 +50,7 @@ export function SystemPromptPage() {
   const [personaProblems, setPersonaProblems] = useState<string[]>([])
   const [discardKey, setDiscardKey] = useState(0)
   const [kernelSet, setKernelSet] = useState<
-    'cli-node' | 'crag' | 'craggemini' | 'openai'
+    SystemPromptKernelSet | 'openai'
   >('cli-node')
   const compatibility = (draft.compatibility as Record<string, unknown>) || {}
   const serverCompatibility = routing.data?.compatibility as
@@ -93,7 +100,12 @@ export function SystemPromptPage() {
         )
       }
       toast.success(
-        protocolPersonaSaveToast(compat, inherited, saved?.kernel_persona)
+        systemPromptSaveToast(
+          kernelSet === 'openai' ? 'cli-node' : kernelSet,
+          compat,
+          inherited,
+          saved?.kernel_persona
+        )
       )
       await Promise.all([
         qc.invalidateQueries({ queryKey: routingQueryOptions().queryKey }),
@@ -108,7 +120,13 @@ export function SystemPromptPage() {
     serverJson !== null &&
     Object.keys(draft).length > 0 &&
     JSON.stringify(draft) !== serverJson
-  const blocked = personaProblems.length > 0
+  const cragGeminiProblem = cragGeminiPromptProblem(
+    draft.compatibility as Record<string, unknown> | undefined
+  )
+  const problems = cragGeminiProblem
+    ? [...personaProblems, cragGeminiProblem]
+    : personaProblems
+  const blocked = problems.length > 0
   const saveDraft = () =>
     save.mutate(compatibilityPatch(compatibility, serverCompatibility))
 
@@ -124,7 +142,7 @@ export function SystemPromptPage() {
       e.preventDefault()
       if (!dirty || save.isPending) return
       if (blocked) {
-        toast.error(personaProblems[0])
+        toast.error(problems[0])
         return
       }
       saveDraft()
@@ -236,7 +254,7 @@ export function SystemPromptPage() {
       </div>
       {dirty ? (
         <SaveBar
-          blockedReason={blocked ? personaProblems[0] : undefined}
+          blockedReason={blocked ? problems[0] : undefined}
           saving={save.isPending}
           onSave={saveDraft}
           onDiscard={discard}

@@ -20,7 +20,11 @@ import {
 } from '@/lib/cred-type'
 import { fmtExpiresAt, fmtNum, fmtUsd } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import { compactEmail, isCodexVm, slotNameLabel } from '@/lib/vm-kind'
+import {
+  isCodexVm,
+  slotNameLabel,
+  slotRawEmail,
+} from '@/lib/vm-kind'
 import {
   accountStatus,
   claudeTier,
@@ -204,8 +208,9 @@ function CardBody({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
               )}
             </Field>
             <Field label='邮箱' compact>
-              <span className='text-xs' title={String(vm.email || '')}>
-                {vm.email ? compactEmail(String(vm.email), 30) : '-'}
+              {/* 详情面管理员审阅用：完整展示，不做脱敏 */}
+              <span className='text-xs break-all'>
+                {slotRawEmail(vm) || '-'}
               </span>
             </Field>
             <Field label='过期' compact>

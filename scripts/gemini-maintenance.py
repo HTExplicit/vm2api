@@ -27,6 +27,21 @@ import tempfile
 import threading
 import time
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+from gemini_host_apparmor import (
+    APPARMOR_MARKER,
+    APPARMOR_PROFILE_NAME,
+    GEMINI_BWRAP_ENTRY,
+    apparmor_profile_bytes,
+    bwrap_userns_mediated,
+    install_managed_bwrap,
+    managed_bwrap_entry_configured,
+    managed_bwrap_required,
+)
+
 
 SOCKET = Path("/run/vm2api-gemini-maintenance/control.sock")
 ACTIONS = {
@@ -61,6 +76,7 @@ RUNTIME_FILES = (
     "scripts/install-gemini-payload.mjs",
     "src/lib/gemini/payload.mjs",
     "bin/kin-egress",
+    "scripts/gemini_host_apparmor.py",
 )
 VERIFIER_FILES = RUNTIME_FILES[5:7]
 MEMBERS = ("manifest.json", "manifest.sig", "agy", "craggemini", "libagy_bridge.so")
@@ -79,6 +95,14 @@ CRAG_MEMBERS = (
 )
 CRAG_ASSETS = tuple(name for name in CRAG_MEMBERS if name != "agy")
 SYSTEMD_UNIT = "vm2api-gemini.service"
+APPARMOR_SERVICE = "apparmor.service"
+APPARMOR_PROFILE_CONTENT = apparmor_profile_bytes()
+SANDBOX_ERROR_CODES = frozenset(
+    {
+        "gemini_sandbox_apparmor_restricted",
+        "gemini_sandbox_unavailable",
+    }
+)
 SYSTEM_ENV = {
     "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
     "LANG": "C",
@@ -412,6 +436,8 @@ class SystemService:
                 "FragmentPath",
                 "-p",
                 "DropInPaths",
+                "-p",
+                "AppArmorProfile",
                 SYSTEMD_UNIT,
             ],
             1,
@@ -427,6 +453,28 @@ class SystemService:
         if not info.get("LoadState") or not info.get("ActiveState"):
             raise fail("systemd_unavailable")
         return info
+
+    def apparmor_load_state(self):
+        raw = command(
+            [
+                "/usr/bin/systemctl",
+                "show",
+                "--no-pager",
+                "-p",
+                "LoadState",
+                APPARMOR_SERVICE,
+            ],
+            2,
+            "apparmor_unavailable",
+            capture=True,
+            success=(0, 1, 4),
+        )
+        info = dict(
+            line.split("=", 1)
+            for line in raw.decode("utf-8", errors="replace").splitlines()
+            if "=" in line
+        )
+        return info.get("LoadState", "").strip()
 
     def ensure_idle(self, info):
         state = info.get("ActiveState")
@@ -589,6 +637,7 @@ class Maintenance:
         runtime_socket=Path("/run/vm2api-gemini/control.sock"),
         trust_dir=Path("/etc/vm2api"),
         service=None,
+        host_root=Path("/"),
     ):
         if os.geteuid() != 0:
             raise ValueError("root required")
@@ -599,6 +648,9 @@ class Maintenance:
         self.unit = canonical(str(unit))
         self.runtime_socket = canonical(str(runtime_socket))
         self.trust = canonical(str(trust_dir))
+        self.host_root = (
+            Path("/") if str(host_root) == "/" else canonical(str(host_root))
+        )
         self.service = (
             service if service is not None else SystemService(self.runtime_socket)
         )
@@ -637,6 +689,8 @@ class Maintenance:
         self.last_inspection = 0.0
         self.inspecting = False
         self.egress_ok = None
+        self.sandbox_status = None
+        self.sandbox_checked_at = 0.0
 
     @classmethod
     def from_config(cls, path):
@@ -772,7 +826,7 @@ class Maintenance:
             with self.maintenance_lock(exclusive=action != "diagnose"):
                 if action == "diagnose":
                     self.phase("diagnosing")
-                    self.inspect()
+                    self.inspect(force_sandbox=True)
                 else:
                     info = self.service.info()
                     self.service.ensure_idle(info)
@@ -789,6 +843,9 @@ class Maintenance:
         finally:
             with self.guard:
                 self.last_inspection = 0.0
+                if action != "diagnose":
+                    self.sandbox_status = None
+                    self.sandbox_checked_at = 0.0
                 self.job.update(
                     status="failed" if code else "completed",
                     phase="failed" if code else "completed",
@@ -910,6 +967,10 @@ class Maintenance:
             "pass" if forward else "warning",
             None if forward else "gemini_maintenance_ipv4_forwarding_disabled",
         )
+        sandbox_state, sandbox_code = self.assess_sandbox(
+            info, force_live=False, allow_live_cache=True
+        )
+        check("sandbox", sandbox_state, sandbox_code)
         # A local recovery is not a Google/OAuth/network qualification.
         check("google_qualification", "warning", "gemini_maintenance_google_not_tested")
         rollback = {"available": False, "version": None}
@@ -1045,7 +1106,299 @@ class Maintenance:
                 canonical(value)
         return options
 
-    def write_unit(self, before, default=None):
+    def _host_path(self, relative):
+        root = getattr(self, "host_root", Path("/"))
+        return root / relative.lstrip("/")
+
+    def _read_sys_text(self, relative, limit=64):
+        path = self._host_path(relative)
+        try:
+            with open(path, "rb") as stream:
+                return stream.read(limit).decode("utf-8", errors="replace").strip()
+        except OSError:
+            return None
+
+    def apparmor_enabled(self):
+        return self._read_sys_text("/sys/module/apparmor/parameters/enabled") in {
+            "Y",
+            "1",
+            "yes",
+        }
+
+    def apparmor_userns_restricted(self):
+        return (
+            self.apparmor_enabled()
+            and self._read_sys_text(
+                "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+            )
+            == "1"
+        )
+
+    def apparmor_profile_loaded(self):
+        path = self._host_path("/sys/kernel/security/apparmor/profiles")
+        try:
+            with open(path, "rb") as stream:
+                raw = stream.read(2 * 1024 * 1024)
+        except OSError:
+            return False
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            parts = line.split()
+            if parts and parts[0] == APPARMOR_PROFILE_NAME:
+                return True
+        return False
+
+    def unit_apparmor_profiles(self, data):
+        if data is None:
+            return []
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise fail("unsupported_service_config") from None
+        section = ""
+        profiles = []
+        for raw_line in text.splitlines():
+            trimmed = raw_line.strip()
+            if not trimmed or trimmed.startswith(("#", ";")):
+                continue
+            if trimmed.startswith("[") and trimmed.endswith("]"):
+                section = trimmed
+                continue
+            if trimmed.startswith("AppArmorProfile="):
+                if section != "[Service]":
+                    raise fail("unsupported_service_config")
+                profiles.append(trimmed.split("=", 1)[1].strip())
+        return profiles
+
+    def check_unit_apparmor_conflict(self, unit_data, service_info=None):
+        profiles = self.unit_apparmor_profiles(unit_data)
+        if any(value != APPARMOR_PROFILE_NAME for value in profiles):
+            raise fail("unsupported_service_config")
+        live_profile = (service_info or {}).get("AppArmorProfile", "").strip()
+        if live_profile and live_profile != APPARMOR_PROFILE_NAME:
+            raise fail("unsupported_service_config")
+
+    def attach_unit_apparmor(self, data):
+        self.check_unit_apparmor_conflict(data)
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise fail("unsupported_service_config") from None
+        lines = text.splitlines()
+        section = ""
+        has_unit = False
+        has_service = False
+        has_after = False
+        has_requires = False
+        has_profile = False
+        for raw_line in lines:
+            trimmed = raw_line.strip()
+            if not trimmed or trimmed.startswith(("#", ";")):
+                continue
+            if trimmed.startswith("[") and trimmed.endswith("]"):
+                section = trimmed
+                if section == "[Unit]":
+                    has_unit = True
+                elif section == "[Service]":
+                    has_service = True
+                continue
+            if section == "[Unit]":
+                if trimmed.startswith("After="):
+                    if APPARMOR_SERVICE in trimmed.split("=", 1)[1].split():
+                        has_after = True
+                elif trimmed.startswith("Requires="):
+                    if APPARMOR_SERVICE in trimmed.split("=", 1)[1].split():
+                        has_requires = True
+            elif section == "[Service]":
+                if trimmed.startswith("AppArmorProfile="):
+                    has_profile = True
+        if not has_unit or not has_service:
+            raise fail("unsupported_service_config")
+        if has_after and has_requires and has_profile:
+            return data
+        out = []
+        section = ""
+        emitted_unit = False
+        emitted_service = False
+        pending_blanks = []
+
+        def flush_section():
+            nonlocal emitted_unit, emitted_service
+            if section == "[Unit]" and not emitted_unit:
+                if not has_after:
+                    out.append(f"After={APPARMOR_SERVICE}")
+                if not has_requires:
+                    out.append(f"Requires={APPARMOR_SERVICE}")
+                emitted_unit = True
+            elif section == "[Service]" and not emitted_service:
+                if not has_profile:
+                    out.append(f"AppArmorProfile={APPARMOR_PROFILE_NAME}")
+                emitted_service = True
+
+        for raw_line in lines:
+            trimmed = raw_line.strip()
+            if not trimmed:
+                pending_blanks.append(raw_line)
+                continue
+            if trimmed.startswith("[") and trimmed.endswith("]"):
+                flush_section()
+                out.extend(pending_blanks)
+                pending_blanks.clear()
+                section = trimmed
+                out.append(raw_line)
+                continue
+            out.extend(pending_blanks)
+            pending_blanks.clear()
+            out.append(raw_line)
+        flush_section()
+        out.extend(pending_blanks)
+        suffix = "\n" if text.endswith("\n") else ""
+        return ("\n".join(out) + suffix).encode("utf-8")
+
+    def prepare_apparmor(self, service_info, before):
+        if not self.apparmor_userns_restricted():
+            return False
+        parser = shutil.which("apparmor_parser", path=SYSTEM_ENV["PATH"])
+        if not parser:
+            raise fail("apparmor_unavailable")
+        abi = self._host_path("/etc/apparmor.d/abi/4.0")
+        if not abi.is_file():
+            raise fail("apparmor_unavailable")
+        load_state_fn = getattr(self.service, "apparmor_load_state", None)
+        if not callable(load_state_fn) or load_state_fn() != "loaded":
+            raise fail("apparmor_unavailable")
+        self.check_unit_apparmor_conflict(before, service_info)
+        profile_dir = self._host_path("/etc/apparmor.d")
+        profile = profile_dir / APPARMOR_PROFILE_NAME
+        try:
+            require_root(profile_dir, stat.S_ISDIR)
+        except (OSError, ValueError):
+            raise fail("apparmor_policy_conflict") from None
+        if exists(profile):
+            try:
+                info = profile.lstat()
+            except OSError:
+                raise fail("apparmor_policy_conflict") from None
+            if not stat.S_ISREG(info.st_mode):
+                raise fail("apparmor_policy_conflict")
+            try:
+                existing = read_root(profile, 65536)
+            except (OSError, ValueError):
+                raise fail("apparmor_policy_conflict") from None
+            lines = existing.splitlines()
+            if not lines or lines[0] != APPARMOR_MARKER.encode("ascii"):
+                raise fail("apparmor_policy_conflict")
+        bwrap_entry = None
+        if bwrap_userns_mediated(host_root=self._host_path("/")):
+            try:
+                bwrap_entry = install_managed_bwrap(host_root=self._host_path("/"))
+            except (OSError, FileNotFoundError) as err:
+                raise fail("apparmor_unavailable") from err
+        profile_content = apparmor_profile_bytes(bwrap_entry=bwrap_entry)
+        fd, tmp_name = tempfile.mkstemp(prefix=".vm2api-gemini.", dir=profile_dir)
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as output:
+                output.write(profile_content)
+                os.fchmod(output.fileno(), 0o644)
+                output.flush()
+                os.fsync(output.fileno())
+            command([parser, "-Q", "-K", str(tmp_path)], 15, "apparmor_load_failed")
+            command([parser, "-r", "-K", str(tmp_path)], 15, "apparmor_load_failed")
+            os.replace(tmp_path, profile)
+            fsync_dir(profile_dir)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        return True
+
+    def query_live_sandbox(self, *, force=False):
+        try:
+            require_root(self.runtime_socket.parent, stat.S_ISDIR)
+            info_socket = self.runtime_socket.lstat()
+            if (
+                not stat.S_ISSOCK(info_socket.st_mode)
+                or info_socket.st_uid != 0
+                or stat.S_IMODE(info_socket.st_mode) != 0o660
+            ):
+                return None
+        except (OSError, ValueError):
+            return None
+        client = UnixHTTP(self.runtime_socket)
+        client.timeout = 4.5
+        try:
+            payload = b'{"force":true}' if force else b"{}"
+            client.request(
+                "POST",
+                "/maintenance-sandbox",
+                payload,
+                {"Content-Type": "application/json"},
+            )
+            response = client.getresponse()
+            if response.status == 404:
+                return None
+            result = parse_json(response.read(256))
+            if (
+                response.status != 200
+                or not isinstance(result, dict)
+                or not {"ok", "code"}.issubset(result)
+                or type(result["ok"]) is not bool
+            ):
+                return None
+            if result["ok"]:
+                return ("pass", None)
+            code = result.get("code")
+            if isinstance(code, str) and code in SANDBOX_ERROR_CODES:
+                return ("fail", code)
+            return ("fail", "gemini_sandbox_unavailable")
+        except (OSError, http.client.HTTPException, ValueError, RecursionError):
+            return None
+        finally:
+            client.close()
+
+    def inspect_static_sandbox(self, service_info=None):
+        has_setpriv = bool(shutil.which("setpriv", path=SYSTEM_ENV["PATH"]))
+        has_bwrap = bool(shutil.which("bwrap", path=SYSTEM_ENV["PATH"])) or (
+            self._host_path(GEMINI_BWRAP_ENTRY).is_file()
+        )
+        if self.apparmor_userns_restricted():
+            loaded = self.apparmor_profile_loaded()
+            unit_profile = (service_info or {}).get("AppArmorProfile", "").strip()
+            if not (loaded and unit_profile == APPARMOR_PROFILE_NAME):
+                return ("fail", "gemini_sandbox_apparmor_restricted")
+            if not managed_bwrap_entry_configured(host_root=self._host_path("/")):
+                return ("fail", "gemini_sandbox_apparmor_restricted")
+        if not (has_setpriv and has_bwrap):
+            return ("warning", "gemini_sandbox_unavailable")
+        return ("pass", None)
+
+    def assess_sandbox(self, service_info, *, force_live=False, allow_live_cache=True):
+        active = (service_info or {}).get("ActiveState") == "active"
+        if not active:
+            status = self.inspect_static_sandbox(service_info)
+            with self.guard:
+                self.sandbox_status = status
+                self.sandbox_checked_at = time.monotonic()
+            return status
+        if allow_live_cache and not force_live:
+            with self.guard:
+                cached = getattr(self, "sandbox_status", None)
+                checked_at = getattr(self, "sandbox_checked_at", 0.0)
+            if cached is not None and time.monotonic() - checked_at < 10.0:
+                return cached
+        live = self.query_live_sandbox(force=force_live)
+        if live is not None:
+            with self.guard:
+                self.sandbox_status = live
+                self.sandbox_checked_at = time.monotonic()
+            return live
+        static = self.inspect_static_sandbox(service_info)
+        if static[0] == "fail":
+            return static
+        return ("warning", "gemini_maintenance_sandbox_unverified")
+
+    def write_unit(self, before, default=None, *, apparmor=None):
+        want_apparmor = (
+            self.apparmor_userns_restricted() if apparmor is None else bool(apparmor)
+        )
         if before is None:
             data = read_root(
                 self.bundle / "deploy/gemini-host.service.example", 65536
@@ -1064,7 +1417,7 @@ class Maintenance:
         if default is None and options["--egress"] == str(
             self.runtime / "bin/kin-egress"
         ):
-            return before
+            return self.attach_unit_apparmor(before) if want_apparmor else before
         options["--egress"] = str(self.runtime / "bin/kin-egress")
         if default is not None:
             if self.crag_bundle:
@@ -1100,7 +1453,10 @@ class Maintenance:
             self.runtime / "scripts/gemini-host.py"
         )
         line += "".join(f" {name} {value}" for name, value in options.items())
-        return re.sub(rb"(?m)^[ \t]*ExecStart=[^\r\n]*", line.encode(), before, count=1)
+        updated = re.sub(
+            rb"(?m)^[ \t]*ExecStart=[^\r\n]*", line.encode(), before, count=1
+        )
+        return self.attach_unit_apparmor(updated) if want_apparmor else updated
 
     def is_crag_manifest(self, raw):
         manifest = parse_json(raw)
@@ -1372,7 +1728,7 @@ class Maintenance:
             "activation_required": locked,
         }
 
-    def inspect(self):
+    def inspect(self, *, force_sandbox=False):
         if exists(self.pending):
             return
         try:
@@ -1387,6 +1743,15 @@ class Maintenance:
             egress_ok = False
         with self.guard:
             self.egress_ok = egress_ok
+        service = getattr(self, "service", None)
+        if service is not None:
+            try:
+                info = service.info()
+                self.assess_sandbox(
+                    info, force_live=force_sandbox, allow_live_cache=not force_sandbox
+                )
+            except (Failure, OSError, ValueError):
+                pass
         for payload, unit, runtime in (
             (self.current, self.unit, self.runtime),
             (
@@ -1403,6 +1768,19 @@ class Maintenance:
             except (Failure, OSError, ValueError, RecursionError):
                 pass
 
+    def is_default_crag_public_key(self, key_path):
+        if not self.crag_bundle or key_path is None:
+            return False
+        if (
+            (self.runtime / "defaults") in key_path.parents
+            and key_path.name == "crag-license-public.pem"
+        ):
+            return True
+        try:
+            return hash_pin(key_path, self.pins["crag-license-public.pem"])
+        except (OSError, ValueError):
+            return False
+
     def stage_pinned(self):
         if sys.platform != "linux" or platform.machine() not in {"x86_64", "amd64"}:
             raise fail("unsupported_host")
@@ -1415,19 +1793,22 @@ class Maintenance:
             *(self.bundle / name for name in VERIFIER_FILES),
         ):
             require_root(entry, stat.S_ISREG)
-        command(
-            [
-                "/usr/bin/python3",
-                "-I",
-                str(fetcher),
-                "--manifest",
-                str(self.descriptor),
-                "--dest",
-                str(source),
-            ],
-            600,
-            "fetch_failed",
-        )
+        argv = [
+            "/usr/bin/python3",
+            "-I",
+            str(fetcher),
+            "--manifest",
+            str(self.descriptor),
+            "--dest",
+            str(source),
+        ]
+        existing_agy = self.current / "agy"
+        try:
+            require_root(existing_agy, stat.S_ISREG)
+            argv.extend(["--reuse-agy", str(existing_agy)])
+        except (OSError, ValueError):
+            pass
+        command(argv, 600, "fetch_failed")
         self.phase("verifying")
         expected_assets = CRAG_ASSETS if self.crag_bundle else ASSETS
         if not all(hash_pin(source / name, self.pins[name]) for name in expected_assets):
@@ -1684,6 +2065,9 @@ class Maintenance:
             self.prepare_dependencies()
         before = self.unit_bytes()
         options = self.unit_args(before)
+        use_apparmor = False
+        if action in {"install", "repair", "recover"}:
+            use_apparmor = self.prepare_apparmor(service_info, before)
         root_dir(self.current.parent)
         root_dir(self.runtime)
         if exists(self.transaction):
@@ -1728,6 +2112,8 @@ class Maintenance:
                     previous["verifier_root"],
                     dest=self.transaction / "payload",
                 )
+                if APPARMOR_PROFILE_NAME in self.unit_apparmor_profiles(previous_unit):
+                    self.prepare_apparmor(service_info, previous_unit)
                 target_unit = previous_unit
                 new_activation = read_optional(self.backup / "before/activation", 1024)
             elif action in {"update_cli", "update_native"}:
@@ -1746,6 +2132,7 @@ class Maintenance:
                     and current["digest"] == self.pins["manifest.json"]["sha256"]
                 ):
                     return
+                use_apparmor = self.prepare_apparmor(service_info, before)
                 default, staged_digest, members = self.stage_release(target["id"])
                 if current["digest"] == staged_digest:
                     return
@@ -1754,7 +2141,7 @@ class Maintenance:
                     for m in ("craggemini", "libagy_bridge.so")
                 ):
                     raise fail("cli_incompatible", 409)
-                target_unit = self.write_unit(before, default)
+                target_unit = self.write_unit(before, default, apparmor=use_apparmor)
                 new_activation = None
                 preserve_runtime = False
                 verifier_root = self.bundle
@@ -1780,25 +2167,42 @@ class Maintenance:
                     verifier_root = candidate["verifier_root"]
                     materialized = True
                 if not materialized:
+                    configured_key = (
+                        Path(options["--public-key"]) if before is not None else None
+                    )
+                    manual_trust_configured = (
+                        "--release-verifier" in options
+                        or exists(self.manual_release)
+                        or (
+                            configured_key is not None
+                            and configured_key != self.public_key
+                            and not self.is_default_crag_public_key(configured_key)
+                        )
+                        or (
+                            not self.crag_bundle
+                            and "--default-release-verifier" not in options
+                            and exists(self.public_key)
+                        )
+                    )
                     if current_id is not None and (
                         not target["pinned"] or digest != pinned_digest
                     ):
-                        raise fail("repair_release_unknown", 409)
+                        # When current payload failed verification under standard default trust
+                        # (e.g. corrupted manifest.json or mismatched old release digest), allow
+                        # install/repair/recover to replace it with a freshly verified signed release
+                        # instead of deadlocking between update_requires_valid_payload and
+                        # repair_release_unknown. Manual trust configurations still fail closed.
+                        can_reinstall_broken = (
+                            action in {"install", "repair", "recover"}
+                            and not manual_trust_configured
+                            and (self.crag_bundle or target["pinned"])
+                        )
+                        if not can_reinstall_broken:
+                            raise fail("repair_release_unknown", 409)
                     if current_id is None:
                         # A missing custom payload may not be silently replaced by a
                         # default just because the installer has a pinned catalog.
-                        if (
-                            "--release-verifier" in options
-                            or exists(self.manual_release)
-                            or (
-                                before is not None
-                                and Path(options["--public-key"]) != self.public_key
-                            )
-                            or (
-                                "--default-release-verifier" not in options
-                                and exists(self.public_key)
-                            )
-                        ):
+                        if manual_trust_configured:
                             raise fail("manual_source_required", 409)
                         if "--default-release-verifier" in options:
                             configured = read_verifier(
@@ -1806,12 +2210,14 @@ class Maintenance:
                             )
                             if configured["manifest_sha256"] != pinned_digest:
                                 raise fail("repair_release_unknown", 409)
-                    default, _, _ = self.stage_release(target["id"])
-                    target_unit = self.write_unit(before, default)
-                    if current_id is None:
+                    default, staged_digest, _ = self.stage_release(target["id"])
+                    target_unit = self.write_unit(before, default, apparmor=use_apparmor)
+                    if current_id is None or digest != staged_digest:
                         new_activation = None
                     verifier_root = self.bundle
-            target_unit = self.write_unit(target_unit)
+            target_unit = self.write_unit(
+                target_unit, apparmor=False if rollback else use_apparmor
+            )
             self.prepare_runtime(
                 keep_existing=preserve_runtime,
                 verifier_root=verifier_root,

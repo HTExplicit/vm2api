@@ -4,6 +4,7 @@
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
 import { normalizeCodexModelMappings, validateCodexModelMappingsPatch } from './codex-model-mapping.mjs'
+import { normalizeCodexCatalogVersion } from './codex-models.mjs'
 
 export { isCodexVm, normalizeVmKind } from '../vm/vm-kind.mjs'
 
@@ -12,6 +13,7 @@ export const CODEX_UPSTREAM_TRANSPORTS = Object.freeze(['prefer_websocket', 'htt
 
 export const DEFAULT_CODEX_ROUTING = Object.freeze({
   enabled: true,
+  official_passthrough: true,
   // `auto` resolves the official Codex catalog client version at sync time,
   // falling back to the verified release pin when the registry is unavailable.
   catalog_client_version: 'auto',
@@ -83,12 +85,30 @@ export function validateInferenceWebsocketPatch(body = {}) {
   if (!Object.prototype.hasOwnProperty.call(body, 'codex')) return
   if (!asObject(body.codex)) throw typedError('codex 必须是对象', 'invalid_codex_websocket')
   const codex = body.codex
+  if (
+    Object.prototype.hasOwnProperty.call(codex, 'official_passthrough') &&
+    typeof codex.official_passthrough !== 'boolean'
+  ) {
+    throw typedError('codex.official_passthrough 必须是布尔', 'invalid_codex_passthrough')
+  }
   if (Object.prototype.hasOwnProperty.call(codex, 'websocket')) {
     validateEnabledToggle(codex.websocket, 'codex.websocket', 'invalid_codex_websocket')
   }
   if (Object.prototype.hasOwnProperty.call(codex, 'upstream_transport')) {
     if (!CODEX_UPSTREAM_TRANSPORTS.includes(codex.upstream_transport)) {
       throw typedError('codex.upstream_transport 必须是 prefer_websocket 或 http', 'invalid_upstream_transport')
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(codex, 'catalog_client_version')) {
+    if (typeof codex.catalog_client_version !== 'string') {
+      throw typedError('codex.catalog_client_version 必须是字符串', 'invalid_catalog_client_version')
+    }
+    const trimmed = codex.catalog_client_version.trim()
+    if (!trimmed || (trimmed.toLowerCase() !== 'auto' && !normalizeCodexCatalogVersion(trimmed))) {
+      throw typedError(
+        'codex.catalog_client_version 必须是 auto 或语义版本号（例如 0.170.0 / v0.170.0）',
+        'invalid_catalog_client_version',
+      )
     }
   }
   if (Object.prototype.hasOwnProperty.call(codex, 'user_agent')) {
@@ -129,6 +149,7 @@ export function normalizeCodexRouting(raw = {}) {
   }
   return {
     enabled: src.enabled !== false,
+    official_passthrough: src.official_passthrough !== false,
     catalog_client_version:
       typeof src.catalog_client_version === 'string' && src.catalog_client_version.trim()
         ? src.catalog_client_version.trim()

@@ -13,6 +13,7 @@ import { getDb } from '../database.mjs'
 import { parseFailureDiagnostics } from '../../transport/failure-diagnostics.mjs'
 import { DEFAULT_MUTED_ERROR_CLASSES, enrichLogRow, excludeErrorClassSql } from '../../admin/error-class.mjs'
 import { reportTimezone, zonedDayStartMs } from '../../core/timezone.mjs'
+import { THIRD_PARTY_CLIENT_SESSION_ID, modelMismatch } from '../../protocol/log-fields.mjs'
 import {
   ERROR_PRED,
   PROMPT_TOKENS_SQL,
@@ -31,8 +32,8 @@ const SCAN_CAP = 2000
 const SUMMARY_SCAN_CAP = 5000
 /** Recent rows mined for distinct filter values / empty-prefix session suggestions. */
 const RECENT_SCAN = 5000
-/** One conversation = the caller's session id; rows without one fall back to the outbound id. */
-const CONVERSATION_KEY_SQL = "COALESCE(NULLIF(session_id, ''), outbound_session_id)"
+/** One conversation = the caller's session id; rows without one (or tagged as third-party) fall back to the outbound id. */
+const CONVERSATION_KEY_SQL = `COALESCE(NULLIF(NULLIF(session_id, ''), '${THIRD_PARTY_CLIENT_SESSION_ID}'), outbound_session_id)`
 const OPTION_LIMIT = 200
 const EXPORT_LIMIT_DEFAULT = 2000
 const EXPORT_LIMIT_MAX = 5000
@@ -46,6 +47,7 @@ const BLOCKED_STATES = {
   refusal_guard: 'refusal_guard',
   refusal_similar: 'refusal_guard',
   refusal_device: 'refusal_guard',
+  refusal_session: 'refusal_guard',
   policy_blocked: 'policy',
 }
 
@@ -141,13 +143,24 @@ function costBreakdown(row) {
   }
 }
 
+/** Re-evaluate stored mismatch=1 rows so legacy Gemini tier-suffix rows do not falsely flag as redirected. */
+function effectiveModelMismatch(row) {
+  if (row.model_mismatch == null) return null
+  const stored = Number(row.model_mismatch)
+  if (stored !== 1) return stored
+  const requested = row.requested_model || row.model
+  const upstream = row.upstream_model
+  if (requested && upstream && modelMismatch(requested, upstream) === 0) return 0
+  return stored
+}
+
 /** Switches that changed how this request was served. Fixed order; the UI does not sort. */
 function specialSettings(row) {
   const out = []
   if (row.stream) out.push({ key: 'stream', label: '流式' })
   if (row.has_tools) out.push({ key: 'tools', label: '工具调用' })
   if (row.log_mode === 'debug') out.push({ key: 'debug', label: '调试采样' })
-  if (row.model_mismatch === 1)
+  if (effectiveModelMismatch(row) === 1)
     out.push({ key: 'mismatch', label: '模型重定向', value: `${row.requested_model} → ${row.upstream_model}` })
   if (row.speed === 'fast') out.push({ key: 'fast', label: 'Fast 模式', value: row.speed })
   if (row.service_tier === 'priority') out.push({ key: 'priority', label: 'Priority', value: row.service_tier })
@@ -165,6 +178,17 @@ function blockedBy(row) {
   return null
 }
 
+function parseErrorDetails(value) {
+  if (value == null || value === '') return null
+  if (typeof value === 'object' && !Array.isArray(value)) return value
+  try {
+    const parsed = JSON.parse(String(value))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
 /** Raw `usage_logs` row (already `enrichLogRow`-ed) + batched names → `UsageLogRow`. */
 export function toUsageLogRow(row, names, chain = []) {
   const accountId = row.final_account_id || row.account_id || null
@@ -173,6 +197,7 @@ export function toUsageLogRow(row, names, chain = []) {
   const cacheCreation = nullableNum(row.cache_creation_tokens)
   const cacheRead = num(row.cache_read_tokens)
   const blocked = blockedBy(row)
+  const errorDetails = parseErrorDetails(row.error_details)
   return {
     id: row.id,
     requestId: row.request_id ?? null,
@@ -232,6 +257,7 @@ export function toUsageLogRow(row, names, chain = []) {
     inboundDeviceId: row.inbound_device_id ?? null,
     upstreamStatus: nullableNum(row.upstream_status),
     upstream400Message: row.upstream_400_message ?? null,
+    intercept: parseErrorDetails(row.intercept),
     jevState: row.jev_state || null,
     errorClass: row.error_class ?? null,
     errorLabel: row.error_label ?? null,
@@ -239,6 +265,8 @@ export function toUsageLogRow(row, names, chain = []) {
     errorCode: row.error_code || null,
     errorMessage: row.error_message || null,
     failureDiagnostics: parseFailureDiagnostics(row.failure_diagnostics_json),
+    upstreamType: row.upstream_type ?? errorDetails?.upstream_type ?? null,
+    errorDetails,
     blockedBy: blocked,
     blockedReason: blocked ? row.error_message || row.error_label || null : null,
     userAgent: row.user_agent || null,
@@ -268,6 +296,7 @@ function attemptWithinRow(attempt, row) {
 }
 
 function toProviderChainItem(r, names) {
+  const errorDetails = parseErrorDetails(r.error_details_json)
   return {
     attemptNumber: num(r.attempt_no),
     vmId: r.vm_id ?? null,
@@ -281,11 +310,18 @@ function toProviderChainItem(r, names) {
     selectionReason: r.selection_reason ?? null,
     upstreamStatus: nullableNum(r.upstream_status),
     errorScope: r.error_scope ?? null,
-    errorCode: r.error_code || null,
+    errorCode: r.error_code ?? null,
     errorMessage: r.error_message || null,
+    upstreamType: r.upstream_type ?? errorDetails?.upstream_type ?? null,
+    errorDetails,
     terminalState: r.terminal_state ?? null,
     action: r.action ?? null,
     downstreamCommitted: !!r.downstream_committed,
+    hopRequestId: r.hop_request_id ?? null,
+    providerRunId: r.provider_run_id ?? null,
+    providerTurnId: r.provider_turn_id ?? null,
+    providerAttemptId: nullableNum(r.provider_attempt_id),
+    providerRequestId: r.provider_request_id ?? null,
     waitMs: nullableNum(r.wait_ms),
     queueWaitMs: nullableNum(r.queue_wait_ms),
     schedulingMs: nullableNum(r.scheduling_ms),
@@ -342,7 +378,10 @@ function buildFilter(filters, defaultMuted) {
   }
   eq('path', filters.endpoint)
   eq('protocol', filters.protocol)
-  if (filters.upstream_400) where.push('upstream_status = 400')
+  eq('via', filters.via)
+  eq('final_state', filters.final_state)
+  if (filters.upstream_risk_errors) where.push('upstream_status IN (400, 401, 403, 422)')
+  else if (filters.upstream_400) where.push('upstream_status = 400')
   eq('request_id', filters.request_id)
   if (filters.account_id) {
     where.push('(account_id = ? OR final_account_id = ?)')
@@ -394,9 +433,11 @@ function buildFilter(filters, defaultMuted) {
     params.push(end)
   }
   if (filters.q) {
-    where.push('(path LIKE ? OR error_code LIKE ? OR error_message LIKE ? OR request_id LIKE ?)')
-    const like = `%${String(filters.q).slice(0, 100)}%`
-    params.push(like, like, like, like)
+    where.push(
+      '(LOWER(path) LIKE ? OR LOWER(error_code) LIKE ? OR LOWER(error_message) LIKE ? OR LOWER(request_id) LIKE ? OR LOWER(upstream_type) LIKE ?)',
+    )
+    const like = `%${String(filters.q).slice(0, 100).toLowerCase()}%`
+    params.push(like, like, like, like, like)
   }
   const errorClass = filters.error_class ? String(filters.error_class) : null
   if (errorClass) where.push(ERROR_PRED)
@@ -405,10 +446,17 @@ function buildFilter(filters, defaultMuted) {
   const excludeSql = excludeErrorClassSql(muted)
   if (excludeSql) where.push(excludeSql)
   const blocked = new Set(muted)
-  let keep = null
-  if (errorClass) keep = (row) => row.error_class === errorClass
-  else if (blocked.size) keep = (row) => !row.error_class || !blocked.has(row.error_class)
-  return { where, params, keep, sqlOnlySummary: !errorClass && muted.every((c) => c === 'auth') }
+  const predicates = []
+  if (errorClass) predicates.push((row) => row.error_class === errorClass)
+  else if (blocked.size) predicates.push((row) => !row.error_class || !blocked.has(row.error_class))
+  if (filters.model_mismatch) predicates.push((row) => effectiveModelMismatch(row) === 1)
+  const keep = predicates.length ? (row) => predicates.every((fn) => fn(row)) : null
+  return {
+    where,
+    params,
+    keep,
+    sqlOnlySummary: !errorClass && !filters.model_mismatch && muted.every((c) => c === 'auth'),
+  }
 }
 
 function exportRow(raw) {
@@ -419,6 +467,8 @@ function exportRow(raw) {
     ip: raw.ip_address,
     stream: !!raw.stream,
     has_tools: raw.has_tools == null ? null : !!raw.has_tools,
+    upstream_type: raw.upstream_type ?? null,
+    error_details: parseErrorDetails(raw.error_details),
   })
 }
 

@@ -1,0 +1,184 @@
+{
+  "schema": "vm2api-upstream-binary-provenance-v1",
+  "recorded_by": "HTExplicit/vm2api",
+  "record_type": "supplier_release_observation",
+  "application_release": "v1.4.236",
+  "application_commit": "e8e8c487be1158b8c8c9b7a0d01935e1a6467a0f",
+  "application_source": "https://github.com/dofastted/vm2api/tree/v1.4.236",
+  "statement": "Official GitHub release asset metadata and CRAG signed manifest, observed without rebuilding upstream binaries.",
+  "official_release_workflow": {
+    "url": "https://github.com/dofastted/vm2api/actions/runs/45954667547",
+    "conclusion": "success"
+  },
+  "payload_release": "payload-2026.11.26-kernel-advisor-iterations",
+  "payload_source": {
+    "url": "https://github.com/dofastted/vm2api/releases/tag/payload-2026.11.26-kernel-advisor-iterations",
+    "oauth_helper": {
+      "name": "kin-oauth-auth",
+      "size": 11559096,
+      "sha256": "41bbcd57737e8dd3b65a1aafc9bc523d15bf316605a60dfa3e6841bbdc5f0f16",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.26-kernel-advisor-iterations/kin-oauth-auth"
+    }
+  },
+  "native": {
+    "release": "payload-2026.11.27-crag-3.1.24",
+    "version": "3.1.24",
+    "variant": "standard",
+    "source_repository": "dofastted/crag",
+    "core_plaintext_sha256": "4a52250f2e2b4be7323110a31695287010bf90c5482e2da2bcf7e3f1055f5534",
+    "archive": {
+      "name": "crag-v2-licensed-amd64.tar.gz",
+      "size": 171335019,
+      "sha256": "f6342c577784159a89352c0aab8fb4ea86f0cc55a024c59904c530dbdbcad934",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.27-crag-3.1.24/crag-v2-licensed-amd64.tar.gz"
+    },
+    "manifest_sha256": "c6dc588ef37a575673258bafa1db7d2ef8901daccd991890fc58bb7bf8fb601a",
+    "fork_rebuilt": false,
+    "assets": {
+      "crag-v2-amd64-LICENSES.txt": "80ee2b207aa7a45ad09360dd874d62b3be2e079bfa84de368092940889e84784",
+      "crag-v2-amd64-claude-code-2.1.321-LICENSE.md": "8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a",
+      "crag-v2-amd64-claude-code-2.1.321-claude": "426c33815ca6645a772f722fbff10dbf2cbdb124a8aeab733c1365dbf8bbf61f",
+      "crag-v2-amd64-crag-license-public.pem": "a38372fb87af66678f7823538f2cf8b9fa7e0f3cbefcd612a4d5c47ebef10126",
+      "crag-v2-amd64-v3.1.24-crag-v2": "633cca55a765f5e141d7ccbb40af118a4e2f19fbbc84d9211a0a6b99654b6d01",
+      "crag-v2-amd64-v3.1.24-crag-v2.payload.enc": "5481d1249579f374c1e12ea383d76093e614d93fbcfff4353692364337860410",
+      "crag-v2-amd64-kernel.json.example": "78f7efce48658da76d996c2c99b50127265d7c6cf6ce13947162f057cf6d2f42",
+      "crag-v2-amd64-v3.1.24-manifest.json": "c6dc588ef37a575673258bafa1db7d2ef8901daccd991890fc58bb7bf8fb601a",
+      "crag-v2-amd64-unpack-note.md": "ee7ca2fce548bc4b35ad4236c9a36d76d38e55315cb5175faec454952582e731",
+      "crag-v2-licensed-amd64.tar.gz": "f6342c577784159a89352c0aab8fb4ea86f0cc55a024c59904c530dbdbcad934"
+    }
+  },
+  "assets": [
+    {
+      "name": "kin-kernel",
+      "size": 13258640,
+      "sha256": "b2dbec573cff2699d4de577f7d85485dd04f17eafe3eecc682c4435459500e31",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.26-kernel-advisor-iterations/kin-kernel"
+    },
+    {
+      "name": "kin-codex-kernel",
+      "size": 5981528,
+      "sha256": "95727081222f4096e9e63d29e6c9c2e009ff00365a70add30a885063fe7f9993",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.26-kernel-advisor-iterations/kin-codex-kernel"
+    },
+    {
+      "name": "kin-oauth-auth",
+      "size": 11559096,
+      "sha256": "41bbcd57737e8dd3b65a1aafc9bc523d15bf316605a60dfa3e6841bbdc5f0f16",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.26-kernel-advisor-iterations/kin-oauth-auth"
+    },
+    {
+      "name": "kin-computer",
+      "size": 5519576,
+      "sha256": "1512b4551f520528425f38c8e262fcab52f071bb7a435471eda9dccc1fc3f198",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.26-kernel-advisor-iterations/kin-computer"
+    },
+    {
+      "name": "kin-worker",
+      "size": 11604152,
+      "sha256": "2c7732289e18a04180c79ea2d1eb5476b4dc011f924f985c5a39ac1ac4b1948a",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.26-kernel-advisor-iterations/kin-worker"
+    },
+    {
+      "name": "kin-slot-gate",
+      "size": 5603512,
+      "sha256": "99233d86da0476100acf026fdaa2246da765d4f1792e9f6294edbdd0901d5d29",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.26-kernel-advisor-iterations/kin-slot-gate"
+    },
+    {
+      "name": "cli-node",
+      "size": 31005108,
+      "sha256": "f6c3744dda01f756049360113607d2bd9a25911de0fdaf30fe9bb1a1918a6788",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.26-kernel-advisor-iterations/cli-node"
+    },
+    {
+      "name": "ld-linux-x86-64.so.2",
+      "size": 236616,
+      "sha256": "cd4df4f3c7b83673d61189bf2eaebd33ca4f2853ab9772b8a25e025ef99b1e81",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.26-kernel-advisor-iterations/ld-linux-x86-64.so.2"
+    },
+    {
+      "name": "libc.so.6",
+      "size": 2125328,
+      "sha256": "8db37cf3f2169f59a0f07ef1fea308c35656668c64c8ff294e1860f4121eb161",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.26-kernel-advisor-iterations/libc.so.6"
+    },
+    {
+      "name": "libgcc_s.so.1",
+      "size": 183024,
+      "sha256": "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.26-kernel-advisor-iterations/libgcc_s.so.1"
+    },
+    {
+      "name": "libm.so.6",
+      "size": 952616,
+      "sha256": "e9c4b28d340e415b8137480ec442662f981e1399386c5931dae0e886e3639e91",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.26-kernel-advisor-iterations/libm.so.6"
+    },
+    {
+      "name": "kin-kernel-crag",
+      "size": 9734168,
+      "sha256": "5764a186e3778278a8733ecaf924211070968def7c6648c6f6ecf3b76120a537",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.27-crag-3.1.24/kin-kernel-crag"
+    },
+    {
+      "name": "crag-v2-amd64-LICENSES.txt",
+      "size": 514,
+      "sha256": "80ee2b207aa7a45ad09360dd874d62b3be2e079bfa84de368092940889e84784",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.27-crag-3.1.24/crag-v2-amd64-LICENSES.txt"
+    },
+    {
+      "name": "crag-v2-amd64-claude-code-2.1.321-LICENSE.md",
+      "size": 147,
+      "sha256": "8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.27-crag-3.1.24/crag-v2-amd64-claude-code-2.1.321-LICENSE.md"
+    },
+    {
+      "name": "crag-v2-amd64-claude-code-2.1.321-claude",
+      "size": 341910032,
+      "sha256": "426c33815ca6645a772f722fbff10dbf2cbdb124a8aeab733c1365dbf8bbf61f",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.27-crag-3.1.24/crag-v2-amd64-claude-code-2.1.321-claude"
+    },
+    {
+      "name": "crag-v2-amd64-crag-license-public.pem",
+      "size": 113,
+      "sha256": "a38372fb87af66678f7823538f2cf8b9fa7e0f3cbefcd612a4d5c47ebef10126",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.27-crag-3.1.24/crag-v2-amd64-crag-license-public.pem"
+    },
+    {
+      "name": "crag-v2-amd64-v3.1.24-crag-v2",
+      "size": 894488,
+      "sha256": "633cca55a765f5e141d7ccbb40af118a4e2f19fbbc84d9211a0a6b99654b6d01",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.27-crag-3.1.24/crag-v2-amd64-v3.1.24-crag-v2"
+    },
+    {
+      "name": "crag-v2-amd64-v3.1.24-crag-v2.payload.enc",
+      "size": 13500188,
+      "sha256": "5481d1249579f374c1e12ea383d76093e614d93fbcfff4353692364337860410",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.27-crag-3.1.24/crag-v2-amd64-v3.1.24-crag-v2.payload.enc"
+    },
+    {
+      "name": "crag-v2-amd64-kernel.json.example",
+      "size": 1208,
+      "sha256": "78f7efce48658da76d996c2c99b50127265d7c6cf6ce13947162f057cf6d2f42",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.27-crag-3.1.24/crag-v2-amd64-kernel.json.example"
+    },
+    {
+      "name": "crag-v2-amd64-v3.1.24-manifest.json",
+      "size": 2721,
+      "sha256": "c6dc588ef37a575673258bafa1db7d2ef8901daccd991890fc58bb7bf8fb601a",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.27-crag-3.1.24/crag-v2-amd64-v3.1.24-manifest.json"
+    },
+    {
+      "name": "crag-v2-amd64-unpack-note.md",
+      "size": 15748,
+      "sha256": "ee7ca2fce548bc4b35ad4236c9a36d76d38e55315cb5175faec454952582e731",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.27-crag-3.1.24/crag-v2-amd64-unpack-note.md"
+    },
+    {
+      "name": "crag-v2-licensed-amd64.tar.gz",
+      "size": 171335019,
+      "sha256": "f6342c577784159a89352c0aab8fb4ea86f0cc55a024c59904c530dbdbcad934",
+      "url": "https://github.com/dofastted/vm2api/releases/download/payload-2026.11.27-crag-3.1.24/crag-v2-licensed-amd64.tar.gz"
+    }
+  ]
+}

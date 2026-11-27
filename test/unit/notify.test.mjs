@@ -22,12 +22,14 @@ import {
 } from '../../src/lib/admin/notify.mjs'
 
 test('normalize fills defaults and clamps', () => {
-  const n = normalizeNotifyConfig({ interval_sec: 3, min_available: 0, email: { port: 0 } })
+  const n = normalizeNotifyConfig({ interval_sec: 3, cooldown_sec: -5, min_available: 0, email: { port: '' } })
   assert.equal(n.enabled, false)
   assert.equal(n.interval_sec, 15)
+  assert.equal(n.cooldown_sec, 30)
   assert.equal(n.min_available, 1)
   assert.equal(n.digest_sec, 21600)
   assert.equal(n.email.port, 587)
+  assert.equal(normalizeNotifyConfig({ email: { port: 0 } }).email.port, 1)
   assert.equal(n.events.pool_empty, true)
   assert.equal(n.events.digest, true)
   assert.equal(n.events.revoked, true)
@@ -256,7 +258,7 @@ test('Feishu outage cards put incident details ahead of metrics and link to the 
       )
       assert.deepEqual(tables[0].rows, [{ value_0: '128', value_1: '92.0k', value_2: '$2.48' }])
       assert.deepEqual(tables[1].rows, [{ value_0: '99.2%', value_1: '1', value_2: '1 / 0' }])
-      assert.equal(elements.at(-1).behaviors[0].default_url, 'https://panel.example/cc/#/cluster')
+      assert.equal(elements.at(-1).behaviors[0].default_url, 'https://panel.example/cc#/cluster')
       return Response.json({ StatusCode: 0 })
     },
   })
@@ -411,14 +413,14 @@ test('format message stays Chinese and includes console url', () => {
   assert.match(msg.text, /vm-04 d@x 无效凭证/)
   assert.doesNotMatch(msg.text, /vm-03 c@x/)
   assert.doesNotMatch(msg.text, /^不可用$/m)
-  assert.match(msg.text, /http:\/\/127\.0\.0\.1:8787\/#\/cluster/)
+  assert.match(msg.text, /http:\/\/127\.0\.0\.1:8787\/cc#\/cluster/)
   const custom = formatNotifyMessage(
     { type: 'pool_empty' },
     snap,
     normalizeNotifyConfig({ console_url: 'https://panel.example/' }),
     'http://127.0.0.1:8787',
   )
-  assert.match(custom.text, /https:\/\/panel\.example\/#\/cluster/)
+  assert.match(custom.text, /https:\/\/panel\.example\/cc#\/cluster/)
   assert.doesNotMatch(formatNotifyMessage({ type: 'pool_empty' }, snap).text, /#\/cluster/)
   assert.match(msg.subject, /KIN/)
 })
@@ -621,4 +623,220 @@ test('dispatch includes wecom and the test helper routes to it', async () => {
     snapshot: summarizePoolAvailability([]),
   })
   assert.equal(out.channel, 'wecom')
+})
+
+test('jev notify events default to enabled, edge-trigger, and respect event toggles', () => {
+  const defaults = normalizeNotifyConfig({})
+  assert.equal(defaults.events.jev_paused, true)
+  assert.equal(defaults.events.jev_resumed, true)
+  assert.equal(defaults.events.jev_http_400_burst, true)
+
+  const baseSnap = summarizePoolAvailability([])
+  const okJev = {
+    enabled: true,
+    total_keys: 1,
+    active_keys: 1,
+    paused: [],
+    http_400: { count: 0, window_sec: 600, threshold: 20, first_at: null, last_at: null, key_fingerprints: [] },
+  }
+  const pausedRow = {
+    key_fingerprint: 'a1b2c3d4e5f6',
+    masked_key: 'apik********f8e2',
+    reason: 'overloaded',
+    http_status: 529,
+    at: '2026-11-26T00:37:46.000Z',
+    until: '2026-11-26T00:38:16.000Z',
+    seconds_left: 30,
+  }
+  const pausedSnap = {
+    ...baseSnap,
+    jev: { ...okJev, active_keys: 0, paused: [pausedRow] },
+  }
+  const healthySnap = { ...baseSnap, jev: okJev }
+
+  // Healthy -> paused fires jev_paused once
+  const pausedEvents = detectPoolNotifyEvents(healthySnap, pausedSnap, defaults)
+  assert.deepEqual(
+    pausedEvents.map((e) => e.type),
+    ['jev_paused'],
+  )
+  // Still paused does not repeat
+  assert.deepEqual(detectPoolNotifyEvents(pausedSnap, pausedSnap, defaults), [])
+
+  // Paused -> healthy fires jev_resumed once
+  const resumedEvents = detectPoolNotifyEvents(pausedSnap, healthySnap, defaults)
+  assert.deepEqual(
+    resumedEvents.map((e) => e.type),
+    ['jev_resumed'],
+  )
+
+  // Disabled switches suppress events
+  const muted = normalizeNotifyConfig({
+    events: { jev_paused: false, jev_resumed: false, jev_http_400_burst: false },
+  })
+  assert.deepEqual(detectPoolNotifyEvents(healthySnap, pausedSnap, muted), [])
+  assert.deepEqual(detectPoolNotifyEvents(pausedSnap, healthySnap, muted), [])
+
+  // 400 burst: 19 -> 20 triggers once, 20 -> 25 does not repeat, 10 -> 20 triggers again
+  const make400Snap = (count) => ({
+    ...baseSnap,
+    jev: {
+      ...okJev,
+      http_400: {
+        count,
+        window_sec: 600,
+        threshold: 20,
+        first_at: '2026-11-26T00:16:11.000Z',
+        last_at: '2026-11-26T00:37:18.000Z',
+        key_fingerprints: ['a1b2c3d4e5f6'],
+      },
+    },
+  })
+  assert.deepEqual(detectPoolNotifyEvents(make400Snap(18), make400Snap(19), defaults), [])
+  const burst1 = detectPoolNotifyEvents(make400Snap(19), make400Snap(20), defaults)
+  assert.deepEqual(
+    burst1.map((e) => e.type),
+    ['jev_http_400_burst'],
+  )
+  assert.deepEqual(detectPoolNotifyEvents(make400Snap(20), make400Snap(25), defaults), [])
+  assert.deepEqual(detectPoolNotifyEvents(make400Snap(19), make400Snap(20), muted), [])
+  const burst2 = detectPoolNotifyEvents(make400Snap(10), make400Snap(20), defaults)
+  assert.deepEqual(
+    burst2.map((e) => e.type),
+    ['jev_http_400_burst'],
+  )
+})
+
+test('jev notify formatting covers cooling, permanent pause, resume, and 400 burst', () => {
+  const snap = summarizePoolAvailability([])
+  const coolingMsg = formatNotifyMessage(
+    {
+      type: 'jev_paused',
+      key_fingerprint: 'a1b2c3d4e5f6',
+      masked_key: 'apik********f8e2',
+      reason: 'overloaded',
+      http_status: 529,
+      until: '2026-11-26T00:38:16.000Z',
+      seconds_left: 30,
+      active_keys: 0,
+      total_keys: 1,
+    },
+    snap,
+  )
+  assert.match(coolingMsg.text, /审核密钥已暂停/)
+  assert.match(coolingMsg.text, /apik\*{8}f8e2/)
+  assert.match(coolingMsg.text, /529（过载）/)
+  assert.match(coolingMsg.text, /自动恢复 30 秒后重试/)
+  assert.match(coolingMsg.text, /可用密钥 0 \/ 1/)
+
+  const permMsg = formatNotifyMessage(
+    {
+      type: 'jev_paused',
+      key_fingerprint: 'a1b2c3d4e5f6',
+      masked_key: 'apik********f8e2',
+      reason: 'auth',
+      http_status: 401,
+      until: null,
+      seconds_left: null,
+      active_keys: 0,
+      total_keys: 1,
+    },
+    snap,
+  )
+  assert.match(permMsg.text, /401（凭据失效）/)
+  assert.match(permMsg.text, /需人工恢复/)
+
+  const resumeMsg = formatNotifyMessage(
+    {
+      type: 'jev_resumed',
+      key_fingerprint: 'a1b2c3d4e5f6',
+      masked_key: 'apik********f8e2',
+      active_keys: 1,
+      total_keys: 1,
+    },
+    snap,
+  )
+  assert.match(resumeMsg.text, /审核密钥已恢复/)
+  assert.match(resumeMsg.text, /已恢复调用/)
+  assert.match(resumeMsg.text, /可用密钥 1 \/ 1/)
+
+  const burstMsg = formatNotifyMessage(
+    {
+      type: 'jev_http_400_burst',
+      count: 25,
+      window_sec: 600,
+      first_at: '2026-11-26T00:16:11.000Z',
+      last_at: '2026-11-26T00:37:18.000Z',
+      key_fingerprints: ['a1b2c3d4e5f6'],
+    },
+    snap,
+  )
+  assert.match(burstMsg.text, /审核上游 400 突增/)
+  assert.match(burstMsg.text, /10 分钟内 25 次 400/)
+  assert.match(burstMsg.text, /a1b2c3d4e5f6/)
+})
+
+test('notify monitor polls jevSnapshot and dispatches jev_paused then jev_resumed', async () => {
+  const jevStates = [
+    {
+      enabled: true,
+      total_keys: 1,
+      active_keys: 1,
+      paused: [],
+      http_400: { count: 0, window_sec: 600, threshold: 20, first_at: null, last_at: null, key_fingerprints: [] },
+    },
+    {
+      enabled: true,
+      total_keys: 1,
+      active_keys: 0,
+      paused: [
+        {
+          key_fingerprint: 'deadbeef1234',
+          masked_key: 'apik********f8e2',
+          reason: 'overloaded',
+          http_status: 529,
+          at: '2026-11-26T00:37:46.000Z',
+          until: '2026-11-26T00:38:16.000Z',
+          seconds_left: 30,
+        },
+      ],
+      http_400: { count: 0, window_sec: 600, threshold: 20, first_at: null, last_at: null, key_fingerprints: [] },
+    },
+    {
+      enabled: true,
+      total_keys: 1,
+      active_keys: 1,
+      paused: [],
+      http_400: { count: 0, window_sec: 600, threshold: 20, first_at: null, last_at: null, key_fingerprints: [] },
+    },
+  ]
+  let idx = 0
+  const sent = []
+  const monitor = createNotifyMonitor({
+    config: {
+      enabled: true,
+      cooldown_sec: 300,
+      events: {
+        digest: false,
+        pool_empty: false,
+        pool_low: false,
+        pool_recovered: false,
+        revoked: false,
+        invalid: false,
+        jev_paused: true,
+        jev_resumed: true,
+        jev_http_400_burst: true,
+      },
+    },
+    snapshot: async () => summarizePoolAvailability([]),
+    jevSnapshot: () => jevStates[Math.min(idx++, jevStates.length - 1)],
+    send: async (_msg, event) => {
+      sent.push(event.type)
+      return { ok: true }
+    },
+  })
+  await monitor.runOnce()
+  await monitor.runOnce()
+  await monitor.runOnce()
+  assert.deepEqual(sent, ['jev_paused', 'jev_resumed'])
 })

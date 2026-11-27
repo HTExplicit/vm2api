@@ -4,8 +4,10 @@ import { isCragOrderVmId } from '../vm/crag-subscription.mjs'
 import { loadOrderReceiptKey, deriveOrderReceipt } from './crag-shop-receipt.mjs'
 import {
   createShopSupplier,
+  isHostId,
   isOrderId,
   isPaymentMethod,
+  isReferenceOrderId,
   isSku,
   isQuantity,
   isAmount,
@@ -30,7 +32,40 @@ const UNPAID_STATES = ORDER_STATES.slice(0, ORDER_STATES.indexOf('paid'))
 // expired, so an unpaid order older than this is closed locally — but only after the
 // supplier confirms it is still unpaid, so a late payment is never dropped.
 const PAYMENT_WINDOW = 30 * 60
+const CATALOG_CACHE_KEY = 'crag_shop_catalog_cache_v1'
+const CATALOG_FRESH_MS = 60_000
+const CATALOG_REVALIDATE_COOLDOWN_MS = 3_000
 const nowSeconds = () => Math.floor(Date.now() / 1000)
+const isCatalogHash = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
+
+function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const keys = Object.keys(value)
+    .filter((key) => value[key] !== undefined)
+    .sort()
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+}
+
+export function catalogHash(catalog) {
+  return createHash('sha256').update(canonicalJson(catalog)).digest('hex')
+}
+
+function etagMatches(header, hash) {
+  if (typeof header !== 'string' || !header.trim()) return false
+  const target = `"${hash}"`
+  for (const part of header.split(',')) {
+    const candidate = part.trim()
+    if (candidate === '*') return true
+    const normalized = candidate.startsWith('W/') ? candidate.slice(2).trim() : candidate
+    if (normalized === target || normalized === hash) return true
+  }
+  return false
+}
+
+function isCachedCatalogPayload(value) {
+  return object(value) && Array.isArray(value.plans) && Array.isArray(value.payment_methods)
+}
 
 export const isCragShopPath = (pathname) => pathname === ROOT || pathname.startsWith(`${ROOT}/`)
 export const isCragDeviceShopPath = (pathname) => pathname.startsWith(`${DEVICE_ROOT}/`)
@@ -264,7 +299,7 @@ async function readInput(req, readRawBody, emptyAllowed) {
 }
 
 function purchaseInput(body, order = false) {
-  const allowed = ['sku', 'slots', 'months', 'coupon']
+  const allowed = ['sku', 'slots', 'months', 'coupon', 'renew_order_id']
   if (order) allowed.push('payment_method', 'request_id', 'expected_amount_minor', 'activation_target')
   if (Object.keys(body).some((key) => !allowed.includes(key)) || !isSku(body.sku)) throw badBody()
   const purchase = { sku: body.sku }
@@ -277,6 +312,10 @@ function purchaseInput(body, order = false) {
     if (typeof body.coupon !== 'string' || body.coupon.length > 64 || /[^\x20-\x7e]/.test(body.coupon)) throw badBody()
     const coupon = body.coupon.trim()
     if (coupon) purchase.coupon = coupon
+  }
+  if (Object.hasOwn(body, 'renew_order_id')) {
+    if (body.sku !== 'renewal' || !isReferenceOrderId(body.renew_order_id)) throw badBody()
+    purchase.renew_order_id = body.renew_order_id
   }
   return purchase
 }
@@ -357,7 +396,7 @@ function view(row, activationEnabled = true) {
             : 'awaiting_fulfillment',
     }
   } else if (!vm_id) {
-    result.activation = { state: 'manual' }
+    result.activation = { state: row.activation_phase === 'active' ? 'active' : 'manual' }
   } else {
     const activation = {
       vm_id,
@@ -567,8 +606,182 @@ export function createCragShopHandler({
   allowDeviceRequest = () => true,
   activationEnabled = true,
   supplier = createShopSupplier(),
+  catalogCacheTtlMs = CATALOG_FRESH_MS,
+  nowMs = () => Date.now(),
 }) {
   const project = (row) => view(row, activationEnabled)
+  const catalogCache = new Map()
+  const inflightCatalog = new Map()
+  let hydratedDb = null
+
+  function hydrateCatalogCache() {
+    let db
+    try {
+      db = getDb?.()
+    } catch {
+      return
+    }
+    if (!db || hydratedDb === db) return
+    hydratedDb = db
+    try {
+      const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(CATALOG_CACHE_KEY)
+      if (!row?.value) return
+      const parsed = JSON.parse(row.value)
+      if (!object(parsed)) return
+      for (const scope of ['public', 'pilot']) {
+        const saved = parsed[scope]
+        if (!object(saved) || !isCachedCatalogPayload(saved.catalog)) continue
+        const hash = catalogHash(saved.catalog)
+        catalogCache.set(scope, {
+          catalog: saved.catalog,
+          hash,
+          etag: typeof saved.etag === 'string' && saved.etag ? saved.etag : `"${hash}"`,
+          fetchedAt: Number.isFinite(saved.fetched_at) ? saved.fetched_at : 0,
+          checkedAt: 0,
+        })
+      }
+    } catch {
+      // Missing settings table or corrupt snapshot degrades cleanly to live fetch.
+    }
+  }
+
+  function persistCatalogCache() {
+    let db
+    try {
+      db = getDb?.()
+    } catch {
+      return
+    }
+    if (!db) return
+    const snapshot = {}
+    for (const scope of ['public', 'pilot']) {
+      const entry = catalogCache.get(scope)
+      if (!entry) continue
+      snapshot[scope] = {
+        catalog: entry.catalog,
+        hash: entry.hash,
+        etag: entry.etag,
+        fetched_at: entry.fetchedAt,
+      }
+    }
+    try {
+      db.prepare(`
+        INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+      `).run(CATALOG_CACHE_KEY, JSON.stringify(snapshot), new Date(nowMs()).toISOString())
+    } catch {
+      // Cache persistence is best-effort and must never fail plan delivery.
+    }
+  }
+
+  async function revalidateCatalog(scope, { force = false } = {}) {
+    hydrateCatalogCache()
+    const existing = catalogCache.get(scope)
+    if (inflightCatalog.has(scope)) return inflightCatalog.get(scope)
+    if (!force && existing && existing.checkedAt > 0 && nowMs() - existing.checkedAt < CATALOG_REVALIDATE_COOLDOWN_MS) {
+      return existing
+    }
+    const allowPilot = scope === 'pilot'
+    const ifNoneMatch = existing ? existing.etag || `"${existing.hash}"` : null
+    const task = (async () => {
+      if (typeof supplier.fetchPlans === 'function') {
+        const reply = await supplier.fetchPlans({ allowPilot, ifNoneMatch })
+        const now = nowMs()
+        if (reply.status === 'not_modified' && existing) {
+          const nextEtag = reply.etag || existing.etag
+          const updated = { ...existing, etag: nextEtag, checkedAt: now }
+          catalogCache.set(scope, updated)
+          if (nextEtag !== existing.etag) persistCatalogCache()
+          return updated
+        }
+        const catalog = reply.catalog
+        const nextHash = catalogHash(catalog)
+        const nextEtag = reply.etag || `"${nextHash}"`
+        if (existing && existing.hash === nextHash) {
+          const updated = { ...existing, etag: nextEtag, checkedAt: now }
+          catalogCache.set(scope, updated)
+          if (nextEtag !== existing.etag) persistCatalogCache()
+          return updated
+        }
+        const updated = { catalog, hash: nextHash, etag: nextEtag, fetchedAt: now, checkedAt: now }
+        catalogCache.set(scope, updated)
+        persistCatalogCache()
+        return updated
+      }
+      const catalog = await supplier.plans({ allowPilot })
+      const now = nowMs()
+      const nextHash = catalogHash(catalog)
+      if (existing && existing.hash === nextHash) {
+        const updated = { ...existing, checkedAt: now }
+        catalogCache.set(scope, updated)
+        return updated
+      }
+      const updated = { catalog, hash: nextHash, etag: `"${nextHash}"`, fetchedAt: now, checkedAt: now }
+      catalogCache.set(scope, updated)
+      persistCatalogCache()
+      return updated
+    })()
+    inflightCatalog.set(scope, task)
+    try {
+      return await task
+    } finally {
+      if (inflightCatalog.get(scope) === task) inflightCatalog.delete(scope)
+    }
+  }
+
+  async function resolveCatalog({ allowPilot, forceRefresh }) {
+    hydrateCatalogCache()
+    const scope = allowPilot ? 'pilot' : 'public'
+    const cached = catalogCache.get(scope)
+    if (cached && !forceRefresh) {
+      if (nowMs() - cached.checkedAt >= catalogCacheTtlMs) {
+        void revalidateCatalog(scope).catch(() => {})
+      }
+      return { ...cached, stale: false }
+    }
+    if (cached && forceRefresh) {
+      try {
+        return { ...(await revalidateCatalog(scope, { force: true })), stale: false }
+      } catch {
+        return { ...cached, stale: true }
+      }
+    }
+    return { ...(await revalidateCatalog(scope, { force: forceRefresh })), stale: false }
+  }
+
+  async function servePlans(req, res, url, { allowPilot }) {
+    const forceRefresh = url.searchParams.get('refresh') === '1'
+    const entry = await resolveCatalog({ allowPilot, forceRefresh })
+    const etag = `"${entry.hash}"`
+    res.setHeader?.('ETag', etag)
+    res.setHeader?.('Cache-Control', 'no-cache')
+    if (
+      etagMatches(req.headers?.['if-none-match'], entry.hash) &&
+      typeof res.writeHead === 'function' &&
+      typeof res.end === 'function'
+    ) {
+      res.writeHead(304)
+      res.end()
+      return true
+    }
+    const clientHash = url.searchParams.get('hash')
+    if (isCatalogHash(clientHash) && clientHash === entry.hash) {
+      return json(res, 200, {
+        ok: true,
+        data: { unchanged: true, catalog_hash: entry.hash, ...(entry.stale ? { stale: true } : {}) },
+      })
+    }
+    return json(res, 200, {
+      ok: true,
+      data: { ...entry.catalog, catalog_hash: entry.hash, ...(entry.stale ? { stale: true } : {}) },
+    })
+  }
+
+  async function warmPlans() {
+    const scopes = ['public']
+    if (process.env.VM2API_CRAG_SHOP_PILOT_TOKEN_FILE) scopes.push('pilot')
+    await Promise.allSettled(scopes.map((scope) => revalidateCatalog(scope)))
+  }
   function deviceIdentity() {
     let hostId
     try {
@@ -578,6 +791,36 @@ export function createCragShopHandler({
     }
     if (typeof hostId !== 'string' || !/^[a-f0-9]{64}$/.test(hostId)) throw unavailableDevice()
     return hostId
+  }
+
+  function tryHostId() {
+    try {
+      const id = subscription?.purchaseDeviceId?.()
+      return isHostId(id) ? id : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  async function syncDirectCredit(db, owner, row, order) {
+    if (order?.direct_credit !== true || order?.status !== 'fulfilled') return row
+    if (typeof subscription?.status === 'function') {
+      try {
+        await subscription.status()
+      } catch {
+        // Authority pull is best-effort; status polling will also converge.
+      }
+    }
+    if (!row.activation_vm_id && row.activation_phase !== 'active' && !isClosed(row)) {
+      durable(db, () =>
+        db
+          .prepare(`UPDATE crag_shop_orders SET activation_phase = 'active'
+          WHERE owner = ? AND order_id = ? AND status = 'fulfilled' AND closed_at IS NULL`)
+          .run(owner, row.order_id),
+      )
+      return findOrder(db, owner, row.order_id) ?? row
+    }
+    return row
   }
 
   function receiptKey(db) {
@@ -830,7 +1073,7 @@ export function createCragShopHandler({
       const device = isCragDeviceShopPath(url.pathname)
       let owner = buyerOwner(req)
       const ok = (data) => json(res, 200, { ok: true, data })
-      if (!device && route === 'plans') return ok(await supplier.plans({ allowPilot: !!owner }))
+      if (!device && route === 'plans') return await servePlans(req, res, url, { allowPilot: !!owner })
       if (!device && !owner) {
         // A valid panel session with no buyer binding is not the same as not being signed
         // in, and "sign in" is advice such a user cannot act on — they already are. The
@@ -859,7 +1102,7 @@ export function createCragShopHandler({
               `${DEVICE_COOKIE}=${randomBytes(32).toString('base64url')}; Path=${DEVICE_ROOT}; Max-Age=31536000; HttpOnly; SameSite=Strict${secure}`,
             )
           }
-          return ok(await supplier.plans(supplierOptions))
+          return await servePlans(req, res, url, supplierOptions)
         }
         if (!token) {
           // Only 'plans' mints a checkout identity. A request that merely arrived without
@@ -890,6 +1133,11 @@ export function createCragShopHandler({
       if (route === 'quote') {
         const input = purchaseInput(await readInput(req, readRawBody, false))
         if (device && input.sku === 'renewal') throw deviceOptionDenied()
+        if (input.sku === 'renewal' && input.renew_order_id) {
+          requireAdmin(req)
+          const renewHostId = deviceIdentity()
+          return ok(await supplier.quote({ ...input, host_id: renewHostId }, undefined, supplierOptions))
+        }
         return ok(await supplier.quote(input, await renewalProof(req, input.sku), supplierOptions))
       }
       const db = getDb()
@@ -930,13 +1178,14 @@ export function createCragShopHandler({
         )
         if (isClosed(row)) return ok(project(row))
         const receipt = deriveOrderReceipt(key, row.order_id)
-        const result = (reply) => {
-          const current = reflectOrder(db, owner, reply.order)
+        const result = async (reply) => {
+          const reflected = reflectOrder(db, owner, reply.order)
+          const current = await syncDirectCredit(db, owner, reflected, reply.order)
           return ok({ ...project(current), ...(current.status === 'pending' && reply.form ? reply.form : {}) })
         }
         if (existing && row.dispatch_state !== 'unsent') {
           try {
-            return result(await supplier.resume(row, receipt, supplierOptions))
+            return await result(await supplier.resume(row, receipt, supplierOptions))
           } catch (err) {
             if (
               !(err instanceof ShopError) ||
@@ -946,9 +1195,18 @@ export function createCragShopHandler({
               throw err
           }
         }
-        const proof = await renewalProof(req, row.sku)
+        const lockedOrderRenewal = row.sku === 'renewal' && !!input.purchase.renew_order_id
+        const directHostId = lockedOrderRenewal
+          ? deviceIdentity()
+          : !row.activation_vm_id
+            ? device
+              ? hostId
+              : tryHostId()
+            : undefined
+        const supplierPurchase = directHostId ? { ...input.purchase, host_id: directHostId } : input.purchase
+        const proof = lockedOrderRenewal ? undefined : await renewalProof(req, row.sku)
         if (row.expected_amount_minor != null) {
-          const quote = await supplier.quote(input.purchase, proof, supplierOptions)
+          const quote = await supplier.quote(supplierPurchase, proof, supplierOptions)
           if (quote.amount_minor !== row.expected_amount_minor)
             throw failure(409, 'shop_price_changed', 'Price changed; request a new quote and use a new request ID')
         }
@@ -961,9 +1219,8 @@ export function createCragShopHandler({
             .run(owner, row.order_id),
         )
         if (!dispatch.changes) return ok(project(findOrder(db, owner, row.order_id)))
-        const { order, form } = await supplier.create(row, receipt, proof, input.purchase, supplierOptions)
-        const current = reflectOrder(db, owner, order)
-        return ok({ ...project(current), ...(current.status === 'pending' && form ? form : {}) })
+        const reply = await supplier.create(row, receipt, proof, supplierPurchase, supplierOptions)
+        return await result(reply)
       }
       const orderId = ORDER_PATH.exec(url.pathname)?.[1]
       if (!orderId || !isOrderId(orderId)) throw missingOrder()
@@ -1028,9 +1285,15 @@ export function createCragShopHandler({
       if (route === 'apply') {
         if (row.activation_phase === 'active') return ok(project(row))
         const receipt = deriveOrderReceipt(receiptKey(db), row.order_id)
-        const current = row.status === 'fulfilled' ? row : reflectOrder(db, owner, await supplier.status(row, receipt))
+        // Always consult supplier status when no voucher digest is recorded yet so an already-
+        // fulfilled direct-credit order syncs host rights instead of falling through to /claim.
+        const remote = row.status === 'fulfilled' && row.redemption_sha256 ? null : await supplier.status(row, receipt)
+        const current = remote ? reflectOrder(db, owner, remote) : row
         if (current.status !== 'fulfilled')
           throw failure(409, 'shop_claim_not_ready', 'The CRAG shop order has not been fulfilled')
+        if (remote?.direct_credit === true) {
+          return ok(project(await syncDirectCredit(db, owner, current, remote)))
+        }
         const { redemption_code } = await supplier.claim(row, receipt)
         const digest = createHash('sha256').update(redemption_code).digest('hex')
         if (row.redemption_sha256 && row.redemption_sha256 !== digest)
@@ -1118,7 +1381,22 @@ export function createCragShopHandler({
         return ok({ ...project(current), ...(current.status === 'pending' && form ? form : {}) })
       }
       if (route === 'claim' || route === 'apply-renewal') {
-        if (row.status === 'reserved') reflectOrder(db, owner, await supplier.status(row, receipt))
+        let remote = null
+        if (row.status === 'reserved' || !row.redemption_sha256) {
+          remote = await supplier.status(row, receipt)
+          row = reflectOrder(db, owner, remote)
+        }
+        if (remote?.direct_credit === true) {
+          if (row.status !== 'fulfilled')
+            throw failure(409, 'shop_claim_not_ready', 'The CRAG shop order has not been fulfilled')
+          await syncDirectCredit(db, owner, row, remote)
+          if (route === 'apply-renewal') return ok(await subscription.status())
+          throw failure(
+            409,
+            'shop_direct_credit_no_voucher',
+            'This order was credited directly to your host subscription and does not issue a separate voucher code.',
+          )
+        }
         const result = await supplier.claim(row, receipt)
         let hostStatus
         if (route === 'apply-renewal') {
@@ -1144,7 +1422,9 @@ export function createCragShopHandler({
       }
       try {
         const order = await supplier.status(row, receipt)
-        return ok(project(reflectOrder(db, owner, order)))
+        const reflected = reflectOrder(db, owner, order)
+        const synced = await syncDirectCredit(db, owner, reflected, order)
+        return ok(project(synced))
       } catch (err) {
         if (err instanceof ShopError && err.code === 'shop_order_not_found' && row.status === 'reserved') {
           return ok(project(findOrder(db, owner, row.order_id) ?? row))
@@ -1165,5 +1445,5 @@ export function createCragShopHandler({
     }
   }
 
-  return Object.assign(handleCragShop, { pollActivation, pollOrderExpiry })
+  return Object.assign(handleCragShop, { pollActivation, pollOrderExpiry, warmPlans })
 }

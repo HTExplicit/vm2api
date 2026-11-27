@@ -7,6 +7,7 @@ import { extractOpenaiUsage, openaiAnthropicUsageFromExtract, openaiChatUsageFro
 import { resolveGptFastAlias } from './gpt-model-policy.mjs'
 import { buildAnthropicSseError } from './stream-truncation.mjs'
 import { claudeStopReasonToOpenAIFinish } from './convert.mjs'
+import { firstNonEmptyEffort } from './log-fields.mjs'
 
 const IDENTITY_KEYS = [
   'base_url',
@@ -228,7 +229,7 @@ function toolsToCodex(tools) {
         name: tool.function.name,
         description: tool.function.description || '',
         parameters: tool.function.parameters || { type: 'object', properties: {} },
-        ...(tool.function.strict === undefined ? {} : { strict: tool.function.strict }),
+        ...(typeof tool.function.strict === 'boolean' && { strict: tool.function.strict }),
       }
     }
     if (tool?.type === 'custom') {
@@ -243,10 +244,26 @@ function toolsToCodex(tools) {
         name: tool.name,
         description: tool.description || '',
         parameters: tool.input_schema || tool.parameters || { type: 'object', properties: {} },
+        ...(typeof tool.strict === 'boolean' && { strict: tool.strict }),
       }
     }
     return tool
   })
+}
+
+export function codexCompatibleFunctionTools(tools) {
+  if (!Array.isArray(tools)) return null
+  let changed = false
+  const compatible = tools.map((tool) => {
+    if (tool?.type !== 'function' || tool.strict !== undefined) return tool
+    const { function: nested, ...flat } = tool
+    const definition = nested || tool
+    if (definition.strict !== undefined || typeof definition.name !== 'string' || !definition.parameters) return tool
+    changed = true
+    // Codex honors strict only on the flat Responses function definition.
+    return { ...flat, ...nested, type: 'function', strict: false }
+  })
+  return changed ? compatible : null
 }
 
 export function chatToCodexResponses(body = {}) {
@@ -322,7 +339,7 @@ function stripUnsupportedCodexFields(body = {}) {
   delete next.max_tokens
   delete next.temperature
   delete next.prompt_cache_retention
-  const effort = normalizeCodexReasoningEffort(next.reasoning?.effort || next.reasoning_effort)
+  const effort = normalizeCodexReasoningEffort(firstNonEmptyEffort(next.reasoning?.effort, next.reasoning_effort))
   delete next.reasoning_effort
   if (effort) {
     next.reasoning = {

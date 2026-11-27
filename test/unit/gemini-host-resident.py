@@ -248,14 +248,26 @@ with tempfile.TemporaryDirectory(prefix="gemini-resident-") as temporary:
             assert healed is not None and healed is not first_session
             assert len(created_sessions) == 2
 
-        # 8. SlotNetworkLease refcounting: sharing vm2agy<slot> + kin-egress across NativeSession & Headless.
+        # 8. SlotNetworkLease refcounting: sharing vm2agy<slot> + host relay + kin-egress across NativeSession & Headless.
+        assert (
+            impl.rewrite_proxy_endpoint("socks5h://u%401:p%3A2@192.0.2.15:1080", "198.18.252.1", 41080)
+            == "socks5h://u%401:p%3A2@198.18.252.1:41080"
+        )
+        assert (
+            impl.rewrite_proxy_endpoint("socks5h://192.0.2.15:1080", "198.18.252.1", 41080)
+            == "socks5h://198.18.252.1:41080"
+        )
         start_calls = []
         stop_calls = []
+        fake_relay = Mock()
+        fake_relay.poll.return_value = None
         fake_egress = Mock()
         fake_egress.poll.return_value = None
+        seen_egress_cfg = []
 
         def fake_start_network(lease_dir, network):
             start_calls.append((lease_dir, list(network)))
+            seen_egress_cfg.append(json.loads((lease_dir / "egress.json").read_text()))
             r_fd, w_fd = os.pipe()
             os.close(w_fd)
             return r_fd
@@ -266,13 +278,14 @@ with tempfile.TemporaryDirectory(prefix="gemini-resident-") as temporary:
         with (
             patch.object(host, "start_network", side_effect=fake_start_network),
             patch.object(host, "stop_network", side_effect=fake_stop_network),
+            patch.object(impl, "host_tcp_listening", return_value=True),
             patch.object(impl.os, "chown"),
             patch.object(
                 impl.subprocess,
                 "run",
                 return_value=SimpleNamespace(returncode=0),
             ),
-            patch.object(impl.subprocess, "Popen", return_value=fake_egress),
+            patch.object(impl.subprocess, "Popen", side_effect=[fake_relay, fake_egress]),
         ):
             env_dir = directory / ENV_ID
             net = ["0", "2016", "192.0.2.15", "1080"]
@@ -281,8 +294,14 @@ with tempfile.TemporaryDirectory(prefix="gemini-resident-") as temporary:
             )
             assert lease1["refcount"] == 1
             assert len(start_calls) == 1
+            # Relay mode configures netns toward the slot gateway IP (198.18.252.1:<ephemeral>).
+            assert start_calls[0][1][2] == "198.18.252.1", start_calls[0][1]
+            assert seen_egress_cfg[0]["proxy_url"].startswith("socks5h://")
+            assert "@198.18.252.1:" in seen_egress_cfg[0]["proxy_url"] or seen_egress_cfg[0]["proxy_url"].startswith(
+                "socks5h://198.18.252.1:"
+            )
 
-            # Second holder (e.g. Headless `agy models`) borrows the SAME netns + egress without colliding!
+            # Second holder (e.g. Headless `agy models`) borrows the SAME netns + relay + egress without colliding!
             lease2 = host.acquire_slot_network(
                 0, env_dir, net, "px-1", PROXY, PROXY_DIGEST, lambda u: ["true"]
             )
@@ -290,17 +309,57 @@ with tempfile.TemporaryDirectory(prefix="gemini-resident-") as temporary:
             assert lease1["refcount"] == 2
             assert len(start_calls) == 1
 
-            # Closing Headless decrements refcount -> egress & netns stay alive!
+            # Closing Headless decrements refcount -> relay, egress & netns stay alive!
             host.release_slot_network(0, lease2)
             assert lease1["refcount"] == 1
             assert len(stop_calls) == 0
+            fake_relay.kill.assert_not_called()
             fake_egress.kill.assert_not_called()
 
-            # Closing last holder tears down egress & netns cleanly!
+            # Closing last holder tears down relay, egress & netns cleanly!
             host.release_slot_network(0, lease1)
             assert lease1["refcount"] == 0
             assert len(stop_calls) == 1
+            fake_relay.kill.assert_called_once()
             fake_egress.kill.assert_called_once()
+
+        # 8b. #1622 authorize failing-stage reporting & redaction (no proxy secrets leaked to stderr).
+        import io
+        prev_auth_state = host.environments[ENV_ID]["auth_state"]
+        auth_secret_proxy = "socks5h://authuser:supersecretpass@192.0.2.15:1080"
+        auth_secret_sha = hashlib.sha256(auth_secret_proxy.encode()).hexdigest()
+        for expected_stage in ("network_prepare", "relay_start", "proxy_probe", "egress_start", "cli_launch", "challenge_wait"):
+            captured_err = io.StringIO()
+            with (
+                patch.object(host, "ensure_oauth_runtime"),
+                patch.object(
+                    impl,
+                    "Login",
+                    side_effect=impl.Failure(503, stage=expected_stage),
+                ),
+                patch.object(impl.sys, "stderr", captured_err),
+            ):
+                try:
+                    host._request(
+                        "authorize",
+                        {
+                            "id": ENV_ID,
+                            "proxy_id": "px-1",
+                            "proxy_url": auth_secret_proxy,
+                            "proxy_sha256": auth_secret_sha,
+                        },
+                    )
+                except impl.Failure as err:
+                    assert err.status == 503
+                    assert err.code == "gemini_authorization_unavailable"
+                    assert err.stage == expected_stage, (err.stage, expected_stage)
+                else:
+                    raise AssertionError(f"expected Failure for stage={expected_stage}")
+            stderr_text = captured_err.getvalue()
+            assert f"Gemini CLI authorization did not start stage={expected_stage}" in stderr_text, stderr_text
+            assert "supersecretpass" not in stderr_text
+            assert "192.0.2.15" not in stderr_text
+        host.environments[ENV_ID]["auth_state"] = prev_auth_state
 
         # 9. Unready NativeSession crash records exponential backoff (no 32s tight loop).
         unready = make_fake_session()
@@ -376,5 +435,85 @@ with tempfile.TemporaryDirectory(prefix="gemini-resident-") as temporary:
             stale.close.assert_called_once()
             assert ENV_ID not in host.native_sessions
             sched_warm.assert_called_once_with(ENV_ID, force=True)
+
+        # 13. Terminal.relay() method must NOT be shadowed by Agy's egress_relay handle.
+        fake_term_egress = Mock()
+        fake_term_egress.poll.return_value = None
+        fake_term_relay = Mock()
+        fake_term_relay.poll.return_value = None
+
+        def fake_terminal_start(self_term, _proxy_url, _size):
+            self_term.pid = 4242
+            self_term.terminal = 99
+            self_term.egress = fake_term_egress
+            self_term.egress_relay = fake_term_relay
+
+        with (
+            patch.object(impl.Agy, "start", fake_terminal_start),
+            patch.object(impl.Terminal, "await_start", return_value=None),
+            patch.object(impl.Terminal, "exited", return_value=False),
+            patch.object(impl.Terminal, "live_profile", return_value=True),
+            patch.object(impl.os, "read", return_value=b"hi"),
+        ):
+            term = impl.Terminal(
+                host,
+                records[ENV_ID],
+                PROXY,
+                directory / ENV_ID / PROFILE,
+                (80, 24),
+                "sess-relay-check",
+                ("tok",),
+            )
+            assert term.egress_relay is fake_term_relay
+            assert callable(term.relay), "Terminal.relay method must remain callable"
+            assert term.relay.__func__ is impl.Terminal.relay
+            assert term.alive() is True
+            assert term.relay(b"", None) == "aGk="
+            fake_term_relay.poll.return_value = 1
+            assert term.alive() is False
+
+        # NativeSession.is_alive() also tracks egress_relay.
+        ns_probe = impl.NativeSession.__new__(impl.NativeSession)
+        ns_probe.egress = fake_term_egress
+        ns_probe.native_tui = Mock()
+        ns_probe.native_tui.poll.return_value = None
+        ns_probe.egress_relay = fake_term_relay
+        fake_term_relay.poll.return_value = None
+        assert ns_probe.is_alive() is True
+        fake_term_relay.poll.return_value = 1
+        assert ns_probe.is_alive() is False
+
+        # 14. ThreadingUnixStreamServer must configure a large listen backlog (>= 128) for burst concurrency.
+        assert impl.ThreadingUnixStreamServer.request_queue_size >= 128, (
+            impl.ThreadingUnixStreamServer.request_queue_size
+        )
+
+        # 15. _stream_native_infer handles http.client.IncompleteRead cleanly as 502 gemini_inference_failed.
+        from http.client import IncompleteRead
+
+        bad_sess = make_fake_session()
+        bad_conn = Mock()
+        bad_resp = Mock()
+        bad_resp.read1.side_effect = IncompleteRead(b"")
+        bad_sess.open_stream.return_value = (bad_conn, bad_resp)
+        host.native_sessions[ENV_ID] = bad_sess
+        fake_handler = Mock()
+        fake_ctx = {
+            "identifier": ENV_ID,
+            "request_id": "req-incomplete-read",
+            "native_body": {"model": MODEL_A, "contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+            "model": MODEL_A,
+            "auth": ((), None),
+            "entry": {"cancel_event": threading.Event()},
+            "gateway_policy": None,
+        }
+        with (
+            patch.object(host, "_use_sharded_daemon", return_value=False),
+            patch.object(host, "_acquire_native_session", return_value=bad_sess),
+        ):
+            state, err_code = host._stream_native_infer(fake_ctx, fake_handler)
+        assert (state, err_code) == ("failed", "gemini_inference_failed")
+        fake_handler.send_json_error.assert_called_once_with(502, "gemini_inference_failed")
+        bad_conn.close.assert_called_once()
 
 print("gemini-host-resident: ALL PASS")

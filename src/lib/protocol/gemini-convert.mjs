@@ -13,8 +13,18 @@
  * never silently drop unsupported fields on restricted native-TUI slots.
  */
 import crypto from 'node:crypto'
+import {
+  escapeNativeTuiSlashes,
+  sanitizeNativeTuiText,
+  stripIllegalControlChars,
+  stripVendorBillingLines,
+} from '../gemini/prompt-normalizer.mjs'
 import { isClientStream } from './convert.mjs'
+import { extractImpliedModelEffort, isGeminiSeriesId, resolveGeminiDefaultEffort } from './gemini-model-policy.mjs'
+import { firstNonEmptyEffort, isEmptyEffortValue } from './log-fields.mjs'
 import { buildAnthropicSseError } from './stream-truncation.mjs'
+
+export { escapeNativeTuiSlashes, sanitizeNativeTuiText, stripIllegalControlChars }
 
 export const SKIP_THOUGHT_SIGNATURE = 'skip_thought_signature_validator'
 export const FULL_GEMINI_CAPABILITIES = Object.freeze([
@@ -411,11 +421,52 @@ function snakeToCamel(key) {
  * caller-owned payloads (`args`, `response`, schemas, `labels`) untouched.
  */
 export function geminiCamelCase(value) {
-  if (Array.isArray(value)) return value.map(geminiCamelCase)
+  if (Array.isArray(value)) {
+    let out = null
+    for (let i = 0; i < value.length; i += 1) {
+      const item = value[i]
+      const next = geminiCamelCase(item)
+      if (out) {
+        out[i] = next
+      } else if (next !== item) {
+        out = value.slice()
+        out[i] = next
+      }
+    }
+    return out || value
+  }
   if (!isPlainObject(value)) return value
+  const keys = Object.keys(value)
+  let changed = false
+  let hasSnake = false
+  for (let i = 0; i < keys.length; i += 1) {
+    if (keys[i].includes('_')) {
+      hasSnake = true
+      changed = true
+      break
+    }
+  }
+  if (!hasSnake) {
+    let out = null
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i]
+      const raw = value[key]
+      const nextVal = GEMINI_OWN_KEYS.has(key) ? raw : geminiCamelCase(raw)
+      if (out) {
+        out[key] = nextVal
+      } else if (nextVal !== raw) {
+        out = {}
+        for (let j = 0; j < i; j += 1) out[keys[j]] = value[keys[j]]
+        out[key] = nextVal
+      }
+    }
+    return out || value
+  }
   const out = {}
-  const originalKeys = new Set(Object.keys(value))
-  for (const [key, raw] of Object.entries(value)) {
+  const originalKeys = new Set(keys)
+  for (let i = 0; i < keys.length; i += 1) {
+    const key = keys[i]
+    const raw = value[key]
     const camel = snakeToCamel(key)
     const nextVal = GEMINI_OWN_KEYS.has(camel) ? raw : geminiCamelCase(raw)
     if (camel === key) {
@@ -424,7 +475,7 @@ export function geminiCamelCase(value) {
       out[camel] = nextVal
     }
   }
-  return out
+  return changed ? out : value
 }
 
 export function geminiFuncName(name) {
@@ -433,10 +484,15 @@ export function geminiFuncName(name) {
   return s
 }
 
+const MCP_CALL_PREFIXES = ['mcp__craggemini__', 'mcp_craggemini_', 'mcp__crag__', 'mcp_crag_']
+
 export function geminiToolNameFromCall(name) {
   let s = String(name || '')
-  if (s.startsWith('mcp__craggemini__') && s.length > 'mcp__craggemini__'.length) {
-    s = s.slice('mcp__craggemini__'.length)
+  for (const prefix of MCP_CALL_PREFIXES) {
+    if (s.startsWith(prefix) && s.length > prefix.length) {
+      s = s.slice(prefix.length)
+      break
+    }
   }
   for (const sep of [':', '.']) {
     const prefix = `${GEMINI_NS}${sep}`
@@ -449,17 +505,21 @@ export function geminiToolNameFromCall(name) {
   return s
 }
 
+// Leave room for CRAGGemini's 9-char `mcp_crag_` prefix so `mcp_crag_<wireName>`
+// always fits inside `agy` 1.5.9's 64-char `ValidateToolName` ceiling without double truncation.
+const MAX_WIRE_TOOL_NAME_LEN = 55
+
 function makeWireToolName(rawName, usedNames) {
   const base = geminiFuncName(rawName)
   let safe = base.replace(/[^A-Za-z0-9_-]/g, '_')
   if (!safe || /^[0-9-]/.test(safe)) safe = `${NAME_LEAD}${safe || 'tool'}`
-  if (safe.length > 64) {
+  if (safe.length > MAX_WIRE_TOOL_NAME_LEN) {
     const hash = crypto
       .createHash('sha256')
       .update(String(rawName || ''))
       .digest('hex')
       .slice(0, 8)
-    safe = `${safe.slice(0, 55)}_${hash}`
+    safe = `${safe.slice(0, MAX_WIRE_TOOL_NAME_LEN - 9)}_${hash}`
   }
   if (!usedNames.has(safe)) {
     usedNames.add(safe)
@@ -470,10 +530,11 @@ function makeWireToolName(rawName, usedNames) {
     .update(String(rawName || ''))
     .digest('hex')
     .slice(0, 8)
-  let candidate = `${safe.slice(0, 55)}_${hash}`
+  let candidate = `${safe.slice(0, MAX_WIRE_TOOL_NAME_LEN - 9)}_${hash}`
   let n = 1
   while (usedNames.has(candidate)) {
-    candidate = `${safe.slice(0, 52)}_${hash}_${n++}`
+    const tail = `_${hash}_${n++}`
+    candidate = `${safe.slice(0, Math.max(1, MAX_WIRE_TOOL_NAME_LEN - tail.length))}${tail}`
   }
   usedNames.add(candidate)
   return candidate
@@ -582,11 +643,6 @@ function parseJsonObjectArgs(raw) {
   return {}
 }
 
-const FENCED_CODE_BLOCK_RE = /```[\s\S]*?```/g
-const ANSI_ESCAPE_RE = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/g
-const ILLEGAL_CONTROL_RE = /[^\P{Cc}\n\r\t]/gu
-const LEADING_SLASH_TOKEN_RE = /(^|\p{White_Space})(\/+)/gu
-
 function isPlaceholderText(text, { allowEllipsis = false } = {}) {
   if (typeof text !== 'string') return true
   const trimmed = text.trim()
@@ -595,74 +651,8 @@ function isPlaceholderText(text, { allowEllipsis = false } = {}) {
   return false
 }
 
-function isBillingHeaderLine(line) {
-  const trimmed = line.trim().toLowerCase()
-  if (!trimmed) return false
-  if (/^(?:x-[a-z0-9_-]*billing[a-z0-9_-]*|[a-z0-9_-]+-billing-(?:header|metadata|token|info)):/.test(trimmed)) {
-    return true
-  }
-  if (/^x-[a-z0-9_-]+:/.test(trimmed) && /(?:cc_version=|cch=|cc_entrypoint=)/.test(trimmed)) {
-    return true
-  }
-  return trimmed.includes('cc_version=') && trimmed.includes('cch=')
-}
-
-function stripBillingSegment(segment) {
-  const lines = segment.split('\n')
-  let removed = false
-  const kept = lines.filter((line) => {
-    if (isBillingHeaderLine(line)) {
-      removed = true
-      return false
-    }
-    return true
-  })
-  if (!removed) return { text: segment, removed: false }
-  return { text: kept.join('\n').replace(/\n{3,}/g, '\n\n'), removed: true }
-}
-
 function stripAnthropicBillingLines(text) {
-  if (!text) return ''
-  let anyRemoved = false
-  let out = ''
-  let lastIndex = 0
-  FENCED_CODE_BLOCK_RE.lastIndex = 0
-  for (const match of text.matchAll(FENCED_CODE_BLOCK_RE)) {
-    const before = text.slice(lastIndex, match.index)
-    const cleaned = stripBillingSegment(before)
-    if (cleaned.removed) anyRemoved = true
-    out += cleaned.text + match[0]
-    lastIndex = match.index + match[0].length
-  }
-  const tail = stripBillingSegment(text.slice(lastIndex))
-  if (tail.removed) anyRemoved = true
-  out += tail.text
-  return anyRemoved ? out.trim() : text
-}
-
-/**
- * Strip ANSI escape sequences and illegal Unicode Cc control characters (keeping \n, \r, \t)
- * and repair lone UTF-16 surrogates so CRAGGemini (`valid_text` / `valid_system_prompt`)
- * and `gemini-host.py` never reject pasted terminal logs or binary artifacts.
- */
-export function stripIllegalControlChars(text) {
-  if (typeof text !== 'string' || !text) return ''
-  return text.toWellFormed().replace(ANSI_ESCAPE_RE, '').replace(ILLEGAL_CONTROL_RE, '')
-}
-
-/**
- * Neutralize whitespace-preceded `/` tokens (e.g. `/etc/hosts`, `/v1/messages`, `// comment`,
- * `a / b`, `/help`) with a non-whitespace, non-control zero-width separator (`U+200B`) so
- * CRAGGemini's `valid_text` and `agy`'s TUI slash-command parser treat them as ordinary text
- * without altering path semantics.
- */
-export function escapeNativeTuiSlashes(text) {
-  if (typeof text !== 'string' || !text) return ''
-  return text.replace(LEADING_SLASH_TOKEN_RE, '$1\u200B$2')
-}
-
-export function sanitizeNativeTuiText(text) {
-  return escapeNativeTuiSlashes(stripIllegalControlChars(text))
+  return stripVendorBillingLines(text)
 }
 
 function sanitizeNativeTuiResponseValue(value, depth = 0) {
@@ -708,11 +698,39 @@ function normalizeEffort(raw) {
   if (['none', 'off', 'disabled', '0'].includes(value)) return 'none'
   if (['minimal', 'min'].includes(value)) return 'minimal'
   if (value === 'low') return 'low'
-  if (value === 'medium' || value === 'med') return 'medium'
+  if (value === 'medium' || value === 'med' || value === 'auto' || value === 'adaptive') return 'medium'
   if (value === 'high') return 'high'
-  if (value === 'xhigh') return 'xhigh'
+  if (value === 'xhigh' || value === 'extra_high' || value === 'extra-high') return 'xhigh'
   if (value === 'max') return 'max'
   return ''
+}
+
+function parseInboundModelSpec(rawModel, { allowLeadingModelsPrefix = false } = {}) {
+  let work = typeof rawModel === 'string' ? rawModel.trim() : ''
+  if (!work) return { model: '', parenEffort: '' }
+  if (allowLeadingModelsPrefix && /^models\//i.test(work)) {
+    work = work.replace(/^models\//i, '')
+  }
+  if (/\[1m\]$/i.test(work)) {
+    work = work.replace(/\[1m\]$/i, '')
+  }
+  let parenEffort = ''
+  const pm = /\(([^()]+)\)$/.exec(work)
+  if (pm && pm.index > 0) {
+    const rawEff = pm[1].trim()
+    if (/^\d+$/.test(rawEff)) {
+      parenEffort = effortFromBudget(Number(rawEff))
+    } else {
+      parenEffort = normalizeEffort(rawEff)
+    }
+    if (!parenEffort) return { model: '', parenEffort: '' }
+    work = work.slice(0, pm.index)
+  }
+  if (/-latest$/i.test(work) && work.length > '-latest'.length) {
+    work = work.replace(/-latest$/i, '')
+  }
+  if (!MODEL_RE.test(work)) return { model: '', parenEffort: '' }
+  return { model: work, parenEffort }
 }
 
 function effortFromBudget(budget) {
@@ -801,6 +819,108 @@ function distinctStrings(values) {
   return [...new Set(values)]
 }
 
+function orderedDistinctStrings(values) {
+  const seen = new Set()
+  const out = []
+  for (const item of values) {
+    if (typeof item !== 'string' || seen.has(item)) continue
+    seen.add(item)
+    out.push(item)
+  }
+  return out
+}
+
+/** Parameter names CRAGGemini / agy may inject when materializing MCP tools (#1915). */
+const AGY_BRIDGE_INJECTED_PARAMS = new Set(['toolSummary'])
+
+function agyBridgeClientAlias(param) {
+  return `_client_${param}`
+}
+
+/** Whether the caller's tool schema declares a bridge-colliding param at the root level only (#1915). */
+export function clientDeclaredAgyBridgeParam(schema, param) {
+  if (!AGY_BRIDGE_INJECTED_PARAMS.has(param) || !isPlainObject(schema)) return false
+  const props = isPlainObject(schema.properties) ? schema.properties : {}
+  return Object.hasOwn(props, param)
+}
+
+/**
+ * Rename client-declared tool parameters that collide with agy bridge injection so
+ * downstream schema merging does not duplicate `required` entries (#1915).
+ * Bridge injection is top-level only; renames apply only to root `properties`, not nested objects.
+ */
+export function avoidAgyBridgeParamCollisions(schema) {
+  if (!isPlainObject(schema)) return schema
+  const out = { ...schema }
+  if (!isPlainObject(out.properties)) return out
+  const props = { ...out.properties }
+  const renames = new Map()
+  for (const key of Object.keys(props)) {
+    if (AGY_BRIDGE_INJECTED_PARAMS.has(key)) {
+      const alias = agyBridgeClientAlias(key)
+      if (!Object.hasOwn(props, alias)) {
+        renames.set(key, alias)
+        props[alias] = props[key]
+        delete props[key]
+      }
+    }
+  }
+  out.properties = props
+  if (Array.isArray(out.required)) {
+    out.required = orderedDistinctStrings(
+      out.required.map((n) => (typeof n === 'string' && renames.has(n) ? renames.get(n) : n)),
+    )
+  }
+  return out
+}
+
+/**
+ * Align historical `functionCall.args` with the forwarded schema before antigravity (#1915).
+ */
+export function forwardAgyBridgeToolArgs(args, schema) {
+  if (!isPlainObject(args)) return args
+  let out = null
+  for (const name of AGY_BRIDGE_INJECTED_PARAMS) {
+    if (!clientDeclaredAgyBridgeParam(schema, name)) continue
+    const alias = agyBridgeClientAlias(name)
+    if (Object.hasOwn(args, name) && !Object.hasOwn(args, alias)) {
+      const o = out ?? { ...args }
+      out = o
+      o[alias] = args[name]
+      delete o[name]
+    }
+  }
+  return out ?? args
+}
+
+/**
+ * Restore client parameter names after antigravity forwarding (#1915).
+ * Drops bare bridge-injected keys only when the caller did not declare that param in the tool schema.
+ */
+export function restoreAgyBridgeToolArgs(args, schema = null) {
+  if (!isPlainObject(args)) return args
+  let out = null
+  const touch = () => {
+    if (!out) out = { ...args }
+    return out
+  }
+  for (const name of AGY_BRIDGE_INJECTED_PARAMS) {
+    const alias = agyBridgeClientAlias(name)
+    const hasAlias = Object.hasOwn(args, alias)
+    const hasOrig = Object.hasOwn(args, name)
+    const clientDeclared = clientDeclaredAgyBridgeParam(schema, name)
+    if (hasAlias) {
+      const o = touch()
+      o[name] = args[alias]
+      delete o[alias]
+    } else if (hasOrig && !clientDeclared) {
+      const o = touch()
+      delete o[name]
+    }
+  }
+  return out || args
+}
+
 /**
  * Clean JSON Schema for Gemini / Antigravity `functionDeclarations`.
  * When `plain: true`, reduces to Gemini's OpenAPI Schema subset (inlining
@@ -811,7 +931,16 @@ export function sanitizeGeminiSchema(raw, { plain = false } = {}) {
   const root = isPlainObject(raw) ? raw : { type: 'object', properties: {} }
   if (!plain) {
     const shaped = shapeJsonSchemaForGemini(root, true)
-    return isPlainObject(shaped) ? shaped : { type: 'object', properties: {} }
+    const result = isPlainObject(shaped) ? shaped : { type: 'object', properties: {} }
+    if (Array.isArray(result.required)) {
+      const props = isPlainObject(result.properties) ? result.properties : {}
+      const keep = orderedDistinctStrings(
+        result.required.filter((n) => typeof n === 'string' && Object.hasOwn(props, n)),
+      )
+      if (keep.length) result.required = keep
+      else delete result.required
+    }
+    return result
   }
   const defs = {}
   for (const key of ['$defs', 'definitions']) {
@@ -1058,7 +1187,7 @@ export function sanitizeGeminiSchema(raw, { plain = false } = {}) {
     }
     if (Array.isArray(out.required)) {
       const props = isPlainObject(out.properties) ? out.properties : {}
-      const keep = out.required.filter((n) => typeof n === 'string' && Object.hasOwn(props, n))
+      const keep = orderedDistinctStrings(out.required.filter((n) => typeof n === 'string' && Object.hasOwn(props, n)))
       if (keep.length) out.required = keep
       else delete out.required
     }
@@ -1145,8 +1274,12 @@ function formatExecutableCodePart(part) {
 
 function parseGeminiNativeInbound(rawBody, { routeModel, routeStream }) {
   const body = geminiCamelCase(rawBody)
-  const model = routeModel || (typeof body.model === 'string' ? body.model : '')
-  if (!MODEL_RE.test(model) || (body.model != null && body.model !== model)) {
+  const rawSelected = routeModel || (typeof body.model === 'string' ? body.model : '')
+  if (body.model != null && routeModel && body.model !== routeModel) {
+    throw makeProtocolError(400, 'gemini_invalid_model', 'A valid Gemini model is required.')
+  }
+  const { model, parenEffort } = parseInboundModelSpec(rawSelected, { allowLeadingModelsPrefix: true })
+  if (!model) {
     throw makeProtocolError(400, 'gemini_invalid_model', 'A valid Gemini model is required.')
   }
   if (!Array.isArray(body.contents) || body.contents.length === 0) {
@@ -1394,7 +1527,7 @@ function parseGeminiNativeInbound(rawBody, { routeModel, routeStream }) {
     }
     if (isPlainObject(gc.thinkingConfig)) {
       const tc = gc.thinkingConfig
-      const effort = tc.thinkingLevel
+      const effort = !isEmptyEffortValue(tc.thinkingLevel)
         ? normalizeEffort(tc.thinkingLevel)
         : typeof tc.thinkingBudget === 'number'
           ? effortFromBudget(tc.thinkingBudget)
@@ -1432,6 +1565,15 @@ function parseGeminiNativeInbound(rawBody, { routeModel, routeStream }) {
       if (!GEN_READ_OR_BUILT.has(k) && k !== 'responseModalities' && v != null) extraGenConfig[k] = v
     }
   }
+  if (!thinking && parenEffort) {
+    if (parenEffort === 'none') hideThinking = true
+    thinking = {
+      enabled: parenEffort !== 'none',
+      disabled: parenEffort === 'none',
+      effort: parenEffort !== 'none' ? parenEffort : '',
+      includeThoughts: !hideThinking,
+    }
+  }
 
   return {
     protocol: 'gemini',
@@ -1453,6 +1595,7 @@ function parseGeminiNativeInbound(rawBody, { routeModel, routeStream }) {
     thinking,
     hideThinking,
     thinkingDisplay: null,
+    includeEncryptedReasoning: false,
     responseFormat,
     safetySettings: Array.isArray(body.safetySettings) ? body.safetySettings : null,
     cachedContent: typeof body.cachedContent === 'string' ? body.cachedContent : null,
@@ -1461,8 +1604,8 @@ function parseGeminiNativeInbound(rawBody, { routeModel, routeStream }) {
 }
 
 function parseOpenAIChatInbound(body, { headers }) {
-  const model = typeof body.model === 'string' ? body.model : ''
-  if (!MODEL_RE.test(model)) throw makeProtocolError(400, 'gemini_invalid_model', 'A valid Gemini model is required.')
+  const { model, parenEffort } = parseInboundModelSpec(body.model, { allowLeadingModelsPrefix: true })
+  if (!model) throw makeProtocolError(400, 'gemini_invalid_model', 'A valid Gemini model is required.')
   if (body.stream != null && typeof body.stream !== 'boolean') {
     throw makeProtocolError(400, 'gemini_invalid_request', 'stream must be a boolean.')
   }
@@ -1553,7 +1696,11 @@ function parseOpenAIChatInbound(body, { headers }) {
       if (parts.length) messages.push({ role: 'user', parts })
     } else if (raw.role === 'assistant') {
       inLeadingSystem = false
-      const parts = extractParts(raw.content)
+      const parts = []
+      if (typeof raw.reasoning_content === 'string' && raw.reasoning_content) {
+        parts.push({ kind: 'thinking', text: raw.reasoning_content, signature: '' })
+      }
+      parts.push(...extractParts(raw.content))
       if (typeof raw.refusal === 'string' && raw.refusal) {
         parts.push({ kind: 'text', text: raw.refusal, signature: '' })
       }
@@ -1715,11 +1862,21 @@ function parseOpenAIChatInbound(body, { headers }) {
 
   let thinking = null
   let hideThinking = false
-  const googleTc = isPlainObject(body.extra_body?.google?.thinking_config)
-    ? body.extra_body.google.thinking_config
-    : null
-  const effort = normalizeEffort(googleTc?.thinking_level ?? body.reasoning_effort ?? body.reasoning?.effort)
-  if (body.reasoning?.summary === 'none' || googleTc?.include_thoughts === false || effort === 'none') {
+  const rawGoogleTc = body.extra_body?.google?.thinking_config ?? body.extra_body?.google?.thinkingConfig
+  const googleTc = isPlainObject(rawGoogleTc) ? rawGoogleTc : null
+  const tcLevel = googleTc?.thinking_level ?? googleTc?.thinkingLevel
+  const tcBudget = googleTc?.thinking_budget ?? googleTc?.thinkingBudget
+  const tcInclude = googleTc?.include_thoughts ?? googleTc?.includeThoughts
+  const effort = normalizeEffort(
+    firstNonEmptyEffort(
+      tcLevel,
+      body.reasoning_effort,
+      body.reasoning?.effort,
+      body.output_config?.effort,
+      parenEffort,
+    ),
+  )
+  if (body.reasoning?.summary === 'none' || tcInclude === false || effort === 'none') {
     hideThinking = true
   }
   if (effort) {
@@ -1729,8 +1886,8 @@ function parseOpenAIChatInbound(body, { headers }) {
       effort: effort !== 'none' ? effort : '',
       includeThoughts: !hideThinking,
     }
-  } else if (typeof googleTc?.thinking_budget === 'number' && Number.isFinite(googleTc.thinking_budget)) {
-    const budget = googleTc.thinking_budget
+  } else if (typeof tcBudget === 'number' && Number.isFinite(tcBudget)) {
+    const budget = tcBudget
     if (budget === 0) hideThinking = true
     thinking = {
       enabled: budget !== 0,
@@ -1738,6 +1895,13 @@ function parseOpenAIChatInbound(body, { headers }) {
       effort: budget > 0 ? effortFromBudget(budget) : '',
       budgetTokens: budget,
       includeThoughts: !hideThinking,
+    }
+  } else if (tcInclude === true) {
+    thinking = {
+      enabled: true,
+      disabled: false,
+      effort: '',
+      includeThoughts: true,
     }
   } else if (isPlainObject(body.thinking)) {
     const type = String(body.thinking.type || '').toLowerCase()
@@ -1796,6 +1960,7 @@ function parseOpenAIChatInbound(body, { headers }) {
     thinking,
     hideThinking,
     thinkingDisplay: null,
+    includeEncryptedReasoning: false,
     responseFormat,
     safetySettings: null,
     cachedContent: null,
@@ -1804,8 +1969,8 @@ function parseOpenAIChatInbound(body, { headers }) {
 }
 
 function parseOpenAIResponsesInbound(body, { headers }) {
-  const model = typeof body.model === 'string' ? body.model : ''
-  if (!MODEL_RE.test(model)) throw makeProtocolError(400, 'gemini_invalid_model', 'A valid Gemini model is required.')
+  const { model, parenEffort } = parseInboundModelSpec(body.model, { allowLeadingModelsPrefix: true })
+  if (!model) throw makeProtocolError(400, 'gemini_invalid_model', 'A valid Gemini model is required.')
   if (body.stream != null && typeof body.stream !== 'boolean') {
     throw makeProtocolError(400, 'gemini_invalid_request', 'stream must be a boolean.')
   }
@@ -1975,6 +2140,8 @@ function parseOpenAIResponsesInbound(body, { headers }) {
   }
 
   let inLeadingSystem = true
+  let configUpdateEffort = ''
+  let pendingEncryptedSig = ''
   if (typeof body.input === 'string') {
     if (!body.input.trim()) throw makeProtocolError(400, 'gemini_invalid_request', 'input must not be empty.')
     messages.push({ role: 'user', parts: [{ kind: 'text', text: body.input, signature: '' }] })
@@ -1982,6 +2149,11 @@ function parseOpenAIResponsesInbound(body, { headers }) {
     for (const item of body.input) {
       if (!isPlainObject(item))
         throw makeProtocolError(400, 'gemini_invalid_request', 'Each input item must be an object.')
+      if (item.type === 'configuration_update') {
+        const updEff = normalizeEffort(item.reasoning?.effort ?? item.effort)
+        if (updEff) configUpdateEffort = updEff
+        continue
+      }
       if (item.type === 'additional_tools' && Array.isArray(item.tools)) {
         for (const extraTool of item.tools) addResponsesTool(extraTool)
         continue
@@ -1992,12 +2164,16 @@ function parseOpenAIResponsesInbound(body, { headers }) {
           throw makeProtocolError(400, 'gemini_invalid_request', 'function_call.name is required.')
         }
         const { id, signature } = unsignedToolCallId(item.call_id || item.id || newCallId())
+        const effSig = signature || pendingEncryptedSig
+        pendingEncryptedSig = ''
         const ns =
           typeof item.namespace === 'string' && item.namespace && item.namespace !== 'functions' ? item.namespace : ''
         const fullName = ns ? `${ns}.${item.name}` : item.name
         messages.push({
           role: 'assistant',
-          parts: [{ kind: 'tool_call', id, name: fullName, args: parseJsonObjectArgs(item.arguments), signature }],
+          parts: [
+            { kind: 'tool_call', id, name: fullName, args: parseJsonObjectArgs(item.arguments), signature: effSig },
+          ],
         })
       } else if (item.type === 'custom_tool_call') {
         inLeadingSystem = false
@@ -2119,7 +2295,10 @@ function parseOpenAIResponsesInbound(body, { headers }) {
           ],
         })
       } else if (item.type === 'reasoning') {
-        // Ignore replayed reasoning blocks; Gemini rejects foreign thought blocks.
+        // Ignore unsigned foreign reasoning blocks; preserve encrypted_content thoughtSignature when present.
+        if (typeof item.encrypted_content === 'string' && item.encrypted_content.trim()) {
+          pendingEncryptedSig = item.encrypted_content.trim()
+        }
       } else {
         if (item.type != null && item.type !== 'message' && item.type !== 'agent_message') {
           throw makeProtocolError(
@@ -2204,7 +2383,15 @@ function parseOpenAIResponsesInbound(body, { headers }) {
 
   let thinking = null
   let hideThinking = false
-  const effort = normalizeEffort(body.reasoning?.effort ?? body.reasoning_effort)
+  const effort = normalizeEffort(
+    firstNonEmptyEffort(
+      configUpdateEffort,
+      body.reasoning?.effort,
+      body.reasoning_effort,
+      body.output_config?.effort,
+      parenEffort,
+    ),
+  )
   if (body.reasoning?.summary === 'none' || body.reasoning?.generate_summary === 'none' || effort === 'none') {
     hideThinking = true
   }
@@ -2216,6 +2403,9 @@ function parseOpenAIResponsesInbound(body, { headers }) {
       includeThoughts: !hideThinking,
     }
   }
+  const includeEncryptedReasoning =
+    Array.isArray(body.include) &&
+    body.include.some((item) => String(item || '').trim() === 'reasoning.encrypted_content')
 
   let responseFormat = null
   const fmt = body.text?.format
@@ -2255,6 +2445,7 @@ function parseOpenAIResponsesInbound(body, { headers }) {
     thinking,
     hideThinking,
     thinkingDisplay: null,
+    includeEncryptedReasoning,
     responseFormat,
     safetySettings: null,
     cachedContent: null,
@@ -2265,8 +2456,8 @@ function parseOpenAIResponsesInbound(body, { headers }) {
 }
 
 function parseAnthropicInbound(body, { headers }) {
-  const model = typeof body.model === 'string' ? body.model : ''
-  if (!MODEL_RE.test(model)) throw makeProtocolError(400, 'gemini_invalid_model', 'A valid Gemini model is required.')
+  const { model, parenEffort } = parseInboundModelSpec(body.model, { allowLeadingModelsPrefix: true })
+  if (!model) throw makeProtocolError(400, 'gemini_invalid_model', 'A valid Gemini model is required.')
   if (body.stream != null && typeof body.stream !== 'boolean') {
     throw makeProtocolError(400, 'gemini_invalid_request', 'stream must be a boolean.')
   }
@@ -2307,6 +2498,7 @@ function parseAnthropicInbound(body, { headers }) {
 
   const extraSystemParts = []
   let inLeadingSystem = true
+  let midTurnEffort = ''
   let webSearch = false
   let searchOptions = null
   const googleTools = []
@@ -2397,6 +2589,8 @@ function parseAnthropicInbound(body, { headers }) {
     if (!isPlainObject(raw) || !['user', 'assistant', 'system'].includes(raw.role)) {
       throw makeProtocolError(400, 'gemini_invalid_request', 'Anthropic message role must be user or assistant.')
     }
+    const msgEff = normalizeEffort(raw.output_config?.effort)
+    if (msgEff) midTurnEffort = msgEff
     if (raw.role === 'system') {
       const sysText =
         typeof raw.content === 'string'
@@ -2539,12 +2733,12 @@ function parseAnthropicInbound(body, { headers }) {
           if (typeof block.signature === 'string' && block.signature.trim()) {
             pendingThinkingSig = block.signature.trim()
           }
-        } else if (
-          block.type === 'redacted_thinking' ||
-          block.type === 'server_tool_use' ||
-          block.type === 'web_search_tool_result'
-        ) {
-          // Do not send foreign thinking or server tool replay blocks back to Gemini.
+        } else if (block.type === 'redacted_thinking') {
+          if (typeof block.data === 'string' && block.data.trim()) {
+            pendingThinkingSig = block.data.trim()
+          }
+        } else if (block.type === 'server_tool_use' || block.type === 'web_search_tool_result') {
+          // Do not send foreign server tool replay blocks back to Gemini.
         } else if (
           block.type === 'search_result' ||
           block.type === 'tool_reference' ||
@@ -2606,7 +2800,7 @@ function parseAnthropicInbound(body, { headers }) {
   let thinking = null
   let hideThinking = false
   let thinkingDisplay = null
-  const effort = normalizeEffort(body.output_config?.effort)
+  const effort = normalizeEffort(firstNonEmptyEffort(midTurnEffort, body.output_config?.effort, parenEffort))
   if (isPlainObject(body.thinking)) {
     const type = String(body.thinking.type || '').toLowerCase()
     const budget = Number(body.thinking.budget_tokens)
@@ -2901,6 +3095,7 @@ function finalizeToolsAndRestoreContext(protocol, ir) {
     maxOutputTokens: Number.isInteger(ir.generationConfig?.maxOutputTokens) ? ir.generationConfig.maxOutputTokens : 0,
     hideThinking: Boolean(ir.hideThinking),
     thinkingDisplay: ir.thinkingDisplay || null,
+    includeEncryptedReasoning: Boolean(ir.includeEncryptedReasoning),
     responseFormat: ir.responseFormat || null,
     searchOptions: ir.searchOptions || null,
   }
@@ -2996,24 +3191,63 @@ function pairFunctionTurns(contents, { responseKey = 'output' } = {}) {
   return out
 }
 
-function buildThinkingConfig(ir, model) {
-  if (!ir.thinking) return null
+function modelSupportsGeminiDefaultThinking(model) {
+  if (!isGeminiSeriesId(model)) return false
+  const lower = String(model || '')
+    .trim()
+    .toLowerCase()
+  if (/(?:^|[-_/])(embedding|imagen|veo|aqa|tts)(?:$|[-_])/.test(lower)) return false
+  if (/gemini-1[.-]/.test(lower)) return false
+  if (/gemini-2\.0(?![0-9])/.test(lower) && !lower.includes('thinking')) return false
+  const gen = geminiGeneration(lower)
+  if (gen >= 3) return true
+  if (/gemini-2\.5/.test(lower) || lower.includes('thinking')) return true
+  return false
+}
+
+function mapGemini3ThinkingLevel(effort, model) {
+  if (effort === 'minimal') return /flash/i.test(model) ? 'minimal' : 'low'
+  if (effort === 'low') return 'low'
+  if (effort === 'medium') return 'medium'
+  if ((effort === 'xhigh' || effort === 'max') && /hydrogen/i.test(model)) return 'xhigh'
+  return 'high'
+}
+
+function buildThinkingConfig(ir, model, { defaultEffort = null } = {}) {
   const gen = geminiGeneration(model)
-  if (ir.thinking.disabled) {
+  const explicit = ir.thinking
+  const modelImplied =
+    extractImpliedModelEffort(ir.requestedModel || '') ||
+    extractImpliedModelEffort(model) ||
+    extractImpliedModelEffort(ir.model)
+  if (explicit?.disabled || (!explicit && modelImplied === 'none')) {
     if (gen >= 3) return { thinkingLevel: 'low', includeThoughts: false }
     return { thinkingBudget: 0 }
   }
-  if (!ir.thinking.enabled && !ir.thinking.effort) return null
-  const tc = { includeThoughts: ir.thinking.includeThoughts !== false }
-  if (gen >= 3) {
-    const effort = ir.thinking.effort || 'medium'
-    if (effort === 'minimal') tc.thinkingLevel = /flash/i.test(model) ? 'minimal' : 'low'
-    else if (effort === 'low') tc.thinkingLevel = 'low'
-    else if (effort === 'medium') tc.thinkingLevel = /flash/i.test(model) || gen > 3 ? 'medium' : 'high'
-    else tc.thinkingLevel = 'high'
+  const hasExplicit = Boolean(explicit && (explicit.enabled || explicit.effort || explicit.budgetTokens != null))
+  const fallbackEffort =
+    (modelImplied && modelImplied !== 'none' ? normalizeEffort(modelImplied) : '') ||
+    (defaultEffort && defaultEffort !== 'off' ? normalizeEffort(defaultEffort) || 'medium' : null)
+  if (!hasExplicit) {
+    const supportsThinking = modelSupportsGeminiDefaultThinking(model) || Boolean(modelImplied)
+    if (!fallbackEffort || fallbackEffort === 'none' || !supportsThinking) {
+      return null
+    }
+    const tc = { includeThoughts: explicit ? explicit.includeThoughts !== false : !ir.hideThinking }
+    if (gen >= 3 || (modelImplied && !isGeminiSeriesId(model))) {
+      tc.thinkingLevel = mapGemini3ThinkingLevel(fallbackEffort, model)
+      return tc
+    }
+    tc.thinkingBudget = budgetFromEffort(fallbackEffort)
     return tc
   }
-  const budget = ir.thinking.budgetTokens || budgetFromEffort(ir.thinking.effort || 'medium')
+  const tc = { includeThoughts: explicit.includeThoughts !== false }
+  const effort = explicit.effort || fallbackEffort || 'medium'
+  if (gen >= 3) {
+    tc.thinkingLevel = mapGemini3ThinkingLevel(effort, model)
+    return tc
+  }
+  const budget = explicit.budgetTokens || budgetFromEffort(effort)
   tc.thinkingBudget = budget
   return tc
 }
@@ -3086,7 +3320,10 @@ function ensureGeminiContentsValid(contents, { antigravity = false } = {}) {
  * Build a canonical Google Gemini `generateContent` request body from IR.
  * `target`: `'gemini'` (Google Gemini API) or `'antigravity'` (Antigravity / Code Assist).
  */
-export function buildGeminiRequest(ir, { target = 'gemini', model = ir.model } = {}) {
+export function buildGeminiRequest(
+  ir,
+  { target = 'gemini', model = ir.model, defaultEffort, includeThinkingConfig = false } = {},
+) {
   const ag = target === 'antigravity'
   const claude = /claude/i.test(model)
   const callNames = new Map()
@@ -3094,6 +3331,13 @@ export function buildGeminiRequest(ir, { target = 'gemini', model = ir.model } =
   const cleanedMessages = dropDuplicateToolResults(ir.messages)
   const resolveWireName = (rawName) =>
     ir.restoreContext?.wireNameFor ? ir.restoreContext.wireNameFor(rawName) : geminiFuncName(rawName)
+  const schemaByToolName = new Map()
+  for (const tool of ir.tools || []) {
+    if (!tool?.name) continue
+    schemaByToolName.set(tool.name, tool.schema)
+    if (tool.wireName) schemaByToolName.set(tool.wireName, tool.schema)
+    if (tool.origName) schemaByToolName.set(tool.origName, tool.schema)
+  }
 
   for (const msg of cleanedMessages) {
     const role = msg.role === 'assistant' ? 'model' : 'user'
@@ -3129,7 +3373,12 @@ export function buildGeminiRequest(ir, { target = 'gemini', model = ir.model } =
       } else if (p.kind === 'tool_call') {
         const safeName = resolveWireName(p.name)
         if (p.id) callNames.set(p.id, safeName)
-        const fnCall = { name: safeName, args: isPlainObject(p.args) ? cleanUndefinedStrings(p.args) : {} }
+        let callArgs = isPlainObject(p.args) ? cleanUndefinedStrings(p.args) : {}
+        if (ag) {
+          const toolSchema = schemaByToolName.get(p.name) || schemaByToolName.get(safeName)
+          callArgs = forwardAgyBridgeToolArgs(callArgs, toolSchema)
+        }
+        const fnCall = { name: safeName, args: callArgs }
         if (p.id) fnCall.id = ag ? p.id.replace(/[^a-zA-Z0-9_-]/g, '_') : p.id
         const part = { functionCall: fnCall }
         if (ag) {
@@ -3243,7 +3492,7 @@ export function buildGeminiRequest(ir, { target = 'gemini', model = ir.model } =
           const wireName = tool.wireName || resolveWireName(tool.name)
           const decl = { name: wireName }
           if (tool.description) decl.description = stripIllegalControlChars(tool.description)
-          decl.parameters = sanitizeGeminiSchema(tool.schema, { plain: true })
+          decl.parameters = avoidAgyBridgeParamCollisions(sanitizeGeminiSchema(tool.schema, { plain: true }))
           return decl
         })
         agTools.push({ functionDeclarations: decls })
@@ -3302,6 +3551,14 @@ export function buildGeminiRequest(ir, { target = 'gemini', model = ir.model } =
     ) {
       agGen.candidateCount = rawGen.candidateCount
     }
+    if (includeThinkingConfig) {
+      const effectiveDefaultEffort =
+        defaultEffort !== undefined ? defaultEffort : resolveGeminiDefaultEffort(ir.requestedModel || model)
+      const tc = buildThinkingConfig(ir, ir.requestedModel || model, {
+        defaultEffort: effectiveDefaultEffort,
+      })
+      if (tc) agGen.thinkingConfig = tc
+    }
     if (Object.keys(agGen).length) req.generationConfig = agGen
 
     if (ir.conversationId) req.conversation_id = ir.conversationId
@@ -3337,7 +3594,8 @@ export function buildGeminiRequest(ir, { target = 'gemini', model = ir.model } =
   }
 
   const gen = { ...ir.extraGenConfig, ...ir.generationConfig }
-  const tc = buildThinkingConfig(ir, model)
+  const effectiveDefaultEffort = defaultEffort !== undefined ? defaultEffort : resolveGeminiDefaultEffort(model)
+  const tc = buildThinkingConfig(ir, model, { defaultEffort: effectiveDefaultEffort })
   if (tc) gen.thinkingConfig = tc
   if (ir.responseFormat) {
     if (ir.responseFormat.type === 'enum' && Array.isArray(ir.responseFormat.values)) {
@@ -3937,6 +4195,7 @@ export function createGeminiRestoreTransform(
         if (ctx.disableParallelTools && emittedToolCalls >= 1) return
         emittedToolCalls += 1
         let args = event.args || {}
+        if (ag) args = restoreAgyBridgeToolArgs(args, entry?.schema)
         if (claudeModel && entry?.schema) {
           args = unquoteClaudeEnumArgs(args, entry.schema)
         }
@@ -4379,12 +4638,18 @@ export function renderGeminiProtocolResponse(
   }
   if (protocol === 'openai-responses') {
     const output = []
-    if (collected.thinking) {
+    const includeEnc = Boolean(restoreContext?.includeEncryptedReasoning)
+    let lastThinkingSig = ''
+    for (const p of collected.parts || []) {
+      if (p.kind === 'thinking' && p.signature) lastThinkingSig = p.signature
+    }
+    if (collected.thinking || (includeEnc && lastThinkingSig)) {
       output.push({
         id: `rs_${randomHex(12)}`,
         type: 'reasoning',
         status: 'completed',
-        summary: [{ type: 'summary_text', text: collected.thinking }],
+        summary: collected.thinking ? [{ type: 'summary_text', text: collected.thinking }] : [],
+        ...(includeEnc && lastThinkingSig ? { encrypted_content: lastThinkingSig } : {}),
       })
     }
     if (collected.text || (!collected.toolCalls.length && !collected.images?.length)) {
@@ -4440,7 +4705,8 @@ export function renderGeminiProtocolResponse(
   }
 }
 
-export function formatGeminiProtocolError(protocol, status, code, message) {
+export function formatGeminiProtocolError(protocol, status, code, message, details = null) {
+  const hasDetails = Boolean(details && typeof details === 'object' && Object.keys(details).length)
   if (protocol === 'gemini') {
     const grpcStatus =
       status === 400
@@ -4453,17 +4719,25 @@ export function formatGeminiProtocolError(protocol, status, code, message) {
               ? 'NOT_FOUND'
               : status === 409
                 ? 'ABORTED'
-                : status === 429
+                : status === 402 || status === 429
                   ? 'RESOURCE_EXHAUSTED'
                   : status === 504
                     ? 'DEADLINE_EXCEEDED'
                     : 'UNAVAILABLE'
+    const info = { '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: code }
+    if (hasDetails) {
+      const metadata = {}
+      for (const [k, v] of Object.entries(details)) {
+        if (v != null) metadata[k] = String(v)
+      }
+      if (Object.keys(metadata).length) info.metadata = metadata
+    }
     return {
       error: {
         code: status,
         message,
         status: grpcStatus,
-        details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: code }],
+        details: [info],
       },
     }
   }
@@ -4474,15 +4748,20 @@ export function formatGeminiProtocolError(protocol, status, code, message) {
         ? 'permission_error'
         : status === 404
           ? 'not_found_error'
-          : status === 429
-            ? 'rate_limit_error'
-            : status >= 500
-              ? 'api_error'
-              : 'invalid_request_error'
+          : code === 'api_key_quota_exhausted'
+            ? 'quota_error'
+            : code === 'api_key_rate_limit' ||
+                code === 'api_key_concurrency_limit' ||
+                code === 'user_concurrency_limit' ||
+                status === 429
+              ? 'rate_limit_error'
+              : status >= 500
+                ? 'api_error'
+                : 'invalid_request_error'
   if (protocol === 'anthropic') {
-    return { type: 'error', error: { type, message, code } }
+    return { type: 'error', error: hasDetails ? { type, message, code, details } : { type, message, code } }
   }
-  return { error: { type, code, message } }
+  return { error: hasDetails ? { type, code, message, details } : { type, code, message } }
 }
 
 export function formatGeminiProtocolStreamError(protocol, status, code, message) {
@@ -4796,8 +5075,9 @@ export function createGeminiProtocolStreamEncoder(
 
   // OpenAI Responses streaming encoder
   const respId = `resp_${randomHex(12)}`
+  const includeEnc = Boolean(restoreContext?.includeEncryptedReasoning)
   let outputIndex = 0
-  let openReasoning = null // { index, id, text }
+  let openReasoning = null // { index, id, text, signature }
   let openText = null // { index, id, text }
   const sse = (type, data) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`
   const ensureStart = () => {
@@ -4808,14 +5088,21 @@ export function createGeminiProtocolStreamEncoder(
   }
   const closeReasoning = () => {
     if (!openReasoning) return ''
-    const { index, id, text } = openReasoning
+    const { index, id, text, signature } = openReasoning
     openReasoning = null
     const part = { type: 'summary_text', text }
-    const item = { id, type: 'reasoning', status: 'completed', summary: [part] }
+    const item = {
+      id,
+      type: 'reasoning',
+      status: 'completed',
+      summary: text ? [part] : [],
+      ...(includeEnc && signature ? { encrypted_content: signature } : {}),
+    }
     return (
-      sse('response.reasoning_summary_text.done', { item_id: id, output_index: index, summary_index: 0, text }) +
-      sse('response.reasoning_summary_part.done', { item_id: id, output_index: index, summary_index: 0, part }) +
-      sse('response.output_item.done', { output_index: index, item })
+      (text
+        ? sse('response.reasoning_summary_text.done', { item_id: id, output_index: index, summary_index: 0, text }) +
+          sse('response.reasoning_summary_part.done', { item_id: id, output_index: index, summary_index: 0, part })
+        : '') + sse('response.output_item.done', { output_index: index, item })
     )
   }
   const closeText = () => {
@@ -4843,12 +5130,28 @@ export function createGeminiProtocolStreamEncoder(
         if (event.model) resolvedModel = event.model
         return ''
       }
+      if (event.kind === 'thinking_signature') {
+        if (openReasoning) {
+          openReasoning.signature = event.signature
+        } else if (includeEnc && event.signature) {
+          let out = ensureStart() + closeText()
+          const index = outputIndex++
+          const id = `rs_${randomHex(10)}`
+          openReasoning = { index, id, text: '', signature: event.signature }
+          out += sse('response.output_item.added', {
+            output_index: index,
+            item: { id, type: 'reasoning', status: 'in_progress', summary: [] },
+          })
+          return out
+        }
+        return ''
+      }
       if (event.kind === 'thinking') {
         let out = ensureStart() + closeText()
         if (!openReasoning) {
           const index = outputIndex++
           const id = `rs_${randomHex(10)}`
-          openReasoning = { index, id, text: '' }
+          openReasoning = { index, id, text: '', signature: '' }
           out += sse('response.output_item.added', {
             output_index: index,
             item: { id, type: 'reasoning', status: 'in_progress', summary: [] },

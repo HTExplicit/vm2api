@@ -44,6 +44,48 @@ const archFor = (projectRoot, kernel, runtimeOptions) =>
   kernel === 'crag' ? cragTargetArch(projectRoot, runtimeOptions) : 'amd64'
 const CRAG_PINNED_RELEASES = [
   {
+    tag: 'payload-2026.11.27-crag-3.1.24',
+    label: '3.1.24 修复工具续接拒答后追问死锁 409',
+    size: 171335019,
+    manifestSha256: 'c6dc588ef37a575673258bafa1db7d2ef8901daccd991890fc58bb7bf8fb601a',
+    sha256: 'f6342c577784159a89352c0aab8fb4ea86f0cc55a024c59904c530dbdbcad934',
+  },
+  {
+    tag: 'payload-2026.11.26-crag-3.1.23',
+    label: '3.1.23 Advisor 用量 iterations 透传与输入归一化',
+    size: 171335938,
+    manifestSha256: '52ec5b674d8df1da42c81d823b75f37245ee43e327018e99d5a5f4b514737daf',
+    sha256: '701a1d9e3799fd34729941c6b942c47d365da629c2a465fe72045eeacc16da00',
+  },
+  {
+    tag: 'payload-2026.11.26-crag-3.1.22',
+    label: '3.1.22 Advisor 工具多余 input_schema 归一化透传',
+    size: 171330504,
+    manifestSha256: 'af6d6808a500f48d0138d71606e59fc38697c2762e708ba21b6306d669fc3c82',
+    sha256: '2f1bfef54f50902cce8ca62c6ae0a986017e2e28d8ca7cf430e9e006982237cc',
+  },
+  {
+    tag: 'payload-2026.11.26-crag-3.1.21',
+    label: '3.1.21 原生遥测真实上传观测与验证',
+    size: 171328602,
+    manifestSha256: '5fb232bcaeb15bb2025afd6efcd0cb0c8ae7b3cc5caac9e2b063e008f30816d3',
+    sha256: '288d4120768c984fc01df90303da27d8755898046db9954c4312e8fa0e6dc469',
+  },
+  {
+    tag: 'payload-2026.11.25-crag-3.1.20',
+    label: '3.1.20 转录文件回收、401续跑重试与 OAuth 用量转发',
+    size: 171286019,
+    manifestSha256: 'b34b3574bd4e2232c28706d56d5c1ff7524a65df630c10b3a4f16746ffd5e09b',
+    sha256: '8b0d2bd3d9a3944f9f4532f1f2b260003f2337380a6d35420a5e670be2fe8aa6',
+  },
+  {
+    tag: 'payload-2026.11.25-crag-3.1.18',
+    label: '3.1.18 中断工具续接冷却恢复与审查结果透传',
+    size: 171194028,
+    manifestSha256: 'b45291ebb3d336b1c66e2a1338a056f877dd6423bedcb02dc8b2717608fbb569',
+    sha256: '007837bfaf155c9e5897dfddc7d4e29d5a993689c3cfc7faec595f78edfd7c8b',
+  },
+  {
     tag: 'payload-2026.11.24-crag-3.1.17',
     label: '3.1.17 Auto Mode 审查结果透传修复',
     size: 171083280,

@@ -10,6 +10,9 @@ import { MessageChannel, Worker, receiveMessageOnPort } from 'node:worker_thread
 import { detectMutatedTables } from './sql-compat.mjs'
 
 const syncWorkerUrl = new URL('./pg-sync-worker.mjs', import.meta.url)
+const SIGNAL_REPLY_INDEX = 0
+const SIGNAL_DEAD_INDEX = 1
+const WAIT_SLICE_MS = 100
 
 function reconstructError(info) {
   const err = new Error(info?.message || 'PostgreSQL query failed')
@@ -26,20 +29,43 @@ function reconstructError(info) {
 
 export class PgSyncDb {
   /**
-   * @param {{ worker?: Worker, port: MessagePort, ownsWorker?: boolean, onMutation?: (tables: string[]) => void }} opts
+   * @param {{ worker?: Worker, port: MessagePort, ownsWorker?: boolean, onMutation?: (tables: string[]) => void, rpcTimeoutMs?: number }} opts
    */
-  constructor({ worker = null, port, ownsWorker = false, onMutation = null }) {
+  constructor({ worker = null, port, ownsWorker = false, onMutation = null, rpcTimeoutMs = 90_000 }) {
     this.engine = 'postgres'
     this._worker = worker
     this._port = port
     this._ownsWorker = ownsWorker
     this._onMutation = onMutation
-    this._sab = new SharedArrayBuffer(4)
+    this._rpcTimeoutMs = Math.max(50, Number(rpcTimeoutMs) || 90_000)
+    this._sab = new SharedArrayBuffer(8)
     this._signal = new Int32Array(this._sab)
     this._seq = 0
     this._inTransaction = false
     this._txMutatedTables = new Set()
     this._closed = false
+    this._workerDead = false
+    this._workerDeadReason = ''
+    this._staleDropped = 0
+    this._timeouts = 0
+
+    if (this._worker) {
+      const wakeDead = (reason) => {
+        this._workerDead = true
+        this._workerDeadReason = reason
+        this._inTransaction = false
+        this._txMutatedTables.clear()
+        Atomics.store(this._signal, SIGNAL_DEAD_INDEX, 1)
+        Atomics.add(this._signal, SIGNAL_REPLY_INDEX, 1)
+        Atomics.notify(this._signal, SIGNAL_REPLY_INDEX)
+      }
+      this._onWorkerError = (err) => wakeDead(`pg-sync-worker error: ${err?.message || err}`)
+      this._onWorkerExit = (code) => {
+        if (!this._closed) wakeDead(`pg-sync-worker exited unexpectedly with code ${code}`)
+      }
+      this._worker.on('error', this._onWorkerError)
+      this._worker.on('exit', this._onWorkerExit)
+    }
   }
 
   get isTransaction() {
@@ -50,28 +76,81 @@ export class PgSyncDb {
     this._onMutation = typeof fn === 'function' ? fn : null
   }
 
+  _drainStaleMessages(beforeId) {
+    let envelope = receiveMessageOnPort(this._port)
+    while (envelope) {
+      const msg = envelope.message
+      if (msg && typeof msg.id === 'number' && msg.id >= beforeId) {
+        throw Object.assign(
+          new Error(`pg-sync-worker protocol error: unexpected response id=${msg.id} before request id=${beforeId}`),
+          { code: 'PG_SYNC_PROTOCOL_ERROR' },
+        )
+      }
+      this._staleDropped += 1
+      envelope = receiveMessageOnPort(this._port)
+    }
+  }
+
   _rpc(op, sql = '', params = []) {
     if (this._closed) throw new Error('PostgreSQL sync connection is closed')
+    if (this._workerDead || Atomics.load(this._signal, SIGNAL_DEAD_INDEX) !== 0) {
+      throw new Error(this._workerDeadReason || 'pg-sync-worker is not running')
+    }
     const id = ++this._seq
-    Atomics.store(this._signal, 0, 0)
+    this._drainStaleMessages(id)
     this._port.postMessage({ id, op, sql, params, sab: this._sab })
-    Atomics.wait(this._signal, 0, 0)
+    const deadline = Date.now() + this._rpcTimeoutMs
 
-    let envelope = receiveMessageOnPort(this._port)
-    let spins = 0
-    while (!envelope && spins < 500) {
-      Atomics.wait(this._signal, 0, 1, 1)
-      envelope = receiveMessageOnPort(this._port)
-      spins += 1
+    while (true) {
+      if (this._workerDead || Atomics.load(this._signal, SIGNAL_DEAD_INDEX) !== 0) {
+        throw new Error(this._workerDeadReason || 'pg-sync-worker exited during query')
+      }
+      // Snapshot reply counter BEFORE reading the MessagePort so a reply
+      // posted concurrently cannot cause a missed Atomics.wait wakeup.
+      const seen = Atomics.load(this._signal, SIGNAL_REPLY_INDEX)
+      let envelope = receiveMessageOnPort(this._port)
+      while (envelope) {
+        const msg = envelope.message
+        if (msg && typeof msg.id === 'number') {
+          if (msg.id < id) {
+            this._staleDropped += 1
+            envelope = receiveMessageOnPort(this._port)
+            continue
+          }
+          if (msg.id === id) {
+            if (!msg.ok) {
+              throw reconstructError(msg.error)
+            }
+            return msg.result
+          }
+          throw Object.assign(new Error(`pg-sync-worker protocol error: expected id=${id}, got id=${msg.id}`), {
+            code: 'PG_SYNC_PROTOCOL_ERROR',
+          })
+        }
+        envelope = receiveMessageOnPort(this._port)
+      }
+
+      if (Atomics.load(this._signal, SIGNAL_REPLY_INDEX) !== seen) {
+        continue
+      }
+
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        this._timeouts += 1
+        if (op === 'begin') {
+          // Best-effort async rollback so a late-completing BEGIN cannot leak state.txClient.
+          try {
+            const rollbackId = ++this._seq
+            this._port.postMessage({ id: rollbackId, op: 'rollback', sql: '', params: [], sab: this._sab })
+          } catch {}
+        }
+        throw Object.assign(new Error(`pg-sync-worker timed out after ${this._rpcTimeoutMs}ms for op=${op}`), {
+          code: 'PG_SYNC_TIMEOUT',
+        })
+      }
+
+      Atomics.wait(this._signal, SIGNAL_REPLY_INDEX, seen, Math.min(remaining, WAIT_SLICE_MS))
     }
-    if (!envelope?.message) {
-      throw new Error(`pg-sync-worker returned no response for op=${op}`)
-    }
-    const msg = envelope.message
-    if (!msg.ok) {
-      throw reconstructError(msg.error)
-    }
-    return msg.result
   }
 
   _recordMutation(sql) {
@@ -190,7 +269,13 @@ export class PgSyncDb {
 
   poolStats() {
     try {
-      return this._rpc('stats')
+      const stats = this._rpc('stats')
+      if (!stats || typeof stats !== 'object') return stats
+      return {
+        ...stats,
+        stale_dropped: this._staleDropped,
+        timeouts: this._timeouts,
+      }
     } catch {
       return null
     }
@@ -203,6 +288,8 @@ export class PgSyncDb {
       this._port.close()
     } catch {}
     if (this._ownsWorker && this._worker) {
+      if (this._onWorkerError) this._worker.off('error', this._onWorkerError)
+      if (this._onWorkerExit) this._worker.off('exit', this._onWorkerExit)
       try {
         this._worker.postMessage({ op: 'shutdown' })
       } catch {}
@@ -217,7 +304,7 @@ export class PgSyncDb {
 /**
  * Spawn the dedicated `pg-sync-worker` and return an initialized `PgSyncDb` instance.
  */
-export async function createPgSyncDb(pgConfig, { onMutation = null } = {}) {
+export async function createPgSyncDb(pgConfig, { onMutation = null, rpcTimeoutMs = null } = {}) {
   const worker = new Worker(syncWorkerUrl, {
     workerData: { pgConfig },
   })
@@ -254,5 +341,6 @@ export async function createPgSyncDb(pgConfig, { onMutation = null } = {}) {
   const { port1, port2 } = new MessageChannel()
   worker.postMessage({ op: 'attach', port: port2 }, [port2])
 
-  return new PgSyncDb({ worker, port: port1, ownsWorker: true, onMutation })
+  const effectiveTimeout = rpcTimeoutMs ?? Math.max(30_000, (Number(pgConfig?.statementTimeoutMs) || 60_000) + 30_000)
+  return new PgSyncDb({ worker, port: port1, ownsWorker: true, onMutation, rpcTimeoutMs: effectiveTimeout })
 }

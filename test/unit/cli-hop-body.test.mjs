@@ -5,6 +5,7 @@ import {
   prepareOutboundEnvelope,
   stripCliOwnedSystem,
 } from '../../src/lib/protocol/outbound-attempt.mjs'
+import { validateCacheBreakpoints } from '../../src/lib/protocol/cache-ttl.mjs'
 import {
   applyCrsUnofficialPersona,
   CRS_OFFICIAL_SYSTEM,
@@ -13,7 +14,7 @@ import {
 } from '../../src/lib/identity/crs-persona.mjs'
 import { CRS_OFFICIAL_AGENT_PROMPT } from '../../src/lib/identity/official-cc-system-2.1.241.mjs'
 
-test('CLI zero preserves caller TTLs against a different platform default', () => {
+test('CLI zero preserves explicit caller TTLs and fills omitted TTLs from platform default', () => {
   for (const controls of [
     [{ type: 'ephemeral', ttl: '1h' }],
     [{ type: 'ephemeral', ttl: '5m' }],
@@ -33,7 +34,7 @@ test('CLI zero preserves caller TTLs against a different platform default', () =
       const body = prepareCliHopBody(input, { personaPreset: 'zero', cacheTtl })
       assert.deepEqual(
         body.system.map((block) => block.cache_control),
-        controls,
+        controls.map((control) => (control.ttl ? control : { ...control, ttl: cacheTtl })),
       )
     }
     assert.deepEqual(input, before)
@@ -139,7 +140,7 @@ test('environment opt-out prevents HTTP slot selection from overwriting caller t
   assert.deepEqual(body.system, [{ type: 'text', text: caller }])
 })
 
-test('cli-hop passthrough rejects invalid caller markers instead of repairing them', () => {
+test('cli-hop passthrough auto-repairs invalid caller markers instead of violently rejecting', () => {
   const request = (content) => ({
     model: 'claude-opus-5-5',
     messages: [{ role: 'user', content }],
@@ -154,14 +155,8 @@ test('cli-hop passthrough rejects invalid caller markers instead of repairing th
   ]) {
     const input = request(content)
     const before = structuredClone(input)
-    assert.throws(
-      () => prepareCliHopBody(input, { preserveSystem: true }),
-      (error) => {
-        assert.equal(error.status, 400)
-        assert.equal(error.body.error.code, 'invalid_cache_control')
-        return true
-      },
-    )
+    const out = prepareCliHopBody(input, { preserveSystem: true })
+    assert.doesNotThrow(() => validateCacheBreakpoints(out))
     assert.deepEqual(input, before)
   }
 })

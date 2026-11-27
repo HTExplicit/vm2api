@@ -23,6 +23,18 @@ export type FailureDiagnostics = {
   cleanupErrorCode?: string
 }
 
+/** 安全脱敏后的标量错误诊断字段（upstream_type / #1705 续传恢复字段 / 410 reason / 风控 JEV 分数）。 */
+export type LogErrorDetails = Record<string, string | number | boolean>
+
+/** 拦截网关单次裁决结构（usage_logs.intercept）。 */
+export type InterceptVerdict = {
+  kind: 'pass' | 'block'
+  by: string
+  keyword?: string
+  rule?: string
+  route?: { kind: string; target: string; score?: number }
+}
+
 /** 单次上游尝试，`request_attempts` 直出，按 `attemptNumber` 升序构成供应商链。 */
 export type ProviderChainItem = {
   attemptNumber: number
@@ -44,11 +56,19 @@ export type ProviderChainItem = {
   errorScope: string | null
   errorCode?: string | null
   errorMessage?: string | null
+  upstreamType?: string | null
+  errorDetails?: LogErrorDetails | null
   /** 本次尝试的终态（success / exhausted / cooldown / …）。 */
   terminalState: string | null
   action: string | null
   /** 该次尝试是否已把响应提交给下游（= 最终服务方）。 */
   downstreamCommitted: boolean
+  /** 网关发给槽位内核的单跳 request_id，用于对照 `docker logs kin-NN`。 */
+  hopRequestId?: string | null
+  providerRunId?: string | null
+  providerTurnId?: string | null
+  providerAttemptId?: number | null
+  providerRequestId?: string | null
   /** 调度总耗时，包含实际排队；历史记录没有拆分。 */
   waitMs: number | null
   queueWaitMs: number | null
@@ -207,6 +227,10 @@ export type UsageLogRow = {
   errorCode: string | null
   errorMessage: string | null
   failureDiagnostics?: FailureDiagnostics | null
+  upstreamType?: string | null
+  errorDetails?: LogErrorDetails | null
+  /** 网关裁决 JSON（via / keyword / rule / route）。 */
+  intercept?: InterceptVerdict | null
   /** classifyJev 实际 POST 的 state。送审上下文，不是模型指出的命中句。 */
   jevState: string | null
 
@@ -261,6 +285,12 @@ export type UsageLogFilters = {
   endpoint?: string
   /** (`protocol`) */
   protocol?: string
+  /** (`via`) 精确匹配路由/拦截器标签（如 jev / hard-regex / refusal-guard / distill-detect）。 */
+  via?: string
+  /** (`final_state`) 精确匹配终态（如 policy_blocked / refusal_device / refusal_session）。 */
+  finalState?: string
+  /** (`upstream_risk_errors=1`) 上游 400/401/403/422 风险与错误诊断行。 */
+  upstreamRiskErrors?: boolean
   /** (`status_code`) 精确状态码。 */
   statusCode?: number
   /** (`exclude_status_200=1`) 只看非 2xx；与 statusCode 互斥，后者优先。 */

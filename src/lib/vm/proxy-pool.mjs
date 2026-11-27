@@ -37,6 +37,14 @@ export const BIND_LIMIT_MIN = 1
 export const BIND_LIMIT_MAX = 32
 export const PROXY_LABEL_MAX = 64
 const PROBE_BATCH_CONCURRENCY = 4
+/** Greeting-only remote SOCKS checks share the event loop; stagger avoids pile-ups. */
+const PROBE_REMOTE_STAGGER_MS = 400
+
+export function isRemoteSocksProbeRow(proxy) {
+  if (!proxy || isLocalEgressProxy(proxy) || proxy.scheme === 'http') return false
+  const host = normalizeSocksHost(proxy.host)
+  return !!host && !isLocalForwarderHost(host)
+}
 
 const DEFAULT_CONFIG = {
   probe_interval_min: 10, // 5 | 10 | 30 | 60
@@ -1750,18 +1758,27 @@ export class ProxyPool extends EventEmitter {
         if (p.enabled) return true
         return p.status === 'fail' || (p.status === 'dead' && p.last_error)
       })
+      const indexed = list.map((p, index) => ({ p, index }))
+      const remote = indexed.filter(({ p }) => isRemoteSocksProbeRow(p))
+      const local = indexed.filter(({ p }) => !isRemoteSocksProbeRow(p))
+      const applyOne = async ({ p, index }) => {
+        if (!this.state.proxies.includes(p) || (onlyEnabled && this._isManuallyDisabled(p))) return
+        const result = await this._probeAndApply(p)
+        results[index] = { id: p.id, ...result, status: p.status, enabled: p.enabled }
+      }
       let next = 0
       await Promise.all(
-        Array.from({ length: Math.min(PROBE_BATCH_CONCURRENCY, list.length) }, async () => {
-          while (next < list.length) {
-            const index = next++
-            const p = list[index]
-            if (!this.state.proxies.includes(p) || (onlyEnabled && this._isManuallyDisabled(p))) continue
-            const result = await this._probeAndApply(p)
-            results[index] = { id: p.id, ...result, status: p.status, enabled: p.enabled }
+        Array.from({ length: Math.min(PROBE_BATCH_CONCURRENCY, local.length) }, async () => {
+          while (next < local.length) {
+            const slot = local[next++]
+            await applyOne(slot)
           }
         }),
       )
+      for (let i = 0; i < remote.length; i++) {
+        if (i > 0) await new Promise((resolve) => setTimeout(resolve, PROBE_REMOTE_STAGGER_MS))
+        await applyOne(remote[i])
+      }
       this.save()
       const completed = results.filter(Boolean)
       return { ok: true, total: completed.length, results: completed }

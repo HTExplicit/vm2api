@@ -8,11 +8,17 @@
  * into CRAG or Anthropic upstream.
  */
 import { CRS_OFFICIAL_CLI_SYSTEM } from '../identity/crs-persona.mjs'
-import { materializeAutomaticCache } from './cache-ttl.mjs'
+import {
+  DEFAULT_CACHE_TTL,
+  isCleanCacheControl,
+  materializeAutomaticCache,
+  normalizeCacheControlObject,
+  repairCacheBreakpoints,
+} from './cache-ttl.mjs'
+import { isEmptyEffortValue } from './log-fields.mjs'
 import { normalizeToolInputSchemas } from './tool-input-schema.mjs'
 
 const BILLING_LINE_RE = /^x-anthropic-billing-header:/i
-const VALID_TTL = new Set(['5m', '1h'])
 
 export const CRAG_CORE_ALLOWED_TOP_KEYS = Object.freeze(
   new Set([
@@ -96,7 +102,26 @@ const CUSTOM_TOOL_KEYS = new Set([
   'cache_control',
 ])
 
-const ADVISOR_TOOL_KEYS = new Set(['type', 'name', 'model', 'max_uses', 'caching', 'cache_control'])
+// `max_tokens` bounds the advisor's own output (thinking + text) per call; at the
+// cap the result block comes back with stop_reason "max_tokens". Dropping it
+// silently removed the caller's ceiling on advisor spend.
+//
+// `defer_loading` is what Claude Code actually sends: its advisor arrives as
+// {type, name, model, defer_loading: true} -- no max_uses, no caching. It is
+// already allowed on custom tools (CUSTOM_TOOL_KEYS above), and dropping it only
+// here cost the caller both halves of deferred loading: the field itself, and the
+// advanced-tool-use beta, since beta derivation runs on the sanitized body
+// (go-worker-client.mjs builds `main` from prepareCragRequest's output).
+const ADVISOR_TOOL_KEYS = new Set([
+  'type',
+  'name',
+  'model',
+  'max_uses',
+  'max_tokens',
+  'caching',
+  'defer_loading',
+  'cache_control',
+])
 
 const PROVIDER_TOOL_DROP_KEYS = new Set(['annotations', 'function', 'parameters'])
 
@@ -106,11 +131,29 @@ const BLOCK_KEYS_BY_TYPE = Object.freeze({
   text: new Set(['type', 'text', 'cache_control']),
   image: new Set(['type', 'source', 'cache_control']),
   document: new Set(['type', 'source', 'title', 'context', 'citations', 'cache_control']),
-  tool_use: new Set(['type', 'id', 'name', 'input', 'caller', 'cache_control']),
+  // `extension` rides along opaquely: it is minted by the gateway's issued-tool
+  // replay (issued-tool-replay.mjs), which restores its own remembered value over
+  // whatever the client echoed back before this sanitization runs. The CRAG
+  // continuation hash covers these bytes, so it cannot be reshaped or refilled --
+  // dropping it is what broke the replay on the CRAG path. cli-node keeps it too
+  // (see kernel-request.mjs "Keep official extension fields").
+  tool_use: new Set(['type', 'id', 'name', 'input', 'caller', 'extension', 'cache_control']),
   tool_result: new Set(['type', 'tool_use_id', 'content', 'is_error', 'cache_control']),
   thinking: new Set(['type', 'thinking', 'signature']),
   redacted_thinking: new Set(['type', 'data']),
   tool_reference: new Set(['type', 'tool_name', 'cache_control']),
+  tool_addition: new Set(['type', 'tool', 'cache_control']),
+  tool_removal: new Set(['type', 'tool', 'cache_control']),
+})
+
+/**
+ * Inline tools carried by `tool_addition` / `tool_removal`. Note the reference
+ * form keys off `name` here, unlike the top-level `tool_reference` block which
+ * uses `tool_name`.
+ */
+const INLINE_TOOL_KEYS_BY_TYPE = Object.freeze({
+  tool_reference: new Set(['type', 'name']),
+  tool_definition: new Set(['type', 'definition']),
 })
 
 const PROVIDER_HISTORY_BLOCK_TYPES = new Set([
@@ -125,7 +168,7 @@ const PROVIDER_HISTORY_BLOCK_TYPES = new Set([
   'advisor_tool_result',
 ])
 
-const THINKING_KEYS = new Set(['type', 'budget_tokens', 'display'])
+const THINKING_KEYS = new Set(['type', 'budget_tokens', 'display', 'block_binding'])
 const TOOL_CHOICE_KEYS = new Set(['type', 'name', 'disable_parallel_tool_use'])
 const OUTPUT_CONFIG_KEYS = new Set(['effort', 'format', 'task_budget'])
 const CONTEXT_MANAGEMENT_KEYS = new Set(['edits'])
@@ -160,6 +203,12 @@ function pickKeys(source, allowedSet) {
   return out
 }
 
+function pickOutputConfig(source) {
+  const cfg = pickKeys(source, OUTPUT_CONFIG_KEYS)
+  if (Object.hasOwn(cfg, 'effort') && isEmptyEffortValue(cfg.effort)) delete cfg.effort
+  return Object.keys(cfg).length ? cfg : undefined
+}
+
 function hasOnlyAllowedKeys(source, allowedSet) {
   for (const key of Object.keys(source)) {
     if (!allowedSet.has(key)) return false
@@ -167,31 +216,19 @@ function hasOnlyAllowedKeys(source, allowedSet) {
   return true
 }
 
-/** Strict whitelist rebuild of cache_control: only `{ type: 'ephemeral', ttl?: '5m'|'1h' }`. */
-export function sanitizeCragCacheControl(control, param = 'cache_control') {
-  if (control == null) return undefined
-  if (!isPlainObject(control)) invalid(param, 'must be an object', 'invalid_cache_control')
-  if (control.type !== 'ephemeral') {
-    invalid(param, 'must use type "ephemeral"', 'invalid_cache_control')
-  }
-  const out = { type: 'ephemeral' }
-  if (control.ttl != null && String(control.ttl).trim() !== '') {
-    if (!VALID_TTL.has(control.ttl)) {
-      invalid(`${param}.ttl`, 'must be "5m" or "1h"', 'invalid_cache_control')
-    }
-    out.ttl = control.ttl
-  }
-  return out
+/** Strict whitelist rebuild of cache_control: repairs into `{ type: 'ephemeral', ttl?: '5m'|'1h' }` or drops unusable markers. */
+export function sanitizeCragCacheControl(control) {
+  return normalizeCacheControlObject(control, { stripExtraFields: true })
 }
 
-function isCleanCacheControl(control) {
-  if (control == null) return true
-  if (!isPlainObject(control) || control.type !== 'ephemeral') return false
-  for (const key of Object.keys(control)) {
-    if (key !== 'type' && key !== 'ttl') return false
-  }
-  if (control.ttl != null && !VALID_TTL.has(control.ttl)) return false
-  return true
+function applySanitizedCacheControl(target, control) {
+  const clean = sanitizeCragCacheControl(control)
+  if (clean !== undefined) target.cache_control = clean
+  else delete target.cache_control
+}
+
+function isCleanCragCacheControl(control) {
+  return control == null || isCleanCacheControl(control, { stripExtraFields: true })
 }
 
 /** True when system only carries the placeholder CLI identity left by third-party relocation. */
@@ -244,11 +281,50 @@ function sanitizeSystem(system) {
     if (!cleaned.trim()) continue
     const block = { type: 'text', text: cleaned }
     if (entry.cache_control != null) {
-      block.cache_control = sanitizeCragCacheControl(entry.cache_control, `${param}.cache_control`)
+      applySanitizedCacheControl(block, entry.cache_control)
     }
     out.push(block)
   }
   return out.length ? out : undefined
+}
+
+/**
+ * Strict rebuild of a `tool_addition` / `tool_removal` inline tool.
+ *
+ * The definition form is handed to `sanitizeToolDefinition` so an inline tool
+ * cannot route arbitrary fields to upstream by nesting them one level deeper
+ * than the `tools` array.
+ */
+function sanitizeInlineTool(tool, param, capabilities) {
+  if (!isPlainObject(tool) || typeof tool.type !== 'string' || !tool.type) {
+    invalid(param, 'must be a typed inline tool')
+  }
+  if (tool.type === 'tool_reference') {
+    if (typeof tool.name !== 'string' || !tool.name) invalid(`${param}.name`, 'is required')
+    return { type: 'tool_reference', name: tool.name }
+  }
+  if (tool.type === 'tool_definition') {
+    if (!isPlainObject(tool.definition)) invalid(`${param}.definition`, 'must be an object')
+    return {
+      type: 'tool_definition',
+      definition: sanitizeToolDefinition(tool.definition, `${param}.definition`, capabilities),
+    }
+  }
+  return invalid(`${param}.type`, `unsupported inline tool type "${tool.type}"`)
+}
+
+/**
+ * Fast-path cleanliness for an inline tool. The reference form is small enough
+ * to verify exactly; the definition form is deliberately reported as unclean so
+ * it goes through the rebuild instead of duplicating every rule in
+ * `sanitizeToolDefinition` here. That costs canonical-history reuse on those
+ * turns and keeps correctness in one place.
+ */
+function isCleanInlineTool(tool) {
+  if (!isPlainObject(tool)) return false
+  if (tool.type !== 'tool_reference') return false
+  if (!hasOnlyAllowedKeys(tool, INLINE_TOOL_KEYS_BY_TYPE.tool_reference)) return false
+  return typeof tool.name === 'string' && !!tool.name
 }
 
 function isCleanBlock(block) {
@@ -260,7 +336,7 @@ function isCleanBlock(block) {
   const allowed = BLOCK_KEYS_BY_TYPE[block.type]
   if (allowed) {
     if (!hasOnlyAllowedKeys(block, allowed)) return false
-    if (!isCleanCacheControl(block.cache_control)) return false
+    if (!isCleanCragCacheControl(block.cache_control)) return false
     if (block.type === 'text' && typeof block.text !== 'string') return false
     if (block.type === 'tool_use') {
       if (
@@ -277,10 +353,13 @@ function isCleanBlock(block) {
       if (typeof block.tool_use_id !== 'string' || !block.tool_use_id) return false
       if (Array.isArray(block.content) && !block.content.every(isCleanBlock)) return false
     }
+    if (block.type === 'tool_addition' || block.type === 'tool_removal') {
+      if (!isCleanInlineTool(block.tool)) return false
+    }
     return true
   }
   if (PROVIDER_HISTORY_BLOCK_TYPES.has(block.type)) {
-    return !Object.hasOwn(block, 'annotations') && isCleanCacheControl(block.cache_control)
+    return !Object.hasOwn(block, 'annotations') && isCleanCragCacheControl(block.cache_control)
   }
   return false
 }
@@ -290,6 +369,14 @@ function isCleanMessages(messages) {
   for (const message of messages) {
     if (!isPlainObject(message) || !hasOnlyAllowedKeys(message, MESSAGE_ALLOWED_KEYS)) return false
     if (!['user', 'assistant', 'system'].includes(message.role)) return false
+    if (message.output_config != null) {
+      if (!isPlainObject(message.output_config) || !hasOnlyAllowedKeys(message.output_config, OUTPUT_CONFIG_KEYS)) {
+        return false
+      }
+      if (Object.hasOwn(message.output_config, 'effort') && isEmptyEffortValue(message.output_config.effort)) {
+        return false
+      }
+    }
     if (typeof message.content === 'string') continue
     if (!Array.isArray(message.content)) return false
     if (!message.content.every(isCleanBlock)) return false
@@ -297,7 +384,7 @@ function isCleanMessages(messages) {
   return true
 }
 
-function sanitizeContentBlock(block, param) {
+function sanitizeContentBlock(block, param, capabilities) {
   if (typeof block === 'string') return { type: 'text', text: block }
   if (!isPlainObject(block) || typeof block.type !== 'string' || !block.type) {
     invalid(param, 'must be a typed content block')
@@ -306,23 +393,17 @@ function sanitizeContentBlock(block, param) {
   if (type === 'text') {
     if (typeof block.text !== 'string') invalid(`${param}.text`, 'must be a string')
     const out = { type: 'text', text: block.text }
-    if (block.cache_control != null) {
-      out.cache_control = sanitizeCragCacheControl(block.cache_control, `${param}.cache_control`)
-    }
+    if (block.cache_control != null) applySanitizedCacheControl(out, block.cache_control)
     return out
   }
   if (type === 'image') {
     const out = pickKeys(block, BLOCK_KEYS_BY_TYPE.image)
-    if (out.cache_control != null) {
-      out.cache_control = sanitizeCragCacheControl(out.cache_control, `${param}.cache_control`)
-    }
+    if (out.cache_control != null) applySanitizedCacheControl(out, out.cache_control)
     return out
   }
   if (type === 'document') {
     const out = pickKeys(block, BLOCK_KEYS_BY_TYPE.document)
-    if (out.cache_control != null) {
-      out.cache_control = sanitizeCragCacheControl(out.cache_control, `${param}.cache_control`)
-    }
+    if (out.cache_control != null) applySanitizedCacheControl(out, out.cache_control)
     return out
   }
   if (type === 'tool_use') {
@@ -330,9 +411,7 @@ function sanitizeContentBlock(block, param) {
     if (typeof block.name !== 'string' || !block.name) invalid(`${param}.name`, 'is required')
     if (!isPlainObject(block.input)) invalid(`${param}.input`, 'must be an object')
     const out = pickKeys(block, BLOCK_KEYS_BY_TYPE.tool_use)
-    if (out.cache_control != null) {
-      out.cache_control = sanitizeCragCacheControl(out.cache_control, `${param}.cache_control`)
-    }
+    if (out.cache_control != null) applySanitizedCacheControl(out, out.cache_control)
     return out
   }
   if (type === 'tool_result') {
@@ -343,14 +422,14 @@ function sanitizeContentBlock(block, param) {
       if (typeof block.content === 'string') {
         out.content = block.content
       } else if (Array.isArray(block.content)) {
-        out.content = block.content.map((child, i) => sanitizeContentBlock(child, `${param}.content[${i}]`))
+        out.content = block.content.map((child, i) =>
+          sanitizeContentBlock(child, `${param}.content[${i}]`, capabilities),
+        )
       } else if (block.content !== null) {
         invalid(`${param}.content`, 'must be text or an array of content blocks')
       }
     }
-    if (block.cache_control != null) {
-      out.cache_control = sanitizeCragCacheControl(block.cache_control, `${param}.cache_control`)
-    }
+    if (block.cache_control != null) applySanitizedCacheControl(out, block.cache_control)
     return out
   }
   if (type === 'thinking') {
@@ -364,23 +443,30 @@ function sanitizeContentBlock(block, param) {
   }
   if (type === 'tool_reference') {
     const out = pickKeys(block, BLOCK_KEYS_BY_TYPE.tool_reference)
-    if (out.cache_control != null) {
-      out.cache_control = sanitizeCragCacheControl(out.cache_control, `${param}.cache_control`)
-    }
+    if (out.cache_control != null) applySanitizedCacheControl(out, out.cache_control)
+    return out
+  }
+  if (type === 'tool_addition' || type === 'tool_removal') {
+    const out = { type, tool: sanitizeInlineTool(block.tool, `${param}.tool`, capabilities) }
+    if (block.cache_control != null) applySanitizedCacheControl(out, block.cache_control)
     return out
   }
   if (PROVIDER_HISTORY_BLOCK_TYPES.has(type)) {
     const out = {}
     for (const [k, v] of Object.entries(block)) {
       if (v === undefined || k === 'annotations') continue
-      out[k] = k === 'cache_control' ? sanitizeCragCacheControl(v, `${param}.cache_control`) : v
+      if (k === 'cache_control') {
+        applySanitizedCacheControl(out, v)
+        continue
+      }
+      out[k] = v
     }
     return out
   }
   invalid(param, `unsupported content block type "${type}"`)
 }
 
-function sanitizeMessages(messages, { preserveCanonicalHistory = false } = {}) {
+function sanitizeMessages(messages, { preserveCanonicalHistory = false, capabilities } = {}) {
   if (!Array.isArray(messages) || !messages.length) invalid('messages', 'must be a non-empty array')
   if (preserveCanonicalHistory && isCleanMessages(messages)) return messages
   return messages.map((message, index) => {
@@ -391,7 +477,7 @@ function sanitizeMessages(messages, { preserveCanonicalHistory = false } = {}) {
       out.content = message.content
     } else if (Array.isArray(message.content)) {
       out.content = message.content.map((block, blockIndex) =>
-        sanitizeContentBlock(block, `${param}.content[${blockIndex}]`),
+        sanitizeContentBlock(block, `${param}.content[${blockIndex}]`, capabilities),
       )
     } else if (message.content == null && (message.output_config != null || message.clear_at != null)) {
       out.content = []
@@ -399,11 +485,71 @@ function sanitizeMessages(messages, { preserveCanonicalHistory = false } = {}) {
       invalid(`${param}.content`, 'must be text or an array of content blocks')
     }
     if (message.output_config != null && isPlainObject(message.output_config)) {
-      out.output_config = pickKeys(message.output_config, OUTPUT_CONFIG_KEYS)
+      const cfg = pickOutputConfig(message.output_config)
+      if (cfg) out.output_config = cfg
     }
     if (message.clear_at != null) out.clear_at = message.clear_at
     return out
   })
+}
+
+/**
+ * Strict whitelist rebuild of a single tool definition.
+ *
+ * Shared by the top-level `tools` array and by the inline definitions carried
+ * in `tool_addition` blocks, so an inline tool cannot smuggle fields past the
+ * same checks. Cross-tool name uniqueness stays with the caller: inline tools
+ * are added mid-conversation and do not share a namespace with `tools`.
+ */
+function sanitizeToolDefinition(tool, param, capabilities) {
+  if (!isPlainObject(tool) || typeof tool.name !== 'string' || !tool.name) {
+    invalid(param, 'must have a valid tool name')
+  }
+  const [normalized] = normalizeToolInputSchemas([tool], invalid)
+  tool = isPlainObject(normalized) ? normalized : tool
+  if (tool.type === 'function' || Object.hasOwn(tool, 'function') || Object.hasOwn(tool, 'parameters')) {
+    invalid(param, 'must use a Claude tool definition')
+  }
+  if (tool.type === 'advisor_20260301') {
+    // name and model are upstream contract fields and remain fail-closed; a stray
+    // input_schema (e.g. synthesized by an intermediate proxy) is stripped by
+    // pickKeys below instead of refusing the whole turn (aligned with CRAG PR #31).
+    if (tool.name !== 'advisor' || typeof tool.model !== 'string' || !tool.model.trim()) {
+      invalid(param, 'invalid native advisor tool definition')
+    }
+    const clean = pickKeys(tool, ADVISOR_TOOL_KEYS)
+    if (clean.cache_control != null) applySanitizedCacheControl(clean, clean.cache_control)
+    return clean
+  }
+  if (tool.type != null && tool.type !== 'custom') {
+    const expectedName = CRAG_PROVIDER_TOOL_NAMES.get(tool.type)
+    const hasCap = Array.isArray(capabilities) && capabilities.includes('provider_managed_tools_v1')
+    if (!expectedName || (Array.isArray(capabilities) && !hasCap)) {
+      invalid(`${param}.type`, 'this CRAG runtime does not support this provider-managed tool')
+    }
+    if (tool.name !== expectedName) {
+      invalid(`${param}.name`, `must be ${expectedName} for this provider-managed tool`)
+    }
+    if (tool.input_schema !== undefined) {
+      invalid(`${param}.input_schema`, 'is not allowed on provider-managed tools')
+    }
+    const clean = {}
+    for (const [k, v] of Object.entries(tool)) {
+      if (v === undefined || PROVIDER_TOOL_DROP_KEYS.has(k)) continue
+      if (k === 'cache_control') {
+        applySanitizedCacheControl(clean, v)
+        continue
+      }
+      clean[k] = v
+    }
+    return clean
+  }
+  if (!isPlainObject(tool.input_schema) || tool.input_schema.type !== 'object') {
+    invalid(`${param}.input_schema`, 'must be an object schema')
+  }
+  const clean = pickKeys(tool, CUSTOM_TOOL_KEYS)
+  if (clean.cache_control != null) applySanitizedCacheControl(clean, clean.cache_control)
+  return clean
 }
 
 function sanitizeTools(rawTools, capabilities) {
@@ -418,56 +564,8 @@ function sanitizeTools(rawTools, capabilities) {
     if (!isPlainObject(tool) || typeof tool.name !== 'string' || !tool.name || names.has(tool.name)) {
       invalid(param, 'must have a unique tool name')
     }
-    if (tool.type === 'function' || Object.hasOwn(tool, 'function') || Object.hasOwn(tool, 'parameters')) {
-      invalid(param, 'must use a Claude tool definition')
-    }
-    if (tool.type === 'advisor_20260301') {
-      if (
-        tool.name !== 'advisor' ||
-        typeof tool.model !== 'string' ||
-        !tool.model.trim() ||
-        tool.input_schema !== undefined
-      ) {
-        invalid(param, 'invalid native advisor tool definition')
-      }
-      const clean = pickKeys(tool, ADVISOR_TOOL_KEYS)
-      if (clean.cache_control != null) {
-        clean.cache_control = sanitizeCragCacheControl(clean.cache_control, `${param}.cache_control`)
-      }
-      names.add(tool.name)
-      out.push(clean)
-      continue
-    }
-    if (tool.type != null && tool.type !== 'custom') {
-      const expectedName = CRAG_PROVIDER_TOOL_NAMES.get(tool.type)
-      const hasCap = Array.isArray(capabilities) && capabilities.includes('provider_managed_tools_v1')
-      if (!expectedName || (Array.isArray(capabilities) && !hasCap)) {
-        invalid(`${param}.type`, 'this CRAG runtime does not support this provider-managed tool')
-      }
-      if (tool.name !== expectedName) {
-        invalid(`${param}.name`, `must be ${expectedName} for this provider-managed tool`)
-      }
-      if (tool.input_schema !== undefined) {
-        invalid(`${param}.input_schema`, 'is not allowed on provider-managed tools')
-      }
-      const clean = {}
-      for (const [k, v] of Object.entries(tool)) {
-        if (v === undefined || PROVIDER_TOOL_DROP_KEYS.has(k)) continue
-        clean[k] = k === 'cache_control' ? sanitizeCragCacheControl(v, `${param}.cache_control`) : v
-      }
-      names.add(tool.name)
-      out.push(clean)
-      continue
-    }
-    if (!isPlainObject(tool.input_schema) || tool.input_schema.type !== 'object') {
-      invalid(`${param}.input_schema`, 'must be an object schema')
-    }
-    const clean = pickKeys(tool, CUSTOM_TOOL_KEYS)
-    if (clean.cache_control != null) {
-      clean.cache_control = sanitizeCragCacheControl(clean.cache_control, `${param}.cache_control`)
-    }
+    out.push(sanitizeToolDefinition(tool, param, capabilities))
     names.add(tool.name)
-    out.push(clean)
   }
   return out
 }
@@ -507,31 +605,15 @@ export function sanitizeSafeguardsForCrag(safeguards, capabilities) {
   return { value: out.length ? out : undefined, stripped: false }
 }
 
-function validateBreakpointOrderAndBudget(body) {
-  let count = 0
-  let short = false
-  const visit = (node, param) => {
-    const control = node?.cache_control
-    if (control == null) return
-    if (control.type !== 'ephemeral' || (control.ttl != null && !VALID_TTL.has(control.ttl))) {
-      invalid(param, 'Cache control must be ephemeral with an optional 5m or 1h TTL.', 'invalid_cache_control')
-    }
-    if (short && control.ttl === '1h') {
-      invalid(param, 'Cache TTL must place 1h before 5m (including missing TTL).', 'invalid_cache_control')
-    }
-    if (control.ttl !== '1h') short = true
-    if (++count > 4) {
-      invalid(param, 'Cache control exceeds four breakpoints.', 'invalid_cache_control')
-    }
-  }
-  for (const [i, tool] of (body.tools || []).entries()) visit(tool, `tools[${i}].cache_control`)
-  if (Array.isArray(body.system)) {
-    for (const [i, block] of body.system.entries()) visit(block, `system[${i}].cache_control`)
-  }
-  for (const [i, msg] of (body.messages || []).entries()) {
-    if (!Array.isArray(msg?.content)) continue
-    for (const [j, block] of msg.content.entries()) visit(block, `messages[${i}].content[${j}].cache_control`)
-  }
+function repairCragCacheBreakpoints(body) {
+  const fallbackTtl = body.cache_ttl || body.crag_options?.cache_ttl || DEFAULT_CACHE_TTL
+  return repairCacheBreakpoints(body, {
+    limit: 4,
+    fallbackTtl,
+    fillMissing: false,
+    stripExtraFields: true,
+    liftNested: true,
+  })
 }
 
 /**
@@ -606,7 +688,7 @@ export function sanitizeCragBodyWhitelist(
   }
   out.model = materialized.model
 
-  out.messages = sanitizeMessages(materialized.messages, { preserveCanonicalHistory })
+  out.messages = sanitizeMessages(materialized.messages, { preserveCanonicalHistory, capabilities: caps })
 
   const system = sanitizeSystem(materialized.system)
   if (system !== undefined) out.system = system
@@ -664,8 +746,8 @@ export function sanitizeCragBodyWhitelist(
 
   if (materialized.output_config != null) {
     if (!isPlainObject(materialized.output_config)) invalid('output_config', 'must be an object')
-    const cfg = pickKeys(materialized.output_config, OUTPUT_CONFIG_KEYS)
-    if (Object.keys(cfg).length) out.output_config = cfg
+    const cfg = pickOutputConfig(materialized.output_config)
+    if (cfg) out.output_config = cfg
   }
 
   if (materialized.context_management != null) {
@@ -726,10 +808,36 @@ export function sanitizeCragBodyWhitelist(
 
   // Controlled CRAG internal fields
   for (const key of CRAG_INTERNAL_ALLOWED_TOP_KEYS) {
-    if (materialized[key] !== undefined) out[key] = materialized[key]
+    const value = materialized[key]
+    if (value === undefined) continue
+    if (key === 'effort' && isEmptyEffortValue(value)) continue
+    if (
+      key === 'crag_options' &&
+      isPlainObject(value) &&
+      Object.hasOwn(value, 'effort') &&
+      isEmptyEffortValue(value.effort)
+    ) {
+      const next = { ...value }
+      delete next.effort
+      if (Object.keys(next).length) out[key] = next
+      continue
+    }
+    if (key === 'crag_prompt' && isPlainObject(value) && Array.isArray(value.blocks)) {
+      out[key] = {
+        ...value,
+        blocks: value.blocks.map((block) => {
+          if (!isPlainObject(block) || block.cache_control == null) return block
+          const next = { ...block }
+          applySanitizedCacheControl(next, block.cache_control)
+          return next
+        }),
+      }
+      continue
+    }
+    out[key] = value
   }
 
-  if (validateCacheBudget) validateBreakpointOrderAndBudget(out)
+  const finalBody = validateCacheBudget ? repairCragCacheBreakpoints(out) : out
 
-  return { body: out, strippedFields, strippedSafeguards }
+  return { body: finalBody, strippedFields, strippedSafeguards }
 }

@@ -781,7 +781,7 @@ fetch_file() {
 # 镜像安装：只落部署文件，不 clone 仓库，不在本机构建。
 fetch_release_files() {
   local tag="$1"
-  mkdir -p "${INSTALL_DIR}/deploy"
+  mkdir -p "${INSTALL_DIR}/deploy" "${INSTALL_DIR}/scripts"
   info "下载部署文件 ${tag} → ${INSTALL_DIR}"
   fetch_file "$tag" docker-compose.yml "${INSTALL_DIR}/docker-compose.yml"
   fetch_file "$tag" docker-compose.local.yml "${INSTALL_DIR}/docker-compose.local.yml" 1
@@ -791,6 +791,7 @@ fetch_release_files() {
   fetch_file "$tag" deploy/install.sh "${INSTALL_DIR}/deploy/install.sh" 1
   fetch_file "$tag" deploy/install-pg.sh "${INSTALL_DIR}/deploy/install-pg.sh" 1
   fetch_file "$tag" deploy/replace-db-to-pg.sh "${INSTALL_DIR}/deploy/replace-db-to-pg.sh" 1
+  fetch_file "$tag" scripts/migrate-sqlite-to-pg.mjs "${INSTALL_DIR}/scripts/migrate-sqlite-to-pg.mjs" 1
   chmod +x "${INSTALL_DIR}/deploy/install.sh" "${INSTALL_DIR}/deploy/install-pg.sh" "${INSTALL_DIR}/deploy/replace-db-to-pg.sh" 2>/dev/null || true
   if [ "$HOST_ARCH" = arm64 ]; then
     fetch_file "$tag" deploy/prepare-arm64.py "${INSTALL_DIR}/deploy/prepare-arm64.py" 1
@@ -848,6 +849,242 @@ prepare_gemini_dependencies() {
   fi
 }
 
+gemini_apparmor_userns_restricted() {
+  local root="${1:-/}" enabled restricted enabled_val restricted_val
+  enabled="${root%/}/sys/module/apparmor/parameters/enabled"
+  restricted="${root%/}/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+  [ -f "$enabled" ] && [ -f "$restricted" ] || return 1
+  enabled_val="$(tr -d '[:space:]' < "$enabled" 2>/dev/null)" || return 1
+  restricted_val="$(tr -d '[:space:]' < "$restricted" 2>/dev/null)" || return 1
+  case "$enabled_val" in
+    Y|1|yes) ;;
+    *) return 1 ;;
+  esac
+  [ "$restricted_val" = "1" ]
+}
+
+check_gemini_unit_apparmor_profile() {
+  local unit_path="${1:-/etc/systemd/system/vm2api-gemini.service}"
+  local line trimmed val live_profile
+  if [ -L "$unit_path" ]; then
+    err "拒绝覆盖符号链接形式的 Gemini unit 文件: $unit_path"
+    return 1
+  fi
+  if [ -e "$unit_path" ]; then
+    if [ ! -f "$unit_path" ]; then
+      err "拒绝覆盖非常规文件的 Gemini unit: $unit_path"
+      return 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+      trimmed="${line#"${line%%[![:space:]]*}"}"
+      trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+      case "$trimmed" in
+        ""|\#*|";"*) continue ;;
+        AppArmorProfile=*)
+          val="${trimmed#AppArmorProfile=}"
+          val="${val#"${val%%[![:space:]]*}"}"
+          val="${val%"${val##*[![:space:]]}"}"
+          if [ "$val" != "vm2api-gemini" ]; then
+            err "检测到管理员自定义的 AppArmorProfile=${val}，拒绝覆盖: $unit_path"
+            return 1
+          fi
+          ;;
+      esac
+    done < "$unit_path"
+  fi
+  if command -v systemctl >/dev/null; then
+    live_profile="$(systemctl show --property=AppArmorProfile --value vm2api-gemini.service 2>/dev/null || true)"
+    live_profile="${live_profile#"${live_profile%%[![:space:]]*}"}"
+    live_profile="${live_profile%"${live_profile##*[![:space:]]}"}"
+    if [ -n "$live_profile" ] && [ "$live_profile" != "vm2api-gemini" ]; then
+      err "检测到管理员自定义的 AppArmorProfile=${live_profile}，拒绝覆盖"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+render_gemini_unit_apparmor() {
+  local unit_file="$1" tmp line trimmed section="" has_unit=0 has_service=0
+  local has_after=0 has_requires=0 has_profile=0 val
+  [ -f "$unit_file" ] && [ ! -L "$unit_file" ] || { err "Gemini unit 模板文件无效: $unit_file"; return 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    case "$trimmed" in
+      \[Unit\]) section="Unit"; has_unit=1; continue ;;
+      \[Service\]) section="Service"; has_service=1; continue ;;
+      \[*\]) section="Other"; continue ;;
+      ""|\#*|";"*) continue ;;
+    esac
+    if [ "$section" = "Unit" ]; then
+      case "$trimmed" in
+        After=*)
+          case " ${trimmed#After=} " in *" apparmor.service "*) has_after=1 ;; esac
+          ;;
+        Requires=*)
+          case " ${trimmed#Requires=} " in *" apparmor.service "*) has_requires=1 ;; esac
+          ;;
+      esac
+    elif [ "$section" = "Service" ]; then
+      case "$trimmed" in
+        AppArmorProfile=*)
+          val="${trimmed#AppArmorProfile=}"
+          val="${val#"${val%%[![:space:]]*}"}"
+          val="${val%"${val##*[![:space:]]}"}"
+          if [ "$val" != "vm2api-gemini" ]; then
+            err "检测到自定义 AppArmorProfile=${val}，拒绝覆盖: $unit_file"
+            return 1
+          fi
+          has_profile=1
+          ;;
+      esac
+    elif [[ "$trimmed" == AppArmorProfile=* ]]; then
+      err "检测到非常规位置的 AppArmorProfile 配置，拒绝覆盖: $unit_file"
+      return 1
+    fi
+  done < "$unit_file"
+  if [ "$has_unit" != 1 ] || [ "$has_service" != 1 ]; then
+    err "Gemini unit 缺少 [Unit] 或 [Service] 段: $unit_file"
+    return 1
+  fi
+  if [ "$has_after" = 1 ] && [ "$has_requires" = 1 ] && [ "$has_profile" = 1 ]; then
+    return 0
+  fi
+  tmp="$(mktemp "${unit_file}.XXXXXX")" || return 1
+  section=""
+  local emitted_unit=0 emitted_service=0 blanks=0
+  {
+    while IFS= read -r line || [ -n "$line" ]; do
+      trimmed="${line#"${line%%[![:space:]]*}"}"
+      trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+      if [ -z "$trimmed" ]; then
+        blanks=$((blanks + 1))
+        continue
+      fi
+      case "$trimmed" in
+        \[*\])
+          if [ "$section" = "Unit" ] && [ "$emitted_unit" = 0 ]; then
+            [ "$has_after" = 1 ] || printf '%s\n' 'After=apparmor.service'
+            [ "$has_requires" = 1 ] || printf '%s\n' 'Requires=apparmor.service'
+            emitted_unit=1
+          elif [ "$section" = "Service" ] && [ "$emitted_service" = 0 ]; then
+            [ "$has_profile" = 1 ] || printf '%s\n' 'AppArmorProfile=vm2api-gemini'
+            emitted_service=1
+          fi
+          while [ "$blanks" -gt 0 ]; do
+            printf '\n'
+            blanks=$((blanks - 1))
+          done
+          case "$trimmed" in
+            \[Unit\]) section="Unit" ;;
+            \[Service\]) section="Service" ;;
+            *) section="Other" ;;
+          esac
+          printf '%s\n' "$line"
+          continue
+          ;;
+      esac
+      while [ "$blanks" -gt 0 ]; do
+        printf '\n'
+        blanks=$((blanks - 1))
+      done
+      printf '%s\n' "$line"
+    done < "$unit_file"
+    if [ "$section" = "Unit" ] && [ "$emitted_unit" = 0 ]; then
+      [ "$has_after" = 1 ] || printf '%s\n' 'After=apparmor.service'
+      [ "$has_requires" = 1 ] || printf '%s\n' 'Requires=apparmor.service'
+    elif [ "$section" = "Service" ] && [ "$emitted_service" = 0 ]; then
+      [ "$has_profile" = 1 ] || printf '%s\n' 'AppArmorProfile=vm2api-gemini'
+    fi
+    while [ "$blanks" -gt 0 ]; do
+      printf '\n'
+      blanks=$((blanks - 1))
+    done
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f "$tmp" "$unit_file" || { rm -f -- "$tmp"; return 1; }
+}
+
+gemini_bwrap_userns_mediated() {
+  local root="${1:-/}" staged profiles
+  staged="${root%/}/etc/apparmor.d/bwrap-userns-restrict"
+  [ -f "$staged" ] || return 1
+  profiles="${root%/}/sys/kernel/security/apparmor/profiles"
+  if [ -f "$profiles" ] && ! grep -Fq bwrap "$profiles" 2>/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
+install_gemini_managed_bwrap() {
+  local root="${1:-/}" host_dir="${root%/}/usr/local/lib/vm2api-gemini"
+  local entry="${host_dir}/exec/bwrap" source
+  command -v install >/dev/null || { err "Gemini 沙箱需要 install(1)"; return 1; }
+  source="$(command -v bwrap)" || { err "Gemini 沙箱需要 bubblewrap（bwrap）"; return 1; }
+  install -d -m 755 "${host_dir}/exec" || return 1
+  if ! install -m 755 -- "$source" "$entry"; then
+    err "无法安装 Gemini 受管 bwrap 入口: $entry"
+    return 1
+  fi
+  ok "Gemini 受管 bwrap 入口已同步: $entry"
+  return 0
+}
+
+# Prepare a scoped, unattached AppArmor profile for vm2api-gemini.service when
+# the host restricts unprivileged user namespaces (e.g. Ubuntu 24.04).
+# Never modifies kernel sysctls or attaches globally to /usr/bin/bwrap.
+prepare_gemini_apparmor() {
+  local root="${1:-/}" unit_path="${2:-}" directory profile candidate marker load_state
+  [ -n "$unit_path" ] || unit_path="${root%/}/etc/systemd/system/vm2api-gemini.service"
+  gemini_apparmor_userns_restricted "$root" || return 0
+  command -v apparmor_parser >/dev/null || { err "Gemini 沙箱需要 apparmor_parser（请安装 apparmor 后重试）"; return 1; }
+  directory="${root%/}/etc/apparmor.d"
+  [ -f "$directory/abi/4.0" ] || { err "Gemini 沙箱 userns 需要 AppArmor ABI 4.0（缺少 $directory/abi/4.0）"; return 1; }
+  command -v systemctl >/dev/null || { err "Gemini AppArmor 准备需要 systemctl"; return 1; }
+  load_state="$(systemctl show --property=LoadState --value apparmor.service 2>/dev/null || true)"
+  load_state="${load_state#"${load_state%%[![:space:]]*}"}"
+  load_state="${load_state%"${load_state##*[![:space:]]}"}"
+  [ "$load_state" = loaded ] || { err "apparmor.service 未加载（LoadState=${load_state:-unknown}），无法持久化 vm2api-gemini profile"; return 1; }
+  check_gemini_unit_apparmor_profile "$unit_path" || return 1
+  profile="$directory/vm2api-gemini"
+  marker='# Managed by vm2api Gemini host userns preparation.'
+  if [ -L "$profile" ] || { [ -e "$profile" ] && { [ ! -f "$profile" ] || [ "$(head -n 1 "$profile")" != "$marker" ]; }; }; then
+    err "拒绝覆盖非 vm2api 管理的 AppArmor profile: $profile"
+    return 1
+  fi
+  local bwrap_rule=""
+  if gemini_bwrap_userns_mediated "$root"; then
+    install_gemini_managed_bwrap "$root" || return 1
+    bwrap_rule='  /usr/local/lib/vm2api-gemini/exec/bwrap ix,'
+  fi
+  candidate="$(mktemp "$directory/.vm2api-gemini.XXXXXX")" || return 1
+  if ! printf '%s\n' \
+    "$marker" \
+    'abi <abi/4.0>,' \
+    'profile vm2api-gemini flags=(unconfined) {' \
+    '  userns,' \
+    ${bwrap_rule:+"$bwrap_rule"} \
+    '}' > "$candidate" || ! chmod 644 "$candidate"; then
+    rm -f -- "$candidate"
+    return 1
+  fi
+  if ! apparmor_parser -Q -K "$candidate"; then
+    rm -f -- "$candidate"
+    err "Gemini AppArmor profile 检查失败: $profile"
+    return 1
+  fi
+  if ! apparmor_parser -r -K "$candidate"; then
+    rm -f -- "$candidate"
+    err "Gemini AppArmor profile 加载失败: $profile"
+    return 1
+  fi
+  if ! mv -f "$candidate" "$profile"; then
+    rm -f -- "$candidate"
+    return 1
+  fi
+  ok "Gemini AppArmor userns profile 已加载并保存: $profile"
+}
+
 prepare_gemini_maintenance() (
   local tag="$1" mode="$2" root=/usr/local/lib/vm2api-gemini-maintenance
   local state=/var/lib/vm2api-gemini config=/etc/vm2api/gemini-maintenance.json
@@ -882,7 +1119,7 @@ PY
     return 1
   fi
   bundle="$(mktemp -d "${root}/bundles/bundle-${tag}.XXXXXX")" || return 1
-  local -a files=(scripts/gemini-maintenance.py deploy/gemini-maintenance.service.example
+  local -a files=(scripts/gemini-maintenance.py scripts/gemini_host_apparmor.py deploy/gemini-maintenance.service.example
     scripts/gemini-host.py scripts/gemini_host_account.py scripts/gemini_host_inference.py
     scripts/gemini_host_native.py scripts/gemini-host-egress.sh scripts/fetch-default-gemini.py
     scripts/install-gemini-payload.mjs src/lib/gemini/payload.mjs deploy/payload.json deploy/gemini-host.service.example)
@@ -935,7 +1172,7 @@ if not match:
 (bundle / 'catalog.json').write_text(json.dumps([{'id': tag, 'version': match[1], 'cli_version': '1.5.9'}]) + '\n')
 (bundle / 'maintenance-config.json').write_text(json.dumps({'install_dir': str(install), 'bundle_dir': str(bundle)}) + '\n')
 PY
-  for file in "$config" "$root/scripts/gemini-maintenance.py" "$unit"; do
+  for file in "$config" "$root/scripts/gemini-maintenance.py" "$root/scripts/gemini_host_apparmor.py" "$unit"; do
     if [ -e "$file" ] || [ -L "$file" ]; then
       [ ! -L "$file" ] && [ -f "$file" ] && [ "$(stat -c '%u:%h' "$file")" = 0:1 ] || { err "拒绝覆盖不受信的维护文件"; return 1; }
       local permissions
@@ -972,17 +1209,20 @@ PY
   systemctl is-enabled --quiet vm2api-gemini-maintenance.service && was_enabled=1
   [ ! -f "$config" ] || install -m 600 "$config" "$backup/config.json" || return 1
   [ ! -f "$root/scripts/gemini-maintenance.py" ] || install -m 644 "$root/scripts/gemini-maintenance.py" "$backup/daemon.py" || return 1
+  [ ! -f "$root/scripts/gemini_host_apparmor.py" ] || install -m 644 "$root/scripts/gemini_host_apparmor.py" "$backup/apparmor.py" || return 1
   [ ! -f "$unit" ] || install -m 644 "$unit" "$backup/service" || return 1
   if atomic_maintenance_file "$bundle/maintenance-config.json" "$config" 600 &&
     atomic_maintenance_file "$bundle/scripts/gemini-maintenance.py" "$root/scripts/gemini-maintenance.py" 644 &&
+    atomic_maintenance_file "$bundle/scripts/gemini_host_apparmor.py" "$root/scripts/gemini_host_apparmor.py" 644 &&
     atomic_maintenance_file "$bundle/deploy/gemini-maintenance.service.example" "$unit" 644 &&
     systemctl daemon-reload && systemctl enable vm2api-gemini-maintenance.service && systemctl restart vm2api-gemini-maintenance.service; then
-    ok "Gemini 维护服务已就绪，可在设置 → Gemini 操作"
+    ok "Gemini 维护服务已就绪，可在设置 → Gemini 维护 操作"
     return 0
   fi
   systemctl stop vm2api-gemini-maintenance.service || warn "无法停止未就绪的维护服务"
   if [ -f "$backup/config.json" ]; then atomic_maintenance_file "$backup/config.json" "$config" 600 || restored=0; else rm -f -- "$config" || restored=0; fi
   if [ -f "$backup/daemon.py" ]; then atomic_maintenance_file "$backup/daemon.py" "$root/scripts/gemini-maintenance.py" 644 || restored=0; else rm -f -- "$root/scripts/gemini-maintenance.py" || restored=0; fi
+  if [ -f "$backup/apparmor.py" ]; then atomic_maintenance_file "$backup/apparmor.py" "$root/scripts/gemini_host_apparmor.py" 644 || restored=0; else rm -f -- "$root/scripts/gemini_host_apparmor.py" || restored=0; fi
   if [ -f "$backup/service" ]; then atomic_maintenance_file "$backup/service" "$unit" 644 || restored=0; else rm -f -- "$unit" || restored=0; fi
   systemctl daemon-reload || restored=0
   [ "$was_enabled" = 1 ] || systemctl disable vm2api-gemini-maintenance.service || warn "无法恢复维护服务的启用状态"
@@ -1015,33 +1255,56 @@ prepare_gemini_host() (
   prepare_gemini_maintenance "$tag" "$mode" || return 1
 
   local host_dir=/usr/local/lib/vm2api-gemini
-  local default_source="${host_dir}/defaults/0.3.0"
+  local defaults_dir="${host_dir}/defaults"
+  local legacy_default_source="${defaults_dir}/0.3.0"
+  local default_source="$legacy_default_source"
   local unit=/etc/systemd/system/vm2api-gemini.service
   local current="${INSTALL_DIR}/share/gemini/current"
-  local exec_start=""
-  local source_pattern='(^|[[:space:]])--payload-source(=|[[:space:]]+)(/[A-Za-z0-9._/-]+)([[:space:]]|$)'
-  local legacy_trust='(^|[[:space:]])(--default-public-key[[:space:]]+/[A-Za-z0-9._/-]+[[:space:]]+--default-release-verifier[[:space:]]+/[A-Za-z0-9._/-]+)([[:space:]]|$)'
+  local existing_exec_start="" existing_public_key="" existing_egress=""
   if command -v systemctl >/dev/null; then
-    exec_start="$(systemctl show --property=ExecStart --value vm2api-gemini.service 2>/dev/null)" || exec_start=""
+    existing_exec_start="$(systemctl show --property=ExecStart --value vm2api-gemini.service 2>/dev/null)" || existing_exec_start=""
   fi
-  # Keep a source supplied by an existing unit/drop-in without copying it into .env.
-  if [ -z "$source" ] && [[ "$exec_start" =~ $source_pattern ]] && [ "${BASH_REMATCH[3]}" != "$default_source" ]; then
-    source="${BASH_REMATCH[3]}"
+  if [ -z "$existing_exec_start" ] && [ -f "$unit" ]; then
+    existing_exec_start="$(grep -m1 -E '^[[:space:]]*ExecStart=' "$unit" 2>/dev/null | sed 's/^[[:space:]]*ExecStart=//')" || existing_exec_start=""
+  fi
+  if [ -n "$existing_exec_start" ]; then
+    local source_pattern='(^|[[:space:]])--payload-source(=|[[:space:]]+)(/[A-Za-z0-9._/-]+)([[:space:]]|$)'
+    local pubkey_pattern='(^|[[:space:]])--public-key(=|[[:space:]]+)(/[A-Za-z0-9._/-]+)([[:space:]]|$)'
+    local egress_pattern='(^|[[:space:]])--egress(=|[[:space:]]+)(/[A-Za-z0-9._/-]+)([[:space:]]|$)'
+    if [ -z "$source" ] && [[ "$existing_exec_start" =~ $source_pattern ]] &&
+      [[ "${BASH_REMATCH[3]}" != "${defaults_dir}/"* ]]; then
+      # Keep an external manual source supplied by an existing unit/drop-in without copying it into .env.
+      source="${BASH_REMATCH[3]}"
+    fi
+    if [[ "$existing_exec_start" =~ $pubkey_pattern ]]; then
+      existing_public_key="${BASH_REMATCH[3]}"
+    fi
+    if [[ "$existing_exec_start" =~ $egress_pattern ]]; then
+      existing_egress="${BASH_REMATCH[3]}"
+    fi
   fi
   if [ "$mode" != source ] && ! command -v curl >/dev/null; then
     err "Gemini 宿主机缺少 curl；请用包管理器安装 curl 后重试"
     return 1
   fi
   local installed=0 want_default=0 use_default=0 default_args="" staging file dependency status host_mode
+  local has_manual_verifier=0
+  if [ -e /etc/vm2api/gemini-release.json ] || [[ "$existing_exec_start" == *"--release-verifier"* ]]; then
+    has_manual_verifier=1
+  fi
   if [ -e "$current" ] || [ -L "$current" ]; then
     installed=1
-    # An installed legacy release still needs the verifier for its own manifest.
-    if [[ "$exec_start" =~ $legacy_trust ]]; then
-      default_args="${BASH_REMATCH[2]}"
-    elif { [ -f "${current}/manifest.json" ] &&
-      cmp -s -- "${current}/manifest.json" "${default_source}/manifest.json"; } ||
-      { [ -f "$unit" ] && grep -Fq -- "${default_source}/crag-license-public.pem" "$unit"; }; then
-      want_default=1
+    if [ -z "$source" ] && [ "$has_manual_verifier" = 0 ]; then
+      # Recognize default installs created either by install.sh (defaults/0.3.0 or defaults/<digest>)
+      # or by vm2api-gemini-maintenance (which writes defaults/<digest>/crag-license-public.pem).
+      if { [ -f "${current}/manifest.json" ] && [ -f "${legacy_default_source}/manifest.json" ] &&
+        cmp -s -- "${current}/manifest.json" "${legacy_default_source}/manifest.json"; } ||
+        [[ "$existing_public_key" == "${defaults_dir}/"*"/crag-license-public.pem" ]] ||
+        { [ -f "$unit" ] && grep -Eq -- "--default-public-key(=|[[:space:]]+)${defaults_dir}/[^[:space:]]+/gemini-ed25519\.pub([[:space:]]|\$)" "$unit"; } ||
+        { [ -f "${current}/manifest.json" ] && grep -Fq '"family"' "${current}/manifest.json" &&
+          grep -Fq '"crag"' "${current}/manifest.json" && grep -Fq '"encrypted"' "${current}/manifest.json"; }; then
+        want_default=1
+      fi
     fi
   elif [ -z "$source" ]; then
     want_default=1
@@ -1097,9 +1360,14 @@ prepare_gemini_host() (
     err "Gemini 需要 python3 和支持 parseArgs 的 Node.js（Ubuntu 24.04：python3、nodejs）"
     return 1
   fi
+  local use_apparmor=0
+  if gemini_apparmor_userns_restricted /; then
+    prepare_gemini_apparmor / "$unit" || return 1
+    use_apparmor=1
+  fi
 
-  local -a files=(deploy/gemini-host.service.example scripts/gemini-host.py scripts/gemini_host_account.py
-    scripts/gemini_host_inference.py scripts/gemini_host_native.py
+  local -a files=(deploy/gemini-host.service.example scripts/gemini-host.py scripts/gemini_host_apparmor.py
+    scripts/gemini_host_account.py scripts/gemini_host_inference.py scripts/gemini_host_native.py
     scripts/gemini-host-egress.sh scripts/install-gemini-payload.mjs src/lib/gemini/payload.mjs)
   for file in "${files[@]}"; do
     if ! fetch_gemini_host_file "$tag" "$mode" "$file" "${staging}/${file}"; then
@@ -1116,6 +1384,7 @@ prepare_gemini_host() (
     err "Gemini 宿主目录必须由 root 拥有且不可由其他用户写入: ${host_dir}"
     return 1
   fi
+  local default_manifest_sha="" default_pubkey_sha="" pinned_egress_sha=""
   if [ "$use_default" = 1 ]; then
     file=scripts/fetch-default-gemini.py
     if ! fetch_gemini_host_file "$tag" "$mode" "$file" "${staging}/${file}" ||
@@ -1123,10 +1392,65 @@ prepare_gemini_host() (
       err "${tag} 缺少 Gemini 默认载荷下载脚本或服务模板配置"
       return 1
     fi
-    if [ ! -e "${default_source%/*}" ] && [ ! -L "${default_source%/*}" ]; then
-      install -d -m 700 "${default_source%/*}" || return 1
+    local pin_meta
+    pin_meta="$(python3 - "${staging}/deploy/payload.json" <<'PY'
+import json, re, sys
+data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+d = data.get("geminiDefaultLinuxAmd64") or {}
+assets = d.get("assets") or {}
+m = (assets.get("manifest.json") or {}).get("sha256") or ""
+p = (assets.get("crag-license-public.pem") or {}).get("sha256") or ""
+e = ""
+for f in data.get("files") or []:
+    if isinstance(f, dict) and f.get("path") == "bin/kin-egress" and f.get("asset") == "kin-egress":
+        e = f.get("sha256") or ""
+        break
+hex64 = lambda v: v if isinstance(v, str) and re.fullmatch(r"[0-9a-f]{64}", v) else ""
+print(hex64(m), hex64(p), hex64(e))
+PY
+    )" || pin_meta=""
+    read -r default_manifest_sha default_pubkey_sha pinned_egress_sha <<< "$pin_meta"
+    # Verify that an existing CRAG installation actually trusts the pinned default issuer key
+    # before treating it as default-managed; custom-signed payloads must never be overwritten.
+    if [ "$installed" = 1 ] && [ -n "$default_pubkey_sha" ] &&
+      [[ "$existing_public_key" != "${defaults_dir}/"*"/crag-license-public.pem" ]]; then
+      local key_to_check=""
+      if [ -n "$existing_public_key" ] && [ -f "$existing_public_key" ]; then
+        key_to_check="$existing_public_key"
+      elif [ -f "${current}/crag-license-public.pem" ]; then
+        key_to_check="${current}/crag-license-public.pem"
+      fi
+      if [ -n "$key_to_check" ] && ! python3 - "$key_to_check" "$default_pubkey_sha" <<'PY'
+import hashlib, sys
+raise SystemExit(0 if hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() == sys.argv[2] else 1)
+PY
+      then
+        use_default=0
+      fi
     fi
-    if ! python3 -I "${staging}/${file}" --manifest "${staging}/deploy/payload.json" --dest "$default_source"; then
+  fi
+  if [ "$use_default" = 1 ]; then
+    # Use a content-addressed cache directory matching gemini-maintenance.py so upgrading to
+    # a newer CRAGGemini release never collides with an earlier defaults/0.3.0 cache.
+    if [ -n "$default_manifest_sha" ]; then
+      default_source="${defaults_dir}/${default_manifest_sha}"
+    fi
+    if [ ! -e "${defaults_dir}" ] && [ ! -L "${defaults_dir}" ]; then
+      install -d -m 700 "${defaults_dir}" || return 1
+    fi
+    local -a fetch_args=(--manifest "${staging}/deploy/payload.json" --dest "$default_source")
+    if grep -Fq -- '--reuse-agy' "${staging}/scripts/fetch-default-gemini.py"; then
+      local reuse_agy_candidate=""
+      if [ -f "${current}/agy" ] && [ ! -L "${current}/agy" ]; then
+        reuse_agy_candidate="${current}/agy"
+      elif [ -f "${legacy_default_source}/agy" ] && [ ! -L "${legacy_default_source}/agy" ]; then
+        reuse_agy_candidate="${legacy_default_source}/agy"
+      fi
+      if [ -n "$reuse_agy_candidate" ]; then
+        fetch_args+=(--reuse-agy "$reuse_agy_candidate")
+      fi
+    fi
+    if ! python3 -I "${staging}/scripts/fetch-default-gemini.py" "${fetch_args[@]}"; then
       err "无法准备 Gemini 默认签名载荷；请检查上述错误后重新执行 prepare-gemini"
       return 1
     fi
@@ -1149,6 +1473,20 @@ prepare_gemini_host() (
   local public_key_path=/etc/vm2api/gemini-ed25519.pub
   if [ "$use_default" = 1 ] && [ -f "${default_source}/crag-license-public.pem" ]; then
     public_key_path="${default_source}/crag-license-public.pem"
+  elif [ -n "$existing_public_key" ] && [ -f "$existing_public_key" ]; then
+    public_key_path="$existing_public_key"
+  fi
+  local egress_path="${INSTALL_DIR}/bin/kin-egress"
+  if [ "$existing_egress" = "${host_dir}/bin/kin-egress" ] && [ -x "${host_dir}/bin/kin-egress" ] && [ ! -L "${host_dir}/bin/kin-egress" ]; then
+    if [ ! -x "$egress_path" ] || [ -L "$egress_path" ] ||
+      { [ -n "$pinned_egress_sha" ] && python3 - "${host_dir}/bin/kin-egress" "$egress_path" "$pinned_egress_sha" <<'PY'
+import hashlib, sys
+h = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
+raise SystemExit(0 if h(sys.argv[1]) == sys.argv[3] and h(sys.argv[2]) != sys.argv[3] else 1)
+PY
+      }; then
+      egress_path="${host_dir}/bin/kin-egress"
+    fi
   fi
   local crag_data_dir="${INSTALL_DIR}/data"
   if [ ! -d "$crag_data_dir" ] && [ -d "${INSTALL_DIR}/src/data/crag-gemini-subscription" ]; then
@@ -1158,20 +1496,102 @@ prepare_gemini_host() (
     local env_data_dir
     env_data_dir="$(grep -m1 '^KIN_DATA_DIR=' "${INSTALL_DIR}/.env" | cut -d= -f2- | tr -d '\r' | sed -e "s/^['\"]//" -e "s/['\"]$//")" || true
     if [[ "$env_data_dir" == /* && "$env_data_dir" != *[[:space:]\|]* ]]; then
-      crag_data_dir="${env_data_dir%/}"
+      local env_data_clean="${env_data_dir%/}"
+      if { [ "$env_data_clean" != "/opt/vm2api/data" ] || [ "$INSTALL_DIR" = "/opt/vm2api" ] || [ -d "/opt/vm2api/data/crag-gemini-subscription" ]; } &&
+        { [ -d "$env_data_clean" ] || [ -d "$(dirname "$env_data_clean")" ]; }; then
+        crag_data_dir="$env_data_clean"
+      fi
     fi
   fi
   local crag_host_dir="${crag_data_dir}/crag-gemini-subscription/public"
   sed -e "s|@INSTALL_DIR@/data/crag-gemini-subscription/public|${crag_host_dir}|g" \
     -e "s|@INSTALL_DIR@/src/data/crag-gemini-subscription/public|${crag_host_dir}|g" \
+    -e "s|--egress @INSTALL_DIR@/bin/kin-egress|--egress ${egress_path}|g" \
     -e "s|@INSTALL_DIR@|${INSTALL_DIR}|g" -e "s|@PAYLOAD_SOURCE_ARG@|${source_arg}|g" \
     -e "s|@DEFAULT_PAYLOAD_ARGS@|${default_args}|g" \
     -e "s|--public-key /etc/vm2api/gemini-ed25519.pub|--public-key ${public_key_path}|g" \
     "${staging}/${files[0]}" > "${staging}/vm2api-gemini.service" || return 1
+  if [ "$use_apparmor" = 1 ]; then
+    render_gemini_unit_apparmor "${staging}/vm2api-gemini.service" || return 1
+  fi
+
+  # When an older default payload is already installed in share/gemini/current, /install-payload
+  # does not overwrite current. Stage-verify and atomically swap current so prepare-gemini and
+  # install.sh upgrade actually advance CRAGGemini to the latest pinned version.
+  local swapped_old=""
+  if [ "$use_default" = 1 ] && [ "$installed" = 1 ] && [ ! -L "$current" ] && [ -d "$current" ] &&
+    { [ ! -f "${current}/manifest.json" ] || ! cmp -s -- "${current}/manifest.json" "${default_source}/manifest.json"; }; then
+    if [ -e /var/lib/vm2api-gemini/maintenance.pending ] || [ -L /var/lib/vm2api-gemini/maintenance.pending ]; then
+      err "Gemini 上次维护未完成；请先在面板恢复后再升级载荷"
+      return 1
+    fi
+    local staged_payload
+    staged_payload="$(mktemp -d "${INSTALL_DIR}/share/gemini/.prepare-payload.XXXXXX")" || return 1
+    rmdir "$staged_payload" || return 1
+    if ! node "${staging}/scripts/install-gemini-payload.mjs" \
+      --source "$default_source" --public-key "$public_key_path" --dest "$staged_payload"; then
+      rm -rf -- "$staged_payload"
+      err "新版本 CRAGGemini 签名载荷校验失败，已保留现有版本"
+      return 1
+    fi
+    systemctl stop vm2api-gemini.service 2>/dev/null || true
+    if ! python3 - "$staged_payload" "$current" <<'PY'
+import ctypes, os, sys
+from pathlib import Path
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+AT_FDCWD = -100
+RENAME_EXCHANGE = 2
+rc = libc.renameat2(AT_FDCWD, os.fsencode(src), AT_FDCWD, os.fsencode(dst), RENAME_EXCHANGE)
+if rc != 0:
+    bak = dst.parent / f".prepare-prev.{os.getpid()}"
+    os.rename(dst, bak)
+    try:
+        os.rename(src, dst)
+    except BaseException:
+        os.rename(bak, dst)
+        raise
+    os.rename(bak, src)
+PY
+    then
+      rm -rf -- "$staged_payload"
+      err "无法原子切换 CRAGGemini 签名载荷，已保留现有版本"
+      return 1
+    fi
+    swapped_old="$staged_payload"
+  fi
+
+  local unit_backup=""
+  if [ -n "$swapped_old" ] && [ -f "$unit" ]; then
+    unit_backup="${staging}/vm2api-gemini.service.prev"
+    cp -p -- "$unit" "$unit_backup" || unit_backup=""
+  fi
   install -m 644 "${staging}/vm2api-gemini.service" "$unit" || return 1
   if ! (systemctl daemon-reload && systemctl enable vm2api-gemini.service && systemctl restart vm2api-gemini.service); then
+    if [ -n "$swapped_old" ] && [ -d "$swapped_old" ]; then
+      python3 - "$swapped_old" "$current" <<'PY' || true
+import ctypes, os, sys
+from pathlib import Path
+old_dir, cur_dir = Path(sys.argv[1]), Path(sys.argv[2])
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+if libc.renameat2(-100, os.fsencode(old_dir), -100, os.fsencode(cur_dir), 2) != 0:
+    bak = cur_dir.parent / f".prepare-rollback.{os.getpid()}"
+    os.rename(cur_dir, bak)
+    os.rename(old_dir, cur_dir)
+    os.rename(bak, old_dir)
+PY
+      rm -rf -- "$swapped_old"
+      if [ -n "$unit_backup" ] && [ -f "$unit_backup" ]; then
+        install -m 644 "$unit_backup" "$unit" || true
+        systemctl daemon-reload || true
+        systemctl restart vm2api-gemini.service || true
+      fi
+    fi
     err "Gemini 宿主服务未就绪，请检查 journalctl -u vm2api-gemini.service"
     return 1
+  fi
+  if [ -n "$swapped_old" ] && [ -d "$swapped_old" ]; then
+    rm -rf -- "$swapped_old"
   fi
 
   if [ -n "$source" ] || [ "$installed" = 1 ]; then
@@ -1417,6 +1837,30 @@ prepare_docker_crag_apparmor() {
   ok "Docker CRAG userns profile 已加载并保存: $profile"
 }
 
+url_points_to_local_host() {
+  local raw="${1:-}" rest host
+  [ -n "$raw" ] || return 1
+  # Strip scheme://, optional userinfo@, and path/query
+  rest="${raw#*://}"
+  rest="${rest%%/*}"
+  rest="${rest%%\?*}"
+  rest="${rest##*@}"
+  if [[ "$rest" == \[*\]:* ]]; then
+    host="${rest#\[}"
+    host="${host%%\]*}"
+  elif [[ "$rest" == \[*\] ]]; then
+    host="${rest#\[}"
+    host="${host%\]}"
+  else
+    host="${rest%%:*}"
+  fi
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+  case "$host" in
+    127.0.0.1|localhost|::1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 need_local_pg() {
   local driver db_url db_host
   driver="$(env_get VM2API_DB_DRIVER)"
@@ -1425,11 +1869,11 @@ need_local_pg() {
   fi
   db_url="$(env_get DATABASE_URL)"
   db_url="${db_url:-$(env_get VM2API_DATABASE_URL)}"
-  if [ -n "$db_url" ]; then
+  if [ -n "$db_url" ] && ! url_points_to_local_host "$db_url"; then
     return 1
   fi
   db_host="$(env_get DATABASE_HOST)"
-  if [ -n "$db_host" ] && [ "$db_host" != "127.0.0.1" ] && [ "$db_host" != "localhost" ]; then
+  if [ -n "$db_host" ] && [ "$db_host" != "127.0.0.1" ] && [ "$db_host" != "localhost" ] && [ "$db_host" != "::1" ]; then
     return 1
   fi
   return 0
@@ -1447,11 +1891,11 @@ need_local_redis() {
   fi
   redis_url="$(env_get REDIS_URL)"
   redis_url="${redis_url:-$(env_get VM2API_REDIS_URL)}"
-  if [ -n "$redis_url" ]; then
+  if [ -n "$redis_url" ] && ! url_points_to_local_host "$redis_url"; then
     return 1
   fi
   redis_host="$(env_get REDIS_HOST)"
-  if [ -n "$redis_host" ] && [ "$redis_host" != "127.0.0.1" ] && [ "$redis_host" != "localhost" ]; then
+  if [ -n "$redis_host" ] && [ "$redis_host" != "127.0.0.1" ] && [ "$redis_host" != "localhost" ] && [ "$redis_host" != "::1" ]; then
     return 1
   fi
   return 0
@@ -1929,24 +2373,26 @@ cmd_uninstall() {
 
 ensure_migrate_script() {
   local script="${INSTALL_DIR}/deploy/replace-db-to-pg.sh"
-  if [ -f "$script" ]; then
-    echo "$script"
-    return 0
-  fi
   local self_dir=""
   if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     if [ -f "${self_dir}/replace-db-to-pg.sh" ]; then
-      mkdir -p "${INSTALL_DIR}/deploy"
-      cp -f "${self_dir}/replace-db-to-pg.sh" "$script"
-      chmod +x "$script" 2>/dev/null || true
+      if [ "${self_dir}/replace-db-to-pg.sh" != "$script" ]; then
+        mkdir -p "${INSTALL_DIR}/deploy"
+        cp -f "${self_dir}/replace-db-to-pg.sh" "$script"
+        chmod +x "$script" 2>/dev/null || true
+      fi
       echo "$script"
       return 0
     fi
   fi
+  if [ -f "$script" ] && grep -q 'verify_pg_sync_rpc_safety' "$script" 2>/dev/null; then
+    echo "$script"
+    return 0
+  fi
   local ref="${TARGET_VERSION:-main}"
   mkdir -p "${INSTALL_DIR}/deploy"
-  info "未检测到本地迁移脚本，正在自动获取 ${ref}/deploy/replace-db-to-pg.sh ..."
+  info "未检测到最新版迁移脚本，正在自动获取 ${ref}/deploy/replace-db-to-pg.sh ..."
   fetch_file "$ref" deploy/replace-db-to-pg.sh "$script" 0
   chmod +x "$script" 2>/dev/null || true
   echo "$script"

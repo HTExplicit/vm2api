@@ -33,7 +33,6 @@ import {
   kernelProcessUp,
   wrapHealthLabel,
 } from '@/lib/wrap-health'
-import { SlotIdentity } from '@/components/platform-chip'
 import { StatusMark } from '@/components/status-mark'
 import { ActiveUsageAction } from '@/features/vm/active-usage-action'
 import { ClaudeResetActions } from '@/features/vm/claude-reset-actions'
@@ -52,6 +51,7 @@ import { OpenaiPlanBadge } from '@/features/vm/openai-plan-badge'
 import { OpenaiQuotaPanel } from '@/features/vm/openai-quota-panel'
 import { proxyHealthOf } from '@/features/vm/proxy-health'
 import { RuntimeChip } from '@/features/vm/runtime-chip'
+import { ClaudeQuotaObservations } from '@/features/vm/usage-windows'
 import { VmMemoryBlock } from '@/features/vm/vm-memory-block'
 import { VmSchedulingBlock } from '@/features/vm/vm-scheduling'
 import { telemetryEnabled } from './telemetry-policy'
@@ -266,13 +266,19 @@ export function VmStatusBoard(props: Props) {
           </div>
           <div className='mt-4 divide-y'>
             <Field label='邮箱' compact>
-              <SlotIdentity
-                vm={vm}
-                email={
-                  vm.email || (typeof acc.email === 'string' ? acc.email : null)
+              {/* 详情面管理员审阅用：完整邮箱直出，不做脱敏 */}
+              <span
+                className='text-xs break-all'
+                title={
+                  String(vm.email || '').trim() ||
+                  (typeof acc.email === 'string' ? acc.email : '') ||
+                  undefined
                 }
-                compact
-              />
+              >
+                {String(vm.email || '').trim() ||
+                  (typeof acc.email === 'string' ? acc.email : '') ||
+                  '未绑定邮箱'}
+              </span>
             </Field>
             {isCodexVm(vm) ? (
               <Field label='平台' compact>
@@ -391,6 +397,7 @@ export function VmStatusBoard(props: Props) {
                     />
                   </div>
                 ) : null}
+                <ClaudeQuotaObservations vm={vm} now={now} />
                 <ActiveUsageAction vm={vm} />
                 <ClaudeResetActions
                   vm={vm}

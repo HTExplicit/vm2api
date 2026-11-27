@@ -7,6 +7,8 @@
  *   official + empty       → DefaultBetaHeader / HaikuBetaHeader
  *   unofficial / mimic     → FullClaudeCodeMimicryBetas (Haiku: HAIKU_BETA_HEADER), never context-1m
  */
+import { isEmptyEffortValue } from './log-fields.mjs'
+
 export const BETA_OAUTH = 'oauth-2025-04-20'
 export const BETA_CLAUDE_CODE = 'claude-code-20250219'
 export const BETA_INTERLEAVED = 'interleaved-thinking-2025-05-14'
@@ -30,6 +32,13 @@ export const BETA_THINKING_DISPLAY_UPDATES = 'thinking-display-updates-2026-08-1
 export const BETA_DANGEROUS_TOOL_USE = 'dangerous-tool-use-2026-09-03'
 /** Mid-conversation `tool_addition.tool` of type `tool_definition`. Not in the always-on prefix. */
 export const BETA_INLINE_TOOLS = 'inline-tools-2026-09-15'
+/**
+ * The `advisor_20260301` tool, and any `advisor_tool_result` block already in the
+ * history. Upstream needs the token for both: dropping the tool from `tools` on a
+ * later turn is allowed, but the replayed result blocks are only accepted while
+ * this beta is still declared. Not in the always-on prefix.
+ */
+export const BETA_ADVISOR_TOOL = 'advisor-tool-2026-03-01'
 
 const PER_TURN_MODELS = {
   'claude-haiku-5-5': true,
@@ -77,6 +86,16 @@ function contentHasInlineToolDefinition(content) {
   return false
 }
 
+function contentHasAdvisorResult(content) {
+  if (!Array.isArray(content)) return false
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    if (block.type === 'advisor_tool_result') return true
+    if (block.type === 'server_tool_use' && block.name === 'advisor') return true
+  }
+  return false
+}
+
 function hasHourCache(node) {
   if (Array.isArray(node)) return node.some(hasHourCache)
   if (!node || typeof node !== 'object') return false
@@ -106,7 +125,7 @@ export function withRequestProtocolBetas(tokens = [], body = {}) {
   if (Object.hasOwn(PER_TURN_MODELS, model)) add('per-turn-control-2026-07-01', BETA_MID_CONVERSATION_TOOL_CHANGES)
   if (Object.hasOwn(MID_TOOL_CHANGE_MODELS, model) || model === 'auto') add(BETA_MID_CONVERSATION_TOOL_CHANGES)
   if (body.thread != null && Object.hasOwn(MID_OUTPUT_CONFIG_MODELS, model)) add(BETA_MID_CONVERSATION_OUTPUT_CONFIG)
-  if (body.output_config?.effort != null) add(BETA_EFFORT)
+  if (!isEmptyEffortValue(body.output_config?.effort)) add(BETA_EFFORT)
   if (body.thinking?.display === 'updates') add(BETA_THINKING_DISPLAY_UPDATES, BETA_EXTENDED_CACHE_TTL)
   if (Array.isArray(body.safeguards) && body.safeguards.some((item) => item?.type === 'dangerous_tool_use'))
     add(BETA_DANGEROUS_TOOL_USE)
@@ -118,6 +137,7 @@ export function withRequestProtocolBetas(tokens = [], body = {}) {
     for (const tool of body.tools) {
       if (tool?.strict === true) add('structured-outputs-2025-12-15')
       if (tool?.defer_loading || String(tool?.type || '').startsWith('tool_search_tool_')) add(BETA_ADVANCED_TOOL_USE)
+      if (String(tool?.type || '').startsWith('advisor_')) add(BETA_ADVISOR_TOOL)
     }
   }
   if (body.thinking?.block_binding) add(BETA_THINKING_BINDING_CONTROLS)
@@ -139,6 +159,7 @@ export function withRequestProtocolBetas(tokens = [], body = {}) {
   if (Array.isArray(body.messages)) {
     let hasClearAt = false
     let hasInlineToolDefinition = false
+    let hasAdvisorResult = false
     let hasMessageOutputConfig = false
     let hasMessageEffort = false
     let hasMessageFormat = false
@@ -147,15 +168,19 @@ export function withRequestProtocolBetas(tokens = [], body = {}) {
       if (!message || typeof message !== 'object') continue
       if (message.clear_at != null) hasClearAt = true
       if (contentHasInlineToolDefinition(message.content)) hasInlineToolDefinition = true
+      // Before the output_config bail below: a replayed advisor result has to be
+      // seen on every message, not just the ones carrying turn controls.
+      if (contentHasAdvisorResult(message.content)) hasAdvisorResult = true
       const config = message.output_config
       if (!config || typeof config !== 'object') continue
       hasMessageOutputConfig = true
-      if (config.effort != null) hasMessageEffort = true
+      if (!isEmptyEffortValue(config.effort)) hasMessageEffort = true
       if (config.format) hasMessageFormat = true
       if (config.task_budget) hasMessageTaskBudget = true
     }
     if (hasClearAt) add(BETA_MID_CONVERSATION_SYSTEM_CLEAR_AT)
     if (hasInlineToolDefinition) add(BETA_INLINE_TOOLS)
+    if (hasAdvisorResult) add(BETA_ADVISOR_TOOL)
     if (hasMessageOutputConfig) add(BETA_MID_CONVERSATION_OUTPUT_CONFIG)
     if (hasMessageEffort) add(BETA_EFFORT)
     if (hasMessageFormat) add('structured-outputs-2025-12-15')

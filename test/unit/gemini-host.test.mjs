@@ -414,6 +414,9 @@ test('only explicit platform SOCKS5 environments are created and credentials sta
   assert.deepEqual(result.body.data, {
     ...record,
     auth_method: 'oauth',
+    schedulable: true,
+    schedule_level: 5,
+    schedule_level_mode: 'auto',
     kernel_version: null,
     account: null,
     created_at: null,
@@ -426,21 +429,46 @@ test('only explicit platform SOCKS5 environments are created and credentials sta
     { ...bound, enabled: false },
     { ...bound, owner_user_id: 'tenant' },
     { ...bound, status: 'dead' },
+    { ...bound, status: 'fail', consecutive_failures: 1, last_error: 'timeout' },
   ]) {
     const blocked = setup(() => assert.fail('unavailable proxy must not reach the host'), proxy)
     assert.equal((await blocked('POST', `${root}/environments`, create)).status, 409)
   }
 })
 
-test('only a probe may use its currently bound enabled proxy with failed health', async () => {
-  for (const status of ['fail', 'dead']) {
+test('Gemini routes mirror pool policy: fail stays schedulable, dead is unavailable except probe', async () => {
+  {
     const operations = []
     const run = setup(
       (operation, payload) => {
         operations.push([operation, payload])
         return operation === 'get' ? record : { ok: false, latency_ms: 14, code: 'private', detail: proxyUrl }
       },
-      { ...bound, status },
+      { ...bound, status: 'fail' },
+    )
+    const probe = await run('POST', `${environmentPath}/proxy/probe`, { proxy_id: 'untrusted', proxy_url: 'untrusted' })
+    assert.deepEqual(probe, {
+      status: 200,
+      body: { ok: true, data: { ok: false, latency_ms: 14, code: 'gemini_proxy_probe_failed' } },
+    })
+    const allowed = await run('POST', `${environmentPath}/test-chat`, { model, prompt: 'ping' })
+    assert.notEqual(allowed.status, 409)
+    const rebindFail = await run('PUT', `${environmentPath}/proxy`, { proxy_id: bound.id })
+    assert.equal(rebindFail.status, 409)
+    assert.equal(rebindFail.body.error.code, 'gemini_proxy_unavailable')
+    assert.deepEqual(
+      operations.map(([operation]) => operation),
+      ['get', 'proxy-probe', 'get', 'test-chat', 'get'],
+    )
+  }
+  {
+    const operations = []
+    const run = setup(
+      (operation, payload) => {
+        operations.push([operation, payload])
+        return operation === 'get' ? record : { ok: false, latency_ms: 14, code: 'private', detail: proxyUrl }
+      },
+      { ...bound, status: 'dead' },
     )
     const probe = await run('POST', `${environmentPath}/proxy/probe`, { proxy_id: 'untrusted', proxy_url: 'untrusted' })
     assert.deepEqual(probe, {
@@ -647,6 +675,88 @@ test('OAuth account import redacts credentials and preserves the authorization b
   assert.equal(accepted.body.data.account.email, 'verified@example.test')
   assert.equal(accepted.body.data.runtime_ready, false)
   assert.doesNotMatch(JSON.stringify(accepted.body), /fixture-access-never-returned/)
+
+  // CPA, sub2api, and bare refresh_token formats normalize to minimal whitelisted OAuth fields
+  // before reaching the host, and responses never leak tokens back to clients.
+  const forwarded = []
+  const capture = setup((operation, payload) => {
+    forwarded.push({ operation, payload })
+    return {
+      ...record,
+      auth_state: 'authorized',
+      auth_method: 'oauth',
+      account: {
+        state: 'ok',
+        email: 'converted@example.test',
+        refresh_token: payload.oauth_account?.refresh_token,
+      },
+    }
+  })
+
+  const bareRtResp = await capture('POST', endpoint, {
+    name: 'rt-only',
+    proxy_id: record.proxy_id,
+    oauth_account: [{ email: 'rt@example.test', refresh_token: '1//06FixtureRtOnly_abc123' }],
+  })
+  assert.equal(bareRtResp.status, 200)
+  assert.deepEqual(forwarded.at(-1).payload.oauth_account, {
+    refresh_token: '1//06FixtureRtOnly_abc123',
+  })
+  assert.doesNotMatch(JSON.stringify(bareRtResp.body), /1\/\/06FixtureRtOnly_abc123/)
+
+  const cpaResp = await capture('POST', endpoint, {
+    name: 'cpa-ag',
+    proxy_id: record.proxy_id,
+    oauth_account: {
+      type: 'antigravity',
+      access_token: 'ya29.cpa-import-token',
+      refresh_token: '1//06cpa-import-refresh',
+      expired: '2030-01-01T00:00:00Z',
+    },
+  })
+  assert.equal(cpaResp.status, 200)
+  assert.deepEqual(forwarded.at(-1).payload.oauth_account, {
+    refresh_token: '1//06cpa-import-refresh',
+    access_token: 'ya29.cpa-import-token',
+    expiry_timestamp: 1893456000,
+  })
+
+  const sub2apiResp = await capture('POST', endpoint, {
+    name: 'sub2api-gem',
+    proxy_id: record.proxy_id,
+    oauth_account: {
+      exported_at: '2026-11-25T08:00:00Z',
+      proxies: [],
+      accounts: [
+        {
+          name: 'gem-1',
+          platform: 'gemini',
+          type: 'oauth',
+          credentials: {
+            access_token: 'ya29.sub2api-import-token',
+            expires_at: '1893456000',
+          },
+        },
+      ],
+    },
+  })
+  assert.equal(sub2apiResp.status, 200)
+  assert.deepEqual(forwarded.at(-1).payload.oauth_account, {
+    access_token: 'ya29.sub2api-import-token',
+    expiry_timestamp: 1893456000,
+  })
+
+  const wrongProvider = await invalid('POST', endpoint, {
+    name: 'claude-cpa',
+    proxy_id: record.proxy_id,
+    oauth_account: {
+      type: 'claude',
+      access_token: 'sk-ant-oat01-wrong-provider',
+      expired: '2030-01-01T00:00:00Z',
+    },
+  })
+  assert.equal(wrongProvider.status, 400)
+  assert.equal(wrongProvider.body.error.code, 'gemini_oauth_import_invalid')
 })
 
 test('Gemini panel exposes scoped quota windows without inventing missing fractions or exposing raw fields', async () => {
@@ -999,7 +1109,7 @@ test('Gemini gateway uses shared account reservations and each selected environm
   assert.equal(pool.inflight.size, 0)
 })
 
-test('a selected Gemini location rejection stays HTTP 403 and releases the half-open probe', async () => {
+test('a selected Gemini location rejection stays HTTP 403 and counts toward the unit circuit', async () => {
   const account = {
     id: 'gemini-location',
     auth_state: 'authorized',
@@ -1048,7 +1158,12 @@ test('a selected Gemini location rejection stays HTTP 403 and releases the half-
   )
   assert.equal(result.status, 403)
   assert.equal(result.body.error.code, 'gemini_location_unsupported')
-  assert.deepEqual(pool.unitCircuit.inspect(accountId), { ok: true, state: 'half_open', probeAvailable: true })
+  assert.deepEqual(pool.unitCircuit.inspect(accountId), {
+    ok: false,
+    reason: 'circuit_open',
+    until: 3001,
+    state: 'open',
+  })
   assert.equal(pool.unitCircuit.snapshot(accountId).failures, 1)
   assert.equal(pool.inflight.size, 0)
 })
@@ -1652,6 +1767,117 @@ test('a host error code the control plane knows survives, and only an unknown on
   // collapsed rather than being forwarded to the panel unvetted.
   code = 'gemini_not_a_real_code'
   await assert.rejects(callGeminiHost('authorization', { id: record.id }), { code: 'gemini_host_unavailable' })
+})
+
+test('authorization failing stage survives allowlist and maps to stage-specific panel message (#1622)', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'gemini-authstage-'))
+  const socketPath = path.join(directory, 'control.sock')
+  const previous = process.env.KIN_GEMINI_HOST_SOCKET
+  process.env.KIN_GEMINI_HOST_SOCKET = socketPath
+  let stage = 'proxy_probe'
+  const server = http.createServer(async (request, response) => {
+    for await (const chunk of request) void chunk
+    response.writeHead(503, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify({ code: 'gemini_authorization_unavailable', stage }))
+  })
+  t.after(async () => {
+    if (previous === undefined) delete process.env.KIN_GEMINI_HOST_SOCKET
+    else process.env.KIN_GEMINI_HOST_SOCKET = previous
+    await new Promise((resolve) => server.close(resolve))
+    await rm(directory, { recursive: true, force: true })
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(socketPath, resolve)
+  })
+
+  await assert.rejects(callGeminiHost('authorize', { id: record.id }), (err) => {
+    assert.equal(err.code, 'gemini_authorization_unavailable')
+    assert.equal(err.status, 503)
+    assert.equal(err.stage, 'proxy_probe')
+    return true
+  })
+
+  // Panel route formats allowlisted stage into stage-specific guidance + error.stage.
+  const panelStage = setup((op) => {
+    if (op === 'get') return record
+    if (op === 'authorize') {
+      throw Object.assign(new Error('gemini_authorization_unavailable'), {
+        code: 'gemini_authorization_unavailable',
+        status: 503,
+        stage: 'proxy_probe',
+      })
+    }
+    throw new Error(`unexpected ${op}`)
+  })
+  const resStage = await panelStage('POST', `/api/panel/gemini/environments/${record.id}/authorization`)
+  assert.equal(resStage.status, 503)
+  assert.equal(resStage.body.error.code, 'gemini_authorization_unavailable')
+  assert.equal(resStage.body.error.stage, 'proxy_probe')
+  assert.match(resStage.body.error.message, /隔离出口无法连通绑定代理/)
+
+  // Unknown stage values are dropped rather than forwarded unvetted.
+  stage = 'raw_secret_exception_text'
+  await assert.rejects(callGeminiHost('authorize', { id: record.id }), (err) => {
+    assert.equal(err.code, 'gemini_authorization_unavailable')
+    assert.equal(err.stage, undefined)
+    return true
+  })
+
+  // #1847 sandbox_denied / cli_early_exit stages and split sandbox error codes survive allowlist.
+  for (const [newStage, pattern] of [
+    ['sandbox_denied', /沙箱策略/],
+    ['cli_early_exit', /异常退出/],
+  ]) {
+    const panelNewStage = setup((op) => {
+      if (op === 'get') return record
+      if (op === 'authorize') {
+        throw Object.assign(new Error('gemini_authorization_unavailable'), {
+          code: 'gemini_authorization_unavailable',
+          status: 503,
+          stage: newStage,
+        })
+      }
+      throw new Error(`unexpected ${op}`)
+    })
+    const res = await panelNewStage('POST', `/api/panel/gemini/environments/${record.id}/authorization`)
+    assert.equal(res.status, 503)
+    assert.equal(res.body.error.code, 'gemini_authorization_unavailable')
+    assert.equal(res.body.error.stage, newStage)
+    assert.match(res.body.error.message, pattern)
+  }
+
+  for (const [sandboxCode, pattern] of [
+    ['gemini_sandbox_apparmor_restricted', /AppArmor/],
+    ['gemini_sandbox_unavailable', /bwrap/],
+  ]) {
+    const panelSandbox = setup((op) => {
+      if (op === 'list') {
+        return {
+          payload_state: 'installed',
+          oauth_runtime_issue: sandboxCode,
+          environments: [],
+        }
+      }
+      if (op === 'get') return record
+      if (op === 'authorize') {
+        throw Object.assign(new Error(sandboxCode), {
+          code: sandboxCode,
+          status: 503,
+          stage: 'sandbox_denied',
+        })
+      }
+      throw new Error(`unexpected ${op}`)
+    })
+    const listRes = await panelSandbox('GET', '/api/panel/gemini')
+    assert.equal(listRes.status, 200)
+    assert.equal(listRes.body.data.oauth_runtime_issue, sandboxCode)
+    const authRes = await panelSandbox('POST', `/api/panel/gemini/environments/${record.id}/authorization`)
+    assert.equal(authRes.status, 503)
+    assert.equal(authRes.body.error.code, sandboxCode)
+    assert.equal(authRes.body.error.stage, 'sandbox_denied')
+    assert.match(authRes.body.error.message, pattern)
+  }
 })
 
 test('synchronous host errors and polled test-chat runs report the same resident-pool copy for native worker/tty faults', async () => {

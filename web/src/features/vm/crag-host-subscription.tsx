@@ -7,10 +7,12 @@ import { CragQuotaGrants } from './crag-quota-grants'
 import { CragRuntimeCounts } from './crag-runtime-counts'
 import {
   cragCredentialRecoveryFaults,
+  cragHostMigrateErrors,
   cragOrderClaimErrors,
   cragSubscriptionErrors,
 } from './crag-subscription-errors'
 import {
+  cragHostOrdersQueryOptions,
   cragHostStatusQueryOptions,
   vmCragLicenseQueryOptions,
   type CragHostStatus,
@@ -30,7 +32,13 @@ export function CragHostSubscription({ vmId }: { vmId: string }) {
   const busy = host.isFetching || working
 
   async function perform(
-    action: 'bind' | 'recover' | 'unbind' | 'claim-by-order',
+    action:
+      | 'bind'
+      | 'recover'
+      | 'unbind'
+      | 'claim-by-order'
+      | 'rebuild-identity'
+      | 'migrate',
     payload?: Record<string, unknown>
   ) {
     if (busy) return
@@ -48,6 +56,19 @@ export function CragHostSubscription({ vmId }: { vmId: string }) {
         setNotice({
           text: '本槽已绑定，开始运行调度后计入使用中的槽位。如内核尚未加载授权，请重启本槽。',
         })
+      } else if (action === 'migrate') {
+        const result = await api<{
+          migrated_vouchers: number
+          migrated_orders: number
+          status?: CragHostStatus
+        }>(`${root}/migrate`, {
+          method: 'POST',
+          body: JSON.stringify(payload ?? {}),
+        })
+        if (result.status) qc.setQueryData(options.queryKey, result.status)
+        setNotice({
+          text: `已完成整机迁移：已迁入 ${result.migrated_vouchers} 张兑换券与 ${result.migrated_orders} 笔历史订单，原宿主机已自动解绑。`,
+        })
       } else {
         const next = await api<
           CragHostStatus & { released?: { released_codes?: string[] } }
@@ -61,13 +82,18 @@ export function CragHostSubscription({ vmId }: { vmId: string }) {
           const count = next.released?.released_codes?.length ?? 0
           setNotice({
             text: count
-              ? `本机订阅已注销，${count} 张兑换券已释放并保留剩余时长。在新机器上用购买时的订单号（或原券码）迁移即可继承。`
+              ? `本机订阅已注销，${count} 张兑换券已释放并保留剩余时长。在新机器上用宿主机 ID 迁移、订单号或原券码即可继承。`
               : '本机订阅已注销。没有仍在有效期内的兑换券可供转移。',
           })
         }
         if (action === 'claim-by-order') {
           setNotice({
-            text: '已把该订单的兑换券迁到本机，剩余时长照旧。原机器上这张券的额度已同时失效。',
+            text: '已把该订单的兑换券迁到本机，剩余时长照旧。原机器上这张券的额度已同时解绑。',
+          })
+        }
+        if (action === 'rebuild-identity') {
+          setNotice({
+            text: '已为本机重建设备标识。请重新提交原兑换码或通过「从其他设备迁移」输入原订单号恢复订阅。',
           })
         }
       }
@@ -79,6 +105,7 @@ export function CragHostSubscription({ vmId }: { vmId: string }) {
             // 先查它独有的文案，再回落到按码索引的通用表。
             ((action === 'claim-by-order' &&
               cragOrderClaimErrors[error.code]) ||
+              (action === 'migrate' && cragHostMigrateErrors[error.code]) ||
               cragSubscriptionErrors[error.code])) ||
           '无法确认订阅操作，请检查连接后重试。',
         error: true,
@@ -86,6 +113,9 @@ export function CragHostSubscription({ vmId }: { vmId: string }) {
     } finally {
       await Promise.all([
         qc.invalidateQueries({ queryKey: options.queryKey }),
+        qc.invalidateQueries({
+          queryKey: cragHostOrdersQueryOptions().queryKey,
+        }),
         qc.invalidateQueries({
           queryKey: vmCragLicenseQueryOptions(vmId).queryKey,
         }),
@@ -117,10 +147,24 @@ export function CragHostSubscription({ vmId }: { vmId: string }) {
       </div>
       <CragRuntimeCounts status={host.isError ? undefined : status} />
       {status?.credential_recovery ? (
-        <p role='alert' className='text-sm text-destructive'>
-          {cragCredentialRecoveryFaults[status.credential_recovery] ??
-            cragSubscriptionErrors.auth_forbidden}
-        </p>
+        <div className='space-y-2'>
+          <p role='alert' className='text-sm text-destructive'>
+            {cragCredentialRecoveryFaults[status.credential_recovery] ??
+              cragSubscriptionErrors.auth_forbidden}
+          </p>
+          {status.credential_recovery === 'host_id_collision' ||
+          status.credential_recovery === 'not_activated' ? (
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              disabled={busy}
+              onClick={() => void perform('rebuild-identity')}
+            >
+              重建设备标识
+            </Button>
+          ) : null}
+        </div>
       ) : null}
       {host.isError ? (
         <p role='alert' className='text-sm text-destructive'>
@@ -147,6 +191,9 @@ export function CragHostSubscription({ vmId }: { vmId: string }) {
         onUnbind={() => void perform('unbind')}
         onClaim={(orderId) =>
           void perform('claim-by-order', { order_id: orderId })
+        }
+        onMigrateHost={(fromHostId, proof) =>
+          void perform('migrate', { from_host_id: fromHostId, proof })
         }
       />
       {status?.state === 'active' ? (

@@ -4,7 +4,7 @@
  * agent-identity recovery.
  */
 import crypto from 'node:crypto'
-import { getVm, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
+import { getVm, syncCodexQuotaSchedule, patchVmRecord } from '../vm/vm-registry.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { isLocalEgressProxy } from '../vm/egress.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
@@ -13,6 +13,8 @@ import {
   upsertCodexAccount,
   persistCodexQuotaSnapshot,
   markCodexQuotaRefreshPending,
+  persistCodexCredentialState,
+  markCodexGrantDead,
 } from '../vm/codex-slot.mjs'
 import {
   buildCodexUsageView,
@@ -23,6 +25,7 @@ import {
 import { CODEX_OAUTH_ORIGINATOR, makeProxyFetch, refreshCodexAccessToken } from '../protocol/codex-models.mjs'
 import { openaiIdentityFromJwt } from './openai-jwt.mjs'
 import { expiresAtToMs } from './oauth-credentials.mjs'
+import { withCredentialRefreshLock } from '../transport/go-worker-client.mjs'
 import { codexQuotaWindowReason, isCodexSlotParked } from '../pool/codex-slot-pool.mjs'
 import { openAIAccountHold } from '../pool/openai-account-runtime.mjs'
 import { activeHoursOf, evaluateActiveHours } from '../pool/active-hours.mjs'
@@ -313,12 +316,47 @@ async function quotaFetch(
 
 async function rotateIfNeeded(slot, projectRoot, vmId, fetchImpl) {
   if (!slot.refresh) return slot
-  const tok = await refreshCodexAccessToken({
-    refreshToken: slot.refresh,
-    proxyUrl: slot.proxyUrl,
-    fetchImpl,
-    timeoutMs: OPENAI_QUOTA_TIMEOUT_MS,
+  // 共锁（key=codex:<vmId>）且锁内重读凭证：等待期间并发方（面板刷新/search）
+  // 轮换出的新票直接采用；本方成功后也用锁内快照落盘，不用锁外捕获的
+  // slot.first 旧元数据覆盖别人的新票。
+  const tok = await withCredentialRefreshLock(`codex:${vmId}`, async () => {
+    const live = readCodexAccounts(projectRoot, vmId)[0] || {}
+    const liveRefresh = String(live.refresh_token || slot.refresh || '').trim()
+    if (!liveRefresh) return { ok: false, error: 'missing_refresh_token' }
+    const result = await refreshCodexAccessToken({
+      refreshToken: liveRefresh,
+      proxyUrl: slot.proxyUrl,
+      fetchImpl,
+      timeoutMs: OPENAI_QUOTA_TIMEOUT_MS,
+    })
+    if (!result?.ok) return result
+    const latest = readCodexAccounts(projectRoot, vmId)[0] || {}
+    if (latest.refresh_token && latest.refresh_token !== liveRefresh) {
+      // 并发方已轮换：内存态采用其新票，本方轮换结果作废（不再写盘）。
+      return { ok: true, rotatedBy: 'concurrent', access_token: latest.access_token, refresh_token: latest.refresh_token }
+    }
+    const expiresAt = result.expires_at || latest.expires_at || slot.first.expires_at
+    upsertCodexAccount(projectRoot, vmId, {
+      access_token: result.access_token,
+      refresh_token: result.refresh_token,
+      id_token: result.id_token || latest.id_token,
+      expires_at: expiresAt,
+    })
+    // 凭证文件是过期时间真值；vm.json 的 codex.expires_at 是导入时快照，
+    // 不镜像会让面板读到「过期 14 天」的假死票。best-effort。
+    try {
+      if (expiresAt) {
+        patchVmRecord(projectRoot, vmId, (vm) => {
+          vm.codex = vm.codex && typeof vm.codex === 'object' ? { ...vm.codex } : {}
+          vm.codex.expires_at = expiresAt
+        })
+      }
+    } catch {}
+    return result
   })
+  if (tok.ok && tok.rotatedBy === 'concurrent') {
+    return { ...slot, access: tok.access_token, refresh: tok.refresh_token }
+  }
   if (!tok.ok) {
     recordOpenaiAuthResult(slot.auth, {
       status: tok.status,
@@ -326,6 +364,23 @@ async function rotateIfNeeded(slot, projectRoot, vmId, fetchImpl) {
       source: 'oauth_refresh',
       message: 'GPT OAuth 刷新失败，请重新导入',
     })
+    // Surface dead credentials (refresh_rejected / refresh_empty / missing_refresh_token)
+    // on the vm ticket instead of failing silently in memory. Transient errors
+    // (timeout / fetch_failed) and ambiguous upstream 4xx/5xx stay unmarked; the
+    // next successful quota snapshot clears the mark again.
+    const structural = ['refresh_rejected', 'refresh_empty', 'missing_refresh_token', 'oauth_revoked'].includes(
+      tok.error,
+    )
+    if (structural) {
+      try {
+        persistCodexCredentialState(projectRoot, vmId, { error: tok.error })
+        // 吊销是 grant 死亡：与 claude 池同落点写四态 unschedulable（仅操作员可清），
+        // 面板立刻显示「不可调度 · 凭证吊销」而不是笼统受限。
+        if (tok.error === 'oauth_revoked') markCodexGrantDead(projectRoot, vmId, tok)
+      } catch {
+        // Persistence is best-effort; the in-memory rotateError still propagates.
+      }
+    }
     return { ...slot, rotateError: tok.error || 'refresh_failed' }
   }
   if (!isOpenaiCredentialCurrent(slot.auth)) return { ...slot, rotateError: 'credential_changed' }
@@ -619,6 +674,10 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
     if (!current.access || current.rotateError) {
       if (current.rotateError === 'credential_changed')
         return fail('credential_changed', '账号或凭据已更新，请重试', 409)
+      // 吊销（token_revoked）与普通刷新失败分开说，面板可据此显示具体状态。
+      if (current.rotateError === 'oauth_revoked') {
+        return fail('oauth_revoked', 'GPT OAuth 凭证已被吊销，需重新授权导入', 502)
+      }
       return fail(current.rotateError || 'refresh_failed', 'GPT OAuth 刷新失败，请重新导入', 502)
     }
     pack = await run(current.access)
@@ -710,6 +769,9 @@ export async function resetOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = 
     if (!current.access || current.rotateError) {
       if (current.rotateError === 'credential_changed')
         return fail('credential_changed', '账号或凭据已更新，请重试', 409)
+      if (current.rotateError === 'oauth_revoked') {
+        return fail('oauth_revoked', 'GPT OAuth 凭证已被吊销，需重新授权导入', 502)
+      }
       return fail(current.rotateError || 'refresh_failed', 'GPT OAuth 刷新失败，请重新导入', 502)
     }
     res = await consume(current.access)
