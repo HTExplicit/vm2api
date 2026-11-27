@@ -49,7 +49,12 @@ function slot(root, id, extra = {}) {
   fs.writeFileSync(path.join(root, 'vms', id + '.json'), JSON.stringify(vm))
   writeCodexAccounts(root, id, [
     {
-      id_token: jwt({ sub: 'subject-' + id, [authClaim]: { chatgpt_account_id: 'workspace-' + id } }),
+      id_token: jwt({
+        sub: 'subject-' + id,
+        email: id + '@example.com',
+        email_verified: true,
+        [authClaim]: { chatgpt_account_id: 'workspace-' + id },
+      }),
       access_token: 'ordinary-access-' + id,
       refresh_token: 'ordinary-refresh-' + id,
       chatgpt_account_id: 'workspace-' + id,
@@ -118,6 +123,7 @@ function fixture(t, extra) {
       if (url.endsWith('/oauth/token')) {
         const form = new URLSearchParams(init.body)
         if (form.get('grant_type') === 'refresh_token') return refresh(form)
+        const code = form.get('code')
         assert.equal(form.get('client_id'), 'oaiapp_mock')
         assert.equal(form.get('resource'), SIWC_RESOURCE)
         assert.equal(form.get('redirect_uri'), SIWC_REDIRECT_URI)
@@ -125,6 +131,10 @@ function fixture(t, extra) {
           createHash('sha256').update(form.get('code_verifier')).digest('base64url'),
           authorize.searchParams.get('code_challenge'),
         )
+        const subject = {
+          'changed-subject': 'another-siwc-subject',
+          'legacy-subject': 'subject-' + vm.id,
+        }[code]
         return jsonResponse({
           access_token: 'mock-access',
           refresh_token: 'mock-refresh',
@@ -136,8 +146,10 @@ function fixture(t, extra) {
             aud: 'oaiapp_mock',
             nonce: authorize.searchParams.get('nonce'),
             exp: Math.floor(now / 1000) + 3600,
-            sub: form.get('code') === 'wrong-account' ? 'other-subject' : 'subject-' + vm.id,
-            [authClaim]: { chatgpt_account_id: 'workspace-' + vm.id },
+            sub: subject || 'siwc-subject-' + vm.id,
+            email: code === 'wrong-account' ? 'someone-else@example.com' : vm.id.toUpperCase() + '@example.com',
+            email_verified: code !== 'unverified-email',
+            ...(code === 'wrong-workspace' ? { [authClaim]: { chatgpt_account_id: 'another-workspace' } } : {}),
           }),
         })
       }
@@ -197,6 +209,17 @@ test('binding verifies the same account, preserves Codex, and supports rebind, s
   await assert.rejects(f.siwc.finish(f.vm.id, session.session_id, f.callback(session, 'wrong-account')), {
     code: 'siwc_account_mismatch',
   })
+  const wrongWorkspace = await f.start()
+  await assert.rejects(
+    f.siwc.finish(f.vm.id, wrongWorkspace.session_id, f.callback(wrongWorkspace, 'wrong-workspace')),
+    {
+      code: 'siwc_account_mismatch',
+    },
+  )
+  const unverified = await f.start()
+  await assert.rejects(f.siwc.finish(f.vm.id, unverified.session_id, f.callback(unverified, 'unverified-email')), {
+    code: 'siwc_account_unverified',
+  })
   assert.equal(f.siwc.view(f.vm.id).enabled, false)
   const result = await f.bind()
   assert.equal(result.enabled, true)
@@ -208,20 +231,41 @@ test('binding verifies the same account, preserves Codex, and supports rebind, s
   assert.doesNotMatch(JSON.stringify(result), /mock-access|mock-refresh|oaiapp_mock/)
   assert.deepEqual(fs.readFileSync(path.join(f.root, 'vms', f.vm.id, 'codex-credentials.json')), original)
   const firstHost = f.siwc.read(f.vm.id).host_id
+  assert.equal(f.siwc.read(f.vm.id).siwc_subject, 'siwc-subject-' + f.vm.id)
 
   const returning = await f.start()
   const authUrl = new URL(returning.auth_url)
   assert.equal(authUrl.searchParams.get('client_id'), 'oaiapp_mock')
   assert.equal(authUrl.searchParams.get('ext_agent_host_id'), firstHost)
-  assert.equal((await f.siwc.finish(f.vm.id, returning.session_id, f.callback(returning, 'renew', ''))).enabled, true)
+  const previous = f.siwc.read(f.vm.id)
+  await assert.rejects(f.siwc.finish(f.vm.id, returning.session_id, f.callback(returning, 'changed-subject', '')), {
+    code: 'siwc_account_mismatch',
+  })
+  assert.deepEqual(f.siwc.read(f.vm.id), previous)
   assert.equal((await f.siwc.setEnabled(f.vm.id, false)).bound, true)
   assert.equal((await f.siwc.setEnabled(f.vm.id, true)).enabled, true)
   assert.equal((await f.siwc.unbind(f.vm.id)).bound, false)
   assert.doesNotMatch(JSON.stringify(f.siwc.read(f.vm.id)), /access_token|refresh_token|id_token/)
+  const rebind = await f.start()
+  assert.equal((await f.siwc.finish(f.vm.id, rebind.session_id, f.callback(rebind, 'renew', ''))).enabled, true)
   assert.equal(
     f.hits.some(({ url }) => url.includes('/revoke')),
     false,
   )
+})
+
+test('a saved registration created before SIWC subjects were stored still reauthorizes', async (t) => {
+  const f = fixture(t)
+  const session = await f.start()
+  const { host_id } = f.siwc.read(f.vm.id)
+  await f.siwc.finish(f.vm.id, session.session_id, f.callback(session, 'legacy-subject'))
+  const { siwc_subject, ...legacy } = f.siwc.read(f.vm.id)
+  assert.equal(siwc_subject, 'subject-' + f.vm.id)
+  writeCodexSiwc(f.root, f.vm.id, legacy)
+  const rebind = await f.start()
+  assert.equal(new URL(rebind.auth_url).searchParams.get('client_id'), 'oaiapp_mock')
+  assert.equal((await f.siwc.finish(f.vm.id, rebind.session_id, f.callback(rebind, 'legacy-subject', ''))).bound, true)
+  assert.equal(f.siwc.read(f.vm.id).host_id, host_id)
 })
 
 test('cancelling or replacing the native identity invalidates an outstanding binding', async (t) => {

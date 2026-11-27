@@ -341,7 +341,8 @@ export class CodexBrowserLoginService {
       }
       job.completed.resolve(result)
     } catch (error) {
-      if (error.code === 'siwc_account_mismatch') job.live.persistable = false
+      if (error.code === 'siwc_account_mismatch' || error.code === 'siwc_account_unverified')
+        job.live.persistable = false
       await respond(400, error.publicMessage || 'OpenAI 授权处理失败，请返回面板重新登录。')
       job.completed.reject(error)
     }
