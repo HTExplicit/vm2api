@@ -283,8 +283,9 @@ export type WeeklySplitSummary = {
 export function sessionCapOf(subject: FableSubject): SessionCapacity | null {
   const sessions = subject.sessions as
     { active?: number; max?: number } | undefined
-  const max = Number(subject.session_max ?? sessions?.max ?? 0)
-  if (!max) return null
+  const limit = subject.session_max ?? sessions?.max
+  if (limit == null) return null
+  const max = Number(limit)
   const active = Number(subject.session_active ?? sessions?.active ?? 0)
   return { active, max }
 }
@@ -307,7 +308,7 @@ export function concInfo(
   const sess = sessionCapOf(subject)
   const title = cooling
     ? `Fable 冷却${subject.fable_cooldown_reason ? ' · ' + String(subject.fable_cooldown_reason) : ''}`
-    : `账号 ${inf}/${max} · Fable ${fin}/${fmax}${sess ? ` · 会话 ${sess.active}/${sess.max}` : ''}`
+    : `账号 ${inf}/${max} · Fable ${fin}/${fmax}${sess ? ` · 会话 ${sess.active}/${sess.max || '不限'}` : ''}`
   return { max, inf, fmax, fin, cooling, hot, title }
 }
 

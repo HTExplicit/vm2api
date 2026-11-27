@@ -77,7 +77,7 @@ test('official VM list preserves sorting, live counts, responsive access and det
     schedule_state: 'off',
     inflight: 3,
     session_active: 2,
-    session_max: 8,
+    session_max: 0,
     schedule_level: 6,
     schedule_level_mode: 'auto',
     has_token: true,
@@ -338,7 +338,7 @@ test('official VM list preserves sorting, live counts, responsive access and det
   assert.equal(await cell(row, '7 天窗口花费').innerText(), '$71.72')
   assert.equal(await cell(rowOf('offline-claude-seats'), '席位/会话').innerText(), '2/5')
   const sessions = cell(row, '席位/会话')
-  assert.equal(await sessions.innerText(), '2/8')
+  assert.equal(await sessions.innerText(), '2/不限')
   assert.equal(await cell(rowOf('offline-claude-seats'), '排队').innerText(), '1')
   assert.equal(await rowOf('offline-manual6').getByText('24h 无请求', { exact: true }).count(), 1)
   assert.equal(await rowOf('offline-manual10').getByText('24h 未知', { exact: true }).count(), 1)
@@ -348,6 +348,9 @@ test('official VM list preserves sorting, live counts, responsive access and det
   assert.equal(await requests.innerText(), '3')
   const refresh = page.getByRole('button', { name: '刷新离线数据', exact: true })
   vm.session_active = 0
+  await refresh.click()
+  await sessions.getByText('0/不限', { exact: true }).waitFor()
+  vm.session_max = 8
   await refresh.click()
   await sessions.getByText('0/8', { exact: true }).waitFor()
   assert.equal(await requests.innerText(), '3')
