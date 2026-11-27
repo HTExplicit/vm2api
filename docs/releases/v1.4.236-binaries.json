@@ -1,5 +1,5 @@
 {
-  "schema": "vm2api-upstream-binary-provenance-v1",
+  "schema": 1,
   "recorded_by": "HTExplicit/vm2api",
   "record_type": "supplier_release_observation",
   "application_release": "v1.4.236",
