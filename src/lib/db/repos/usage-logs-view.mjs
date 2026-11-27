@@ -220,7 +220,7 @@ export function toUsageLogRow(row, names, chain = []) {
     originalModel: row.requested_model ?? null,
     sentModel: row.sent_model ?? null,
     actualResponseModel: row.upstream_response_model ?? null,
-    modelMismatch: row.model_mismatch == null ? null : Number(row.model_mismatch),
+    modelMismatch: effectiveModelMismatch(row),
     endpoint: row.path ?? null,
     protocol: row.protocol ?? null,
     method: row.method ?? null,
@@ -463,6 +463,7 @@ function exportRow(raw) {
   return enrichLogRow({
     ...raw,
     failure_diagnostics: parseFailureDiagnostics(raw.failure_diagnostics_json),
+    model_mismatch: effectiveModelMismatch(raw),
     ts: raw.created_at,
     ip: raw.ip_address,
     stream: !!raw.stream,

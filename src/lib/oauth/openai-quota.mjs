@@ -13,7 +13,6 @@ import {
   upsertCodexAccount,
   persistCodexQuotaSnapshot,
   markCodexQuotaRefreshPending,
-  persistCodexCredentialState,
   markCodexGrantDead,
 } from '../vm/codex-slot.mjs'
 import {
@@ -21,6 +20,7 @@ import {
   extraToCodexSnapshot,
   hasSpendableCodexCredits,
   normalizeCodexCredits,
+  normalizeCodexExtra,
 } from '../protocol/codex-usage.mjs'
 import { CODEX_OAUTH_ORIGINATOR, makeProxyFetch, refreshCodexAccessToken } from '../protocol/codex-models.mjs'
 import { openaiIdentityFromJwt } from './openai-jwt.mjs'
@@ -135,7 +135,7 @@ export function extraFromRateLimit(rateLimit = {}, now = Date.now()) {
     if (!window) continue
     for (const [key, value] of Object.entries(window)) extra[`codex_${role}_${key}`] = value
   }
-  return extra
+  return normalizeCodexExtra(extra)
 }
 
 function creditExpiresAt(row = {}) {
@@ -316,86 +316,49 @@ async function quotaFetch(
 
 async function rotateIfNeeded(slot, projectRoot, vmId, fetchImpl) {
   if (!slot.refresh) return slot
-  // 共锁（key=codex:<vmId>）且锁内重读凭证：等待期间并发方（面板刷新/search）
-  // 轮换出的新票直接采用；本方成功后也用锁内快照落盘，不用锁外捕获的
-  // slot.first 旧元数据覆盖别人的新票。
-  const tok = await withCredentialRefreshLock(`codex:${vmId}`, async () => {
-    const live = readCodexAccounts(projectRoot, vmId)[0] || {}
-    const liveRefresh = String(live.refresh_token || slot.refresh || '').trim()
-    if (!liveRefresh) return { ok: false, error: 'missing_refresh_token' }
-    const result = await refreshCodexAccessToken({
-      refreshToken: liveRefresh,
+  return withCredentialRefreshLock('codex:' + vmId, async () => {
+    const account = readCodexAccounts(projectRoot, vmId)[0] || {}
+    const auth = captureOpenaiAuth(projectRoot, vmId, account)
+    if (!isOpenaiCredentialCurrent(slot.auth)) {
+      return { ...slot, access: account.access_token, refresh: account.refresh_token, auth }
+    }
+    const tok = await refreshCodexAccessToken({
+      refreshToken: slot.refresh,
       proxyUrl: slot.proxyUrl,
       fetchImpl,
       timeoutMs: OPENAI_QUOTA_TIMEOUT_MS,
     })
-    if (!result?.ok) return result
-    const latest = readCodexAccounts(projectRoot, vmId)[0] || {}
-    if (latest.refresh_token && latest.refresh_token !== liveRefresh) {
-      // 并发方已轮换：内存态采用其新票，本方轮换结果作废（不再写盘）。
-      return { ok: true, rotatedBy: 'concurrent', access_token: latest.access_token, refresh_token: latest.refresh_token }
+    if (!tok.ok) {
+      const recorded = recordOpenaiAuthResult(auth, {
+        status: tok.status,
+        error: tok.error,
+        source: 'oauth_refresh',
+        message: 'GPT OAuth 刷新失败，请重新导入',
+      })
+      if (recorded && tok.error === 'oauth_revoked') markCodexGrantDead(projectRoot, vmId, tok)
+      return { ...slot, rotateError: tok.error || 'refresh_failed' }
     }
-    const expiresAt = result.expires_at || latest.expires_at || slot.first.expires_at
+    if (!isOpenaiCredentialCurrent(auth)) return { ...slot, rotateError: 'credential_changed' }
+
+    const expiresAt = tok.expires_at || account.expires_at
     upsertCodexAccount(projectRoot, vmId, {
-      access_token: result.access_token,
-      refresh_token: result.refresh_token,
-      id_token: result.id_token || latest.id_token,
+      access_token: tok.access_token,
+      refresh_token: tok.refresh_token,
+      id_token: tok.id_token || account.id_token,
       expires_at: expiresAt,
     })
-    // 凭证文件是过期时间真值；vm.json 的 codex.expires_at 是导入时快照，
-    // 不镜像会让面板读到「过期 14 天」的假死票。best-effort。
-    try {
-      if (expiresAt) {
-        patchVmRecord(projectRoot, vmId, (vm) => {
-          vm.codex = vm.codex && typeof vm.codex === 'object' ? { ...vm.codex } : {}
-          vm.codex.expires_at = expiresAt
-        })
-      }
-    } catch {}
-    return result
-  })
-  if (tok.ok && tok.rotatedBy === 'concurrent') {
-    return { ...slot, access: tok.access_token, refresh: tok.refresh_token }
-  }
-  if (!tok.ok) {
-    recordOpenaiAuthResult(slot.auth, {
-      status: tok.status,
-      error: tok.error,
-      source: 'oauth_refresh',
-      message: 'GPT OAuth 刷新失败，请重新导入',
-    })
-    // Surface dead credentials (refresh_rejected / refresh_empty / missing_refresh_token)
-    // on the vm ticket instead of failing silently in memory. Transient errors
-    // (timeout / fetch_failed) and ambiguous upstream 4xx/5xx stay unmarked; the
-    // next successful quota snapshot clears the mark again.
-    const structural = ['refresh_rejected', 'refresh_empty', 'missing_refresh_token', 'oauth_revoked'].includes(
-      tok.error,
-    )
-    if (structural) {
-      try {
-        persistCodexCredentialState(projectRoot, vmId, { error: tok.error })
-        // 吊销是 grant 死亡：与 claude 池同落点写四态 unschedulable（仅操作员可清），
-        // 面板立刻显示「不可调度 · 凭证吊销」而不是笼统受限。
-        if (tok.error === 'oauth_revoked') markCodexGrantDead(projectRoot, vmId, tok)
-      } catch {
-        // Persistence is best-effort; the in-memory rotateError still propagates.
-      }
+    if (expiresAt) {
+      patchVmRecord(projectRoot, vmId, (vm) => {
+        vm.codex.expires_at = expiresAt
+      })
     }
-    return { ...slot, rotateError: tok.error || 'refresh_failed' }
-  }
-  if (!isOpenaiCredentialCurrent(slot.auth)) return { ...slot, rotateError: 'credential_changed' }
-  upsertCodexAccount(projectRoot, vmId, {
-    access_token: tok.access_token,
-    refresh_token: tok.refresh_token,
-    id_token: tok.id_token || slot.first.id_token,
-    expires_at: tok.expires_at || slot.first.expires_at,
+    return {
+      ...slot,
+      access: tok.access_token,
+      refresh: tok.refresh_token || slot.refresh,
+      auth: captureOpenaiAuth(projectRoot, vmId),
+    }
   })
-  return {
-    ...slot,
-    access: tok.access_token,
-    refresh: tok.refresh_token || slot.refresh,
-    auth: captureOpenaiAuth(projectRoot, vmId),
-  }
 }
 
 function publicUsage(extra, resetCredits, credits, usagePayload = {}) {

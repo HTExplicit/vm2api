@@ -56,7 +56,6 @@ import {
   readCodexAccounts,
   clearCodexCredits,
   enrichCodexAccountIdentity,
-  persistCodexCredentialState,
   markCodexGrantDead,
 } from '../vm/codex-slot.mjs'
 import { clearOpenAIAccountHold } from '../pool/openai-account-runtime.mjs'
@@ -7569,64 +7568,46 @@ export function createPanelHandler(ctx) {
         }
         const vm = getVm(cfg.paths.project, id)
         if (isCodexVm(vm)) {
-          const first = readCodexAccounts(cfg.paths.project, id)[0] || {}
-          const auth = captureOpenaiAuth(cfg.paths.project, id, first)
-          const refreshToken = String(first.refresh_token || '').trim()
-          if (!refreshToken) {
-            return json(res, 400, {
-              ok: false,
-              error: { code: 'credential_mode_unsupported', message: 'GPT 槽没有 refresh_token，请重新导入 OAuth' },
-            })
-          }
-          // 共锁（key=codex:<vmId>）且锁内重读凭证：等待期间并发方轮换出的新票
-          // 直接采用，不用锁外捕获的旧 RT 重放、也不用旧票元数据落盘。
-          const tok = await withCredentialRefreshLock(`codex:${id}`, async () => {
-            const current = readCodexAccounts(cfg.paths.project, id)[0] || {}
-            const liveRefreshToken = String(current.refresh_token || '').trim()
-            if (!liveRefreshToken) return { ok: false, error: 'credential_mode_unsupported' }
-            const result = await refreshCodexAccessToken({
-              refreshToken: liveRefreshToken,
-              proxyUrl: hostProxyUrlForVm(vm),
-            })
-            if (!result?.ok) return result
-            const latest = readCodexAccounts(cfg.paths.project, id)[0] || {}
-            if (latest.refresh_token && latest.refresh_token !== liveRefreshToken) {
-              // 并发方已轮换：直接采用其新票，本方轮换结果作废。
-              return { ok: true, adopted: true }
+          return withCredentialRefreshLock('codex:' + id, async () => {
+            const project = cfg.paths.project
+            const first = readCodexAccounts(project, id)[0] || {}
+            const refreshToken = String(first.refresh_token || '').trim()
+            if (!refreshToken) {
+              return json(res, 400, {
+                ok: false,
+                error: { code: 'credential_mode_unsupported', message: 'GPT 槽没有 refresh_token，请重新导入 OAuth' },
+              })
             }
-            upsertCodexAccount(cfg.paths.project, id, {
-              access_token: result.access_token,
-              refresh_token: result.refresh_token,
-              id_token: result.id_token || latest.id_token,
-              expires_at: result.expires_at || latest.expires_at,
+            const auth = captureOpenaiAuth(project, id, first)
+            const tok = await refreshCodexAccessToken({ refreshToken, proxyUrl: hostProxyUrlForVm(vm) })
+            if (!tok.ok) {
+              const recorded = recordOpenaiAuthResult(auth, {
+                status: tok.status,
+                error: tok.error,
+                source: 'oauth_refresh',
+                message: 'GPT OAuth 刷新失败，请重新导入',
+              })
+              if (recorded && tok.error === 'oauth_revoked') markCodexGrantDead(project, id, tok)
+              return json(res, 502, {
+                ok: false,
+                error: { code: tok.error || 'refresh_failed', message: 'GPT OAuth 刷新失败，请重新导入' },
+              })
+            }
+            if (!isOpenaiCredentialCurrent(auth)) {
+              return json(res, 409, {
+                ok: false,
+                error: { code: 'credential_changed', message: '凭据已更新，未写入旧刷新结果' },
+              })
+            }
+            upsertCodexAccount(project, id, {
+              access_token: tok.access_token,
+              refresh_token: tok.refresh_token,
+              id_token: tok.id_token || first.id_token,
+              expires_at: tok.expires_at || first.expires_at,
             })
-            return result
+            clearOpenAIAccountHold(id)
+            return json(res, 200, panel.ok({ ok: true, refreshed: true, platform: 'openai' }))
           })
-          if (!tok.ok) {
-            recordOpenaiAuthResult(auth, {
-              status: tok.status,
-              error: tok.error,
-              source: 'oauth_refresh',
-              message: 'GPT OAuth 刷新失败，请重新导入',
-            })
-            return json(res, 502, {
-              ok: false,
-              error: { code: 'credential_mode_unsupported', message: 'GPT 槽没有 refresh_token，请重新导入 OAuth' },
-            })
-          }
-          if (!isOpenaiCredentialCurrent(auth)) {
-            return json(res, 409, {
-              ok: false,
-              error: { code: 'credential_changed', message: '凭据已更新，未写入旧刷新结果' },
-            })
-          }
-          upsertCodexAccount(cfg.paths.project, id, {
-            access_token: tok.access_token,
-            refresh_token: tok.refresh_token,
-            id_token: tok.id_token || first.id_token,
-            expires_at: tok.expires_at || first.expires_at,
-          })
-          return json(res, 200, panel.ok({ ok: true, refreshed: true, platform: 'openai' }))
         }
         if (isApiKeyMode(vm?.claude?.mode)) {
           return json(res, 400, {

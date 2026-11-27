@@ -1187,6 +1187,7 @@ export async function buildProbeOne({
   usageCache = null,
   hop = true,
   fableProbe = probeFableEntitlement,
+  codexQuotaQuery = queryOpenaiQuota,
   routingConfig = {},
 } = {}) {
   const vm = getVm(cfg.paths.project, id)
@@ -1201,7 +1202,7 @@ export async function buildProbeOne({
     )
   }
   if (isCodexVm(vm)) {
-    const result = await queryOpenaiQuota({
+    const result = await codexQuotaQuery({
       projectRoot: cfg.paths.project,
       vmId: id,
       rotate: true,

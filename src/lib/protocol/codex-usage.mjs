@@ -212,7 +212,7 @@ export function extraToCodexSnapshot(extra = {}) {
     secondary_used_percent: num(
       ownDefined(extra, 'codex_secondary_used_percent')
         ? extra.codex_secondary_used_percent
-        : extra[`codex_${secondaryWindow}_used_percent`],
+        : extra.codex_5h_used_percent,
     ),
     secondary_reset_after_seconds: int(
       ownDefined(extra, 'codex_secondary_reset_after_seconds')
