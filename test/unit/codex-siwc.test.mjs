@@ -1208,6 +1208,29 @@ test('native Codex retains generate=false on WebSocket and rejects it on the HTT
   }
 })
 
+test('SIWC HTTP Responses dispatches each SSE event through response.completed', { timeout: 5000 }, async (t) => {
+  const f = fixture(t)
+  await f.bind()
+  const host = await listenGateway(t, f)
+  const res = await fetch('http://' + host + '/responses', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model, input: 'hello', stream: true }),
+  })
+  assert.equal(res.status, 200)
+  assert.match(res.headers.get('content-type'), /^text\/event-stream/)
+  const records = (await res.text()).split('\n\n')
+  assert.equal(records.pop(), '', 'the terminal event must end with a blank line')
+  const types = records.map((record) => {
+    const [name, data, ...extra] = record.split('\n')
+    assert.deepEqual(extra, [])
+    const payload = JSON.parse(data.slice('data: '.length))
+    assert.equal(name, 'event: ' + payload.type)
+    return payload.type
+  })
+  assert.deepEqual(types, ['response.created', 'response.output_text.delta', 'response.completed'])
+})
+
 test('HTTP and WebSocket send the selected speed alias tier to SIWC', { timeout: 5000 }, async (t) => {
   const base = 'gpt-6.2-sol'
   resetGptModelPolicy()
