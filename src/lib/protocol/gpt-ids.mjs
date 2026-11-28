@@ -5,6 +5,13 @@ export const SKIP_GPT =
 
 export const GPT_ID_PREFIX = /^gpt/i
 
+// https://developers.openai.com/api/docs/guides/ultrafast-mode
+const ULTRAFAST_MODELS = new Set(['gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6-astra', 'gpt-6.1-sol'])
+
+export function isPublishedGptUltrafastModel(id) {
+  return ULTRAFAST_MODELS.has(id)
+}
+
 export function isGptSeriesId(id) {
   const s = String(id || '').trim()
   return GPT_ID_PREFIX.test(s) && !SKIP_GPT.test(s)

@@ -274,6 +274,7 @@ Claude PATCH `max_sessions` 返回 400 `claude_max_sessions_forbidden`；OpenAI 
 |------|------|
 | GET | `/model-policy` → `{ policy, models, effective }` |
 | PUT | `/model-policy` |
+| PATCH | `/model-policy?platform=openai` | 管理员按模型更新 Ultrafast 别名。例如正文 `{"models":{"gpt-6.2-sol":true}}`。传 `false` 关闭。 |
 | POST | `/model-policy/reset` |
 | POST | `/model-policy/sync-worker` | 经一个 Claude OAuth 槽拉 Anthropic `/v1/models`（最多合并 3 个号的目录）并入矩阵。返回 `added` 和 `catalog_sync`。无可用槽 400 `no_claude_slot` |
 | POST | `/model-policy/sync-codex` | 经 GPT OAuth 槽 SOCKS 拉 ChatGPT 模型目录并入矩阵。票过期时用 refresh_token 换一次新 access，写入 `codex-credentials.json`。无 Codex 槽 400 `no_codex_slot`。 |

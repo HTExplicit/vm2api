@@ -13,6 +13,11 @@ import { CodexSiwcService, SIWC_REDIRECT_URI, SIWC_RESOURCE } from '../../src/li
 import { startNodeEgressSocks, stopNodeEgressSocks } from '../../src/lib/cluster/node-egress-socks.mjs'
 import { handleCodexImages, handleCodexProtocol, handleCodexSearch } from '../../src/lib/protocol/handle-codex.mjs'
 import { CODEX_SEARCH_URL } from '../../src/lib/protocol/codex-models.mjs'
+import {
+  resetGptModelPolicy,
+  saveGptModelPolicy,
+  syncGptIdsIntoPolicy,
+} from '../../src/lib/protocol/gpt-model-policy.mjs'
 import { openAIAccountHold, resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
 import { summarizeVm, getVm, persistCodexUsage } from '../../src/lib/vm/vm-registry.mjs'
 import { codexCredentialPath, readCodexAccounts, writeCodexAccounts } from '../../src/lib/vm/codex-slot.mjs'
@@ -98,7 +103,7 @@ function completion(id = 'resp_mock') {
   }
 }
 
-function fixture(t, extra) {
+function fixture(t, extra, { catalogModel = model } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-siwc-'))
   t.after(() => fs.rmSync(root, { recursive: true }))
   const vm = slot(root, 'a-siwc', extra)
@@ -162,7 +167,7 @@ function fixture(t, extra) {
       }
       if (url.endsWith('/models')) {
         assert.match(init.headers.authorization, /^Bearer (mock|new)-access$/)
-        return jsonResponse({ models: [{ slug: model, display_name: 'Mock GPT', visibility: 'list' }] })
+        return jsonResponse({ models: [{ slug: catalogModel, display_name: 'Mock GPT', visibility: 'list' }] })
       }
       assert.equal(url, SIWC_RESOURCE + '/responses')
       assert.match(init.headers.authorization, /^Bearer (mock|new)-access$/)
@@ -1201,6 +1206,42 @@ test('native Codex retains generate=false on WebSocket and rejects it on the HTT
       client.terminate()
     }
   }
+})
+
+test('HTTP and WebSocket send the selected speed alias tier to SIWC', { timeout: 5000 }, async (t) => {
+  const base = 'gpt-6.2-sol'
+  resetGptModelPolicy()
+  t.after(resetGptModelPolicy)
+  syncGptIdsIntoPolicy([{ id: base, catalog: { service_tiers: [{ id: 'priority', name: 'Fast' }] } }])
+  saveGptModelPolicy({ models: { [base]: { enabled: true, expose_fast: true, expose_ultrafast: true } } })
+  const f = fixture(t, undefined, { catalogModel: base })
+  await f.bind()
+  const seen = []
+  f.setInference((body) => {
+    seen.push([body.model, body.service_tier])
+    return sse([completion('resp_speed_' + seen.length)])
+  })
+
+  const host = await listenGateway(t, f)
+  const fast = await fetch('http://' + host + '/v1/responses', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: base + '-fast', input: 'fast turn', stream: false }),
+  })
+  assert.equal(fast.status, 200, await fast.text())
+
+  const client = new WebSocket('ws://' + host + '/v1/responses')
+  try {
+    await once(client, 'open')
+    const frames = await wsTurn(client, { model: base + '-ultrafast', input: 'ultrafast turn' })
+    assert.equal(frames.at(-1)?.type, 'response.completed', JSON.stringify(frames))
+  } finally {
+    client.terminate()
+  }
+  assert.deepEqual(seen, [
+    [base, 'priority'],
+    [base, 'ultrafast'],
+  ])
 })
 
 test('existing WebSocket continuation and panel test chat both reach SIWC', { timeout: 5000 }, async (t) => {

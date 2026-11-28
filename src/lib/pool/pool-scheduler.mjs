@@ -356,6 +356,7 @@ export const MODEL_GATE_REASONS = new Set([
   'model_not_supported',
   'model_not_allowed',
   'model_fast_unavailable',
+  'model_ultrafast_unavailable',
 ])
 
 export const MODEL_WAIT_REASONS = new Set(['model_cooldown', 'fable_cooldown', 'fable_quota', 'fable_split'])

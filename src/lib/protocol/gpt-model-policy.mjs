@@ -3,7 +3,7 @@
  * Live ids from ChatGPT sync; seed is empty-catalog fallback.
  */
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
-import { isGptSeriesId, isSyncableGptCatalogId } from './gpt-ids.mjs'
+import { isGptSeriesId, isPublishedGptUltrafastModel, isSyncableGptCatalogId } from './gpt-ids.mjs'
 import { IMAGE_TOOL_MODELS, canonicalImageToolModel } from './image-tool-models.mjs'
 
 const SETTINGS_KEY = 'gpt_model_policy'
@@ -42,6 +42,7 @@ function entry(id, extra = {}) {
     params: extra.params || { max_tokens_default: 16384, max_tokens_cap: 128000 },
     aliases: extra.aliases || [],
     expose_fast: extra.expose_fast === true,
+    expose_ultrafast: extra.expose_ultrafast === true,
   }
 }
 
@@ -59,65 +60,78 @@ function exactPolicyModelId(id) {
   return Object.keys(policy.models || {}).find((candidate) => candidate.toLowerCase() === lower) || null
 }
 
-function hasPriorityTier(row) {
+const SPEED_ALIASES = {
+  fast: { label: 'Fast', flag: 'expose_fast', tier: 'priority' },
+  ultrafast: { label: 'Ultrafast', flag: 'expose_ultrafast', tier: 'ultrafast' },
+}
+
+function supportsUltrafastAlias(id, row) {
   return (
-    Array.isArray(row?.catalog?.service_tiers) &&
-    row.catalog.service_tiers.some((tier) => tier && typeof tier === 'object' && tier.id === 'priority')
+    isPublishedGptUltrafastModel(id.toLowerCase()) ||
+    (Array.isArray(row.catalog?.service_tiers) && row.catalog.service_tiers.some((tier) => tier?.id === 'ultrafast'))
   )
 }
 
-/** Resolve the generated `<model>-fast` alias without treating it as a catalog id. */
-export function resolveGptFastAlias(model) {
+function aliasUnavailableReason(speed, id, row) {
+  if (!row) return 'base_missing'
+  if (row.enabled === false) return 'base_disabled'
+  if (row[speed.flag] !== true) return 'not_exposed'
+  // The native catalog can omit an officially published Ultrafast tier.
+  if (speed.tier === 'ultrafast') return supportsUltrafastAlias(id, row) ? null : 'ultrafast_missing'
+  const upstreamTiers = row.catalog?.service_tiers
+  return Array.isArray(upstreamTiers) && upstreamTiers.some((tier) => tier?.id === 'priority')
+    ? null
+    : 'priority_missing'
+}
+
+/** Resolve a speed alias. An actual upstream catalog id always takes precedence. */
+export function resolveGptSpeedAlias(model) {
   if (!loaded) loadGptModelPolicy()
   const alias = bareModelId(model)
-  if (!/^gpt-/i.test(alias) || !/-fast$/i.test(alias)) return { kind: 'normal', model: alias }
+  const suffix = /-(fast|ultrafast)$/i.exec(alias)?.[1].toLowerCase()
+  if (!/^gpt-/i.test(alias) || !suffix) return { kind: 'normal', model: alias }
 
   const actualId = exactPolicyModelId(alias)
   if (actualId) return { kind: 'actual', model: actualId }
 
-  const baseId = alias.replace(/-fast$/i, '')
-  const baseIdExact = exactPolicyModelId(baseId)
-  const base = baseIdExact ? policy.models?.[baseIdExact] : null
-  if (!baseIdExact || !base) {
-    return { kind: 'unavailable', alias, reason: 'base_missing' }
+  const speed = SPEED_ALIASES[suffix]
+  const base = exactPolicyModelId(alias.slice(0, -suffix.length - 1))
+  const reason = aliasUnavailableReason(speed, base, policy.models?.[base])
+  if (reason) {
+    return { kind: 'unavailable', alias, base, reason, label: speed.label, errorCode: `model_${suffix}_unavailable` }
   }
-  if (base.enabled === false) return { kind: 'unavailable', alias, reason: 'base_disabled', base: baseIdExact }
-  if (base.expose_fast !== true) return { kind: 'unavailable', alias, reason: 'not_exposed', base: baseIdExact }
-  if (!hasPriorityTier(base)) return { kind: 'unavailable', alias, reason: 'priority_missing', base: baseIdExact }
-  return { kind: 'fast', alias, base: baseIdExact, service_tier: 'priority' }
+  return { kind: 'tier', alias, base, service_tier: speed.tier }
 }
 
 export function isGptFastAliasAvailable(model) {
-  return resolveGptFastAlias(model).kind === 'fast'
+  return resolveGptSpeedAlias(model).service_tier === 'priority'
 }
 
-export function listGptFastAliases({ mappingKeys = [] } = {}) {
+export function listGptSpeedAliases({ mappingKeys = [] } = {}) {
   if (!loaded) loadGptModelPolicy()
   const actualIds = new Set(Object.keys(policy.models || {}).map((id) => id.toLowerCase()))
   const mapped = new Set(
     (Array.isArray(mappingKeys) ? mappingKeys : []).map((id) => bareModelId(id).toLowerCase()).filter(Boolean),
   )
-  return Object.entries(policy.models || {})
-    .filter(([id, row]) => {
-      const alias = `${id}-fast`.toLowerCase()
-      return (
-        /^gpt-/i.test(id) &&
-        row?.enabled !== false &&
-        row?.expose_fast === true &&
-        hasPriorityTier(row) &&
-        !actualIds.has(alias) &&
-        !mapped.has(alias)
-      )
-    })
-    .map(([id, row]) => ({
-      id: `${id}-fast`,
-      display_name: `${row.display_name || id} Fast`,
-      family: 'codex',
-      enabled: true,
-      source: 'gpt-model-policy',
-      alias_of: id,
-      service_tier: 'priority',
-    }))
+  const aliases = []
+  for (const [id, row] of Object.entries(policy.models || {})) {
+    if (!/^gpt-/i.test(id)) continue
+    for (const [suffix, speed] of Object.entries(SPEED_ALIASES)) {
+      const alias = `${id}-${suffix}`
+      const lowerAlias = alias.toLowerCase()
+      if (actualIds.has(lowerAlias) || mapped.has(lowerAlias) || aliasUnavailableReason(speed, id, row)) continue
+      aliases.push({
+        id: alias,
+        display_name: `${row.display_name || id} ${speed.label}`,
+        family: 'codex',
+        enabled: true,
+        source: 'gpt-model-policy',
+        alias_of: id,
+        service_tier: speed.tier,
+      })
+    }
+  }
+  return aliases
 }
 
 /** Known image model ids only; `enabled` must be a boolean. Unlisted ids keep `base`. */
@@ -233,6 +247,7 @@ export function loadGptModelPolicy({ force = false } = {}) {
             id,
             family: 'codex',
             expose_fast: row?.expose_fast === true,
+            expose_ultrafast: row?.expose_ultrafast === true,
           },
         ]),
       )
@@ -269,6 +284,10 @@ export function saveGptModelPolicy(next) {
         ...edits,
         id,
         family: 'codex',
+        expose_ultrafast:
+          typeof edits.expose_ultrafast === 'boolean'
+            ? edits.expose_ultrafast
+            : policy.models?.[id]?.expose_ultrafast === true,
         expose_fast: typeof edits.expose_fast === 'boolean' ? edits.expose_fast : models[id]?.expose_fast === true,
       }
       if (catalog) models[id].catalog = catalog
@@ -289,6 +308,30 @@ export function saveGptModelPolicy(next) {
   persist()
   return policy
 }
+export function patchGptUltrafastAliases(changes) {
+  if (!changes || typeof changes !== 'object' || Array.isArray(changes) || !Object.keys(changes).length) {
+    return { ok: false, message: 'models 必须是非空的模型 ID 到布尔值映射' }
+  }
+
+  const current = getGptModelPolicy()
+  const models = { ...current.models }
+  for (const [id, enabled] of Object.entries(changes)) {
+    if (typeof enabled !== 'boolean' || !isGptSeriesId(id) || !Object.hasOwn(models, id)) {
+      return { ok: false, message: '请指定现有 GPT 模型 ID 和布尔值' }
+    }
+    const row = models[id]
+    if (enabled && (row.enabled === false || !supportsUltrafastAlias(id, row))) {
+      return { ok: false, message: '只能为启用且支持 Ultrafast 的模型开启别名' }
+    }
+    models[id] = { ...row, expose_ultrafast: enabled }
+  }
+
+  const next = { ...current, models, updated_at: new Date().toISOString() }
+  new SettingsRepo().set(SETTINGS_KEY, next)
+  policy = next
+  return { ok: true, models: changes }
+}
+
 export function listGptPolicyModels() {
   if (!loaded) loadGptModelPolicy()
   return Object.entries(policy.models || {})

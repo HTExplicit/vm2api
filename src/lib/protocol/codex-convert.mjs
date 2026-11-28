@@ -4,7 +4,7 @@
  * Request/usage shapes follow codex-proxy-rs (system→developer, extract_usage).
  */
 import { extractOpenaiUsage, openaiAnthropicUsageFromExtract, openaiChatUsageFromExtract } from './openai-usage.mjs'
-import { resolveGptFastAlias } from './gpt-model-policy.mjs'
+import { resolveGptSpeedAlias } from './gpt-model-policy.mjs'
 import { buildAnthropicSseError } from './stream-truncation.mjs'
 import { claudeStopReasonToOpenAIFinish } from './convert.mjs'
 import { firstNonEmptyEffort } from './log-fields.mjs'
@@ -33,17 +33,17 @@ export function stripCodexIdentity(body = {}) {
   return next
 }
 
-function normalizeFastAliasBody(body = {}) {
+function normalizeSpeedAliasBody(body = {}) {
   if (!body || typeof body !== 'object') return { ok: true, body }
-  const fast = resolveGptFastAlias(body.model)
-  if (fast.kind === 'unavailable') {
-    return { ok: false, code: fast.reason === 'base_disabled' ? 'model_disabled' : 'model_fast_unavailable' }
+  const alias = resolveGptSpeedAlias(body.model)
+  if (alias.kind === 'unavailable') {
+    return { ok: false, code: alias.reason === 'base_disabled' ? 'model_disabled' : alias.errorCode }
   }
-  if (fast.kind !== 'fast') return { ok: true, body }
+  if (alias.kind !== 'tier') return { ok: true, body }
   const model = String(body.model || '').trim()
   const parts = model.split('/').filter(Boolean)
-  if (parts.length) parts[parts.length - 1] = fast.base
-  return { ok: true, body: { ...body, model: parts.join('/'), service_tier: fast.service_tier } }
+  if (parts.length) parts[parts.length - 1] = alias.base
+  return { ok: true, body: { ...body, model: parts.join('/'), service_tier: alias.service_tier } }
 }
 
 function textParts(content) {
@@ -424,7 +424,7 @@ export function anthropicToCodexResponses(body = {}) {
 
 export function toCodexResponses(protocol, body, convert = {}) {
   const stripped = stripCodexIdentity(body)
-  const fast = normalizeFastAliasBody(stripped)
+  const fast = normalizeSpeedAliasBody(stripped)
   if (!fast.ok) return fast
   const normalized = fast.body
   if (protocol === 'openai.responses') {

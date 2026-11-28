@@ -104,6 +104,7 @@ const PANEL_ROUTE_SAMPLES = [
   ['PUT', '/api/panel/distill'],
   ['GET', '/api/panel/model-policy'],
   ['PUT', '/api/panel/model-policy'],
+  ['PATCH', '/api/panel/model-policy'],
   ['POST', '/api/panel/model-policy/reset'],
   ['POST', '/api/panel/model-policy/sync-worker'],
   ['GET', '/api/panel/pricing'],
