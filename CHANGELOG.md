@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.4.26701 — 2026-11-28
+## 1.4.26801 — 2026-11-28
 
-- 合入上游 v1.4.267，包含终态上游 HTTP 400 分类、无参工具流式修复、PostgreSQL 和 Redis 热路径优化、在途日志清理和预热管理。保留 fork 的 SIWC、Ultrafast、账号浏览器和升级恢复。
+- 合入上游 v1.4.268，包含终态上游 HTTP 400 分类、无参工具流式修复、PostgreSQL 和 Redis 热路径优化、在途日志清理和预热管理。保留 fork 的 SIWC、Ultrafast、账号浏览器和升级恢复。
 - 账号面板从调度租约读取在途请求数和 RPM。改槽号和内核按需重启共用在途请求计数。
 - SQLite 078 和 PostgreSQL 012 一次性把存量直连端点正文策略更新为原样转发。迁移后可按端点重新选择项目策略。PostgreSQL 013 补齐 fork 的 API 账号和请求日志字段。
 - 发布 CRAG 3.1.31 签名载荷。Gemini 宿主对齐签名载荷 0.5.5，使用原版 agy CLI，已安装的宿主通过本版安装器同步。
@@ -49,6 +49,17 @@
 - 合入上游 v1.4.236，保留 fork 的账号浏览器、OpenAI 账号 API、调度和升级恢复配置。
 - SQLite 新增 074、075，沿用旧库迁移账本；PostgreSQL 沿用上游 006、007。
 - Linux amd64 发布沿用 fork 构建的 kin-egress，载荷固定 CRAG 3.1.24 和 CRAGGemini 0.4.14。已启用的 Gemini 宿主可通过本版安装器的 prepare-gemini 同步。
+
+## 1.4.268 — 2026-11-28 · fork 会话与父会话转发相同的 Bash 历史命令，恢复 fork 首轮的提示缓存复用（外部贡献）
+
+- **保留客户端回传的 Bash 命令，使父会话与 fork 的历史前缀一致（#2124，外部贡献 `Gitforxuyang`）**：同一段 Bash 历史在父会话与新 fork 中此前可能被转发成两种文本，导致 fork 首轮无法复用父会话的提示缓存。例如模型返回 `cd /example && pwd`，客户端随后在工具调用历史里回传 `pwd`：父会话命中工具调用回放记录，会补回目录前缀、转发 `cd /example && pwd`；新 fork 没有这条记录，转发 `pwd`。命令位于历史前部时，缓存前缀就此分叉，后面再多相同消息也无法命中。
+  - `src/lib/protocol/issued-tool-replay.mjs`：回放工具块时，对 `id` 与名称都匹配、且客户端回传了字符串 `input.command` 的 Bash 调用，保留客户端回传的命令，而不是用服务端记录的命令覆盖。回放块来自每次从存储字符串重新解析出的副本，不会改写存储的记录；非 Bash 工具、`id` 不匹配的调用行为不变
+  - **行为变化，升级前请知悉**：对 Bash 调用，父会话转发给上游的 `input.command` 现在是**客户端回传的命令**，不再是服务端记录的原始命令；两者不同时（如上例），父会话的历史文本会从 `cd /example && pwd` 变为 `pwd`。这是为了让父会话与 fork 一致而有意为之
+- **补记：#2122 已随 `1.4.267` 发出，当时的发布说明遗漏了它**。`1.4.267` 的二进制与源码中包含该修复（`unrestCodexNode`），但 `1.4.267` 的说明只写了 #2121：
+  - **Codex 重新授权后清除 Rust 调度器侧的节点惩罚（#2122，Fixes #2086）**：吊销的 Codex 凭据会把节点按 `oauth_revoked`、`until = MAX_SAFE_INTEGER` 永久停放；重新授权此前只清了 JS 侧（`clearOpenAIAccountHold`），没清 Rust 调度器自己的惩罚，所以额度查询正常、派发却一直报 `pinned node codex_vm:… is busy`，要重启调度器才恢复。现在 Codex 凭据导入（`commitImportedCodexVm`）与令牌刷新成功路径会同步调用新增的 `PoolScheduler.unrestCodexNode`（`unrestVmNode` 因硬编码 `claude_vm` 清不到 Codex 节点，其契约不变）
+  - 已知边界：未在真实 Codex 账号上复现；「吊销会让 Rust 持有惩罚」这一环是读 `handle-codex.mjs` 与 `health.rs` 推断的
+- 部署说明：本次改动零数据库迁移、零 Rust 变更、零 `deploy/payload.json` 变更；升级后重启控制面即可生效。
+
 
 ## 1.4.267 — 2026-11-28 · 优化 Claude Code ↔ CRAGGemini 原生边界并钉选 `0.5.5` 签名载荷
 
