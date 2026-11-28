@@ -682,13 +682,18 @@ unixTest('public CRAG handler preserves folded controls through normalization an
     assert.deepEqual(body.output_config, { effort: 'max', format })
     assert.deepEqual(
       body.messages.map((message) => message.role),
-      ['user', 'assistant', 'system', 'user', 'system'],
+      ['user', 'assistant', 'user', 'system'],
     )
-    assert.match(body.messages[0].content.at(-1).text, /Claude Code environment update/)
-    assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
-    assert.deepEqual(body.messages[3].content[0].cache_control, shortMarker)
+    const firstUser = body.messages[0].content
+    assert.ok(firstUser.some((block) => /Claude Code environment update/.test(block.text)))
+    assert.deepEqual(body.messages[2].content[0].cache_control, shortMarker)
     assert.equal(body.messages.at(-1).clear_at, 'tool_uses')
-    assert.equal(body.messages.at(-1).content[0].text, 'clear this point')
+    // The system control follows its matching tool result. A later 1h
+    // breakpoint must normalize to the preceding 5m TTL.
+    assert.deepEqual(body.messages.at(-1).content, [
+      { type: 'text', text: 'keep this anchor', cache_control: shortMarker },
+      { type: 'text', text: 'clear this point' },
+    ])
     assert.equal(
       body.messages.some((message) => message.role === 'system' && message.content.length === 0),
       false,

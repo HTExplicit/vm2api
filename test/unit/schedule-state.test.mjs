@@ -58,6 +58,7 @@ test('risk-audit and request-level codes never change the slot state', () => {
     'signature_repairable',
     'http_404',
     'wrap_connection_error',
+    'crag_prompt_replace_empty_unsupported',
     'worker_transport_failure',
     'worker_timeout',
     'slot_busy',

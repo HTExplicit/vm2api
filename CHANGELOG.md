@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.4.26501 — 2026-11-28
+## 1.4.26601 — 2026-11-28
 
-- 合入上游 v1.4.265，包含终态上游 HTTP 400 分类、无参工具流式修复、PostgreSQL 和 Redis 热路径优化及预热管理。保留 fork 的 SIWC、Ultrafast、账号浏览器和升级恢复。
+- 合入上游 v1.4.266，包含终态上游 HTTP 400 分类、无参工具流式修复、PostgreSQL 和 Redis 热路径优化、在途日志清理和预热管理。保留 fork 的 SIWC、Ultrafast、账号浏览器和升级恢复。
 - 账号面板从调度租约读取在途请求数和 RPM。改槽号和内核按需重启共用在途请求计数。
 - SQLite 078 和 PostgreSQL 012 一次性把存量直连端点正文策略更新为原样转发。迁移后可按端点重新选择项目策略。PostgreSQL 013 补齐 fork 的 API 账号和请求日志字段。
 - 发布 CRAG 3.1.31 签名载荷。Gemini 宿主对齐签名载荷 0.5.4，使用原版 agy CLI，已安装的宿主通过本版安装器同步。
@@ -49,6 +49,15 @@
 - 合入上游 v1.4.236，保留 fork 的账号浏览器、OpenAI 账号 API、调度和升级恢复配置。
 - SQLite 新增 074、075，沿用旧库迁移账本；PostgreSQL 沿用上游 006、007。
 - Linux amd64 发布沿用 fork 构建的 kin-egress，载荷固定 CRAG 3.1.24 和 CRAGGemini 0.4.14。已启用的 Gemini 宿主可通过本版安装器的 prepare-gemini 同步。
+
+## 1.4.266 — 2026-11-28 · 修复 PG 18 账单批写类型冲突、恢复清全缓存与断连在飞孤儿，新增 20K 回放基准套件
+
+- **修复 PostgreSQL 18 + Redis 8 真实闭环验证暴露的 3 项缺陷（#2119）**：承接 `1.4.264`（#2102）后的真库端到端与压测验证，根治以下 3 个问题：
+  - **`api_keys` 批写 PG 18 参数类型冲突与空串强转**：`ApiKeyStore._applyUsageBatchToPg` 统一将 `$1` 绑定为 `$1::text`，仅在 `EXTRACT(EPOCH FROM ...)` 中使用 `($1::text)::timestamptz` 与 `NULLIF(k.window_*_start, '')::timestamptz`，避免 PG 18 类型冲突及空串强转报错导致账单清零；`flushPendingUsage()` 保留 `readdDirtyKeyUsage` 防丢语义并补充失败计数/最近错误（`usageFlushStats()`）与 30s 节流 `console.error`；`startUsageFlusher()` 改为单 tick 最多排干 16 批（每批 200 keys，防重入）
+  - **备份恢复清全缓存与本地快照**：在 `src/lib/cache/index.mjs` 新增并导出 SSOT 方法 `invalidateAllCaches()`（覆盖 `apikey:`、`billing:`、`sched:`、`dash:`、`entity:`、`risk:`、`live:` 全部 7 前缀，清理 `dashboard.snapshotCache`、`liveLogs`、`apiKeys.negCache`、`scheduler.snapshots`，并通过 `registerLocalCacheClearer` 联动清除 `RefusalGuardsRepo` 进程内快照）；`BackupService.restoreBackup()` 在 PG 与 SQLite 恢复分支统一调用，根治恢复后读出旧脏用户
+  - **`vm2api:live:inflight` 断连孤儿清理**：`RequestLogStore` 新增幂等 `bindLifecycle()` / `abort()`（监听 `req` `aborted`、`req` `close` 仅 `!req.complete`、`res` `close` 仅 `!res.writableFinished` 并预检已断开请求），`handleProtocol` / `handleSearch` / `handleImages` 增加 `try/finally` 退出兜底并保持 `res.on('finish')` 兼容，确保超时断连或异常早退时 `vm2api:live:inflight` 与 `vm2api:live:sess:conc:*` 零孤儿残留
+- **新增 20K RPM × 100K 上下文脱敏回放基准套件与 Phase 0 基线报告（#2116）**：新增 `scripts/bench-20k/` 隔离压测与闭环零丢/零漂移校验脚本、合并单测 `test/unit/bench-20k.test.mjs`（20 用例）与 `docs/performance/phase0-baseline-20k-replay.md`，固化后续性能迭代标尺；离线脱敏语料置于 `.local/bench-20k/` 不入库。
+- 部署说明：本次改动相对 `1.4.265` 零数据库迁移、零 Rust 变更、零 `deploy/payload.json` 变更（若从 `1.4.263` 及更早版本跨版升级，控制面启动时会自动幂等应用 `1.4.264` 的 PG 迁移 `011`）；升级后重启控制面即可生效。
 
 ## 1.4.265 — 2026-11-28 · 账号预热面板可见性：阶段汇总、徽章与手动启停（外部贡献）
 

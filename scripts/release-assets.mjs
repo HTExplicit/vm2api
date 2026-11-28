@@ -11,7 +11,6 @@ import { fileURLToPath } from 'node:url'
 import { verifyCragV2Tree } from '../src/lib/vm/wrap-cli-runtime.mjs'
 
 const root = path.resolve(import.meta.dirname, '..')
-const upstreamSourceRecord = 'docs/releases/v1.4.246-binaries.json'
 export function imageAssets(manifest) {
   const assets = new Map()
   for (const file of manifest.files) {
@@ -71,6 +70,30 @@ export function verifyCragArchive(manifest, dir) {
   }
 }
 
+export function supplierBuildFor(manifest, readRelease) {
+  const releases = new Map()
+  const assets = []
+  for (const [name, { file }] of imageAssets(manifest)) {
+    if (!file) continue
+    const tag = file.release || manifest.release
+    if (!releases.has(tag)) {
+      const release = readRelease(tag)
+      assert.equal(release.tag_name, tag)
+      assert.equal(release.draft, false, tag + ': supplier release is private')
+      releases.set(tag, release)
+    }
+    const official = releases.get(tag).assets.find((asset) => asset.name === name)
+    assert.ok(official, name + ': missing supplier asset in ' + tag)
+    assert.equal(official.size, file.size, name + ': supplier size mismatch')
+    assert.equal(official.digest, 'sha256:' + file.sha256, name + ': supplier digest mismatch')
+    assets.push({ name, size: official.size, sha256: file.sha256, release: tag, url: official.browser_download_url })
+  }
+  return {
+    releases: [...releases.values()].map((release) => ({ tag: release.tag_name, url: release.html_url })),
+    assets,
+  }
+}
+
 export function writeProvenance({ manifest, dir, image, sourceCommit, upstreamBuild, cragBuild, assets }) {
   const pinnedAssets = assets.filter((asset) => asset.name !== 'kin-egress')
   for (const asset of pinnedAssets) {
@@ -96,7 +119,6 @@ export function writeProvenance({ manifest, dir, image, sourceCommit, upstreamBu
       release: manifest.release,
       build: {
         ...upstreamBuild,
-        source_record: upstreamSourceRecord,
         assets: upstreamBuild.assets.filter((asset) => pinnedAssets.some((item) => item.name === asset.name)),
       },
       crag: cragBuild,
@@ -164,8 +186,19 @@ function main() {
     run('docker', ['rm', container])
   }
   const expected = stagedAssets(manifest, opts.dest)
-  verifyCragArchive(manifest, opts.dest)
-  const upstreamBuild = JSON.parse(fs.readFileSync(path.join(root, upstreamSourceRecord), 'utf8'))
+  const signedCrag = verifyCragArchive(manifest, opts.dest)
+  const upstreamBuild = supplierBuildFor(manifest, (tag) =>
+    JSON.parse(capture('gh', ['api', `repos/${manifest.repo}/releases/tags/${tag}`])),
+  )
+  const cragBuild = {
+    release: manifest.crag_release,
+    source_repository: 'dofastted/crag',
+    software_version: signedCrag.software_version,
+    core_plaintext_sha256: signedCrag.payload.plaintext_sha256,
+    assets: Object.fromEntries(upstreamBuild.assets
+      .filter((asset) => asset.release === manifest.crag_release)
+      .map((asset) => [asset.name, asset.sha256])),
+  }
   expected.push(
     writeProvenance({
       manifest,
@@ -173,7 +206,7 @@ function main() {
       image: opts.image,
       sourceCommit: capture('git', ['rev-parse', 'HEAD']),
       upstreamBuild,
-      cragBuild: upstreamBuild.native,
+      cragBuild,
       assets: [...expected],
     }),
   )

@@ -39,6 +39,27 @@ ALTER TABLE api_endpoint_keys ADD COLUMN IF NOT EXISTS source_vm_id TEXT NOT NUL
 ALTER TABLE api_endpoint_keys ADD COLUMN IF NOT EXISTS source_account_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_api_endpoint_keys_source ON api_endpoint_keys(source_vm_id, source_account_id);
 
+-- Browser identity and authenticated web storage belong to a slot, including
+-- slots which have not completed their first OpenAI OAuth login yet.
+CREATE TABLE IF NOT EXISTS slot_browser_profiles (
+  vm_id TEXT PRIMARY KEY,
+  account_id TEXT,
+  fingerprint_json TEXT,
+  storage_state_enc TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+ALTER TABLE openai_api_accounts ADD COLUMN IF NOT EXISTS offer_checked_at TEXT;
+ALTER TABLE openai_api_accounts ADD COLUMN IF NOT EXISTS link_checked_at TEXT;
+ALTER TABLE openai_api_orgs ADD COLUMN IF NOT EXISTS paid_balance TEXT;
+ALTER TABLE openai_api_orgs ADD COLUMN IF NOT EXISTS grants_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE openai_api_orgs ADD COLUMN IF NOT EXISTS next_expiring_amount TEXT;
+ALTER TABLE openai_api_orgs ADD COLUMN IF NOT EXISTS next_expiring_at TEXT;
+-- Billing authentication is owned by the slot's fixed web identity.
+ALTER TABLE slot_browser_profiles ADD COLUMN IF NOT EXISTS billing_session_enc TEXT;
+ALTER TABLE openai_api_accounts ADD COLUMN IF NOT EXISTS call_error_json TEXT;
+
 -- Keep the PostgreSQL writer and readers compatible with the fork's SQLite log schema.
 ALTER TABLE usage_logs
   ADD COLUMN IF NOT EXISTS source_account_id TEXT,
