@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.4.26001 — 2026-11-28
+## 1.4.26101 — 2026-11-28
 
-- 合入上游 v1.4.260。保留 fork 的 SIWC、Ultrafast、账号浏览器和升级恢复。
+- 合入上游 v1.4.261。保留 fork 的 SIWC、Ultrafast、账号浏览器和升级恢复。
 - 账号面板从调度租约读取在途请求数和 RPM。改槽号和内核按需重启共用在途请求计数。
 - SQLite 078 和 PostgreSQL 011 一次性把存量直连端点正文策略更新为原样转发。迁移后可按端点重新选择项目策略。
 - 发布 CRAG 3.1.31 签名载荷。Gemini 宿主对齐签名载荷 0.5.4，使用原版 agy CLI，已安装的宿主通过本版安装器同步。
@@ -49,6 +49,13 @@
 - 合入上游 v1.4.236，保留 fork 的账号浏览器、OpenAI 账号 API、调度和升级恢复配置。
 - SQLite 新增 074、075，沿用旧库迁移账本；PostgreSQL 沿用上游 006、007。
 - Linux amd64 发布沿用 fork 构建的 kin-egress，载荷固定 CRAG 3.1.24 和 CRAGGemini 0.4.14。已启用的 Gemini 宿主可通过本版安装器的 prepare-gemini 同步。
+
+## 1.4.261 — 2026-11-28 · 文档：vm2api 与 CRAG V4 的协议边界；内核目录标注历史 V4 载荷的升级建议
+
+- **`vm2api` ↔ CRAG 协议与整流边界文档与内核目录 label（#2093）**：
+  - `docs/PROTOCOL.md`：「CRAG native V2 部署边界」更新为「CRAG Native V4 部署与协议边界」；新增「`vm2api` ↔ CRAG 协议与整流边界（Claude Code `2.1.321`）」，写明网关入口的协议转译、第三方 `system` / `role=system|developer` 文本搬迁、CRAG 最终出口 `2.1.321` 结构整流（`src/lib/protocol/crag-321-rectifier.mjs`）与槽内 CRAG 的职责划分；新增「历史 CRAG V4 载荷升级策略（`3.1.26`–`3.1.30` → `3.1.31`）」
+  - `src/lib/admin/kernel-catalog.mjs`：仅更新 `CRAG_PINNED_RELEASES` 中 `3.1.31`（标注「推荐」）与 `3.1.30` / `3.1.29` / `3.1.27` / `3.1.26`（标注「历史·建议改用 3.1.31」）的展示 `label`；所有 `tag` / `size` / `sha256` / `manifestSha256` 保持不变，不覆写历史 Release 的不可变附件
+- 部署说明：本次改动零数据库迁移、零 Rust 变更、零 `deploy/payload.json` 变更、零协议行为变更；仅文档与面板内核列表中的展示文字，升级后重启控制面即可。
 
 ## 1.4.260 — 2026-11-28 · CRAG 出口新增 Claude Code 2.1.321 结构整流器
 
