@@ -278,6 +278,8 @@ test('migration 059 onward preserves the published 9102 ledger, browser state an
       '073_multi_tier_key_permissions.sql',
       '074_log_error_details_and_hop_correlation.sql',
       '075_usage_logs_advisor_billing.sql',
+      '076_scheduler_center.sql',
+      '077_scheduler_pool_prompt_default.sql',
     ])
     assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '059' ORDER BY version").all(), ledger)
     for (const table of preservedTables)
@@ -600,6 +602,8 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       '073_multi_tier_key_permissions.sql',
       '074_log_error_details_and_hop_correlation.sql',
       '075_usage_logs_advisor_billing.sql',
+      '076_scheduler_center.sql',
+      '077_scheduler_pool_prompt_default.sql',
     ])
     const { risk_review_enabled, body_policy, owner_user_id, ...after } = db
       .prepare('SELECT * FROM api_endpoints WHERE id = ?')
@@ -719,6 +723,8 @@ test('migration 072 upgrades pre-072 crag_shop_orders in place with NULL activat
       '073_multi_tier_key_permissions.sql',
       '074_log_error_details_and_hop_correlation.sql',
       '075_usage_logs_advisor_billing.sql',
+      '076_scheduler_center.sql',
+      '077_scheduler_pool_prompt_default.sql',
     ])
     assert.deepEqual(applyMigrations(db, { migrationsDir: src }), [])
     const row = db
@@ -730,6 +736,35 @@ test('migration 072 upgrades pre-072 crag_shop_orders in place with NULL activat
       { ...row },
       { activation_error_code: null, activation_error_recovery: null, activation_request_id: null },
     )
+  } finally {
+    db.close()
+  }
+})
+
+test('upgrading preserves API endpoint body policies and changes the PG column default', () => {
+  const src = path.resolve('src/lib/db/migrations')
+  const pg010 = path.resolve('src/lib/db/pg/pg-migrations/010_api_endpoint_body_policy_default.sql')
+  const oldDir = path.join(tmp, 'before076')
+  fs.mkdirSync(oldDir, { recursive: true })
+  for (const file of fs.readdirSync(src)) {
+    if (file.endsWith('.sql') && file < '076') fs.copyFileSync(path.join(src, file), path.join(oldDir, file))
+  }
+  const db = new DatabaseSync(':memory:')
+  try {
+    applyMigrations(db, { migrationsDir: oldDir })
+    const insert = db.prepare(`INSERT INTO api_endpoints (id, name, base_url, created_at, updated_at, body_policy)
+      VALUES (?, ?, 'https://api.anthropic.com', '2026-11-27', '2026-11-27', ?)`)
+    insert.run('ep_caller', 'Caller', 'caller')
+    insert.run('ep_persona', 'Persona', 'persona')
+
+    applyMigrations(db, { migrationsDir: src })
+    const policy = db.prepare('SELECT body_policy FROM api_endpoints WHERE id = ?')
+    assert.equal(policy.get('ep_caller').body_policy, 'caller')
+    assert.equal(policy.get('ep_persona').body_policy, 'persona')
+
+    const pg010Sql = fs.readFileSync(pg010, 'utf8')
+    assert.match(pg010Sql, /ALTER TABLE api_endpoints[\s\S]*ALTER COLUMN body_policy SET DEFAULT 'caller'/i)
+    assert.doesNotMatch(pg010Sql, /UPDATE api_endpoints/i)
   } finally {
     db.close()
   }

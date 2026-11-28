@@ -5,6 +5,7 @@ export type ViewId =
   | 'cluster'
   | 'vm'
   | 'import'
+  | 'pools'
   | 'specs'
   | 'billing'
   | 'crag-subscription'
@@ -29,6 +30,7 @@ export const VIEW_TITLES: Record<ViewId, string> = {
   cluster: '集群',
   vm: '虚拟机',
   import: '导入',
+  pools: '分组池',
   specs: '规格',
   billing: '计费',
   'crag-subscription': '订阅 CRAG',
@@ -79,6 +81,7 @@ export const ROUTE_VIEWS = {
   '/cluster': 'cluster',
   '/vm': 'vm',
   '/import': 'import',
+  '/pools': 'pools',
   '/specs': 'specs',
   '/proxies': 'proxies',
   '/billing': 'billing',

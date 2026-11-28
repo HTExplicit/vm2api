@@ -1,7 +1,7 @@
 import { OFFICIAL_CLAUDE_CLI_UA } from '../identity/vm-identity.mjs'
 import { stripIllegalCacheControlFields } from '../protocol/cache-ttl.mjs'
 import { officialMessagesBody } from '../protocol/anthropic-messages.mjs'
-import { restoreToolNamesInSSELine } from '../protocol/anthropic-policy.mjs'
+import { restoreToolNames, restoreToolNamesInSSELine } from '../protocol/anthropic-policy.mjs'
 import { prepareClassifierBody } from '../protocol/request-purpose.mjs'
 import { consumeClaudeSSEData } from '../protocol/convert.mjs'
 import { clientCancelledResult, isCompleteAssistantMessage, mapUpstreamError } from '../core/errors.mjs'
@@ -185,8 +185,14 @@ function joinHeaderMap(headers = {}) {
  * know yet.  Headers the operator configured on the endpoint win; anthropic-beta
  * is the union of endpoint and caller tokens so neither opt-in is dropped.
  */
-function forwardAnthropicProtocolHeaders(headers = {}, protocol = '', protocolKind = '', { passthrough = false } = {}) {
+export function forwardAnthropicProtocolHeaders(
+  headers = {},
+  protocol = '',
+  protocolKind = '',
+  { passthrough = false, officialTraffic = false } = {},
+) {
   if (protocol !== 'anthropic.messages' || protocolKind !== 'anthropic') return {}
+  if (!officialTraffic && !passthrough) return {}
   const out = {}
   for (const [rawName, rawValue] of Object.entries(headers || {})) {
     const name = String(rawName || '').toLowerCase()
@@ -582,6 +588,7 @@ async function runApiAttemptBody({
   requestContext = null,
   forwardImpl = forwardApi,
   passthrough = false,
+  officialTraffic = false,
   toolNames = {},
   picked: selected = null,
   onDispatch = null,
@@ -727,6 +734,7 @@ async function runApiAttemptBody({
   if (redaction) body = await maskJson(body, redaction)
   const callerProtocolHeaders = forwardAnthropicProtocolHeaders(req?.headers, protocol, protocolKind, {
     passthrough,
+    officialTraffic,
   })
   const authHeaders = upstreamAuthHeaders(protocolKind, picked.key.api_key, {
     ...extraHeaders,
@@ -968,6 +976,8 @@ async function runApiAttemptBody({
     }
   }
 
+  const hasToolNames = Boolean(toolNames && Object.keys(toolNames).length > 0)
+
   if (!clientStream) {
     const assembler = converters.createClaudeMessageAssembler()
     let committed = false
@@ -1006,7 +1016,8 @@ async function runApiAttemptBody({
         sawMessageStop,
       }
     }
-    const assembled = assembler.message
+    const assembled =
+      assembler.message && hasToolNames ? restoreToolNames(assembler.message, toolNames) : assembler.message
     if (!sawMessageStop) {
       return {
         ...resultBase,

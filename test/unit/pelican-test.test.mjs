@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { createMockSchedulerRuntime } from '../helpers/mock-scheduler-runtime.mjs'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import fs from 'node:fs'
@@ -148,6 +149,7 @@ test('pelican protocol refuses an unhealthy kernel without starting it or sendin
     writeSSEHeaders() {},
     routing: {},
     projectRoot: root,
+    schedulerRuntime: createMockSchedulerRuntime({ projectRoot: root }),
     ops: {
       writeCodexKernelConfig() {
         configs++

@@ -101,6 +101,7 @@ test('official VM list preserves sorting, live counts, responsive access and det
     codex_usage: {
       pending_refresh: true,
       last_success_at: '2026-11-16T07:00:00Z',
+      windows: [{ id: '7d', used_percent: 18, window_minutes: 10080, reset_at: resetIn(67) }],
     },
     codex_credits: { status: 'available', balance: 12.5 },
     openai_api: {
@@ -333,7 +334,10 @@ test('official VM list preserves sorting, live counts, responsive access and det
   )
   const cell = (slot, label) => slot.getByRole('cell').nth(headers.findIndex((header) => header.trim() === label))
   assert.equal(await cell(row, '槽位').getByText('测试槽', { exact: true }).count(), 1)
-  assert.equal(await cell(row, '调度 · 优先级').getByText('P6', { exact: true }).count(), 1)
+  const priority = cell(row, '调度 · 优先级').getByTitle(/自动.*有效值 6/)
+  assert.equal(await priority.innerText(), 'P6自')
+  const weeklyQuota = cell(row, '7D').getByTitle(/7D 用量 18% · 时间已过 60%/)
+  assert.equal(await weeklyQuota.locator('i').evaluate((bar) => bar.style.width), '18%')
   assert.equal(await cell(row, '今日请求数').innerText(), '12')
   assert.equal(await cell(row, '7 天窗口花费').innerText(), '$71.72')
   assert.equal(await cell(rowOf('offline-claude-seats'), '席位/会话').innerText(), '2/5')
@@ -400,6 +404,7 @@ test('official VM list preserves sorting, live counts, responsive access and det
   await page.keyboard.press('Enter')
   await detail.getByText('99.0%', { exact: true }).waitFor()
   await detail.getByLabel(/额度待刷新，最近测量/).waitFor()
+  await detail.getByText('时间已过 60%', { exact: true }).waitFor()
   await detail.getByRole('button', { name: '刷新额度和积分', exact: true }).waitFor()
   assert.equal(await detail.getByRole('button', { name: 'API配置', exact: true }).count(), 0)
   const cost = detail.getByRole('region', { name: '成本拆分', exact: true })

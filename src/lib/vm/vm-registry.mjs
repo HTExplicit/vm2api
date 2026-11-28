@@ -33,6 +33,7 @@ import { vmQuotaOverrideOf } from '../pool/vm-quota-override.mjs'
 import { activeHoursOf, parseActiveHoursInput } from '../pool/active-hours.mjs'
 import { rollWindowHistory } from '../pool/window-history.mjs'
 import { normalizeOwnerId, vmOriginOf, vmOwnerId, VM_ORIGIN } from '../admin/resource-owner.mjs'
+import { fingerprintDir, syncSlotIdentityTimezoneAndPreset } from '../identity/slot-computer.mjs'
 import { isCodexVm, normalizeVmKind } from './vm-kind.mjs'
 import { canClaudeResetCredits } from '../oauth/credential-mode.mjs'
 import { validTimezone } from '../core/timezone.mjs'
@@ -58,15 +59,25 @@ import { ensureSlotSmbios } from './machine-spec.mjs'
 
 export { isCodexVm, normalizeVmKind } from './vm-kind.mjs'
 
-export function listVms(projectRoot, routing = null) {
+export function listVms(projectRoot, routing = null, { reconcileCodexQuota = false } = {}) {
   const dir = path.join(projectRoot, 'vms')
   if (!fs.existsSync(dir)) return []
   const files = listVmRecordFiles(dir)
   return files
     .map((f) => {
+      const file = path.join(dir, f)
+      let raw
       try {
-        const raw = readJsonCached(path.join(dir, f))
-        if (!raw?.id) return null
+        raw = readJsonCached(file)
+      } catch {
+        return null
+      }
+      if (!raw?.id) return null
+      if (reconcileCodexQuota && isCodexVm(raw)) {
+        const result = syncCodexQuotaSchedule(projectRoot, raw, { policy: routing?.codex?.quota })
+        if (result.changed) raw = readJsonCached(file) || raw
+      }
+      try {
         return summarizeVm(raw, projectRoot, routing)
       } catch {
         return null
@@ -932,6 +943,11 @@ export function persistVmTimezone(projectRoot, id, timezone, { source = 'manual'
   if (vm.fingerprint && typeof vm.fingerprint === 'object') vm.fingerprint.timezone = zone
   vm.updated_at = new Date().toISOString()
   atomicWriteJson(file, vm)
+  if (fs.existsSync(fingerprintDir(projectRoot, id))) {
+    try {
+      syncSlotIdentityTimezoneAndPreset(projectRoot, vm, { timezone: zone, locale: vm.locale })
+    } catch {}
+  }
   return summarizeVm(vm)
 }
 

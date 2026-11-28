@@ -1,5 +1,6 @@
-# Control plane. The console, kin-api-kernel, kin-redact and kin-egress build
-# from source; the remaining payload comes from deploy/payload.json.
+# Control plane and native helpers build from source. Slot payloads are pinned in deploy/payload.json.
+# Multi-arch OCI index digest (linux/amd64 + linux/arm64), verified against Docker Hub.
+ARG RUST_IMAGE=rust:1.86-bookworm@sha256:300ec56abce8cc9448ddea2172747d048ed902a3090e6b57babb2bf19f754081
 
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web
 RUN npm install -g pnpm@10
@@ -23,6 +24,13 @@ COPY worker/ ./worker/
 RUN cd api-kernel && go build -buildvcs=false -trimpath -o /out/kin-api-kernel ./cmd/kin-api-kernel \
   && cd ../redact && go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/kin-redact ./cmd/kin-redact \
   && cd ../worker && go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/kin-egress ./cmd/kin-egress
+
+FROM --platform=linux/amd64 ${RUST_IMAGE} AS scheduler
+WORKDIR /src/scheduler
+COPY scheduler/ ./
+RUN cargo build --release --locked --bin kin-scheduler \
+  && mkdir -p /out \
+  && cp target/release/kin-scheduler /out/kin-scheduler
 
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS payload
 WORKDIR /src
@@ -65,7 +73,8 @@ COPY docker/kin-kvm ./docker/kin-kvm
 COPY --from=web /src/web/dist ./web/dist
 COPY --from=payload /payload/bin/ /opt/vm2api/image-bin/
 COPY --from=helpers /out/ /opt/vm2api/image-bin/
-RUN test -x /opt/vm2api/image-bin/kin-redact && test -x /opt/vm2api/image-bin/kin-egress
+COPY --from=scheduler /out/kin-scheduler /opt/vm2api/image-bin/kin-scheduler
+RUN test -x /opt/vm2api/image-bin/kin-redact && test -x /opt/vm2api/image-bin/kin-egress && test -x /opt/vm2api/image-bin/kin-scheduler
 COPY share/wrap-cli /opt/vm2api/image-wrap-cli
 COPY --from=payload /payload/share/wrap-cli/ /opt/vm2api/image-wrap-cli/
 COPY --from=payload /payload/share/crag/ /opt/vm2api/image-crag/
@@ -86,6 +95,7 @@ ENV NODE_ENV=production \
     KIN_OAUTH_AUTH_BIN=/opt/vm2api/bin/kin-oauth-auth \
     KIN_COMPUTER_BIN=/opt/vm2api/bin/kin-computer \
     KIN_API_KERNEL_BIN=/opt/vm2api/bin/kin-api-kernel \
-    KIN_REDACT_BIN=/opt/vm2api/bin/kin-redact
+    KIN_REDACT_BIN=/opt/vm2api/bin/kin-redact \
+    KIN_SCHEDULER_BIN=/opt/vm2api/bin/kin-scheduler
 EXPOSE 8787
 ENTRYPOINT ["/usr/local/bin/vm2api-entrypoint"]

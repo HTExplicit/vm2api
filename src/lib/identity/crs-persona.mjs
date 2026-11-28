@@ -37,6 +37,15 @@ import { uuidFromSeed } from './identity-rewrite.mjs'
 import { OFFICIAL_CLI_VERSION } from './vm-identity.mjs'
 import { CCH_PLACEHOLDER } from './cch.mjs'
 import { CLAUDE_CLI_UA_RE, isOfficialClaudeUa } from './official-claude-ua.mjs'
+import {
+  OFFICIAL_CLAUDE_CODE_TOOL_NAMES,
+  computeFingerprintFromTextUtf16,
+  hasVerifiedDesktopHeaders,
+  isOfficialClaudeToolName,
+  isValidStrictOfficialUserId,
+  stripInvisibleUnicode,
+  verifyOfficialClaudeCode,
+} from './official-cc-verifier.mjs'
 import { modelSupportsMidConversationSystem } from '../protocol/anthropic-policy.mjs'
 import { validTimezone } from '../core/timezone.mjs'
 import { normalizeCacheTtl, validateCacheBreakpoints } from '../protocol/cache-ttl.mjs'
@@ -62,6 +71,9 @@ import {
   agentStandingVar,
   canonicalPersonaCompat,
   extractTemplateVars,
+  isOfficialIdentityText,
+  isPresetEnvEnabled,
+  isPresetGuidanceEnabled,
   presetFlagEnabled,
   normalizeOverlayPreset,
   normalizePersonaPreset,
@@ -305,15 +317,7 @@ export function extractFirstUserText(messages) {
 }
 
 export function computeClaudeCodeFingerprint(firstUserText = '', cliVersion = DEFAULT_CLI_VERSION) {
-  const buf = Buffer.from(String(firstUserText), 'utf8')
-  let chars = ''
-  for (const i of [4, 7, 20]) {
-    chars += i < buf.length ? String.fromCharCode(buf[i]) : '0'
-  }
-  return createHash('sha256')
-    .update(FINGERPRINT_SALT + chars + cliVersion, 'utf8')
-    .digest('hex')
-    .slice(0, 3)
+  return computeFingerprintFromTextUtf16(firstUserText, cliVersion)
 }
 
 export { CCH_PLACEHOLDER, computeClaudeCodeCch, sealClaudeCodeCch } from './cch.mjs'
@@ -586,14 +590,20 @@ function stripLeakySystem(system, options = {}) {
   return system
 }
 
-/** Normalize caller text blocks; only billing lines are gateway-owned. Also used by usage attribution. */
-export function callerSystemBlocksWithoutBilling(system) {
+/**
+ * Normalize caller text blocks; billing lines are always stripped, and when
+ * `stripOfficialIdentity` is true (Mode 3 zero), exact-trimmed official identity
+ * blocks from `OFFICIAL_IDENTITY_SET` are also stripped while caller business blocks
+ * keep their original text, cache_control, and order verbatim.
+ */
+export function callerSystemBlocksWithoutBilling(system, { stripOfficialIdentity = false } = {}) {
   const blocks = Array.isArray(system) ? system : system == null ? [] : [system]
   return blocks.flatMap((item) => {
     const block = typeof item === 'string' ? { type: 'text', text: item } : item
     if (!block || typeof block.text !== 'string') return []
     const text = stripBillingLines(block.text)
     if (!text.trim()) return []
+    if (stripOfficialIdentity && isOfficialIdentityText(text)) return []
     return [text === block.text ? block : { ...block, text }]
   })
 }
@@ -888,8 +898,8 @@ export function personaTemplateVars({
   return {
     billing,
     billing_semi: billing.endsWith(';') ? billing : `${billing};`,
-    identity: entrypoint === 'sdk-cli' ? OFFICIAL_303_AGENT_IDENTITY : CRS_OFFICIAL_CLI_SYSTEM,
-    identity_cli: entrypoint === 'sdk-cli' ? OFFICIAL_303_AGENT_IDENTITY : CRS_OFFICIAL_CLI_SYSTEM,
+    identity: CRS_OFFICIAL_CLI_SYSTEM,
+    identity_cli: CRS_OFFICIAL_CLI_SYSTEM,
     identity_compact: CRS_COMPACT_IDENTITY,
     reporting: CRS_REPORTING_OUTCOMES,
     dynamic_boundary: '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__',
@@ -918,14 +928,12 @@ export function personaTemplateVars({
     session_id: String(sessionId || '').trim(),
     keep_dynamic_boundary: ['official', 'official_full', OFFICIAL_303_PRESET].includes(preset),
     main_prompt_303: () =>
-      presetFlagEnabled(compat, 'persona_guidance_presets', preset)
+      isPresetGuidanceEnabled(compat, preset)
         ? renderOfficial303MainPrompt({ cwd: env?.cwd, entrypoint })
         : OFFICIAL_303_HARNESS,
     harness_303: OFFICIAL_303_HARNESS,
     guidance_303: () =>
-      presetFlagEnabled(compat, 'persona_guidance_presets', preset)
-        ? renderOfficial303Guidance({ cwd: env?.cwd, entrypoint })
-        : '',
+      isPresetGuidanceEnabled(compat, preset) ? renderOfficial303Guidance({ cwd: env?.cwd, entrypoint }) : '',
     env_303: () => (withEnv ? buildOfficial303Environment(env, { model: model || env?.modelId }) : ''),
     env_instructions_303: () =>
       withEnv && presetFlagEnabled(compat, 'persona_env_instructions_presets', preset)
@@ -951,10 +959,19 @@ export function personaTemplateVars({
  * preview drops billing blocks); request-scoped values stay as placeholders.
  */
 export function personaPreviewVars({ timezone = 'UTC', model = 'claude-sonnet-5' } = {}) {
-  const vars = personaTemplateVars({ env: { timezone, modelId: model }, model, withEnv: true })
+  const vars = personaTemplateVars({
+    env: { timezone, modelId: model },
+    model,
+    withEnv: true,
+    compat: {
+      persona_guidance_presets: { official_full: true },
+      model_env_extra_presets: { official_full: true },
+    },
+    preset: 'official_full',
+  })
   return {
-    identity: vars.identity,
-    identity_cli: vars.identity_cli,
+    identity: CRS_OFFICIAL_CLI_SYSTEM,
+    identity_cli: CRS_OFFICIAL_CLI_SYSTEM,
     identity_compact: vars.identity_compact,
     reporting: vars.reporting,
     dynamic_boundary: vars.dynamic_boundary,
@@ -962,12 +979,12 @@ export function personaPreviewVars({ timezone = 'UTC', model = 'claude-sonnet-5'
     agent_official: vars.agent_official,
     env_timezone_only: vars.env_timezone_only(),
     env_official: vars.env_official(),
-    timezone: vars.timezone,
+    timezone: timezone || vars.timezone,
     model: vars.model,
     cli_version: vars.cli_version,
-    main_prompt_303: vars.main_prompt_303(),
+    main_prompt_303: renderOfficial303MainPrompt({ cwd: '', entrypoint: 'cli' }),
     harness_303: vars.harness_303,
-    guidance_303: vars.guidance_303(),
+    guidance_303: renderOfficial303Guidance({ cwd: '', entrypoint: 'cli' }),
     env_303: vars.env_303(),
     env_instructions_303: OFFICIAL_303_ENV_INSTRUCTIONS,
     env_timezone: ` - Timezone: ${timezone}`,
@@ -1107,36 +1124,8 @@ export function inboundHasTools(body) {
 export const PERSONA_EXPANSION_MODES = Object.freeze(['official_tools', 'any_tools', 'never'])
 export const DEFAULT_PERSONA_EXPANSION = 'official_tools'
 
-/** Anthropic first-party tool types/names. */
-const OFFICIAL_TOOL_PREFIX_RE =
-  /^(web_search|web_fetch|code_execution|text_editor|str_replace_based_edit_tool|str_replace|computer|bash|memory)(_|$)/i
-
-/** Claude Code built-in tool names (case-insensitive). */
-export const CLAUDE_CODE_TOOL_NAMES = Object.freeze(
-  new Set([
-    'bash',
-    'read',
-    'write',
-    'edit',
-    'multiedit',
-    'glob',
-    'grep',
-    'ls',
-    'task',
-    'agent',
-    'webfetch',
-    'notebookedit',
-    'todowrite',
-    'skill',
-    'askuserquestion',
-    'enterplanmode',
-    'exitplanmode',
-    'bashoutput',
-    'killshell',
-    'listmcpresources',
-    'readmcpresource',
-  ]),
-)
+/** Claude Code built-in tool names (strict case-sensitive PascalCase SSOT). */
+export const CLAUDE_CODE_TOOL_NAMES = OFFICIAL_CLAUDE_CODE_TOOL_NAMES
 
 function toolLabel(tool) {
   if (!tool || typeof tool !== 'object') return ''
@@ -1156,22 +1145,9 @@ export function normalizePersonaExpansion(value) {
 export function isOfficialLookingTool(tool, extraNames = []) {
   const name = toolLabel(tool)
   if (!name) return false
-  const lower = name.toLowerCase()
-  if (OFFICIAL_TOOL_PREFIX_RE.test(lower)) return true
-  if (CLAUDE_CODE_TOOL_NAMES.has(lower)) return true
-  if (lower.startsWith('mcp__')) return true
-  const type = String(tool.type || '')
-    .trim()
-    .toLowerCase()
-  if (type && type !== lower && OFFICIAL_TOOL_PREFIX_RE.test(type)) return true
-  const extras = extraNames
-    .map((n) =>
-      String(n || '')
-        .trim()
-        .toLowerCase(),
-    )
-    .filter(Boolean)
-  return extras.includes(lower)
+  if (isOfficialClaudeToolName(tool?.name, tool)) return true
+  const extras = extraNames.map((n) => String(n || '').trim()).filter(Boolean)
+  return extras.includes(name)
 }
 
 export function inboundHasOfficialLookingTools(body, extraNames = []) {
@@ -1597,47 +1573,27 @@ export function standingUsageFromRoutingFile(filePath, mode) {
   }
 }
 
-const LEGACY_OFFICIAL_USER_ID_RE = /^user_([a-fA-F0-9]{64})_account_([a-fA-F0-9-]*)_session_([a-fA-F0-9-]{36})$/
-
 export function isValidOfficialUserId(raw) {
-  if (raw == null) return false
-  if (typeof raw === 'object') {
-    return !!(raw.device_id && raw.session_id)
-  }
-  const s = String(raw).trim()
-  if (!s) return false
-  if (s.startsWith('{')) {
-    try {
-      const p = JSON.parse(s)
-      return !!(p && p.device_id && p.session_id)
-    } catch {
-      return false
-    }
-  }
-  return LEGACY_OFFICIAL_USER_ID_RE.test(s)
+  return isValidStrictOfficialUserId(raw)
 }
 
 /**
- * oh-my-pi / omp inbound: their own ROLE + PROJECT blocks, or the OAuth
- * stealth prefix (`cc_entrypoint=local-agent` + Agent SDK one-liner).
- * Claude Desktop shares that entrypoint, so its desktop headers let it continue
- * through the existing official checks; OMP-specific system markers still reject it.
+ * oh-my-pi / omp inbound: their own ROLE + PROJECT blocks, RFC 2119 /
+ * <project-context><workstation>, or the OAuth stealth prefix
+ * (`cc_entrypoint=local-agent` without verified Desktop headers).
  */
 export function looksLikeOhMyPiSystem(system, headers = {}) {
-  const text = systemToText(system)
+  const text = stripInvisibleUnicode(systemToText(system))
   if (!text) return false
-  const ua = String(headers['user-agent'] || headers['User-Agent'] || '').trim()
-  const desktop =
-    isOfficialClaudeUa(ua) &&
-    /[ (,]local-agent(?=[,)])/.test(ua) &&
-    /[ (,]agent-sdk\/\d+\.\d+\.\d+(?=[,)])/.test(ua) &&
-    headers['anthropic-client-platform'] === 'desktop_app' &&
-    /^\d+\.\d+\.\d+$/.test(String(headers['anthropic-client-version'] || '').trim())
-  if (/cc_entrypoint\s*=\s*local-agent/i.test(text) && !desktop) return true
+  const desktop = hasVerifiedDesktopHeaders(headers)
+  if (/\bcc_entrypoint\s*=\s*local-agent\b/i.test(text) && !desktop) return true
   if (/<system-conventions>/i.test(text) && /Oh My Pi/i.test(text)) return true
   if (/<system-conventions>/i.test(text) && /<workstation>/i.test(text)) return true
+  if (/<project-context>[\s\S]*?<workstation>/i.test(text)) return true
+  if (/RFC 2119 keywords:\s*MUST,\s*REQUIRED,\s*SHOULD/i.test(text)) return true
   if (/^ROLE\s*\n\s*=+/m.test(text) && /^PROJECT\s*\n\s*=+/m.test(text)) return true
   if (/\b(?:oh my pi|pi coding harness|omp coding harness)\b/i.test(text)) return true
+  if (/\ba coding assistant running inside pi\b/i.test(text)) return true
   // OMP 18.12–18.16 send the Claude Code envelope plus their own role line (captured).
   if (/^You are omp['’]s trusted coding assistant\.?\s*$/im.test(text)) return true
   return false
@@ -1657,7 +1613,7 @@ export function looksLikeOfficialClaudeSystem(system, headers = {}) {
   if (looksLikeOhMyPiSystem(system, headers)) return false
   const text = systemToText(system)
   if (!text) return false
-  if (/x-anthropic-billing-header:/i.test(text)) return true
+  if (/^\s*x-anthropic-billing-header:/i.test(text)) return true
   if (hasOfficialClaudeEntrypoint(text)) return true
   if (hasOfficialClaudeLine(system)) return true
   if (hasOfficialClaudeChildPrompt(system)) return true
@@ -1673,63 +1629,28 @@ export function inboundHasOpenAIToolShape(body = {}) {
 }
 
 /**
- * Official Claude Code family detection uses the CLI User-Agent prefix and body checks.
- * UA + user_id is not enough: third-party Messages clients spoof both.
- * Body must also look like official CC system, and must not be OpenAI tools.
- * oh-my-pi / local-agent stealth is unofficial even with a matching UA.
+ * Official Claude Code direct traffic check — delegates to SSOT strict verifier.
  */
-export function isOfficialClaudeCodeTraffic(headers = {}, body = {}) {
-  const ua = String(headers['user-agent'] || headers['User-Agent'] || '').trim()
-  if (!isOfficialClaudeUa(ua) || !CLAUDE_CLI_UA_RE.test(ua)) return false
-  if (looksLikeOhMyPiSystem(body?.system, headers)) return false
-  if (!isValidOfficialUserId(body?.metadata?.user_id)) return false
-  if (inboundHasOpenAIToolShape(body)) return false
-  return looksLikeOfficialClaudeSystem(body?.system, headers)
-}
-
-/**
- * Billing block plus an entrypoint field. Third-party tools do send the
- * "You are Claude Code" line, but never this block, which is what makes it a
- * usable signal. The entrypoint value itself is not checked: real values drift
- * across IDEs and a forger could fill any of them anyway.
- */
-function systemHasOfficialBillingBlock(system) {
-  return extractSystemTexts(system).some(
-    (text) => /x-anthropic-billing-header/i.test(text) && /cc_entrypoint=/i.test(text),
-  )
-}
-
-/**
- * An upstream API gateway forwarding real Claude Code rewrites the UA to
- * Go-http-client. The billing block is the signal third-party clients do not
- * send, and some relays keep that block while dropping metadata.user_id.
- * A relay that also drops the block still counts when the client beta
- * (`claude-code-20250219`), the official system text, and a valid user_id
- * all survive. The identity line alone is not enough: third-party tools copy it.
- */
-function headerBetaTokens(headers = {}) {
-  const raw = headers?.['anthropic-beta'] || headers?.['Anthropic-Beta'] || ''
-  return String(raw)
-    .split(',')
-    .map((part) => part.trim())
-    .filter(Boolean)
+export function isOfficialClaudeCodeTraffic(headers = {}, body = {}, opts = {}) {
+  return verifyOfficialClaudeCode(headers, body, { ...opts, detectProxiedOfficialCc: false }).direct
 }
 
 export function systemLooksLikeRelayedClaudeCode(system) {
-  if (hasOfficialClaudeLine(system)) return true
   if (isOfficialClaudeSecurityMonitorPrompt(system)) return true
-  return eachSystemText(system).some((text) => looksLikeAgentPrompt(text))
+  const texts = eachSystemText(system)
+  if (!texts.length) return false
+  const first = texts[0].trimStart()
+  const anchoredIdx = /^x-anthropic-billing-header:/i.test(first) ? 1 : 0
+  const anchor = String(texts[anchoredIdx] || '').trimStart()
+  if (OFFICIAL_CC_CHILD_PROMPT_PREFIXES.some((prefix) => anchor.startsWith(prefix))) return true
+  return texts.length >= 2 && texts.some((text) => looksLikeAgentPrompt(text))
 }
 
-export function isProxiedOfficialClaudeCode(body = {}, headers = {}) {
-  if (!body || typeof body !== 'object') return false
-  if (looksLikeOhMyPiSystem(body?.system)) return false
-  if (inboundHasOpenAIToolShape(body)) return false
-  // Billing block first: some relays keep it and may drop user_id. local-agent
-  // already returned above.
-  if (systemHasOfficialBillingBlock(body?.system)) return true
-  if (!isValidOfficialUserId(body?.metadata?.user_id)) return false
-  return headerBetaTokens(headers).includes('claude-code-20250219') && systemLooksLikeRelayedClaudeCode(body?.system)
+/**
+ * Proxied / relayed official Claude Code check — delegates to SSOT strict verifier.
+ */
+export function isProxiedOfficialClaudeCode(body = {}, headers = {}, opts = {}) {
+  return verifyOfficialClaudeCode(headers, body, { ...opts, detectProxiedOfficialCc: true }).proxied
 }
 
 /**
@@ -1761,6 +1682,15 @@ export function officialCcPassthroughFromRouting(routing = {}) {
 /** Recognition is not passthrough. The body is kept only when that switch is on. */
 export function officialFamilyBodyPassthrough(officialTraffic, routing = {}) {
   return officialTraffic === true && officialCcPassthroughFromRouting(routing)
+}
+
+/** Explicit opt-in rollout toggle (default false): strict zero-mutation & verbatim error passthrough on CRAG. */
+export function cragStrictPassthroughFromRouting(routing = {}) {
+  return routing?.compatibility?.crag_strict_passthrough === true
+}
+
+export function cragStrictPassthroughEnabled(officialPassthrough, routing = {}) {
+  return officialPassthrough === true && cragStrictPassthroughFromRouting(routing)
 }
 
 function stripSystemCacheControl(body) {
@@ -2070,12 +2000,20 @@ function applyTemplatePersona(
     callerAgent: rawCallerAgent = '',
     entrypoint = 'cli',
     cacheTtl = null,
+    cragDirectReplace = false,
   } = {},
 ) {
   const messages = Array.isArray(body.messages) ? body.messages : []
   const zero = preset === 'zero'
-  const blocks = selectedTemplateBlocks(resolvePersonaTemplate(preset, templates), switches, preset)
-  const withEnv = presetFlagEnabled(switches, 'persona_env_presets', preset)
+  const templateSource =
+    cragDirectReplace && Array.isArray(templates?.[preset]) && templates[preset].length
+      ? templates[preset]
+      : resolvePersonaTemplate(preset, templates)
+  const blocks = selectedTemplateBlocks(templateSource, switches, preset)
+  const hasCustomZeroTemplate = zero && Array.isArray(templates?.zero) && templates.zero.length > 0
+  const withEnv = zero
+    ? hasCustomZeroTemplate && switches?.persona_env_presets?.zero !== false
+    : isPresetEnvEnabled(switches, preset)
   const hasUser = messages.some((message) => message?.role === 'user')
   // A variable only consumes caller text if its block will actually be sent.
   const zeroVars = new Set(
@@ -2085,7 +2023,7 @@ function applyTemplatePersona(
             block?.id === 'caller_system'
               ? !block.role && hasUser
               : block?.role === 'system'
-                ? withEnv && hasUser
+                ? !cragDirectReplace && withEnv && hasUser
                 : !block?.role,
           )
           .flatMap((block) => extractTemplateVars(block?.text))
@@ -2107,13 +2045,19 @@ function applyTemplatePersona(
     : thirdPartyClientPrompt(body.system, callerOptions)
   if (harness) env.timezone = requiredTimezone(identity, facts)
   env.timezone = String(env.timezone || '').trim() || requiredTimezone(identity, facts)
-  const templateHasHarness = blocks.some(
-    (block) =>
-      ['harness', 'guidance'].includes(String(block?.id || '')) ||
-      extractTemplateVars(block?.text).some((name) => ['harness_303', 'guidance_303', 'agent_official'].includes(name)),
-  )
+  const hasHarnessBlock = (list) =>
+    list.some(
+      (block) =>
+        ['harness', 'guidance'].includes(String(block?.id || '')) ||
+        extractTemplateVars(block?.text).some((name) =>
+          ['harness_303', 'guidance_303', 'agent_official'].includes(name),
+        ),
+    )
+  const templateHasHarness = hasHarnessBlock(blocks)
+  const sourceDefinesHarness = hasHarnessBlock(templateSource)
   const templateWantsCallerAgent = blocks.some((block) => extractTemplateVars(block?.text).includes('caller_agent'))
-  const usesCallerAgent = !harness && !templateHasHarness && (preset === 'official' || templateWantsCallerAgent)
+  const usesCallerAgent =
+    !harness && !templateHasHarness && ((preset === 'official' && !sourceDefinesHarness) || templateWantsCallerAgent)
   const suppliedAgent = usesCallerAgent ? String(rawCallerAgent || '').trim() : ''
   const zeroAgentBlocks =
     zero && usesCallerAgent && zeroVars.has('caller_agent')
@@ -2121,7 +2065,10 @@ function applyTemplatePersona(
       : []
   const callerAgent = zero
     ? extractSystemTexts(zeroAgentBlocks).join('\n\n')
-    : suppliedAgent || (preset === 'official' && !harness && !templateHasHarness ? CRS_OFFICIAL_AGENT_PROMPT : '')
+    : suppliedAgent ||
+      (preset === 'official' && !harness && !templateHasHarness && !sourceDefinesHarness
+        ? CRS_OFFICIAL_AGENT_PROMPT
+        : '')
   const zeroRemaining = zero
     ? harness && zeroVars.has('agent_official')
       ? []
@@ -2156,6 +2103,7 @@ function applyTemplatePersona(
     messages,
     entrypoint,
   })
+  if (cragDirectReplace) vars.keep_dynamic_boundary = false
   const callerBlocks = blocks.filter((block) => block?.id === 'caller_system')
   const officialBlocks = blocks.filter((block) => block?.id !== 'caller_system')
   const templateOwned = new Set()
@@ -2171,7 +2119,7 @@ function applyTemplatePersona(
   const renderOptions = { blockVars, templateOwned, usedCallerCache: new Set() }
   let system = renderPersonaTemplate(officialBlocks, vars, renderOptions)
 
-  if (preset === 'official') {
+  if (preset === 'official' && !cragDirectReplace) {
     system = insertOfficialCallerAgent(system, callerAgent, cacheTtl == null ? undefined : { type: 'ephemeral' })
     for (const block of system) templateOwned.add(block)
   }
@@ -2191,6 +2139,12 @@ function applyTemplatePersona(
     if (callerText) {
       outMessages = prependRawToFirstUserMessage(outMessages, `<system-reminder>\n${callerText}\n</system-reminder>\n`)
     }
+  }
+  if (cragDirectReplace) {
+    let assembled = { ...body, system, messages: outMessages }
+    if (zero && renderOptions.usedCallerCache.size)
+      assembled = deferReorderedCallerCache(assembled, body, templateOwned)
+    return mergeTemplateCache(assembled, templateOwned, zero ? normalizeCacheTtl(cacheTtl) : cacheTtl)
   }
   if (withEnv) {
     const environment = renderJoinedTemplateBlocks(officialBlocks, vars, { ...renderOptions, role: 'system' })
@@ -2235,6 +2189,7 @@ export function applyCrsUnofficialPersona(
     park,
     parkStyle,
     agent,
+    routing = null,
     routingFile,
     headers,
     sessionId,
@@ -2242,6 +2197,7 @@ export function applyCrsUnofficialPersona(
     model,
     entrypoint,
     cacheTtl = null,
+    cragDirectReplace = false,
   } = {},
 ) {
   if (!body || typeof body !== 'object') return body
@@ -2250,18 +2206,21 @@ export function applyCrsUnofficialPersona(
   if (!forceConfigured && officialClient) return body
   let fromFile = null
   let fileSettings = personaTemplateSettingsFallback()
-  let routing = null
-  if (routingFile) {
+  let resolvedRouting = routing && typeof routing === 'object' ? routing : null
+  if (resolvedRouting) {
+    fromFile = personaOptionsFromRouting(resolvedRouting)
+    fileSettings = personaTemplateSettingsFromRouting(resolvedRouting)
+  } else if (routingFile) {
     try {
-      routing = readJsonParsedCached(routingFile)
-      if (routing) {
-        fromFile = personaOptionsFromRouting(routing)
-        fileSettings = personaTemplateSettingsFromRouting(routing)
+      resolvedRouting = readJsonParsedCached(routingFile)
+      if (resolvedRouting) {
+        fromFile = personaOptionsFromRouting(resolvedRouting)
+        fileSettings = personaTemplateSettingsFromRouting(resolvedRouting)
       } else {
         fromFile = { mode: DEFAULT_PERSONA_MODE, park: DEFAULT_PERSONA_PARK, agent: DEFAULT_PERSONA_AGENT }
       }
     } catch {
-      routing = null
+      resolvedRouting = null
       fromFile = { mode: DEFAULT_PERSONA_MODE, park: DEFAULT_PERSONA_PARK, agent: DEFAULT_PERSONA_AGENT }
       fileSettings = personaTemplateSettingsFallback()
     }
@@ -2270,7 +2229,7 @@ export function applyCrsUnofficialPersona(
   // Read the caller's agent prompt before stripLeakySystem drops it as known official text.
   const rawCallerAgent = extractCallerAgentPrompt(body.system)
   const resolvedEntrypoint =
-    entrypoint === 'cli' || entrypoint === 'sdk-cli' ? entrypoint : ccEntrypointFromRouting(routing)
+    entrypoint === 'cli' || entrypoint === 'sdk-cli' ? entrypoint : ccEntrypointFromRouting(resolvedRouting)
   const hopPreset = mode != null ? personaPresetFromHopMode(mode) : null
   const chosen = hopPreset
     ? { ...fileSettings, explicit: true, preset: hopPreset }
@@ -2281,13 +2240,12 @@ export function applyCrsUnofficialPersona(
   const templateSettings =
     chosen.preset === OFFICIAL_303_PRESET ? { ...chosen, preset: templatePresetFor(chosen.preset) } : chosen
   const preserveEnvironment =
-    personaUsesTemplate(templateSettings) &&
-    !presetFlagEnabled(templateSettings.switches, 'persona_env_presets', templateSettings.preset)
+    personaUsesTemplate(templateSettings) && !isPresetEnvEnabled(templateSettings.switches, templateSettings.preset)
   const cleaned = {
     ...body,
     system:
       templateSettings.preset === 'zero'
-        ? callerSystemBlocksWithoutBilling(body.system)
+        ? callerSystemBlocksWithoutBilling(body.system, { stripOfficialIdentity: true })
         : stripLeakySystem(body.system, { preserveEnvironment }),
     messages: sanitizeUnofficialMessages(body.messages),
   }
@@ -2306,6 +2264,7 @@ export function applyCrsUnofficialPersona(
       callerAgent: rawCallerAgent,
       entrypoint: resolvedEntrypoint,
       cacheTtl,
+      cragDirectReplace,
     })
   }
   const doPark =
@@ -2324,4 +2283,85 @@ export function applyCrsUnofficialPersona(
     model,
     overwrite: resolved === 'overwrite',
   })
+}
+
+const CRAG_BILLING_LINE_RE = /^x-anthropic-billing-header:/i
+const CRAG_PROMPT_VERSION_RE = /prompt_version=<([^>\r\n]+)>/i
+
+/**
+ * Render an explicit panel custom persona template into non-billing `system[]`
+ * text blocks for `headless_claude_bridge_v1` `crag_prompt: { mode: 'replace', blocks }`.
+ * Strips `x-anthropic-billing-header:` lines (CRAG owns `system[0]` billing) and
+ * `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__` markers while preserving `cache_control`
+ * and extracting any zero-style `prompt_version`.
+ */
+export function renderCragCustomSystemBlocks(
+  body,
+  {
+    preset,
+    routing = null,
+    routingFile,
+    cliVersion,
+    sessionId = '',
+    identity,
+    model,
+    entrypoint = 'cli',
+    cacheTtl = null,
+  } = {},
+) {
+  const rendered = applyCrsUnofficialPersona(body || {}, {
+    forceConfigured: true,
+    routing,
+    routingFile,
+    mode: preset,
+    park: false,
+    cliVersion,
+    sessionId,
+    identity,
+    model: model || body?.model,
+    entrypoint,
+    cacheTtl,
+    cragDirectReplace: true,
+  })
+  const rawBlocks = Array.isArray(rendered?.system)
+    ? rendered.system
+    : typeof rendered?.system === 'string' && rendered.system
+      ? [{ type: 'text', text: rendered.system }]
+      : []
+  let promptVersion = null
+  const blocks = []
+  for (const entry of rawBlocks) {
+    const rawText =
+      typeof entry === 'string' ? entry : entry?.type === 'text' && typeof entry.text === 'string' ? entry.text : ''
+    if (!rawText) continue
+    let text = rawText
+    if (/x-anthropic-billing-header:/i.test(text)) {
+      const lines = text.split('\n')
+      const kept = []
+      for (const line of lines) {
+        const trimmedLine = line.trim()
+        if (CRAG_BILLING_LINE_RE.test(trimmedLine)) {
+          if (!promptVersion) {
+            const match = trimmedLine.match(CRAG_PROMPT_VERSION_RE)
+            if (match?.[1]?.trim()) promptVersion = match[1].trim()
+          }
+          continue
+        }
+        kept.push(line)
+      }
+      text = kept.join('\n').trim()
+    }
+    if (!text.trim() || text.trim() === '__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__') continue
+    const block = { type: 'text', text }
+    if (entry && typeof entry === 'object' && entry.cache_control != null) {
+      block.cache_control = { ...entry.cache_control }
+    }
+    blocks.push(block)
+  }
+  if (!promptVersion && normalizePersonaPreset(preset) === 'zero') {
+    promptVersion = CRS_OFFICIAL_CLI_SYSTEM
+  }
+  const changedMessages =
+    Array.isArray(rendered?.messages) && rendered.messages !== body?.messages ? rendered.messages : undefined
+  return changedMessages ? { blocks, promptVersion, messages: changedMessages } : { blocks, promptVersion }
 }

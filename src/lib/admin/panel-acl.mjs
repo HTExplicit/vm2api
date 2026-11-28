@@ -1,4 +1,4 @@
-import { cragShopRoute } from './crag-shop.mjs'
+import { cragShopRoute, geminiCragShopRoute } from './crag-shop.mjs'
 
 /**
  * Panel RBAC.
@@ -13,6 +13,7 @@ export const PANEL_VIEWS = [
   'cluster',
   'vm',
   'import',
+  'pools',
   'specs',
   'proxies',
   'models',
@@ -230,7 +231,7 @@ export function authorizePanelRoute(method, path, role) {
   if (/^\/api\/panel\/vms\/[^/]+\/openai-api(?:\/|$)/.test(p) || /^\/api\/panel\/openai-apikey(?:\/|$)/.test(p)) {
     return { ok: false, role: r, code: 'forbidden', message: '只有管理员可以管理账号 API' }
   }
-  const shopRoute = cragShopRoute(m, p)
+  const shopRoute = cragShopRoute(m, p) ?? geminiCragShopRoute(m, p)
   if (shopRoute === 'apply-renewal') return { ok: false, role: r, code: 'forbidden', message: 'Forbidden' }
   if (shopRoute) return { ok: true, role: r }
 

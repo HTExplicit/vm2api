@@ -1,16 +1,78 @@
-import { test } from 'node:test'
+import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { handleCodexSearch } from '../../src/lib/protocol/handle-codex.mjs'
 import { CODEX_APP_VERSION, CODEX_SEARCH_URL } from '../../src/lib/protocol/codex-models.mjs'
 import { readCodexAccounts } from '../../src/lib/vm/codex-slot.mjs'
-import { getVm } from '../../src/lib/vm/vm-registry.mjs'
+import { getVm, listVms } from '../../src/lib/vm/vm-registry.mjs'
 import { openAIAccountHold, resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
 import { Readable } from 'node:stream'
 import { readBody } from '../../src/lib/http/respond.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
+import { createSchedulerRuntime, formatNodeKey } from '../../src/lib/scheduler/scheduler-runtime.mjs'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const REPO_ROOT = path.resolve(__dirname, '../..')
+
+function resolveSchedulerBin() {
+  for (const candidate of [
+    process.env.KIN_SCHEDULER_BIN,
+    path.join(REPO_ROOT, 'bin', process.platform === 'win32' ? 'kin-scheduler.exe' : 'kin-scheduler'),
+    '/tmp/vm2api-sched-m3-target/release/kin-scheduler',
+    '/tmp/vm2api-sched-target/release/kin-scheduler',
+  ]) {
+    if (candidate && fs.existsSync(candidate)) return candidate
+  }
+  return null
+}
+
+let sharedSchedRoot = null
+let sharedSchedulerRuntime = null
+let activeProjectRoot = null
+let searchReqSeq = 0
+
+async function syncProjectVms(root) {
+  activeProjectRoot = root
+  await sharedSchedulerRuntime.syncConfigNow('codex_search_test')
+  await sharedSchedulerRuntime.pushTelemetryNow()
+  for (const vm of listVms(root)) {
+    await sharedSchedulerRuntime.unrestNode(formatNodeKey('codex_vm', vm.id)).catch(() => {})
+  }
+}
+
+before(async () => {
+  const binPath = resolveSchedulerBin()
+  assert.ok(binPath, 'kin-scheduler binary must exist for handle-codex-search tests (set KIN_SCHEDULER_BIN)')
+  sharedSchedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-search-rust-sched-'))
+  sharedSchedulerRuntime = createSchedulerRuntime({
+    cfg: { paths: { data: sharedSchedRoot, project: sharedSchedRoot } },
+    getVms: () => (activeProjectRoot ? listVms(activeProjectRoot) : []),
+    getRoutingConfig: () => ({}),
+    telemetryIntervalMs: 0,
+    clientOptions: {
+      binPath,
+      socketPath: path.join(sharedSchedRoot, 'run', 'scheduler.sock'),
+      tokenPath: path.join(sharedSchedRoot, 'run', 'scheduler.token'),
+      capFile: path.join(sharedSchedRoot, 'run', 'scheduler.cap.json'),
+      manageProcess: true,
+    },
+  })
+  await sharedSchedulerRuntime.start({ waitMs: 5_000, startLoops: false })
+})
+
+after(async () => {
+  if (sharedSchedulerRuntime) {
+    await sharedSchedulerRuntime.shutdown({ drain: false, stopProcess: true })
+    sharedSchedulerRuntime = null
+  }
+  if (sharedSchedRoot) {
+    fs.rmSync(sharedSchedRoot, { recursive: true, force: true })
+    sharedSchedRoot = null
+  }
+})
 
 function writeGptVm(root, id, account = {}) {
   const dir = path.join(root, 'vms')
@@ -32,6 +94,7 @@ function upstream(status, payload, headers = {}) {
 }
 
 async function search(root, { body, headers = {}, ops = {} } = {}) {
+  await syncProjectVms(root)
   const res = { statusCode: 0, body: null, setHeader() {} }
   const logBag = {}
   const stats = { errors: 0, requests: 0, by_route: {} }
@@ -49,6 +112,7 @@ async function search(root, { body, headers = {}, ops = {} } = {}) {
     routing: {},
     projectRoot: root,
     ops,
+    schedulerRuntime: sharedSchedulerRuntime,
   })
   return { res, logBag, stats }
 }
@@ -141,15 +205,15 @@ test('search moves to the next GPT slot on a usage-limit 429 and parks the first
 test('ordinary search 429 keeps credits and uses Retry-After instead of the full-window reset', async (t) => {
   const root = tempRoot('rate-limit')
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  for (const id of ['vm-gpt-a', 'vm-gpt-b']) writeGptVm(root, id)
+  for (const id of ['vm-gpt-rate-a', 'vm-gpt-rate-b']) writeGptVm(root, id)
   const credits = { has_credits: true, balance: '8.25', fetched_at: new Date().toISOString() }
-  const vm = getVm(root, 'vm-gpt-a')
-  fs.writeFileSync(path.join(root, 'vms', 'vm-gpt-a.json'), JSON.stringify({ ...vm, codex: { credits } }))
+  const vm = getVm(root, 'vm-gpt-rate-a')
+  fs.writeFileSync(path.join(root, 'vms', 'vm-gpt-rate-a.json'), JSON.stringify({ ...vm, schedule_level_manual: 10, codex: { credits } }))
   const started = Date.now()
   const { res } = await search(root, {
     ops: {
       fetchImpl: async (_url, init) => {
-        if (init.headers['chatgpt-account-id'] === 'vm-gpt-a')
+        if (init.headers['chatgpt-account-id'] === 'vm-gpt-rate-a')
           return upstream(
             429,
             { error: { code: 'rate_limit_exceeded' } },
@@ -165,10 +229,10 @@ test('ordinary search 429 keeps credits and uses Retry-After instead of the full
     },
   })
   assert.equal(res.statusCode, 200)
-  const stored = getVm(root, 'vm-gpt-a')
+  const stored = getVm(root, 'vm-gpt-rate-a')
   assert.deepEqual(stored.codex.credits, credits)
   assert.equal(stored.codex.extra.codex_limited_until, undefined)
-  const hold = openAIAccountHold('vm-gpt-a')
+  const hold = openAIAccountHold('vm-gpt-rate-a')
   assert.equal(hold.reason, 'rate_limited')
   assert.ok(hold.until >= started + 23_000 && hold.until <= Date.now() + 23_000)
 })
@@ -176,15 +240,15 @@ test('ordinary search 429 keeps credits and uses Retry-After instead of the full
 test('search quota failure after token rotation applies to the refreshed credential generation', async (t) => {
   const root = tempRoot('refresh-quota')
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  for (const id of ['vm-gpt-a', 'vm-gpt-b']) writeGptVm(root, id)
+  for (const id of ['vm-gpt-refresh-a', 'vm-gpt-refresh-b']) writeGptVm(root, id)
   const credits = { has_credits: true, balance: '6', fetched_at: new Date().toISOString() }
-  const vm = getVm(root, 'vm-gpt-a')
-  fs.writeFileSync(path.join(root, 'vms', 'vm-gpt-a.json'), JSON.stringify({ ...vm, codex: { credits } }))
+  const vm = getVm(root, 'vm-gpt-refresh-a')
+  fs.writeFileSync(path.join(root, 'vms', 'vm-gpt-refresh-a.json'), JSON.stringify({ ...vm, policy: { priority: 10 }, codex: { credits } }))
   const { res } = await search(root, {
     ops: {
       refresh: async () => ({ ok: true, access_token: 'at2', refresh_token: 'rt2' }),
       fetchImpl: async (_url, init) => {
-        if (init.headers['chatgpt-account-id'] === 'vm-gpt-b') return upstream(200, { output: 'from b' })
+        if (init.headers['chatgpt-account-id'] === 'vm-gpt-refresh-b') return upstream(200, { output: 'from b' })
         return init.headers.authorization === 'Bearer at2'
           ? upstream(429, { error: { code: 'usage_limit_reached' } })
           : upstream(401, { error: { code: 'token_expired' } })
@@ -192,7 +256,7 @@ test('search quota failure after token rotation applies to the refreshed credent
     },
   })
   assert.equal(res.statusCode, 200)
-  const stored = getVm(root, 'vm-gpt-a')
+  const stored = getVm(root, 'vm-gpt-refresh-a')
   assert.equal(stored.codex.credits.balance, '6')
   assert.ok(stored.codex.credits.invalidated_at)
   assert.ok(stored.codex.extra.codex_limited_until)
@@ -275,6 +339,7 @@ test('search passes a backend 404 through without trying other slots', async () 
 test('the alpha/search route authenticates, logs and reaches the Codex search hop', async () => {
   const root = tempRoot('route')
   writeGptVm(root, 'vm-gpt-a') // no SOCKS5 bound: the hop must stop at proxy_required
+  await syncProjectVms(root)
   const rows = []
   const { handleSearch } = createHandleProtocol({
     cfg: { limits: { max_body_bytes: 1 << 20 }, rewrite: { enabled: false }, paths: { project: root } },
@@ -287,10 +352,14 @@ test('the alpha/search route authenticates, logs and reaches the Codex search ho
       req.apiKeyKind = 'managed'
       return true
     },
-    requestLog: { start: () => ({ request_id: 'req-search' }), finish: (_ctx, row) => rows.push(row) },
+    requestLog: {
+      start: () => ({ request_id: `req-search-${++searchReqSeq}` }),
+      finish: (_ctx, row) => rows.push(row),
+    },
     stats: { errors: 0, requests: 0, by_route: {} },
     groupsRepo: { rateMultiplier: () => 1 },
     routingConfig: {},
+    schedulerRuntime: sharedSchedulerRuntime,
   })
   const req = Readable.from([Buffer.from('{"model":"gpt-6.1-sol","commands":{"search_query":[{"q":"x"}]}}')])
   req.headers = { 'user-agent': 'codex_exec/0.160.1' }

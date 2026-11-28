@@ -26,7 +26,9 @@ import { VM_ORIGIN, canBindProxyToVm, normalizeOwnerId } from '../admin/resource
 import { readCodexAccounts, writeCodexAccounts, clearCodexCredits } from './codex-slot.mjs'
 import { resetOpenaiAuth } from '../oauth/openai-auth-state.mjs'
 import { hasBoundExit, isLocalEgressProxy } from './egress.mjs'
-import { OS_CATALOG, STANDARD_LOCALE, nextNumericIndex, padVm, parseVmIndex } from './vm-runtime.mjs'
+import { isCragDebian13Kernel } from './custom-os-runtime.mjs'
+import { normalizeOsKernel } from './os-catalog.mjs'
+import { STANDARD_LOCALE, nextNumericIndex, padVm, parseVmIndex } from './vm-runtime.mjs'
 import { parseSocks5Fields } from './proxy-pool.mjs'
 import { seedFreshCliHome } from './vm-recreate.mjs'
 import { atomicWriteJson, isValidVmId } from './vm-file.mjs'
@@ -184,7 +186,7 @@ export function buildVmPackage({
       name: vm.name || vm.id,
       platform: kind.platform,
       family: kind.family,
-      kernel: OS_CATALOG[vm.kernel] ? vm.kernel : DEFAULT_KERNEL,
+      kernel: normalizeOsKernel(vm.kernel) || DEFAULT_KERNEL,
       timezone: vm.timezone || null,
       timezone_source: vm.timezone_source || 'auto',
       locale: vm.locale || STANDARD_LOCALE,
@@ -367,8 +369,13 @@ export function parseVmPackage(doc) {
   if (!isValidVmId(id)) return fail('invalid_id', 'vm.id 无效')
   const probe = { platform: vm.platform, family: vm.family }
   const codex = isCodexVm(probe)
-  if (vm.kernel != null && vm.kernel !== '' && !OS_CATALOG[vm.kernel]) {
+  const requestedKernel = vm.kernel != null && vm.kernel !== '' ? normalizeOsKernel(vm.kernel) : DEFAULT_KERNEL
+  if (vm.kernel != null && vm.kernel !== '' && !requestedKernel) {
     return fail('invalid_kernel', '未知系统')
+  }
+  const cragDebian13Package = isCragDebian13Kernel(requestedKernel)
+  if (codex && cragDebian13Package) {
+    return fail('invalid_create_dataplane', 'crag-debian13 仅支持 Anthropic CRAG 槽位')
   }
   let timezone = null
   if (vm.timezone != null && String(vm.timezone).trim() !== '') {
@@ -387,6 +394,8 @@ export function parseVmPackage(doc) {
   if (!dataplane.ok) return fail('invalid_package', dataplane.error || 'dataplane 无效')
   const cragVersion = parseCragKernelVersionPatch(vm.crag_kernel_version)
   if (!cragVersion.ok) return fail('invalid_package', cragVersion.error || 'crag_kernel_version 无效')
+  const effectiveDataplane = !codex && cragDebian13Package ? 'crag' : dataplane.value
+  const effectiveCragVersion = !codex && cragDebian13Package ? cragVersion.value || 'v2' : cragVersion.value
   const policy = parsePolicy(vm.policy, codex)
   if (!policy.ok) return policy
   const proxy = parseProxy(doc.proxy)
@@ -404,7 +413,7 @@ export function parseVmPackage(doc) {
         name: cleanText(vm.name, 80),
         platform: codex ? 'openai' : 'anthropic',
         family: codex ? 'codex' : 'claude',
-        kernel: OS_CATALOG[vm.kernel] ? vm.kernel : DEFAULT_KERNEL,
+        kernel: requestedKernel,
         timezone,
         timezone_source: source || (timezone ? 'manual' : 'auto'),
         locale: cleanText(vm.locale, 64) || STANDARD_LOCALE,
@@ -412,8 +421,8 @@ export function parseVmPackage(doc) {
         note: cleanText(vm.note, 240),
         persona_preset: persona,
         inference_engine: engine,
-        dataplane: dataplane.value,
-        crag_kernel_version: cragVersion.value,
+        dataplane: effectiveDataplane,
+        crag_kernel_version: effectiveCragVersion,
         auth_scheme: auth,
         proxy_cli_enabled: vm.proxy_cli_enabled === true,
         schedulable: vm.schedulable !== false,

@@ -13,6 +13,7 @@ import {
 } from '@/lib/vm-kind'
 import { claudeTier } from '@/lib/vm-status'
 import { GptRouteBadge } from '@/components/gpt-route-badge'
+import { NodePoolBadges } from '@/features/pools/node-pool-badges'
 import { ActiveVmBadge } from '@/features/vm/active-vm-badge'
 import { CodexQuotaSampleStatus } from '@/features/vm/codex-quota-sample-status'
 import { OpenaiPlanBadge } from '@/features/vm/openai-plan-badge'
@@ -109,6 +110,7 @@ export function VmAccountIdentity({ vm }: { vm: Vm }) {
         <span className='truncate' title={node}>
           {node}
         </span>
+        <NodePoolBadges pools={vm.pools} maxVisible={2} compact />
       </div>
     </div>
   )

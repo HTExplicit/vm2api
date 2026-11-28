@@ -2,12 +2,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   pickCodexSlots,
-  orderCodexSessionSlots,
   isCodexSlotParked,
   isCodexFailoverError,
   evaluateCodexQuotaSchedule,
   codexAdmissionBlock,
-  codexAccountCandidate,
+  codexSlotAllowsModel,
+  codexScheduleLevel,
 } from '../../src/lib/pool/codex-slot-pool.mjs'
 import { SessionLimitRegistry } from '../../src/lib/pool/session-limit.mjs'
 import { evaluateOpenAIQuotaGate } from '../../src/lib/pool/openai-quota-policy.mjs'
@@ -35,49 +35,6 @@ test('ready slots sort by remaining 5h/7d stress', () => {
   assert.equal(picked.error, undefined)
 })
 
-test('smart candidates separate 5h flow, weekly stock and absent snapshots', () => {
-  const now = Date.parse('2026-11-14T00:00:00.000Z')
-  const reset7d = new Date(now + 48 * 3_600_000).toISOString()
-  const flow = codexAccountCandidate(
-    gpt('flow', { utilization_5h: 0.2, utilization_7d: 0.9, reset_7d: reset7d }),
-    now,
-    {},
-  )
-  assert.equal(flow.quotaRemainingRank, 8_000)
-  assert.equal(flow.quotaStockRank, 1_000)
-  assert.ok(Math.abs(flow.quotaRemaining7d - 0.1) < 1e-12)
-  assert.equal(flow.quotaReset7dAt, Date.parse(reset7d))
-  const weekly = codexAccountCandidate(gpt('weekly', { utilization_7d: 0.4 }), now, {})
-  assert.equal(weekly.quotaRemainingRank, 6_000)
-  assert.equal(weekly.quotaStockRank, 6_000)
-  assert.equal(weekly.quotaRemaining7d, 0.6)
-  const missing = codexAccountCandidate(gpt('missing', { utilization_5h: null, utilization_7d: '' }), now, {})
-  assert.deepEqual(
-    [missing.quotaRemainingRank, missing.quotaStockRank, missing.quotaRemaining7d, missing.quotaReset7dAt],
-    [null, null, null, null],
-  )
-  const snapshot = codexAccountCandidate(
-    gpt('snapshot', { codex: { extra: { codex_5h_used_percent: 80, codex_7d_used_percent: 20 } } }),
-    now,
-    {},
-  )
-  assert.equal(snapshot.quotaRemainingRank, 2_000)
-  assert.equal(snapshot.quotaStockRank, 8_000)
-  assert.equal(snapshot.quotaRemaining7d, 0.8)
-})
-
-test('smart order favors sustainable 5h flow instead of the worst combined window', () => {
-  const now = Date.parse('2026-11-14T00:00:00.000Z')
-  const ordered = orderCodexSessionSlots(
-    [
-      gpt('vm-a-stock', { utilization_5h: 0.8, utilization_7d: 0.2 }),
-      gpt('vm-z-flow', { utilization_5h: 0.2, utilization_7d: 0.8 }),
-    ],
-    { now, roundRobinCursor: 0 },
-  )
-  assert.deepEqual(ordered.ids, ['vm-z-flow', 'vm-a-stock'])
-})
-
 test('higher scheduling priority and reset urgency cannot bypass auth, operator, hard quota or Retry-After gates', async () => {
   const rt = await import('../../src/lib/pool/openai-account-runtime.mjs')
   rt.resetOpenAIAccountRuntime()
@@ -96,12 +53,12 @@ test('higher scheduling priority and reset urgency cannot bypass auth, operator,
     const held = gpt('vm-held', urgency)
     const ready = gpt('vm-ready', { schedule_level_manual: 1, utilization_5h: 0.7, utilization_7d: 0.7 })
     rt.holdOpenAIAccount(held.id, { until: now + 60_000, now, reason: 'rate_limited' })
-    const ordered = orderCodexSessionSlots([auth, manual, capped, held, ready], {
+    const ordered = pickCodexSlots([auth, manual, capped, held, ready], {
       now,
       roundRobinCursor: 0,
       quotaPolicy: { limit_5h: 0.8 },
     })
-    assert.deepEqual(ordered.ids, ['vm-ready'])
+    assert.deepEqual(ordered.ready, ['vm-ready'])
     assert.equal(codexAdmissionBlock(auth, now).error, 'credential_blocked')
     assert.equal(codexAdmissionBlock(capped, now, { limit_5h: 0.8 }).error, 'quota_exhausted')
     assert.equal(codexAdmissionBlock(held, now).retryAt, now + 60_000)
@@ -151,16 +108,11 @@ test('fresh credits waive only full windows, including pinned and sticky admissi
   assert.equal(evaluateOpenAIQuotaGate(vm, { limit_5h: 1, limit_7d: 1 }, now).limited, false)
   assert.equal(evaluateOpenAIQuotaGate(vm, { limit_5h: 0.8, limit_7d: 1 }, now).reason, 'quota_5h_local')
   assert.equal(evaluateOpenAIQuotaGate(vm, { limit_5h: 1, limit_7d: 0.9 }, now).reason, 'quota_7d_local')
-  assert.deepEqual(orderCodexSessionSlots([vm], { pin: vm.id, now }).ids, [vm.id])
-  for (const options of [{}, { boundVmId: vm.id }, { pin: vm.id }]) {
-    assert.equal(
-      orderCodexSessionSlots([vm], { ...options, now, quotaPolicy: { limit_5h: 0.8 } }).error,
-      'quota_exhausted',
-    )
-  }
+  assert.deepEqual(pickCodexSlots([vm], { pin: vm.id, now }).ids, [vm.id])
+  assert.equal(codexAdmissionBlock(vm, now, { limit_5h: 0.8 }).error, 'quota_exhausted')
   assert.equal(codexAdmissionBlock(vm, now, { limit_5h: 0.8 }).error, 'quota_exhausted')
   const stale = now + CODEX_CREDITS_TTL_MS + 1
-  assert.equal(orderCodexSessionSlots([vm], { pin: vm.id, now: stale }).error, 'quota_exhausted')
+  assert.equal(pickCodexSlots([vm], { pin: vm.id, now: stale }).error, 'quota_exhausted')
 })
 
 test('pinned admissions honor runtime holds and return to the original slot when the hold expires', async () => {
@@ -176,11 +128,11 @@ test('pinned admissions honor runtime holds and return to the original slot when
       reason: 'rate_limited',
       retryAt: until,
     })
-    const pinned = orderCodexSessionSlots(vms, { pin: 'vm-a', now })
+    const pinned = pickCodexSlots(vms, { pin: 'vm-a', now })
     assert.equal(pinned.error, 'capacity_unavailable')
     assert.equal(pinned.retryAt, until)
     assert.deepEqual(pinned.ids, [])
-    assert.deepEqual(orderCodexSessionSlots(vms, { pin: 'vm-a', now: until }).ids, ['vm-a'])
+    assert.deepEqual(pickCodexSlots(vms, { pin: 'vm-a', now: until }).ids, ['vm-a'])
   } finally {
     resetOpenAIAccountRuntime()
   }
@@ -283,17 +235,13 @@ test('429 and usage_limit_reached fail over; committed hops do not', () => {
   )
 })
 
-test('a held GPT slot leaves the order and reports when it returns', async () => {
+test('a held GPT slot records hold state until expiry for Rust telemetry', async () => {
   const rt = await import('../../src/lib/pool/openai-account-runtime.mjs')
   rt.resetOpenAIAccountRuntime()
   const now = Date.parse('2026-10-18T00:00:00.000Z')
   rt.holdOpenAIAccount('vm-failed', { until: now + 60_000, reason: 'oauth_401', now })
-  const ordered = orderCodexSessionSlots([gpt('vm-failed'), gpt('vm-ok')], { now })
-  assert.deepEqual(ordered.ids, ['vm-ok'])
-  assert.equal(ordered.candidates.length, 1)
-  const allHeld = orderCodexSessionSlots([gpt('vm-failed')], { now })
-  assert.equal(allHeld.error, 'capacity_unavailable')
-  assert.equal(allHeld.retryAt, now + 60_000)
+  assert.equal(rt.openAIAccountHold('vm-failed', now)?.reason, 'oauth_401')
+  assert.equal(rt.openAIAccountHold('vm-failed', now)?.until, now + 60_000)
   assert.equal(rt.openAIAccountHold('vm-failed', now + 60_001), null)
   rt.resetOpenAIAccountRuntime()
 })
@@ -358,73 +306,24 @@ test('elapsed 5h reset is not a live park', () => {
   )
 })
 
-test('a bound OpenAI session stays on its VM and a full window is skipped', () => {
-  const sessions = new SessionLimitRegistry()
-  const vms = [
-    gpt('vm-a', { utilization_5h: 0.1, policy: { maxSessions: 1 } }),
-    gpt('vm-b', { utilization_5h: 0.2, policy: { maxSessions: 1 } }),
-  ]
-  sessions.touch('vm-a', 'conv-a')
-  const again = orderCodexSessionSlots(vms, {
-    boundVmId: 'vm-a',
-    sessionKey: 'conv-a',
-    sessionLimit: sessions,
-  })
-  assert.equal(again.sticky, true)
-  assert.equal(again.ids[0], 'vm-a')
-  const fresh = orderCodexSessionSlots(vms, { sessionKey: 'conv-b', sessionLimit: sessions })
-  assert.deepEqual(fresh.ids, ['vm-b'])
-  sessions.touch('vm-b', 'conv-b')
-  const full = orderCodexSessionSlots(vms, { sessionKey: 'conv-c', sessionLimit: sessions })
-  assert.equal(full.error, 'session_window_full')
-  // session_slots is an execution seat count, never a conversation window cap.
-  const seatsOnly = [gpt('vm-a', { policy: { sessionSlots: 1 } })]
-  assert.deepEqual(orderCodexSessionSlots(seatsOnly, { sessionKey: 'conv-z', sessionLimit: sessions }).ids, ['vm-a'])
-})
-
-test('Codex keeps a live binding before scheduling by level and weight', () => {
+test('Codex schedule level resolves manual override and 7d reset tier without legacy Node ordering', () => {
   const now = Date.parse('2026-10-18T00:00:00.000Z')
-  const vms = [
-    gpt('vm-low', { schedule_level_manual: 1, weight: 1, utilization_5h: 0.1 }),
-    gpt('vm-auto', { weight: 200, reset_7d: new Date(now + 3600_000).toISOString() }),
-    gpt('vm-high-a', { schedule_level_manual: 10, weight: 2, utilization_5h: 0.3 }),
-    gpt('vm-high-b', { policy: { priority: 10, weight: 1 }, utilization_5h: 0.4 }),
-  ]
-  const options = { now, boundVmId: 'vm-low', roundRobinCursor: 0 }
-  const ordered = orderCodexSessionSlots(vms, options)
-  assert.deepEqual(ordered.ids, ['vm-low', 'vm-high-a', 'vm-high-b', 'vm-auto'])
-  assert.equal(ordered.sticky, true)
-  const fresh = orderCodexSessionSlots(vms, { ...options, boundVmId: null })
-  assert.deepEqual(fresh.ids, ['vm-high-a', 'vm-high-b', 'vm-auto', 'vm-low'])
-  assert.equal(pickCodexSlots(vms, { now }).ids[0], 'vm-high-a')
-  const sameLevel = orderCodexSessionSlots(vms, { ...options, boundVmId: 'vm-high-b' })
-  assert.equal(sameLevel.ids[0], 'vm-high-b')
-  assert.equal(sameLevel.sticky, true)
-  const fallback = orderCodexSessionSlots(vms, { ...options, excluded: new Set(['vm-low', 'vm-high-a', 'vm-high-b']) })
-  assert.deepEqual(fallback.ids, ['vm-auto'])
-  assert.equal(fallback.sticky, false)
-  assert.deepEqual(orderCodexSessionSlots(vms, { now, pin: 'vm-low' }).ids, ['vm-low'])
+  const low = gpt('vm-low', { schedule_level_manual: 1, weight: 1, utilization_5h: 0.1 })
+  const high = gpt('vm-high-a', { schedule_level_manual: 10, weight: 2, utilization_5h: 0.3 })
+  assert.equal(codexScheduleLevel(low, now).level, 1)
+  assert.equal(codexScheduleLevel(high, now).level, 10)
+  assert.equal(pickCodexSlots([low, high], { now }).ids[0], 'vm-high-a')
 })
 
-test('panel max_concurrency on the listVms summary is the candidate cap (#150)', async () => {
-  const { codexAccountCandidate } = await import('../../src/lib/pool/codex-slot-pool.mjs')
-  const signals = { inFlight: 0 }
-  assert.equal(codexAccountCandidate(gpt('vm-a', { max_concurrency: 4 }), Date.now(), signals).concurrency, 4)
-  assert.equal(
-    codexAccountCandidate(gpt('vm-a', { policy: { maxConcurrency: 3 } }), Date.now(), signals).concurrency,
-    3,
-  )
-  const vms = [gpt('vm-a', { max_concurrency: 4 })]
+test('panel max_concurrency on the listVms summary is enforced by runtime slot cap (#150)', async () => {
   const { tryAcquireOpenAISlot, resetOpenAIAccountRuntime } = await import(
     '../../src/lib/pool/openai-account-runtime.mjs'
   )
   resetOpenAIAccountRuntime()
   tryAcquireOpenAISlot('vm-a', { concurrency: 4 })
   tryAcquireOpenAISlot('vm-a', { concurrency: 4 })
-  assert.deepEqual(orderCodexSessionSlots(vms).ids, ['vm-a'])
   tryAcquireOpenAISlot('vm-a', { concurrency: 4 })
   tryAcquireOpenAISlot('vm-a', { concurrency: 4 })
-  assert.equal(orderCodexSessionSlots(vms).error, 'capacity_unavailable')
   assert.equal(tryAcquireOpenAISlot('vm-a', { concurrency: 4 }), null)
   resetOpenAIAccountRuntime()
 })
@@ -435,21 +334,20 @@ test('panel max_rpm caps starts per minute on a GPT slot', async () => {
   )
   resetOpenAIAccountRuntime()
   const now = Date.parse('2026-09-27T00:00:00.000Z')
-  const vms = [gpt('vm-a', { max_rpm: 2 }), gpt('vm-b', { max_rpm: 0 })]
   for (let i = 0; i < 2; i++) tryAcquireOpenAISlot('vm-a', { concurrency: 2, maxRpm: 2, now }).release()
   assert.equal(tryAcquireOpenAISlot('vm-a', { concurrency: 2, maxRpm: 2, now: now + 1000 }), null)
-  assert.deepEqual(orderCodexSessionSlots(vms, { now: now + 1000 }).ids, ['vm-b'])
-  assert.ok(orderCodexSessionSlots(vms, { now: now + 61_000 }).ids.includes('vm-a'))
+  const reopened = tryAcquireOpenAISlot('vm-a', { concurrency: 2, maxRpm: 2, now: now + 61_000 })
+  assert.ok(reopened)
+  reopened.release()
   resetOpenAIAccountRuntime()
 })
 
 test('panel allowed_models keeps a GPT slot out of other models', () => {
-  const vms = [gpt('vm-a', { allowed_models: ['gpt-5.5'] }), gpt('vm-b')]
-  assert.deepEqual(orderCodexSessionSlots(vms, { model: 'gpt-5.4' }).ids, ['vm-b'])
-  assert.ok(orderCodexSessionSlots(vms, { model: 'gpt-5.5' }).ids.includes('vm-a'))
-  const only = orderCodexSessionSlots([vms[0]], { model: 'gpt-5.4' })
-  assert.equal(only.error, 'model_not_allowed')
-  assert.equal(orderCodexSessionSlots([vms[0]], { pin: 'vm-a', model: 'gpt-5.4' }).error, 'model_not_allowed')
+  const restricted = gpt('vm-a', { allowed_models: ['gpt-5.5'] })
+  const unrestricted = gpt('vm-b')
+  assert.equal(codexSlotAllowsModel(restricted, 'gpt-5.4'), false)
+  assert.equal(codexSlotAllowsModel(restricted, 'gpt-5.5'), true)
+  assert.equal(codexSlotAllowsModel(unrestricted, 'gpt-5.4'), true)
 })
 
 test('GPT wait queue wakes FIFO on release and caps at 100 waiters', async () => {
@@ -526,16 +424,17 @@ test('GPT wait queue re-parks a woken waiter at the head past the cap', async ()
   await Promise.all(parked)
 })
 
-test('RPM-only capacity miss reports when the window reopens', async () => {
+test('RPM-only capacity miss blocks until the 60s window reopens', async () => {
   const { tryAcquireOpenAISlot, resetOpenAIAccountRuntime } = await import(
     '../../src/lib/pool/openai-account-runtime.mjs'
   )
   resetOpenAIAccountRuntime()
   const now = Date.parse('2026-09-27T00:00:00.000Z')
-  tryAcquireOpenAISlot('vm-a', { now }).release()
-  const full = orderCodexSessionSlots([gpt('vm-a', { max_rpm: 1 })], { now: now + 1000 })
-  assert.equal(full.error, 'capacity_unavailable')
-  assert.equal(full.retryAt, now + 60_000)
+  tryAcquireOpenAISlot('vm-a', { concurrency: 1, maxRpm: 1, now }).release()
+  assert.equal(tryAcquireOpenAISlot('vm-a', { concurrency: 1, maxRpm: 1, now: now + 1000 }), null)
+  const reopened = tryAcquireOpenAISlot('vm-a', { concurrency: 1, maxRpm: 1, now: now + 60_000 })
+  assert.ok(reopened)
+  reopened.release()
   resetOpenAIAccountRuntime()
 })
 
@@ -570,18 +469,16 @@ test('a resting slot that cannot serve the model promises no wake time', () => {
   assert.equal(pickCodexSlots([resting], { now, model: 'gpt-test' }).error, 'no_codex_vm')
 })
 
-test('a resting home reports boundState resting, not gone', () => {
+test('a resting home is skipped in pickCodexSlots until its active window opens', () => {
   const now = Date.parse('2026-09-17T12:00:00.000Z')
   const home = gpt('vm-home', {
     policy: { active_hours: { start: '20:00', end: '08:00', timezone: 'UTC' } },
   })
-  const other = orderCodexSessionSlots([home, gpt('vm-on')], { boundVmId: 'vm-home', now })
-  assert.equal(other.boundState, 'resting')
+  const other = pickCodexSlots([home, gpt('vm-on')], { now })
   assert.deepEqual(other.ids, ['vm-on'])
-  // A continuation only offers the home: the pool rests, and the caller learns why.
-  const alone = orderCodexSessionSlots([home], { boundVmId: 'vm-home', now })
+  const alone = pickCodexSlots([home], { now })
   assert.equal(alone.error, 'pool_resting')
-  assert.equal(alone.boundState, 'resting')
+  assert.equal(alone.retryAt, Date.parse('2026-09-17T20:00:00.000Z'))
 })
 
 test('a pin still reaches a resting GPT slot', () => {

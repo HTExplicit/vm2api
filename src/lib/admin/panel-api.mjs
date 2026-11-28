@@ -92,6 +92,7 @@ import { collectLivePanelCredentials } from './panel-live-credentials.mjs'
 import { officialCcHome, readOfficialCcStatus, normalizeOfficialCcConfig } from '../oauth/official-cc-bootstrap.mjs'
 import { normalizeHealthProbeConfig } from './health-probe.mjs'
 import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
+import { normalizeWarmupConfig } from '../pool/account-warmup.mjs'
 import { publicNotifyConfig, summarizePoolAvailability } from './notify.mjs'
 import { cacheHitStats } from './cache-metrics.mjs'
 import { estimateWindow, projectWindowRemaining, usedRatioOf } from './window-estimate.mjs'
@@ -364,6 +365,9 @@ export function clearVmCooldown({ cfg, accountQuota, stickyRouter = null, poolSc
     poolScheduler?.syncQuotaSchedule?.(live, acc)
   } catch {}
   try {
+    poolScheduler?.unrestVmNode?.(vm.id)
+  } catch {}
+  try {
     poolScheduler?.notifyCapacity?.(acc?.account_id || vm.claude?.account_uuid || vm.id)
   } catch {}
   const refreshed = getVm(cfg.paths.project, vm.id) || live
@@ -455,8 +459,8 @@ export function validatePersonaRoutingPatch(body = {}) {
   }
   if (compat.crag_persona_preset != null && String(compat.crag_persona_preset).trim() !== '') {
     const raw = String(compat.crag_persona_preset).trim()
-    if (raw !== 'official_full' && raw !== 'zero') {
-      problems.push(`crag_persona_preset 必须是 official_full / zero，收到 ${raw}`)
+    if (!PERSONA_PRESETS.includes(raw)) {
+      problems.push(`crag_persona_preset 必须是 ${PERSONA_PRESETS.join(' / ')}，收到 ${raw}`)
     }
   }
   if (compat.craggemini_persona_preset != null && String(compat.craggemini_persona_preset).trim() !== '') {
@@ -588,6 +592,9 @@ export function validatePersonaRoutingPatch(body = {}) {
   }
   if (compat.official_cc_passthrough != null && typeof compat.official_cc_passthrough !== 'boolean') {
     problems.push('official_cc_passthrough 必须是布尔')
+  }
+  if (compat.crag_strict_passthrough != null && typeof compat.crag_strict_passthrough !== 'boolean') {
+    problems.push('crag_strict_passthrough 必须是布尔')
   }
   if (Object.prototype.hasOwnProperty.call(compat, 'cch_enabled') && typeof compat.cch_enabled !== 'boolean') {
     problems.push('cch_enabled 必须是布尔')
@@ -1217,7 +1224,9 @@ export async function buildProbeOne({
         ok: !!result.ok,
         source: 'vm-oauth-usage',
         at: result.fetched_at || new Date().toISOString(),
-        ...(result.ok ? {} : { error: result.message || result.error || 'GPT quota probe failed', status: result.status || null }),
+        ...(result.ok
+          ? {}
+          : { error: result.message || result.error || 'GPT quota probe failed', status: result.status || null }),
       })
     } catch {}
     if (!result.ok) return gptQuotaFail(result)
@@ -1654,6 +1663,7 @@ export function buildRouting({ routingConfig, stickyRouter }) {
     official_cc: normalizeOfficialCcConfig(routingConfig?.official_cc),
     health_probe: normalizeHealthProbeConfig(routingConfig?.health_probe),
     usage_probe: normalizeUsageProbeConfig(routingConfig?.usage_probe),
+    warmup: normalizeWarmupConfig(routingConfig?.warmup),
     notify: publicNotifyConfig(routingConfig?.notify),
     vm: normalizeVmConfig(routingConfig?.vm),
     telemetry: {
@@ -2050,10 +2060,10 @@ function enrichVm(v, accountQuota, active, extras = {}) {
   const quotaGate = quotaGateOf(policy)
   // Codex keeps its own conversation window (vm max_sessions); Claude rows report planner seats.
   const codexSessions = isCodex
-    ? accountQuota?.sessions?.snapshot?.(acc?.account_id || v.account_uuid || v.id, {
+    ? accountQuota?.sessions?.snapshot?.(v.id, {
         max: openAIEffective.max_sessions,
         idleMin: 5,
-      }) || { active: 0, max: codexMaxSessions(v), idle_min: 5 }
+      }) || { active: 0, max: openAIEffective.max_sessions, idle_min: 5 }
     : null
   const seatRow = isCodex ? null : extras.pool?.seats?.[v.id] || null
   const liveHardBlock = hardBlockOf(runtime)
@@ -2465,8 +2475,8 @@ function findRuntime(accountQuota, vm, snap = null) {
         leftoverKey &&
         (!cred.has_access ||
           /refresh_token_missing|invalid_grant|token_revoked|invalidated oauth token|worker_unhealthy/.test(
-          err + String(state.status || '')
-        ))
+            err + String(state.status || ''),
+          ))
       const live = !!(vm.has_refresh || vm.has_token || vm.account_uuid)
       if (leftover && live) continue
       return freshenRuntimeState(state, vm, repo)
@@ -2500,7 +2510,7 @@ function freshenRuntimeState(state, vm, repo = null) {
   const lastError = String(state.worker_status?.last_error || state.worker_status?.error || '')
   const leftover =
     /invalid_grant|refresh token not found|oauth_revoked|credential_refresh_failed|token_revoked|invalidated oauth token/i.test(
-      lastError
+      lastError,
     )
   const wMs = expiresAtToMs(cred?.expires_at)
   const vMs = expiresAtToMs(vm.expires_at)

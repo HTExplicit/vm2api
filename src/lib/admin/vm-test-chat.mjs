@@ -734,7 +734,35 @@ export function extractResponsesText(body) {
   return parts.join('')
 }
 
-async function consumeResponsesResponse(res) {
+function strictFailureFromResponseStatus(status) {
+  if (status === 'completed') return null
+  if (status === 'incomplete') {
+    return { code: 'response_incomplete', message: 'upstream response status=incomplete' }
+  }
+  if (status === undefined || status === null || status === '') {
+    return { code: 'no_terminal_event', message: 'response.completed missing status=completed' }
+  }
+  return { code: 'response_not_completed', message: `upstream response status=${status}` }
+}
+
+function terminalResponsesFailure(code, message, partial = {}) {
+  return {
+    ok: false,
+    ...partial,
+    body: {
+      ...(partial.body && typeof partial.body === 'object' ? partial.body : {}),
+      error: { type: 'terminal_error', code, message },
+    },
+  }
+}
+
+/**
+ * OpenAI Responses loopback consumer. When `requireTerminal` is set (Codex
+ * preheat / auto-renew), a 2xx alone is not success: non-streaming bodies must
+ * have `status: completed`, and SSE must end with `response.completed` whose
+ * `response.status` is `completed`.
+ */
+export async function consumeResponsesResponse(res, { requireTerminal = false } = {}) {
   const status = res.status
   const headers = {}
   res.headers.forEach((v, k) => {
@@ -757,8 +785,7 @@ async function consumeResponsesResponse(res) {
   const ctype = String(headers['content-type'] || '')
   if (!ctype.includes('text/event-stream') && !ctype.includes('text/plain')) {
     const body = await res.json().catch(() => null)
-    return {
-      ok: true,
+    const base = {
       status,
       headers,
       body,
@@ -768,6 +795,20 @@ async function consumeResponsesResponse(res) {
       model: body?.model || null,
       vm_id: body?.kin?.vm_id || null,
     }
+    if (requireTerminal && String(body?.status || '') !== 'completed') {
+      const st = String(body?.status || '')
+      const code = st === 'incomplete' ? 'response_incomplete' : st ? 'response_not_completed' : 'no_terminal_event'
+      return terminalResponsesFailure(
+        code,
+        st === 'incomplete'
+          ? 'upstream response ended incomplete'
+          : st
+            ? `upstream response status=${st}`
+            : 'upstream JSON missing status=completed',
+        { ...base, ok: false },
+      )
+    }
+    return { ok: true, ...base }
   }
 
   let text = ''
@@ -776,6 +817,8 @@ async function consumeResponsesResponse(res) {
   let responseId = null
   let lastError = null
   let stopReason = null
+  let sawCompletedTerminal = false
+  let terminalFail = null
   const reader = res.body.getReader()
   const dec = new TextDecoder()
   let buf = ''
@@ -786,13 +829,29 @@ async function consumeResponsesResponse(res) {
       text += String(ev.delta || ev.text || '')
       return
     }
+    if (type === 'response.incomplete' && ev.response) {
+      if (ev.response.id) responseId = ev.response.id
+      if (ev.response.model) model = ev.response.model
+      if (ev.response.usage) usage = ev.response.usage
+      stopReason = ev.response.status || 'incomplete'
+      if (requireTerminal) {
+        terminalFail = { code: 'response_incomplete', message: 'upstream response.incomplete' }
+      }
+      return
+    }
     if (type === 'response.completed' && ev.response) {
       if (ev.response.id) responseId = ev.response.id
       if (ev.response.model) model = ev.response.model
       if (ev.response.usage) usage = ev.response.usage
       const completed = extractResponsesText(ev.response)
       if (completed && !text) text = completed
-      stopReason = ev.response.status || 'completed'
+      const rawStatus = ev.response.status
+      stopReason = rawStatus || 'completed'
+      if (requireTerminal) {
+        const fail = strictFailureFromResponseStatus(rawStatus)
+        if (fail) terminalFail = fail
+        else sawCompletedTerminal = true
+      }
       return
     }
     if (type === 'error' || type === 'response.failed') {
@@ -818,6 +877,30 @@ async function consumeResponsesResponse(res) {
       usage,
       stop_reason: stopReason,
       model,
+    }
+  }
+  if (requireTerminal) {
+    if (terminalFail) {
+      return terminalResponsesFailure(terminalFail.code, terminalFail.message, {
+        status,
+        headers,
+        text,
+        usage,
+        stop_reason: stopReason,
+        model,
+        body: { id: responseId, status: stopReason },
+      })
+    }
+    if (!sawCompletedTerminal) {
+      return terminalResponsesFailure('no_terminal_event', 'Responses stream ended without response.completed', {
+        status,
+        headers,
+        text,
+        usage,
+        stop_reason: stopReason,
+        model,
+        body: { id: responseId, status: stopReason },
+      })
     }
   }
   return {
@@ -870,7 +953,18 @@ function freshLoopbackRequest(rawUrl, init = {}) {
   })
 }
 
-async function postV1Loopback({ path, baseUrl, apiKey, inbound, headers, vmId, timeoutMs, signal, extraHeaders = {} }) {
+async function postV1Loopback({
+  path,
+  baseUrl,
+  apiKey,
+  inbound,
+  headers,
+  vmId,
+  timeoutMs,
+  signal,
+  extraHeaders = {},
+  requireTerminal = false,
+}) {
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), timeoutMs)
   const requestSignal = signal ? AbortSignal.any([signal, ac.signal]) : ac.signal
@@ -890,7 +984,9 @@ async function postV1Loopback({ path, baseUrl, apiKey, inbound, headers, vmId, t
       body: JSON.stringify(inbound),
       signal: requestSignal,
     })
-    return endpoint === '/v1/responses' ? await consumeResponsesResponse(res) : await consumeMessagesResponse(res)
+    return endpoint === '/v1/responses'
+      ? await consumeResponsesResponse(res, { requireTerminal })
+      : await consumeMessagesResponse(res)
   } catch (e) {
     const aborted = requestSignal.aborted
     return {
@@ -919,11 +1015,11 @@ async function postV1Messages(opts) {
 }
 
 async function postV1Responses(opts) {
-  return postV1Loopback({ ...opts, path: '/v1/responses' })
+  return postV1Loopback({ ...opts, path: '/v1/responses', requireTerminal: opts.requireCodexTerminal === true })
 }
 
 /**
- * @param {{ projectRoot: string, vmId: string, model?: string, prompt?: string, max_tokens?: number, timeoutMs?: number, baseUrl?: string, apiKey?: string, accountQuota?: object }} opts
+ * @param {{ projectRoot: string, vmId: string, model?: string, prompt?: string, max_tokens?: number, timeoutMs?: number, baseUrl?: string, apiKey?: string, accountQuota?: object, requireCodexTerminal?: boolean }} opts
  */
 export async function runVmTestChat(opts = {}) {
   const projectRoot = opts.projectRoot
@@ -1025,9 +1121,9 @@ export async function runVmTestChat(opts = {}) {
           dataplane === 'crag'
             ? ` · ${kernelRoute}`
             : cliHop
-              ? cliLayout === 'identity'
-                ? ' · cli-hop · CLI 官方提示词'
-                : ' · cli-hop · 0注入'
+              ? cliLayout === 'zero'
+                ? ' · cli-hop · 0注入'
+                : ' · cli-hop · CLI 官方提示词'
               : unofficial
                 ? ' · 非官方 inference 入站'
                 : ' · 官方 Claude Code 入站'
@@ -1226,6 +1322,7 @@ export async function runVmTestChat(opts = {}) {
       timeoutMs,
       signal: opts.signal,
       extraHeaders: opts.extraHeaders || {},
+      requireCodexTerminal: opts.requireCodexTerminal === true,
     })
     if (codex && !siwc && !result?.ok && looksLikeCodexUnauthorized(result)) {
       const first = readCodexAccounts(projectRoot, vmId)[0] || {}
@@ -1261,6 +1358,7 @@ export async function runVmTestChat(opts = {}) {
               vmId,
               timeoutMs,
               signal: opts.signal,
+              requireCodexTerminal: opts.requireCodexTerminal === true,
               extraHeaders: opts.extraHeaders || {},
             })
           } else {

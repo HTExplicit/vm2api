@@ -16,6 +16,7 @@ import { modelDirectiveForCrag } from '../protocol/model-policy.mjs'
 import { capOutboundBody } from '../protocol/outbound-snapshot.mjs'
 import { cacheTtlFromRouting } from '../protocol/cache-ttl.mjs'
 import { ccEntrypointFromRouting, stripSubagentBilling } from '../identity/crs-persona.mjs'
+import { isPromptSpecV1Caps, sanitizePromptSpec } from '../identity/system-prompt-spec.mjs'
 import { sealClaudeCodeCch } from '../identity/cch.mjs'
 import { canRefreshCredential, credentialModeFromOauth, isApiKeyMode } from '../oauth/credential-mode.mjs'
 import { isCrsMock, writeCrsTrace, mockCrsPayload, emitMockSse } from './crs-mock.mjs'
@@ -30,14 +31,17 @@ import {
   refreshErrorCodeOf,
   REFRESH_SKEW_MS,
   stripWorkerCredentialEmail,
+  withCredentialRefreshLock,
   writeWorkerCredentialFile,
   ensureOfficialCredentialLink,
   slotUidGidFromHomeDir,
 } from '../oauth/oauth-credentials.mjs'
+export { withCredentialRefreshLock }
 import { probeAttemptGuard, runSlotOauth } from './slot-oauth.mjs'
 import { slotHost } from '../vm/slot-host.mjs'
 import { ensureRemoteOfficialCredentialLink } from '../cluster/remote-slot-files.mjs'
-import { normalizeSessionIdleTtlSeconds } from '../vm/slot-engine.mjs'
+import { isHeadlessBridgeCaps, isNativeCragV3Plus, normalizeSessionIdleTtlSeconds } from '../vm/slot-engine.mjs'
+export { isNativeCragV3Plus }
 import {
   cragConsumesModelDirective,
   cragV2KernelActive,
@@ -73,35 +77,6 @@ import {
 const MAX_BODY = 64 * 1024 * 1024
 const MAX_GATEWAY_CLOCK_MS = 86_400_000
 const CRAG_HEADER_ALLOWANCE_MS = 5_000
-const credentialRefreshTail = new Map()
-
-/**
- * Process-local per-key refresh serialization. Codex paths share the same lock
- * (key = `codex:<vmId>`) so the panel refresh button, traffic-side quota
- * rotation and the search path can never consume the same refresh token
- * concurrently — the loser of a rotation race would otherwise replay a retired
- * RT and clobber the winner's fresher ticket on the read-modify-write
- * credential file.
- */
-export function withCredentialRefreshLock(key, fn) {
-  const prev = credentialRefreshTail.get(key) || Promise.resolve()
-  let release
-  const gate = new Promise((resolve) => {
-    release = resolve
-  })
-  const tail = prev.catch(() => {}).then(() => gate)
-  credentialRefreshTail.set(key, tail)
-  return prev
-    .catch(() => {})
-    .then(async () => {
-      try {
-        return await fn()
-      } finally {
-        release()
-        if (credentialRefreshTail.get(key) === tail) credentialRefreshTail.delete(key)
-      }
-    })
-}
 
 export function workerPaths(exec = {}) {
   const slotRoot = exec.homeDir ? path.dirname(exec.homeDir) : null
@@ -366,13 +341,102 @@ function createHopAbortScope(signal) {
   }
 }
 
-function cancelOnAbort(exec, signal, requestId) {
+const OFFICIAL_CALLER_UA_RE =
+  /^claude-cli\/(\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?)(?:\s*\(([A-Za-z0-9., _/+:-]{1,128})\))?$/i
+const SAFE_X_APP_RE = /^[A-Za-z0-9._-]{1,64}$/
+const SAFE_CLAUDE_CODE_HEADER_RE = /^x-claude-code-[a-z0-9-]+$/
+const MAX_CALLER_CLAUDE_CODE_HEADERS = 32
+
+function sanitizeCallerHeaderValue(raw, maxLen = 512) {
+  const first = Array.isArray(raw) ? raw[0] : raw
+  if (typeof first !== 'string') return null
+  const trimmed = first.trim()
+  if (!trimmed || trimmed.length > maxLen || /[\x00-\x1f\x7f]/.test(trimmed)) return null
+  return trimmed
+}
+
+/**
+ * Sanitize an official Claude CLI `User-Agent` entrypoint hint (`cli`, `cli-bg`,
+ * `sdk-cli`, etc.) for CRAG bridge detection while rejecting non-official UAs.
+ */
+export function sanitizeCallerUserAgentHint(rawUa) {
+  const clean = sanitizeCallerHeaderValue(rawUa, 256)
+  if (!clean) return null
+  return OFFICIAL_CALLER_UA_RE.test(clean) ? clean : null
+}
+
+/**
+ * Extract allowlisted, non-secret caller identity & trace headers to forward
+ * inside the internal CRAG `kernel.sock` envelope `headers`.
+ * Credentials (`authorization`, `x-api-key`, `cookie`) and hop-by-hop headers
+ * are never accepted here.
+ */
+export function extractCragCallerHeaders(reqHeaders, { includeUserAgent = true } = {}) {
+  if (!reqHeaders || typeof reqHeaders !== 'object') return undefined
+  const out = {}
+  let ccCount = 0
+  for (const [key, raw] of Object.entries(reqHeaders)) {
+    const lower = String(key || '')
+      .trim()
+      .toLowerCase()
+    if (!lower) continue
+    if (lower === 'x-app') {
+      const value = sanitizeCallerHeaderValue(raw, 64)
+      if (value && SAFE_X_APP_RE.test(value)) out[lower] = value
+      continue
+    }
+    if (lower === 'x-client-request-id') {
+      const value = sanitizeCallerHeaderValue(raw, 256)
+      if (value) out[lower] = value
+      continue
+    }
+    if (includeUserAgent && lower === 'user-agent') {
+      const value = sanitizeCallerUserAgentHint(raw)
+      if (value) out[lower] = value
+      continue
+    }
+    if (lower.startsWith('x-claude-code-') && lower.length <= 96 && SAFE_CLAUDE_CODE_HEADER_RE.test(lower)) {
+      const value = sanitizeCallerHeaderValue(raw, 512)
+      if (!value) continue
+      if (!Object.hasOwn(out, lower)) {
+        if (ccCount >= MAX_CALLER_CLAUDE_CODE_HEADERS) continue
+        ccCount++
+      }
+      out[lower] = value
+    }
+  }
+  return Object.keys(out).length ? out : undefined
+}
+
+function headerValueCaseInsensitive(headers, targetLower) {
+  if (!headers || typeof headers !== 'object') return null
+  if (Object.hasOwn(headers, targetLower)) return headers[targetLower]
+  for (const [key, value] of Object.entries(headers)) {
+    if (String(key).toLowerCase() === targetLower) return value
+  }
+  return null
+}
+
+function resolveCancelSessionId(cancelSessionId, reqHeaders, envelopeHeaders) {
+  for (const candidate of [
+    cancelSessionId,
+    headerValueCaseInsensitive(reqHeaders, 'x-claude-code-session-id'),
+    headerValueCaseInsensitive(envelopeHeaders, 'x-claude-code-session-id'),
+  ]) {
+    const clean = sanitizeCallerHeaderValue(candidate, 256)
+    if (clean) return clean
+  }
+  return ''
+}
+
+function cancelOnAbort(exec, signal, requestId, sessionId = '') {
   if (!signal) return () => {}
   const onAbort = () => {
+    const body = sessionId ? { request_id: requestId, session_id: sessionId } : { request_id: requestId }
     workerRequest(exec, {
       method: 'POST',
       requestPath: '/internal/v1/cancel',
-      body: { request_id: requestId },
+      body,
       timeoutMs: 3000,
     })
       .then((res) => res.resume())
@@ -431,12 +495,31 @@ function mergeRateLimitHeaders(headers = {}) {
     for (const [key, value] of Object.entries(parsed)) {
       if (value == null || value === '') continue
       const lower = String(key).toLowerCase()
-      if (lower.startsWith('anthropic-ratelimit-') || lower === 'retry-after' || lower === 'request-id') {
+      if (
+        lower.startsWith('anthropic-ratelimit-') ||
+        lower === 'retry-after' ||
+        lower === 'request-id' ||
+        lower === 'x-should-retry' ||
+        lower === 'anthropic-organization-id' ||
+        lower === 'anthropic-should-fallback' ||
+        lower === 'cf-ray'
+      ) {
         out[lower] = String(value)
       }
     }
   } catch {}
   return out
+}
+
+/** Merge `providerResult.response_headers` into hop headers without overwriting hop's own headers. */
+function mergeProviderHeaders(baseHeaders = {}, providerHeaders = null) {
+  if (!providerHeaders || typeof providerHeaders !== 'object' || Array.isArray(providerHeaders)) return baseHeaders
+  const ownKeys = new Set(Object.keys(baseHeaders || {}).map((key) => String(key).toLowerCase()))
+  const merged = { ...baseHeaders }
+  for (const [key, value] of Object.entries(publicHeaders(providerHeaders))) {
+    if (!ownKeys.has(key)) merged[key] = value
+  }
+  return merged
 }
 
 /** Parse the X-Usage / X-Model / X-Stop-Reason worker metadata. */
@@ -500,13 +583,16 @@ import { semanticStatusForStreamError } from '../protocol/stream-error-status.mj
 
 export { semanticStatusForStreamError } from '../protocol/stream-error-status.mjs'
 
-function nativeErrorStatus(handoff, body) {
+function nativeErrorStatus(handoff, body, { strictPassthrough = false } = {}) {
   const facts = handoff?.providerResult
   for (const status of [facts?.public_status, facts?.http_status]) {
     if (Number.isInteger(status) && status >= 400 && status < 600) return status
   }
   // A real HTTP 200 on an SSE error is an observation, never an error status.
-  // V3's structured facts must not be reinterpreted from error prose.
+  // V3's structured facts must not be reinterpreted from error prose, except
+  // under strict passthrough where official Anthropic SSE error types map
+  // directly to their canonical HTTP status.
+  if (strictPassthrough) return semanticStatusForStreamError(body)
   return facts?.schema_version === 2 ? 502 : semanticStatusForStreamError(body)
 }
 
@@ -605,27 +691,78 @@ function dumpSessionEnvelope(envelope) {
   } catch {}
 }
 
-function gateCragBody(body, print, health, isolated = false, dropSampling = false) {
+function gateCragBody(body, print, health, isolated = false, dropSampling = false, strictPassthrough = false) {
   if (!body || typeof body !== 'object') return body
-  if (print) alignSamplingWithThinking(body, { drop: dropSampling })
+  if (print && !strictPassthrough) alignSamplingWithThinking(body, { drop: dropSampling })
   const caps = print && Array.isArray(health?.capabilities) ? health.capabilities : []
+  const headlessBridge = print && isHeadlessBridgeCaps(caps)
+  const promptSpecV1 = print && isPromptSpecV1Caps(caps, health)
   const prompt = body.crag_prompt
   const model =
     print && !isolated && body.thread == null && cragConsumesModelDirective(health)
       ? modelDirectiveForCrag(body.model)
       : null
   const hasAlias = body.crag_options != null && Object.hasOwn(body.crag_options, 'prompt')
-  if (!model && !Object.hasOwn(body, 'crag_prompt') && !Object.hasOwn(body, 'crag_model') && !hasAlias) {
+  const stripHeadlessFields =
+    !headlessBridge &&
+    (Object.hasOwn(body, 'crag_persona_preset') ||
+      Object.hasOwn(body, 'crag_prompt_version') ||
+      Object.hasOwn(body, 'crag_env'))
+  const stripPromptSpec = !promptSpecV1 && Object.hasOwn(body, 'crag_prompt_spec')
+  const stripNonLegacyPreset =
+    headlessBridge &&
+    !promptSpecV1 &&
+    (body.crag_persona_preset === 'official' || body.crag_persona_preset === 'custom')
+  if (
+    !model &&
+    !Object.hasOwn(body, 'crag_prompt') &&
+    !Object.hasOwn(body, 'crag_model') &&
+    !hasAlias &&
+    !stripHeadlessFields &&
+    !stripPromptSpec &&
+    !stripNonLegacyPreset
+  ) {
     return body
   }
   const out = { ...body }
-  if (!['append', 'replace'].includes(prompt?.mode) || !caps.includes(`prompt_${prompt.mode}`)) delete out.crag_prompt
+  if (!['append', 'replace'].includes(prompt?.mode) || (!headlessBridge && !caps.includes(`prompt_${prompt.mode}`))) {
+    delete out.crag_prompt
+  }
+  if (stripHeadlessFields) {
+    delete out.crag_persona_preset
+    delete out.crag_prompt_version
+    delete out.crag_env
+  }
+  if (stripPromptSpec) {
+    delete out.crag_prompt_spec
+  }
+  if (stripNonLegacyPreset) {
+    delete out.crag_persona_preset
+  }
   if (model) out.crag_model = model
   else delete out.crag_model
   if (out.crag_options && typeof out.crag_options === 'object' && !Array.isArray(out.crag_options)) {
     const { prompt: _prompt, ...rest } = out.crag_options
     if (Object.keys(rest).length) out.crag_options = rest
     else delete out.crag_options
+  }
+  return out
+}
+
+function stripClientNonCcHeaders(reqHeaders) {
+  if (!reqHeaders || typeof reqHeaders !== 'object') return reqHeaders
+  const out = {}
+  for (const [key, value] of Object.entries(reqHeaders)) {
+    const lower = String(key || '').toLowerCase()
+    if (
+      lower === 'anthropic-beta' ||
+      lower === 'user-agent' ||
+      lower === 'x-app' ||
+      lower === 'x-client-request-id' ||
+      lower.startsWith('x-claude-code-')
+    )
+      continue
+    out[key] = value
   }
   return out
 }
@@ -650,40 +787,66 @@ export function prepareWorkerPayload({
   requestContext = null,
   repaired = false,
   dropSampling = false,
+  strictPassthrough = false,
+  officialPassthrough = null,
+  officialTraffic = null,
+  safeguardsSanitized = false,
 } = {}) {
   const health = exec?.workerStatus
   const print = nativeCragRequest(exec, cragPrint)
+  const strictCrag = strictPassthrough === true && print
   const canonicalBody = print
-    ? prepareCragRequest(body, health, { requestContext })
+    ? prepareCragRequest(body, health, { requestContext, strictPassthrough: strictCrag, safeguardsSanitized })
     : prepareCliNodeRequest(body, { requestContext })
   const displayed =
-    requestContext?.purpose === 'auto_mode_classifier' || repaired
+    strictCrag || requestContext?.purpose === 'auto_mode_classifier' || repaired
       ? canonicalBody
       : ensureOfficialPrintThinking(
           applyThinkingDisplay(canonicalBody, thinkingDisplayMode(routing)),
           ccEntrypointFromRouting(routing),
         )
-  const main = stripSubagentBilling(displayed)
+  const main = strictCrag ? displayed : stripSubagentBilling(displayed)
   // V3's official CC owns beta selection. Its strict request contract does not
   // accept the panel's legacy cli-node beta body extension.
   const officialBetas = print && health?.capabilities?.includes('generation_controls_v3')
+  const headlessBridge = print && isHeadlessBridgeCaps(health?.capabilities)
+  const verifiedOfficial = officialTraffic === true || officialPassthrough === true || strictCrag
+  const callerHeaders =
+    print && verifiedOfficial ? extractCragCallerHeaders(reqHeaders, { includeUserAgent: headlessBridge }) : undefined
   const nativeOwnsHeaders =
     cliHop &&
     cragPrint === true &&
-    officialBetas &&
-    health.capabilities.includes('linux_tui_native_queue') &&
-    !requestContext &&
-    !repaired &&
-    main.thread == null
+    print &&
+    isNativeCragV3Plus(health?.capabilities) &&
+    (strictCrag || (!requestContext && !repaired && main.thread == null))
   let headers
   let turn = null
   let gated = main
-  if (!nativeOwnsHeaders) {
-    headers = prepareOutboundHeaders(reqHeaders, exec?.homeDir, identity, canonicalBody?.model || '', {
+  if (nativeOwnsHeaders) {
+    if (callerHeaders) headers = callerHeaders
+  } else {
+    const nonPassthroughHeadless =
+      headlessBridge &&
+      !strictCrag &&
+      (!verifiedOfficial ||
+        officialPassthrough === false ||
+        body?.crag_persona_preset != null ||
+        body?.crag_prompt != null ||
+        body?.crag_env != null ||
+        (body?.crag_prompt_spec != null && body.crag_prompt_spec?.passthrough !== true))
+    const headerReq = !verifiedOfficial || nonPassthroughHeadless ? stripClientNonCcHeaders(reqHeaders) : reqHeaders
+    headers = prepareOutboundHeaders(headerReq, exec?.homeDir, identity, canonicalBody?.model || '', {
       credentialMode: credentialModeFromOauth(exec?.vm?.claude || {}),
       routing,
       want1m: want1m === true,
+      officialTraffic: verifiedOfficial && !nonPassthroughHeadless,
     })
+    if (callerHeaders) {
+      for (const [k, v] of Object.entries(callerHeaders)) {
+        if (nonPassthroughHeadless && k === 'user-agent') continue
+        headers[k] = v
+      }
+    }
     const thread = pinThreadBetas(
       main,
       withRequestProtocolBetas(String(headers['anthropic-beta'] || '').split(','), main),
@@ -693,18 +856,33 @@ export function prepareWorkerPayload({
     if (!cliHop) gated = sanitizeAnthropicBodyForBetaTokens(main, headers['anthropic-beta'])
     else if (!officialBetas) gated = { ...main, betas: thread.betas }
   }
-  const directed = gateCragBody(gated, print, health, requestContext?.purpose === 'auto_mode_classifier', dropSampling)
+  const directed = gateCragBody(
+    gated,
+    print,
+    health,
+    requestContext?.purpose === 'auto_mode_classifier',
+    dropSampling,
+    strictCrag,
+  )
   return {
     headers,
     gated: directed,
     cliHop,
     routing,
+    strictPassthrough: strictCrag,
     acceptsCallerCwd: print && Array.isArray(health?.capabilities) && health.capabilities.includes('caller_cwd'),
     thread: turn,
   }
 }
 
 function sealPreparedPayload(prepared, gated) {
+  if (prepared.strictPassthrough && prepared.cliHop) {
+    return {
+      headers: prepared.headers,
+      body: gated,
+      thread: prepared.thread,
+    }
+  }
   return {
     headers: prepared.headers,
     body: sealClaudeCodeCch(gated, {
@@ -734,9 +912,14 @@ export async function workerEnvelope({
   preserveCacheBreakpoints = null,
   cliHop = false,
   cragPrint = null,
+  promptSpec = null,
   callerCwd = null,
   repaired = false,
   dropSampling = false,
+  strictPassthrough = false,
+  officialPassthrough = null,
+  officialTraffic = null,
+  safeguardsSanitized = false,
   redactionPrincipal = '',
   redactionSession = '',
 } = {}) {
@@ -752,6 +935,10 @@ export async function workerEnvelope({
     requestContext,
     repaired,
     dropSampling,
+    strictPassthrough,
+    officialPassthrough,
+    officialTraffic,
+    safeguardsSanitized,
   })
   const redaction = await redactionContext({ routing, exec, redactionPrincipal, redactionSession })
   // Mask the separated path with the same policy as the original system text.
@@ -760,22 +947,30 @@ export async function workerEnvelope({
   const gated = redaction ? masked.body : prepared.gated
   const outgoingCwd = redaction ? validateCallerCwd(masked.caller_cwd) : cwd
   const finalized = sealPreparedPayload(prepared, gated)
-  const nativeV3 =
-    nativeCragRequest(exec, cragPrint) && exec?.workerStatus?.capabilities?.includes('generation_controls_v3')
+  const print = nativeCragRequest(exec, cragPrint)
+  const nativeV3 = print && exec?.workerStatus?.capabilities?.includes('generation_controls_v3')
+  // Top-level `prompt_spec` rides on the worker envelope for cli-node (never inside `envelope.body`).
+  const cleanPromptSpec = !print && promptSpec ? sanitizePromptSpec(promptSpec) : null
   // Resolve execution defaults even when cacheTtl is null for mixed-TTL accounting.
-  const defaultCacheTtl =
-    cacheTtl ??
-    finalized.body?.cache_ttl ??
-    finalized.body?.crag_options?.cache_ttl ??
-    (nativeV3 && routing != null ? cacheTtlFromRouting(routing) : null)
+  const defaultCacheTtl = prepared.strictPassthrough
+    ? (cacheTtl ?? null)
+    : (cacheTtl ??
+      finalized.body?.cache_ttl ??
+      finalized.body?.crag_options?.cache_ttl ??
+      (nativeV3 && routing != null ? cacheTtlFromRouting(routing) : null))
   const envelope = {
     ...(requestContext ? { request_context: requestContext } : {}),
     ...(typeof outgoingCwd === 'string' ? { caller_cwd: outgoingCwd } : {}),
+    ...(cleanPromptSpec ? { prompt_spec: cleanPromptSpec } : {}),
     body: finalized.body,
     ...(finalized.headers ? { headers: finalized.headers } : {}),
     stream: !!stream,
     delivery_mode: deliveryMode || 'realtime',
-    preserve_cache_breakpoints: preserveCacheBreakpoints == null ? cacheTtl == null : preserveCacheBreakpoints === true,
+    preserve_cache_breakpoints: prepared.strictPassthrough
+      ? true
+      : preserveCacheBreakpoints == null
+        ? cacheTtl == null
+        : preserveCacheBreakpoints === true,
     cache_ttl: defaultCacheTtl == null ? null : String(defaultCacheTtl),
   }
   dumpSessionEnvelope(envelope)
@@ -811,8 +1006,8 @@ async function preparePrebuiltEnvelope(envelope, redaction, messages, exec, crag
       )
     }
   }
-  if (out.body && Object.hasOwn(out.body, 'caller_cwd')) {
-    const { caller_cwd: _bodyCwd, ...body } = out.body
+  if (out.body && (Object.hasOwn(out.body, 'caller_cwd') || Object.hasOwn(out.body, 'prompt_spec'))) {
+    const { caller_cwd: _bodyCwd, prompt_spec: _bodyPromptSpec, ...body } = out.body
     out.body = body
   }
   if (redaction && out.body) out.body = await maskJson(out.body, redaction)
@@ -876,10 +1071,11 @@ function mockScenario(exec) {
   }
 }
 
-function restoreInferenceFailure(result, requestPath = '/internal/v1/messages') {
+function restoreInferenceFailure(result, requestPath = '/internal/v1/messages', { strictPassthrough = false } = {}) {
   if (requestPath === '/internal/v1/messages' && isClaudeSlotOAuthError(result?.body)) {
     return slotOAuthUnavailable(result)
   }
+  if (strictPassthrough) return result
   if (!result || result.ok || result.committed || isClientCancelledResult(result)) return result
   const facts = result.providerResult
   if (
@@ -947,11 +1143,17 @@ async function callGoWorkerRaw({
   envelope = null,
   cliHop = false,
   cragPrint = null,
+  promptSpec = null,
   callerCwd = null,
   repaired = false,
+  strictPassthrough = false,
+  officialPassthrough = null,
+  officialTraffic = null,
+  safeguardsSanitized = false,
   onEnvelope = null,
   redactionPrincipal = '',
   redactionSession = '',
+  cancelSessionId = '',
   gatewayRequestId = null,
   beforeInferencePost,
 } = {}) {
@@ -968,8 +1170,17 @@ async function callGoWorkerRaw({
       cragPrint,
       requestContext,
       repaired,
+      strictPassthrough,
+      officialPassthrough,
+      officialTraffic,
+      safeguardsSanitized,
     })
-    reportEnvelope(onEnvelope, { body: outboundBody, headers })
+    const cleanPromptSpec = !nativeCragRequest(exec, cragPrint) && promptSpec ? sanitizePromptSpec(promptSpec) : null
+    reportEnvelope(onEnvelope, {
+      ...(cleanPromptSpec ? { prompt_spec: cleanPromptSpec } : {}),
+      body: outboundBody,
+      headers,
+    })
     const rejection = await beforeInferencePost?.()
     if (rejection) return rejection
     writeCrsTrace({ body: outboundBody, headers, stream: false })
@@ -1019,9 +1230,14 @@ async function callGoWorkerRaw({
           preserveCacheBreakpoints,
           cliHop,
           cragPrint,
+          promptSpec,
           callerCwd,
           requestContext,
           repaired,
+          strictPassthrough,
+          officialPassthrough,
+          officialTraffic,
+          safeguardsSanitized,
           redactionPrincipal,
           redactionSession,
         })
@@ -1033,7 +1249,8 @@ async function callGoWorkerRaw({
       envelope: prepared.envelope,
     })
     if (useNativeHandoff || negotiateProviderResult(exec, { managedCrag, requestPath }))
-      handoff = createNativeHandoffState({ nativeHandoff: useNativeHandoff })
+      handoff = createNativeHandoffState({ nativeHandoff: useNativeHandoff, strictPassthrough })
+    const resolvedCancelSessionId = resolveCancelSessionId(cancelSessionId, reqHeaders, prepared.envelope?.headers)
     const response = await inferenceRequest(exec, {
       stream: false,
       managedCrag,
@@ -1052,7 +1269,7 @@ async function callGoWorkerRaw({
       onRequestStarted: () => {
         requestStarted = true
         nativeHandoff = useNativeHandoff
-        const stopRemoteCancel = cancelOnAbort(exec, hopSignal.signal, requestId)
+        const stopRemoteCancel = cancelOnAbort(exec, hopSignal.signal, requestId, resolvedCancelSessionId)
         stopCancel = () => {
           hopSignal.disarm()
           stopRemoteCancel()
@@ -1073,8 +1290,11 @@ async function callGoWorkerRaw({
       handoff.observeMessage(parsed?.type === 'error' ? null : parsed)
       parsed = handoff.finish(parsed)
     }
-    const headers = mergeRateLimitHeaders(
-      publicHeaders(nativeHandoff ? { ...response.headers, ...response.trailers } : response.headers),
+    const headers = mergeProviderHeaders(
+      mergeRateLimitHeaders(
+        publicHeaders(nativeHandoff ? { ...response.headers, ...response.trailers } : response.headers),
+      ),
+      handoff?.providerResult?.response_headers,
     )
     const ok =
       response.statusCode >= 200 &&
@@ -1086,7 +1306,7 @@ async function callGoWorkerRaw({
       ok,
       status:
         nativeHandoff && parsed?.type === 'error' && response.statusCode < 400
-          ? nativeErrorStatus(handoff, parsed)
+          ? nativeErrorStatus(handoff, parsed, { strictPassthrough })
           : response.statusCode || 0,
       upstreamStatus: response.statusCode ?? null,
       via: 'go-worker',
@@ -1172,12 +1392,19 @@ async function streamGoWorkerRaw({
   envelope = null,
   cliHop = false,
   cragPrint = null,
+  promptSpec = null,
   callerCwd = null,
   repaired = false,
+  dropSampling = false,
+  strictPassthrough = false,
+  officialPassthrough = null,
+  officialTraffic = null,
+  safeguardsSanitized = false,
   onEnvelope = null,
   onOutboundHeaders = null,
   redactionPrincipal = '',
   redactionSession = '',
+  cancelSessionId = '',
   gatewayRequestId = null,
   beforeInferencePost,
 } = {}) {
@@ -1195,8 +1422,18 @@ async function streamGoWorkerRaw({
       cragPrint,
       requestContext,
       repaired,
+      dropSampling,
+      strictPassthrough,
+      officialPassthrough,
+      officialTraffic,
+      safeguardsSanitized,
     })
-    reportEnvelope(onEnvelope, { body: outboundBody, headers })
+    const cleanPromptSpec = !nativeCragRequest(exec, cragPrint) && promptSpec ? sanitizePromptSpec(promptSpec) : null
+    reportEnvelope(onEnvelope, {
+      ...(cleanPromptSpec ? { prompt_spec: cleanPromptSpec } : {}),
+      body: outboundBody,
+      headers,
+    })
     const rejection = await beforeInferencePost?.()
     if (rejection) return rejection
     writeCrsTrace({ body: outboundBody, headers, stream: true })
@@ -1319,9 +1556,15 @@ async function streamGoWorkerRaw({
           preserveCacheBreakpoints,
           cliHop,
           cragPrint,
+          promptSpec,
           callerCwd,
           requestContext,
           repaired,
+          dropSampling,
+          strictPassthrough,
+          officialPassthrough,
+          officialTraffic,
+          safeguardsSanitized,
           redactionPrincipal,
           redactionSession,
         })
@@ -1333,7 +1576,8 @@ async function streamGoWorkerRaw({
       envelope: prepared.envelope,
     })
     if (useNativeHandoff || negotiateProviderResult(exec, { managedCrag, requestPath }))
-      handoff = createNativeHandoffState({ nativeHandoff: useNativeHandoff })
+      handoff = createNativeHandoffState({ nativeHandoff: useNativeHandoff, strictPassthrough })
+    const resolvedCancelSessionId = resolveCancelSessionId(cancelSessionId, reqHeaders, prepared.envelope?.headers)
     const response = await inferenceRequest(exec, {
       stream: true,
       deliveryMode,
@@ -1353,7 +1597,7 @@ async function streamGoWorkerRaw({
       onRequestStarted: () => {
         requestStarted = true
         nativeHandoff = useNativeHandoff
-        const stopRemoteCancel = cancelOnAbort(exec, hopSignal.signal, requestId)
+        const stopRemoteCancel = cancelOnAbort(exec, hopSignal.signal, requestId, resolvedCancelSessionId)
         stopCancel = () => {
           hopSignal.disarm()
           stopRemoteCancel()
@@ -1378,6 +1622,7 @@ async function streamGoWorkerRaw({
       if (typeof responseModel === 'string' && responseModel.trim()) upstreamResponseModel = responseModel
       handoff?.observeHeaders(response.trailers)
       if (handoff) parsedBody = handoff.finish(parsedBody)
+      const mergedHeaders = mergeProviderHeaders(headers, handoff?.providerResult?.response_headers)
       // A real HTTP error remains the failure, even if handoff metadata is absent.
       const result = restoreKernelErrorStatus({
         ok: false,
@@ -1385,7 +1630,7 @@ async function streamGoWorkerRaw({
         upstreamStatus: response.statusCode ?? null,
         via: 'go-worker-stream',
         body: parsedBody,
-        headers,
+        headers: mergedHeaders,
         committed: false,
         terminalState: headers['x-terminal-state'] || 'error',
         transportError: false,
@@ -1404,9 +1649,9 @@ async function streamGoWorkerRaw({
         deliveryMode,
         onEvent,
         isCommitEvent: isDownstreamCommitEvent,
-        onCommit: () => {
+        onCommit: (commitHeaders) => {
           committed = true
-          onCommit?.()
+          onCommit?.(mergeRateLimitHeaders(publicHeaders({ ...headers, ...(commitHeaders || {}) })))
         },
         onObserve: (event) => {
           diagnostics.observe(event)
@@ -1447,19 +1692,27 @@ async function streamGoWorkerRaw({
       const body = received.body
       const failed = body?.type === 'error' || !!body?.error
       const trailers = publicHeaders(response.trailers)
+      const status = failed ? nativeErrorStatus(handoff, body, { strictPassthrough }) : response.statusCode
       return {
         ok: !failed,
-        status: failed ? nativeErrorStatus(handoff, body) : response.statusCode,
+        status,
         upstreamStatus: response.statusCode ?? null,
         via: 'go-worker-stream',
         body,
-        headers: mergeRateLimitHeaders(publicHeaders({ ...received.headers, ...headers, ...trailers })),
+        headers: mergeProviderHeaders(
+          mergeRateLimitHeaders(publicHeaders({ ...received.headers, ...headers, ...trailers })),
+          handoff?.providerResult?.response_headers,
+        ),
         hopRequestId: requestId,
         ...nativeMetadata(),
         ...timing.snapshot(),
         sawMessageStop: received.sawMessageStop,
         committed,
-        terminalState: failed ? 'incomplete' : 'verified',
+        terminalState: failed
+          ? strictPassthrough && !committed && status >= 400
+            ? 'rejected'
+            : 'incomplete'
+          : 'verified',
         failureDiagnostics: failed ? diagnostics.snapshot(committed) : null,
         transportError: false,
         threadBetas: prepared.thread,
@@ -1489,7 +1742,8 @@ async function streamGoWorkerRaw({
     const flushCommit = async () => {
       if (committed) return
       committed = true
-      if (typeof onCommit === 'function') onCommit()
+      if (typeof onCommit === 'function')
+        onCommit(mergeRateLimitHeaders(publicHeaders({ ...sseRateHeaders, ...headers })))
       if (onEvent) {
         for (const queued of pendingLines) await onEvent(queued)
       }
@@ -1753,7 +2007,10 @@ async function streamGoWorkerRaw({
           : !!responsesTerminal || isCompleteAssistantMessage({ body: assembled, stopReason, sawMessageStop }))
       if (!committed && complete) await flushCommit()
       const terminalState = complete && !incomplete ? 'verified' : 'incomplete'
-      const rateHeaders = mergeRateLimitHeaders({ ...sseRateHeaders, ...headers, ...trailers })
+      const rateHeaders = mergeProviderHeaders(
+        mergeRateLimitHeaders({ ...sseRateHeaders, ...headers, ...trailers }),
+        handoff?.providerResult?.response_headers,
+      )
       const responseBody = lastError ||
         responsesTerminal?.response ||
         assembled || { type: 'message', role: 'assistant', content: [] }
@@ -1764,7 +2021,7 @@ async function streamGoWorkerRaw({
         ok: response.statusCode === 200 && !lastError && complete,
         status:
           lastError && handoff?.providerResult
-            ? nativeErrorStatus(handoff, lastError)
+            ? nativeErrorStatus(handoff, lastError, { strictPassthrough })
             : nativeTimeout && !committed
               ? 504
               : response.statusCode || 0,
@@ -1936,20 +2193,20 @@ export async function workerHealth(exec, { timeoutMs = 3000, signal, requireInte
 }
 
 /**
- * Relink a local slot's `.credentials.json` onto credentials.json. A regular file
- * left by the CLI's write-then-rename is adopted first when it holds the later
- * grant, so the refresh token the CLI already rotated to is the one kept.
+ * Relink a local slot's `.credentials.json` onto the panel's authoritative
+ * `credentials.json`. Under Panel SSOT a slot-written regular `.credentials.json`
+ * is never adopted over the panel store.
  */
 export function repairLocalCredentialLink(homeDir) {
   if (!homeDir) return Promise.resolve({ linked: false, error: 'home missing' })
-  return withCredentialRefreshLock(String(homeDir), async () => relinkKeepingRotation(homeDir))
+  return withCredentialRefreshLock(String(homeDir), async () => relinkPanelCredential(homeDir))
 }
 
-function relinkKeepingRotation(homeDir) {
-  return ensureOfficialCredentialLink(homeDir, { ...slotUidGidFromHomeDir(homeDir), adoptOfficial: 'rotation' })
+function relinkPanelCredential(homeDir) {
+  return ensureOfficialCredentialLink(homeDir, { ...slotUidGidFromHomeDir(homeDir), adoptOfficial: false })
 }
 
-/** Whether the worker on this slot's node keeps the refresh attempt journal (no token, no network). */
+/** Whether the control plane's `bin/kin-worker` keeps the refresh attempt journal (no token, no network). */
 export function probeWorkerAttemptGuard(exec, opts = {}) {
   return probeAttemptGuard(exec, opts)
 }
@@ -1968,8 +2225,8 @@ export async function ensureWorkerCredential(exec, { force = false, skewMs = REF
     }
   }
 
-  // Adopt a later CLI grant: dropping it and refreshing the older RT revokes the grant.
-  if (exec?.homeDir) relinkKeepingRotation(exec.homeDir)
+  // Keep the local `.credentials.json` alias pointed at panel `credentials.json` without ever adopting CLI writes.
+  if (exec?.homeDir) relinkPanelCredential(exec.homeDir)
   const credential = readWorkerCredentialFile(exec.homeDir)
   if (!credential) {
     return {
@@ -1996,7 +2253,7 @@ export async function ensureWorkerCredential(exec, { force = false, skewMs = REF
   const snapshotRefresh = String(credential.refresh_token || '')
   const lockKey = String(exec.homeDir || exec.vm?.id || 'credential')
   return withCredentialRefreshLock(lockKey, async () => {
-    if (exec?.homeDir) relinkKeepingRotation(exec.homeDir)
+    if (exec?.homeDir) relinkPanelCredential(exec.homeDir)
     const live = readWorkerCredentialFile(exec.homeDir) || credential
     const liveRefresh = String(live?.refresh_token || '')
     if (snapshotRefresh && liveRefresh && snapshotRefresh !== liveRefresh) {
@@ -2018,7 +2275,7 @@ export async function ensureWorkerCredential(exec, { force = false, skewMs = REF
         credential: credentialSummary(live, liveNow),
       }
     }
-    // The slot oauth helper only refreshes inside its own 5-minute window; an early
+    // The panel worker only refreshes inside its own 5-minute window; an early
     // scheduled refresh has to force it.
     const result = await runSlotOauth(exec, 'refresh', { force: !!force || skewMs > REFRESH_SKEW_MS })
     const body = result?.body || {}
@@ -2065,8 +2322,10 @@ export async function importWorkerCredential(exec, credential, { timeoutMs = 600
   return withCredentialRefreshLock(String(exec.homeDir || exec.vm?.id || 'credential'), async () => {
     try {
       if (!writeWorkerCredentialFile(exec.homeDir, credential)) throw new Error('credential_required')
-      // Import is the one case where the control plane's credential replaces the slot's copy.
-      await slotHost(exec.vm).onImport(exec.vm, path.dirname(exec.homeDir))
+      // Panel SSOT: one-way project the imported credential down to the slot.
+      const host = slotHost(exec.vm)
+      const push = host.syncCredentials || host.onImport
+      if (typeof push === 'function') await push(exec.vm, path.dirname(exec.homeDir))
     } catch (error) {
       return {
         ok: false,
@@ -2120,31 +2379,21 @@ async function reconcileClaudeClientCredentials(
     try {
       if (!exec.homeDir) return clientCredentialRequired()
       const slotDir = path.dirname(exec.homeDir)
-      const repairRemoteLink = async () => {
-        if (host.kind === 'node' && !(await ensureRemoteLink(exec.vm, slotDir))?.linked) {
-          throw new Error('remote_link_failed')
-        }
-      }
       const repairLocalLink = () => {
-        // A loose native alias is never a panel import source.
-        if (!ensureOfficialCredentialLink(exec.homeDir, { adoptOfficial: false }).linked) {
+        // Panel SSOT: a loose native alias is never adopted over panel credentials.json.
+        if (
+          !ensureOfficialCredentialLink(exec.homeDir, { ...slotUidGidFromHomeDir(exec.homeDir), adoptOfficial: false })
+            .linked
+        ) {
           throw new Error('credential_link_failed')
         }
       }
-      const sanitizeCredentials = async () => {
-        const stripped = stripWorkerCredentialEmail(exec.homeDir)
-        if (stripped.changed && host.kind === 'node' && typeof host.onImport === 'function') {
-          await host.onImport(exec.vm, slotDir)
+      const projectToSlot = async () => {
+        const push = host.syncCredentials || host.onImport
+        if (typeof push === 'function') await push(exec.vm, slotDir)
+        if (host.kind === 'node' && !(await ensureRemoteLink(exec.vm, slotDir))?.linked) {
+          throw new Error('remote_link_failed')
         }
-      }
-      if (host.kind === 'node') {
-        const pulled = await host.afterRefresh(exec.vm, slotDir)
-        if (pulled?.reason === 'remote_missing') {
-          if (refreshInSlot) return clientCredentialRequired()
-          throw new Error('remote_missing')
-        }
-        await sanitizeCredentials()
-        await repairRemoteLink()
       }
       const credential = readWorkerCredentialFile(exec.homeDir)
       const mode = credential?.type || credential?.mode
@@ -2152,9 +2401,10 @@ async function reconcileClaudeClientCredentials(
       const hasAccess = hasAccessPresence(credential || {})
       const hasRefresh = hasRefreshPresence(credential || {})
       if (!hasAccess && !(refreshInSlot && refreshable && hasRefresh)) return clientCredentialRequired()
-      await sanitizeCredentials()
+      stripWorkerCredentialEmail(exec.homeDir)
       repairLocalLink()
       if (!refreshInSlot) {
+        await projectToSlot()
         return {
           ok: true,
           synced: true,
@@ -2162,30 +2412,29 @@ async function reconcileClaudeClientCredentials(
         }
       }
 
-      let live = credential
+      let live = readWorkerCredentialFile(exec.homeDir) || credential
       let refreshed = false
-      if (refreshable && (!hasAccess || needsRefresh(credential.expires_at))) {
+      if (refreshable && (!hasAccess || needsRefresh(live.expires_at))) {
         if (!hasRefresh) return staleClientCredential({ error: { code: 'refresh_token_missing' } })
         let result
         try {
-          // This already holds the same lock as imports and worker refreshes.
+          // This already holds the same lock as imports and panel refreshes.
           result = await refreshInSlot(exec, 'refresh', { force: false })
         } catch {
           return staleClientCredential()
         }
         if (!result?.ok) return staleClientCredential({ error: result?.body?.error })
-        // Slot refresh also pulls the remote file back. Verify persisted expiry,
-        // not the subprocess's reported expiry, before admitting the client.
-        await sanitizeCredentials()
+        stripWorkerCredentialEmail(exec.homeDir)
         live = readWorkerCredentialFile(exec.homeDir)
         if (!live || !hasAccessPresence(live) || needsRefresh(live.expires_at)) return staleClientCredential()
-        await repairRemoteLink()
         repairLocalLink()
         refreshed = !!result.body?.refreshed
       } else if (!refreshable && !isApiKeyMode(mode)) {
-        const expiry = expiresAtToMs(credential.expires_at)
+        const expiry = expiresAtToMs(live.expires_at)
         if (expiry && expiry <= Date.now()) return staleClientCredential({ error: { code: 'refresh_token_missing' } })
       }
+      // One-way project the panel's authoritative credential down to the slot before admitting the client.
+      await projectToSlot()
       return {
         ok: true,
         status: 200,
@@ -2352,6 +2601,72 @@ export async function countTokensViaWorker(exec, { body, headers = {}, timeoutMs
   return runSlotOauth(exec, 'count-tokens', { body, headers, timeoutMs })
 }
 
+/**
+ * Route POST /v1/messages/count_tokens directly through the slot's Rust/CRAG
+ * `kernel.sock` (`POST /internal/v1/messages/count_tokens`), forwarding official
+ * upstream response headers and error envelopes cleanly across OAuth, Setup
+ * Token, and API Key slots.
+ */
+export async function countTokensViaKernel(exec, { body, headers = {}, timeoutMs = 45000, signal } = {}) {
+  if (isCrsMock()) {
+    return { ok: true, status: 200, body: { input_tokens: 8 }, headers: {}, via: 'rust-kernel-mock' }
+  }
+  const base = workerPaths(exec)
+  const kernelSocket =
+    exec?.vm?.runtime?.kernel_socket || (base.runDir ? path.join(base.runDir, 'kernel.sock') : base.socketPath)
+  const kernelExec = {
+    ...exec,
+    vm: {
+      ...(exec?.vm || {}),
+      runtime: {
+        ...(exec?.vm?.runtime || {}),
+        worker_socket: kernelSocket,
+        worker_token_file: base.tokenPath,
+        worker_run_dir: base.runDir,
+      },
+    },
+  }
+  try {
+    const response = await workerRequest(kernelExec, {
+      method: 'POST',
+      requestPath: '/internal/v1/messages/count_tokens',
+      body,
+      headers,
+      timeoutMs,
+      signal,
+      maxRequestBytes: MAX_BODY,
+    })
+    const data = await readAll(response)
+    const parsed = parseJson(data, response.statusCode)
+    const responseHeaders = mergeRateLimitHeaders(publicHeaders(response.headers))
+    const ok = response.statusCode >= 200 && response.statusCode < 300 && parsed?.type !== 'error' && !parsed?.error
+    return {
+      ok,
+      status: response.statusCode || 0,
+      body: parsed,
+      headers: responseHeaders,
+      via: 'rust-kernel',
+    }
+  } catch (error) {
+    if (signal?.aborted) return clientCancelledResult({ via: 'rust-kernel' })
+    return {
+      ok: false,
+      status: error.status === 413 ? 413 : 0,
+      body: {
+        type: 'error',
+        error: {
+          type: error.status === 413 ? 'invalid_request_error' : 'worker_error',
+          code: error.code || 'worker_transport_error',
+          message: String(error.message || error).slice(0, 300),
+        },
+      },
+      headers: {},
+      via: 'rust-kernel',
+      transportError: error.status !== 413,
+    }
+  }
+}
+
 export const EMPTY_CONTENT_VERDICT = 'native request completed without response content'
 
 export function isRecoverableThinkingOnly(result) {
@@ -2412,7 +2727,11 @@ function trackDownstreamEvents(onEvent) {
  * sent; with one, `downstream` says what was sent and only the missing
  * block stops and terminal frames are appended.
  */
-export function recoverThinkingOnlyMaxTokens(result, { onEvent, onCommit, downstream = null } = {}) {
+export function recoverThinkingOnlyMaxTokens(
+  result,
+  { onEvent, onCommit, downstream = null, strictPassthrough = false } = {},
+) {
+  if (strictPassthrough === true) return result
   const facts = result?.providerResult
   const writer = typeof onEvent === 'function'
   if (!isRecoverableThinkingOnly(result) || (result.committed && writer && (!downstream || downstream.terminal)))
@@ -2473,15 +2792,20 @@ export function recoverThinkingOnlyMaxTokens(result, { onEvent, onCommit, downst
 }
 
 export async function callGoWorker(opts = {}) {
-  const result = restoreInferenceFailure(await callGoWorkerRaw(opts), opts.requestPath)
-  return recoverThinkingOnlyMaxTokens(result, {})
+  const strictPassthrough = opts.strictPassthrough === true
+  const result = restoreInferenceFailure(await callGoWorkerRaw(opts), opts.requestPath, { strictPassthrough })
+  return strictPassthrough ? result : recoverThinkingOnlyMaxTokens(result, {})
 }
 
 export async function streamGoWorker(opts = {}) {
+  const strictPassthrough = opts.strictPassthrough === true
   const tracked = trackDownstreamEvents(opts.onEvent)
   const result = restoreInferenceFailure(
     await streamGoWorkerRaw({ ...opts, onEvent: tracked.onEvent }),
     opts.requestPath,
+    { strictPassthrough },
   )
-  return recoverThinkingOnlyMaxTokens(result, { ...opts, onEvent: opts.onEvent, downstream: tracked.state })
+  return strictPassthrough
+    ? result
+    : recoverThinkingOnlyMaxTokens(result, { ...opts, onEvent: opts.onEvent, downstream: tracked.state })
 }

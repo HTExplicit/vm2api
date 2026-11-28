@@ -4,6 +4,7 @@ import path from 'node:path'
 import { Readable, Transform, Writable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { createGunzip } from 'node:zlib'
+import { CRAG_CLAUDE_DIR_RE, CRAG_CLAUDE_PATH_RE } from '../vm/slot-engine.mjs'
 import {
   cragTargetArch,
   cragV2Arch,
@@ -43,6 +44,27 @@ const baseFor = (root, kernel) =>
 const archFor = (projectRoot, kernel, runtimeOptions) =>
   kernel === 'crag' ? cragTargetArch(projectRoot, runtimeOptions) : 'amd64'
 const CRAG_PINNED_RELEASES = [
+  {
+    tag: 'payload-2026.11.28-crag-3.1.27',
+    label: '3.1.27 统一 PromptSpec v1、拆解 Self-Probe、缓存/Zero 安全与 tool_use handoff_complete 修复',
+    size: 168930962,
+    manifestSha256: '6b8ad1e85df367c37f22cfc7661a67e51d8ccba72a21408d64efef8e02162c2e',
+    sha256: '31d94d341061789bdda7f34f115cf35037b913c43b55c8df65ae1f7061388ecb',
+  },
+  {
+    tag: 'payload-2026.11.28-crag-3.1.26',
+    label: '3.1.26 原生 V4 Headless Bridge、自定义系统底座/vsock 与 tool_use handoff_complete 修复',
+    size: 168863735,
+    manifestSha256: 'e8a6cd7e0481622c48c03fb50ab039f9d3ccd87a5c5534770570a4f5181959b9',
+    sha256: 'cad5fe5ebb7c35d7c8eec54265d346c7faad7a09358c859cd3d4d8fe4bed14e5',
+  },
+  {
+    tag: 'payload-2026.11.27-crag-3.1.25',
+    label: '3.1.25 修复空串 crag_prompt replace 静默回退官方提示词',
+    size: 171332562,
+    manifestSha256: '7d95b8f9228ce3248536193c995cd8ca6f39ad3742fdcf08681fb9202e26b09f',
+    sha256: '005a664e9358a78d94b216d7648d099ddfa7ddebc14f725e41ce248edffd121f',
+  },
   {
     tag: 'payload-2026.11.27-crag-3.1.24',
     label: '3.1.24 修复工具续接拒答后追问死锁 409',
@@ -315,14 +337,19 @@ function fingerprint(root) {
   visit(root)
   return JSON.stringify(rows)
 }
-function verifiedPackage(root, arch = cragV2Arch()) {
-  const key = `${root}\0${arch}`
+function verifiedPackage(root, arch = cragV2Arch(), extraVerifyOpts = null) {
+  const allowUnbundled = extraVerifyOpts?.allowUnbundledStore === true
+  const storeRoot = allowUnbundled ? String(extraVerifyOpts?.sharedClaudeStoreRoot || '') : ''
+  const key = `${root}\0${arch}\0${allowUnbundled ? '1' : '0'}\0${storeRoot}`
   try {
     const before = fingerprint(root)
     const cached = verificationCache.get(key)
     if (cached?.fingerprint === before) return cached.result
     verificationCache.delete(key)
-    const result = verifyCragV2Tree(root, { arch })
+    const result = verifyCragV2Tree(root, {
+      arch,
+      ...(allowUnbundled ? { allowUnbundledStore: true, sharedClaudeStoreRoot: storeRoot } : {}),
+    })
     if (result.ok && fingerprint(root) === before) {
       verificationCache.set(key, { fingerprint: before, result })
       if (verificationCache.size > 8) verificationCache.delete(verificationCache.keys().next().value)
@@ -426,7 +453,9 @@ export function describeKernelCatalog(projectRoot, runtimeOptions) {
   try {
     const cragArch = archFor(projectRoot, 'crag', runtimeOptions)
     const root = cragV2PackageRoot(projectRoot, cragArch)
-    const verified = root ? verifiedPackage(root, cragArch) : { ok: false, code: 'crag_v2_package_missing' }
+    const verified = root
+      ? verifiedPackage(root, cragArch, runtimeOptions)
+      : { ok: false, code: 'crag_v2_package_missing' }
     const release = root ? selectedReleaseInfo(projectRoot, 'crag', root, cragArch) : {}
     if (verified.ok && !release.payload_tag) {
       const manifestSha256 = crypto
@@ -490,9 +519,22 @@ async function downloadFile(asset, dest, max, fetchImpl) {
   if (!elfFile(dest)) throw coded('kernel_not_elf', '内核不是 Linux amd64 ELF')
 }
 
+const CRAG_TAR_BASE_FILES = new Set([
+  'manifest.json',
+  'crag-v2',
+  'crag-v2.payload.enc',
+  'crag-license-public.pem',
+  'kernel.json.example',
+  'unpack-note.md',
+  'LICENSES.txt',
+  'LICENSE.txt',
+])
+
+const CRAG_TAR_CLAUDE_FILES = new Set(['claude', 'LICENSE.md', 'THIRD_PARTY_NOTICES.txt'])
+
 // Parse the bounded ustar stream ourselves. No external extractor ever sees an
 // unchecked name, link, extension record, device, duplicate, or numeric size.
-class PackageTar extends Writable {
+export class PackageTar extends Writable {
   constructor(root) {
     super()
     this.root = root
@@ -505,6 +547,7 @@ class PackageTar extends Writable {
     this.zeros = 0
     this.total = 0
     this.layout = null
+    this.claudeDir = null
   }
   number(header, start, length) {
     const value = header
@@ -564,34 +607,42 @@ class PackageTar extends Writable {
         name = '.'
       } else if (wrapped) name = name.slice(wrapper.length + 1)
     }
-    const allowedFiles = [
-      'manifest.json',
-      'crag-v2',
-      'crag-v2.payload.enc',
-      'crag-license-public.pem',
-      'kernel.json.example',
-      'unpack-note.md',
-      'LICENSES.txt',
-      'LICENSE.txt',
-      'claude-code-2.1.321/claude',
-      'claude-code-2.1.321/LICENSE.md',
-      'claude-code-2.1.321/THIRD_PARTY_NOTICES.txt',
-    ]
-    if (directory ? !['.', 'claude-code-2.1.321'].includes(name) : !allowedFiles.includes(name))
-      throw coded('crag_v2_archive_invalid', 'CRAG tar 包含非官方发行成员')
+    let allowed = false
+    if (directory) {
+      if (name === '.') {
+        allowed = true
+      } else if (CRAG_CLAUDE_DIR_RE.test(name)) {
+        if (this.claudeDir && this.claudeDir !== name) {
+          throw coded('crag_v2_archive_invalid', 'CRAG tar 不能包含多个官方 Claude 版本目录')
+        }
+        this.claudeDir = name
+        allowed = true
+      }
+    } else if (CRAG_TAR_BASE_FILES.has(name)) {
+      allowed = true
+    } else {
+      const parts = name.split('/')
+      if (parts.length === 2 && CRAG_CLAUDE_DIR_RE.test(parts[0]) && CRAG_TAR_CLAUDE_FILES.has(parts[1])) {
+        if (this.claudeDir && this.claudeDir !== parts[0]) {
+          throw coded('crag_v2_archive_invalid', 'CRAG tar 不能包含多个官方 Claude 版本目录')
+        }
+        this.claudeDir = parts[0]
+        allowed = true
+      }
+    }
+    if (!allowed) throw coded('crag_v2_archive_invalid', 'CRAG tar 包含非官方发行成员')
     if (this.names.has(name) || this.names.size >= MAX_MEMBERS)
       throw coded('crag_v2_archive_invalid', 'CRAG tar 成员重复或过多')
     this.names.add(name)
     const size = this.number(h, 124, 12)
     const mode = this.number(h, 100, 8)
-    const memberLimit =
-      name === 'claude-code-2.1.321/claude'
-        ? MAX_ARCHIVE
-        : name === 'crag-v2.payload.enc'
-          ? 128 * 1024 * 1024
-          : name === 'crag-v2'
-            ? 32 * 1024 * 1024
-            : 1024 * 1024
+    const memberLimit = CRAG_CLAUDE_PATH_RE.test(name)
+      ? MAX_ARCHIVE
+      : name === 'crag-v2.payload.enc'
+        ? 128 * 1024 * 1024
+        : name === 'crag-v2'
+          ? 32 * 1024 * 1024
+          : 1024 * 1024
     if ((directory && size) || size > memberLimit || mode & 0o7000)
       throw coded('crag_v2_archive_invalid', 'CRAG tar 成员大小或权限无效')
     this.total += size

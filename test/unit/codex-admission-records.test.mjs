@@ -3,8 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { pickCodexCandidates } from '../../src/lib/protocol/handle-codex.mjs'
-import { getVm, syncCodexQuotaSchedule } from '../../src/lib/vm/vm-registry.mjs'
+import { createSchedulerRuntime } from '../../src/lib/scheduler/scheduler-runtime.mjs'
+import { getVm, listVms, syncCodexQuotaSchedule } from '../../src/lib/vm/vm-registry.mjs'
 import { invalidateReadCache, setVmWriteHook } from '../../src/lib/vm/vm-file.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
 
@@ -35,6 +35,19 @@ function limited(reset) {
   return { codex: { extra: { codex_5h_used_percent: 100, ...(reset ? { codex_5h_reset_at: reset } : {}) } } }
 }
 
+function schedulableCodexIds(root, routing = {}) {
+  const runtime = createSchedulerRuntime({
+    cfg: { paths: { project: root } },
+    getRoutingConfig: () => routing,
+    getVms: () => listVms(root, routing, { reconcileCodexQuota: true }),
+    accountQuota: {},
+    client: { isStandby: true, stopped: true },
+  })
+  return runtime.buildTelemetryBatch()
+    .filter((node) => node.node_key.startsWith('codex_vm:') && node.schedulable)
+    .map((node) => node.node_key.slice('codex_vm:'.length))
+}
+
 test('stable candidate selection reads each slot once without rewriting records', (t) => {
   const root = fleet(t, { 'vm-a': {}, 'vm-b': {} })
   const dir = path.join(root, 'vms')
@@ -50,8 +63,8 @@ test('stable candidate selection reads each slot once without rewriting records'
     invalidateReadCache()
     reads.mock.resetCalls()
     lists.mock.resetCalls()
-    const picked = pickCodexCandidates(root, { headers: {}, apiKeyKind: 'master' })
-    assert.deepEqual(new Set(picked.ids), new Set(['vm-a', 'vm-b']))
+    const picked = schedulableCodexIds(root)
+    assert.deepEqual(new Set(picked), new Set(['vm-a', 'vm-b']))
     assert.equal(lists.mock.calls.filter(({ arguments: args }) => args[0] === dir).length, 1)
     for (const file of recordPaths) {
       assert.equal(reads.mock.calls.filter(({ arguments: args }) => args[0] === file).length, 1)
@@ -134,10 +147,9 @@ test('missing hard-quota reset retains the existing rolling five-minute hold', (
 test('quota reset and policy changes affect the next admission without a refresh interval', (t) => {
   const reset = Date.now() + 3_600_000
   const root = fleet(t, { 'vm-a': limited(new Date(reset).toISOString()), 'vm-b': {} })
-  const req = { headers: {}, apiKeyKind: 'master' }
-  assert.deepEqual(pickCodexCandidates(root, req).ids, ['vm-b'])
+  assert.deepEqual(schedulableCodexIds(root), ['vm-b'])
   t.mock.method(Date, 'now', () => reset + 1)
-  assert.deepEqual(new Set(pickCodexCandidates(root, req).ids), new Set(['vm-a', 'vm-b']))
+  assert.deepEqual(new Set(schedulableCodexIds(root)), new Set(['vm-a', 'vm-b']))
   assert.equal(getVm(root, 'vm-a').temp_unschedulable_reason, undefined)
   t.mock.restoreAll()
 
@@ -145,9 +157,9 @@ test('quota reset and policy changes affect the next admission without a refresh
   const vm = getVm(root, 'vm-a')
   vm.codex.extra = { codex_5h_used_percent: 80, codex_5h_reset_at: new Date(reset).toISOString() }
   fs.writeFileSync(file, JSON.stringify(vm))
-  assert.deepEqual(pickCodexCandidates(root, req, { routing: { codex: { quota: { limit_5h: 0.7 } } } }).ids, ['vm-b'])
+  assert.deepEqual(schedulableCodexIds(root, { codex: { quota: { limit_5h: 0.7 } } }), ['vm-b'])
   assert.deepEqual(
-    new Set(pickCodexCandidates(root, req, { routing: { codex: { quota: { limit_5h: 0.9 } } } }).ids),
+    new Set(schedulableCodexIds(root, { codex: { quota: { limit_5h: 0.9 } } })),
     new Set(['vm-a', 'vm-b']),
   )
 })
@@ -173,8 +185,8 @@ test('legacy quota-off migration is visible in the same candidate load and manua
       schedule_off: true,
     },
   })
-  const picked = pickCodexCandidates(root, { headers: {}, apiKeyKind: 'master' })
-  assert.deepEqual(picked.ids, ['vm-legacy'])
+  const picked = schedulableCodexIds(root)
+  assert.deepEqual(picked, ['vm-legacy'])
   const restored = getVm(root, 'vm-legacy')
   assert.equal(restored.schedulable, true)
   assert.equal(restored.schedule_disabled_reason, null)
@@ -192,10 +204,10 @@ test('quota persistence errors still propagate rather than silently excluding th
     if (String(file).includes('.vm-a.json.')) throw new Error('test quota write failed')
     return write(file, ...args)
   })
-  assert.throws(() => pickCodexCandidates(root, { headers: {}, apiKeyKind: 'master' }), /test quota write failed/)
+  assert.throws(() => schedulableCodexIds(root), /test quota write failed/)
 })
 
 test('a non-Codex visible inventory keeps its existing empty-Codex error', (t) => {
   const root = fleet(t, { 'vm-claude': { platform: 'anthropic', family: 'claude' } })
-  assert.equal(pickCodexCandidates(root, { headers: {}, apiKeyKind: 'master' }).error, 'no_codex_vm')
+  assert.deepEqual(schedulableCodexIds(root), [])
 })
