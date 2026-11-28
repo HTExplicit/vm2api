@@ -33,7 +33,10 @@ function writeVm(project, rec) {
 function makeRuntime(t) {
   const dir = tmpDir()
   const apiKeyStore = new ApiKeyStore({ dataDir: dir })
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  t.after(() => {
+    apiKeyStore.db.close()
+    fs.rmSync(dir, { recursive: true })
+  })
   const repo = new SchedulerPoolsRepo(apiKeyStore.db)
   const runtime = new SchedulerRuntime({
     cfg: { paths: { project: dir, data: dir } },
