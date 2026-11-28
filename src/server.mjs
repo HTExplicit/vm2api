@@ -117,6 +117,7 @@ import { GroupsRepo } from './lib/db/repos/groups-repo.mjs'
 import { GeminiOwnersRepo } from './lib/db/repos/gemini-owners-repo.mjs'
 import { bootstrapSchedulerPools } from './lib/db/repos/scheduler-pools-repo.mjs'
 import { createSchedulerRuntime } from './lib/scheduler/scheduler-runtime.mjs'
+import { setCodexKernelInflightReader } from './lib/transport/codex-kernel-supervisor.mjs'
 import { SettingsRepo } from './lib/db/repos/settings-repo.mjs'
 import { ApiEndpointStore } from './lib/admin/api-endpoints.mjs'
 import { ApiScheduler } from './lib/pool/api-scheduler.mjs'
@@ -1052,6 +1053,10 @@ catalogMonitor = createCatalogMonitor({
     const ownerUserId = geminiOwnersRepo?.getOwner?.(envId) ?? null
     return geminiProxyFor(proxyPool, proxyId, { ownerUserId })
   },
+  resolveGeminiProxyEgressOptions: (proxyId, envId) => {
+    const ownerUserId = geminiOwnersRepo?.getOwner?.(envId) ?? null
+    return geminiProxyEgressOptionsFor(proxyPool, proxyId, { ownerUserId })
+  },
   getApiEndpointStore: () => apiEndpointStore,
   cfg,
   log: (event) => console.log(JSON.stringify(event)),
@@ -1696,7 +1701,7 @@ const handleGeminiCragShop = createGeminiCragShopHandler({
   isCurrentAdmin: (req) => isCragShopAdmin(req.panelBuyerOwner),
   isActivationAdmin: isCragShopAdmin,
 })
-const geminiTerminal = createGeminiTerminal({ proxyPool: () => proxyPool })
+const geminiTerminal = createGeminiTerminal({ proxyPool: () => proxyPool, geminiOwnersRepo: geminiOwnersProxy })
 const geminiSlotPrefs = createGeminiSlotPrefs({
   settingsRepo: {
     get: (key, fallback) => new SettingsRepo().get(key, fallback),
@@ -1765,6 +1770,7 @@ schedulerRuntime = createSchedulerRuntime({
 poolScheduler?.setSchedulerRuntime?.(schedulerRuntime)
 failoverRunner?.setSchedulerRuntime?.(schedulerRuntime)
 apiScheduler?.setSchedulerRuntime?.(schedulerRuntime)
+setCodexKernelInflightReader((vmId, leaseId) => schedulerRuntime.codexInflight(vmId, leaseId))
 const integrationTokenStore = new IntegrationTokenStore()
 const handlePanel = createPanelHandler({
   getDb,
@@ -2807,6 +2813,7 @@ server.listen(cfg.port, cfg.host, () => {
           await warmGeminiEnvironments({
             callHost: callGeminiHost,
             proxyPool: () => proxyPool,
+            geminiOwnersRepo: geminiOwnersProxy,
           })
         } catch {
           // Host daemon may be absent on non-Gemini installs; stay silent.

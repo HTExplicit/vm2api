@@ -25,10 +25,14 @@ compose() {
 # Busy kernels may have no idle slots; process health still has to survive the update.
 probe() {
   docker exec "$CONTAINER" node --input-type=module -e '
+    import { existsSync, readFileSync } from "node:fs"
+    import { parseEnv } from "node:util"
     const [mode, target, baseline = "[]"] = process.argv.slice(1)
     const port = process.env.PORT || "8787"
     const base = `http://127.0.0.1:${port}`
-    const key = process.env.KIN_API_KEY || process.env.VM2API_API_KEY || ""
+    const bootstrapEnv = `${process.env.KIN_PROJECT_ROOT || "/opt/vm2api"}/data/.bootstrap.env`
+    const key = process.env.KIN_API_KEY || process.env.VM2API_API_KEY ||
+      (existsSync(bootstrapEnv) ? parseEnv(readFileSync(bootstrapEnv, "utf8")).VM2API_API_KEY : "") || ""
     const refill = Number(process.env.KIN_RATE_REFILL || 1)
     const interval = Number.isFinite(refill) && refill > 0 ? Math.min(30000, Math.ceil(1000 / refill)) : 1000
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))

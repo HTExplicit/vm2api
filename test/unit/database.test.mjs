@@ -280,6 +280,7 @@ test('migration 059 onward preserves the published 9102 ledger, browser state an
       '075_usage_logs_advisor_billing.sql',
       '076_scheduler_center.sql',
       '077_scheduler_pool_prompt_default.sql',
+      '078_api_endpoint_body_policy_backfill.sql',
     ])
     assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '059' ORDER BY version").all(), ledger)
     for (const table of preservedTables)
@@ -604,12 +605,13 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       '075_usage_logs_advisor_billing.sql',
       '076_scheduler_center.sql',
       '077_scheduler_pool_prompt_default.sql',
+      '078_api_endpoint_body_policy_backfill.sql',
     ])
     const { risk_review_enabled, body_policy, owner_user_id, ...after } = db
       .prepare('SELECT * FROM api_endpoints WHERE id = ?')
       .get('legacy')
     assert.equal(risk_review_enabled, 0)
-    assert.equal(body_policy, 'persona')
+    assert.equal(body_policy, 'caller')
     assert.equal(owner_user_id, null)
     assert.deepEqual(after, before)
     assert.throws(() => db.prepare('UPDATE api_endpoints SET risk_review_enabled = 2').run(), /CHECK/)
@@ -725,6 +727,7 @@ test('migration 072 upgrades pre-072 crag_shop_orders in place with NULL activat
       '075_usage_logs_advisor_billing.sql',
       '076_scheduler_center.sql',
       '077_scheduler_pool_prompt_default.sql',
+      '078_api_endpoint_body_policy_backfill.sql',
     ])
     assert.deepEqual(applyMigrations(db, { migrationsDir: src }), [])
     const row = db
@@ -741,13 +744,13 @@ test('migration 072 upgrades pre-072 crag_shop_orders in place with NULL activat
   }
 })
 
-test('upgrading preserves API endpoint body policies and changes the PG column default', () => {
+test('migration 078 updates existing endpoint policies once and allows rollback of the application', () => {
   const src = path.resolve('src/lib/db/migrations')
   const pg010 = path.resolve('src/lib/db/pg/pg-migrations/010_api_endpoint_body_policy_default.sql')
-  const oldDir = path.join(tmp, 'before076')
+  const oldDir = path.join(tmp, 'before078')
   fs.mkdirSync(oldDir, { recursive: true })
   for (const file of fs.readdirSync(src)) {
-    if (file.endsWith('.sql') && file < '076') fs.copyFileSync(path.join(src, file), path.join(oldDir, file))
+    if (file.endsWith('.sql') && file < '078') fs.copyFileSync(path.join(src, file), path.join(oldDir, file))
   }
   const db = new DatabaseSync(':memory:')
   try {
@@ -757,14 +760,21 @@ test('upgrading preserves API endpoint body policies and changes the PG column d
     insert.run('ep_caller', 'Caller', 'caller')
     insert.run('ep_persona', 'Persona', 'persona')
 
-    applyMigrations(db, { migrationsDir: src })
+    assert.deepEqual(applyMigrations(db, { migrationsDir: src }), ['078_api_endpoint_body_policy_backfill.sql'])
     const policy = db.prepare('SELECT body_policy FROM api_endpoints WHERE id = ?')
     assert.equal(policy.get('ep_caller').body_policy, 'caller')
+    assert.equal(policy.get('ep_persona').body_policy, 'caller')
+
+    db.prepare("UPDATE api_endpoints SET body_policy = 'persona' WHERE id = 'ep_persona'").run()
+    assert.deepEqual(applyMigrations(db, { migrationsDir: src }), [])
+    assert.deepEqual(applyMigrations(db, { migrationsDir: oldDir }), [])
     assert.equal(policy.get('ep_persona').body_policy, 'persona')
 
     const pg010Sql = fs.readFileSync(pg010, 'utf8')
     assert.match(pg010Sql, /ALTER TABLE api_endpoints[\s\S]*ALTER COLUMN body_policy SET DEFAULT 'caller'/i)
     assert.doesNotMatch(pg010Sql, /UPDATE api_endpoints/i)
+    const pg011 = path.resolve('src/lib/db/pg/pg-migrations/011_api_endpoint_body_policy_backfill.sql')
+    assert.equal(fs.readFileSync(pg011, 'utf8'), fs.readFileSync(path.join(src, '078_api_endpoint_body_policy_backfill.sql'), 'utf8'))
   } finally {
     db.close()
   }

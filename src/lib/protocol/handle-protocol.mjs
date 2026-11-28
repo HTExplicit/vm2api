@@ -4317,7 +4317,7 @@ export function createHandleProtocol(deps) {
               onOutboundHeaders: noteOutboundHeaders,
               redactionPrincipal: req.apiKeyRecord?.id || (req.apiKeyKind === 'master' ? 'master' : ''),
               redactionSession: String(req.headers?.['x-claude-code-session-id'] || ''),
-              cancelSessionId: String(req.headers?.['x-claude-code-session-id'] || ''),
+              cancelSessionId: String(outboundReqHeaders?.['x-claude-code-session-id'] || ''),
               tenantId,
               gatewayRequestId: logCtx.request_id,
             })
@@ -4382,7 +4382,7 @@ export function createHandleProtocol(deps) {
               ensureCredential: (exec) => ensureWorkerCredential(exec),
               redactionPrincipal: req.apiKeyRecord?.id || (req.apiKeyKind === 'master' ? 'master' : ''),
               redactionSession: String(req.headers?.['x-claude-code-session-id'] || ''),
-              cancelSessionId: String(req.headers?.['x-claude-code-session-id'] || ''),
+              cancelSessionId: String(outboundReqHeaders?.['x-claude-code-session-id'] || ''),
               onEnvelope: noteOutboundEnvelope,
               onOutboundHeaders: noteOutboundHeaders,
               onCommit: (upstreamHeaders) => {

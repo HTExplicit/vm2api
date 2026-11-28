@@ -197,6 +197,24 @@ rand_hex() {
 }
 
 ENVF="${ROOT}/.env"
+BOOTSTRAP_ENV="${ROOT}/data/.bootstrap.env"
+bootstrap_secret() {
+  secret_name="$1"
+  secret_value="$(env_get_file "$secret_name" "$ENVF")"
+  if [ -z "$secret_value" ]; then
+    secret_value="$(env_get_file "$secret_name" "$BOOTSTRAP_ENV")"
+  fi
+  if [ "$STANDBY" = 0 ]; then
+    if [ -z "$secret_value" ]; then
+      secret_value="$(rand_hex)"
+    fi
+    (umask 077; touch "$BOOTSTRAP_ENV")
+    env_upsert_if_empty "$secret_name" "$secret_value" "$BOOTSTRAP_ENV"
+    env_upsert_if_empty "$secret_name" "$secret_value" "$ENVF"
+  fi
+  printf '%s' "$secret_value"
+}
+
 if [ -z "${VM2API_ADMIN_USER:-}" ]; then
   VM2API_ADMIN_USER=admin
   export VM2API_ADMIN_USER
@@ -209,15 +227,12 @@ if [ -z "${VM2API_ADMIN_PASSWORD:-}" ]; then
   echo "vm2api: VM2API_ADMIN_PASSWORD was empty; using default admin / 123456 (change after login)." >&2
 fi
 if [ -z "${VM2API_API_KEY:-}" ] && [ -z "${KIN_API_KEY:-}" ]; then
-  VM2API_API_KEY="$(rand_hex)"
+  VM2API_API_KEY="$(bootstrap_secret VM2API_API_KEY)"
   export VM2API_API_KEY
-  env_upsert_if_empty VM2API_API_KEY "$VM2API_API_KEY" "$ENVF"
-  echo "vm2api: generated VM2API_API_KEY (empty in env)." >&2
 fi
 if [ -z "${VM2API_DB_SECRET:-}" ] && [ -z "${KIN_DB_SECRET:-}" ]; then
-  VM2API_DB_SECRET="$(rand_hex)"
+  VM2API_DB_SECRET="$(bootstrap_secret VM2API_DB_SECRET)"
   export VM2API_DB_SECRET
-  env_upsert_if_empty VM2API_DB_SECRET "$VM2API_DB_SECRET" "$ENVF"
 fi
 
 if [ "$STANDBY" = 0 ]; then

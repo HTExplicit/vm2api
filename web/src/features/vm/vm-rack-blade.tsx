@@ -225,7 +225,7 @@ export function GeminiSlotStatus({
 }
 
 /**
- * 按已用和上限显示 Claude 席位、Gemini 容量或 GPT 会话数。
+ * 按已用和上限显示 Claude 执行位、Gemini 容量或 GPT 会话数。
  */
 export function VmSeats({
   vm,
@@ -247,7 +247,7 @@ export function VmSeats({
       className='inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap'
       title={sessions ? 'GPT 会话数 / 上限' : seatTitle(vm)}
     >
-      {sessions ? <span>会话</span> : compact ? null : <span>席位</span>}
+      {sessions ? <span>会话</span> : compact ? null : <span>执行位</span>}
       <span
         aria-hidden='true'
         className={cn(

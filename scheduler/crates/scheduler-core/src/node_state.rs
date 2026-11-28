@@ -22,6 +22,7 @@ pub struct NodeMutable {
     pub quota_util_7d_pct: f32,
     pub codex_quota_limited: Option<bool>,
     pub host_memory_pressure: bool,
+    pub new_sessions_blocked: bool,
     pub proxy_ready: bool,
     pub crag_license_ok: bool,
     pub temp_unschedulable_until_ms: Option<u64>,
@@ -60,6 +61,7 @@ impl Default for NodeMutable {
             quota_util_7d_pct: 0.0,
             codex_quota_limited: None,
             host_memory_pressure: false,
+            new_sessions_blocked: false,
             proxy_ready: true,
             crag_license_ok: true,
             temp_unschedulable_until_ms: None,
@@ -124,6 +126,12 @@ impl NodeMutable {
                 became_freer = true;
             }
             self.host_memory_pressure = v;
+        }
+        if let Some(v) = upd.new_sessions_blocked {
+            if !v && self.new_sessions_blocked {
+                became_freer = true;
+            }
+            self.new_sessions_blocked = v;
         }
         if let Some(v) = upd.proxy_ready {
             if v && !self.proxy_ready {

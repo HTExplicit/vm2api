@@ -75,7 +75,11 @@ test('SQLite 076 upgrades pre-076 DB cleanly, preserves existing api_keys, and e
   )
 
   const applied = applyMigrations(db)
-  assert.deepEqual(applied, ['076_scheduler_center.sql', '077_scheduler_pool_prompt_default.sql'])
+  assert.deepEqual(applied, [
+    '076_scheduler_center.sql',
+    '077_scheduler_pool_prompt_default.sql',
+    '078_api_endpoint_body_policy_backfill.sql',
+  ])
 
   // Re-applying is idempotent
   assert.deepEqual(applyMigrations(db), [])
@@ -744,7 +748,7 @@ test('077 SQLite / 009 PG migrations safely repair untouched legacy vm_pools bac
   ).run('pool_openai_pt', 'openai-pt', 'OpenAI Pool', now, now)
 
   const applied = applyMigrations(db)
-  assert.deepEqual(applied, ['077_scheduler_pool_prompt_default.sql'])
+  assert.deepEqual(applied, ['077_scheduler_pool_prompt_default.sql', '078_api_endpoint_body_policy_backfill.sql'])
 
   const modeOf = (id) =>
     db.prepare('SELECT system_prompt_mode FROM scheduler_pools WHERE id = ?').get(id).system_prompt_mode
@@ -819,4 +823,36 @@ test('PostgreSQL 008 migration, SchedulerPoolsRepo, bootstrapSchedulerPools, and
   } finally {
     await pool.end()
   }
+})
+
+test('PostgreSQL 011 backfills existing body policies and keeps later choices', { skip: !PG_URL }, async (t) => {
+  const oldDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-pg-before011-'))
+  const migrationDir = path.dirname(PG_009)
+  for (const file of fs.readdirSync(migrationDir)) {
+    if (file.endsWith('.sql') && file < '011') fs.copyFileSync(path.join(migrationDir, file), path.join(oldDir, file))
+  }
+  const schema = `vm2api_policy_${process.pid}_${Date.now()}`
+  const admin = new pg.Client({ connectionString: PG_URL })
+  await admin.connect()
+  await admin.query(`CREATE SCHEMA "${schema}"`)
+  const url = new URL(PG_URL)
+  url.searchParams.set('options', `-c search_path=${schema}`)
+  const pool = new pg.Pool({ connectionString: url.toString() })
+  t.after(async () => {
+    await pool.end()
+    await admin.query(`DROP SCHEMA "${schema}" CASCADE`)
+    await admin.end()
+    fs.rmSync(oldDir, { recursive: true })
+  })
+
+  await applyPgMigrations(pool, { migrationsDir: oldDir })
+  await pool.query("INSERT INTO api_endpoints (id, name, base_url, body_policy) VALUES ('old', 'Old', 'https://example.test', 'persona')")
+  assert.deepEqual(await applyPgMigrations(pool), ['011_api_endpoint_body_policy_backfill.sql'])
+  const policy = () => pool.query("SELECT body_policy FROM api_endpoints WHERE id = 'old'")
+  assert.equal((await policy()).rows[0].body_policy, 'caller')
+
+  await pool.query("UPDATE api_endpoints SET body_policy = 'persona' WHERE id = 'old'")
+  assert.deepEqual(await applyPgMigrations(pool), [])
+  assert.deepEqual(await applyPgMigrations(pool, { migrationsDir: oldDir }), [])
+  assert.equal((await policy()).rows[0].body_policy, 'persona')
 })

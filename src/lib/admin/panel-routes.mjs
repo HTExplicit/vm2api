@@ -172,7 +172,13 @@ import { publicUserView } from './panel-users.mjs'
 import { authorizePanelRoute, mePayload, panelIdentity } from './panel-acl.mjs'
 import { INTEGRATION_DELEGATED, handleIntegrationAdminRoute } from './integration-routes.mjs'
 import { IntegrationTokenStore } from './integration-tokens.mjs'
-import { callGeminiHost, createGeminiPanelHandler, geminiProxyFor, isGeminiPanelPath } from '../gemini/routes.mjs'
+import {
+  callGeminiHost,
+  createGeminiPanelHandler,
+  geminiProxyEgressOptionsFor,
+  geminiProxyFor,
+  isGeminiPanelPath,
+} from '../gemini/routes.mjs'
 import {
   denyIfUserCannotDeleteVm,
   denyIfUserMissesKey,
@@ -291,7 +297,6 @@ import {
 import { withSlotMaintenance } from '../vm/slot-maintenance.mjs'
 import { clearActiveVmFromDb, removeVmFromDb } from '../vm/vm-db-sync.mjs'
 import { preflightVmRename, renameVmId } from '../vm/vm-rename.mjs'
-import { openAIRuntimeSignals } from '../pool/openai-account-runtime.mjs'
 import { normalizeCredentialMode } from '../oauth/credential-mode.mjs'
 import { DEFAULT_MAX_REQUEST_BYTES, reloadActiveVm } from '../core/config.mjs'
 import {
@@ -923,6 +928,7 @@ export function createPanelHandler(ctx) {
   }
   const handleSchedulerPools = createSchedulerPoolsHandler({
     getDb: () => apiKeyStore?.db || ctx.getDb?.() || getDb(),
+    getRouting: () => ctx.routingConfig || {},
     cfg,
     apiKeyStore: ctx.apiKeyStore,
     apiEndpointStore: ctx.apiEndpointStore,
@@ -5107,7 +5113,7 @@ export function createPanelHandler(ctx) {
               })
             }
             const liveInflight = isCodexVm(currentVm)
-              ? openAIRuntimeSignals(id).inFlight
+              ? resolveSchedulerRuntime()?.codexInflight?.(id) ?? 0
               : ctx.poolScheduler?.vmInflight?.get(id) || 0
             if (liveInflight > 0) {
               return json(res, 409, { ok: false, error: { code: 'vm_busy', message: '还有在飞请求，不能改编号' } })
@@ -5764,6 +5770,7 @@ export function createPanelHandler(ctx) {
           baseUrl: `http://127.0.0.1:${cfg.port}`,
           apiKey: cfg.api_key,
           accountQuota,
+          nodePenalty: ctx.poolScheduler?.nodePenalties?.()?.get(id) || null,
         })
         return json(res, 200, panel.ok(result))
       }
@@ -8285,6 +8292,10 @@ export function createPanelHandler(ctx) {
           resolveGeminiProxy: (proxyId, envId) => {
             const ownerUserId = ctx.geminiOwnersRepo?.getOwner?.(envId) ?? null
             return geminiProxyFor(ctx.proxyPool, proxyId, { ownerUserId })
+          },
+          resolveGeminiProxyEgressOptions: (proxyId, envId) => {
+            const ownerUserId = ctx.geminiOwnersRepo?.getOwner?.(envId) ?? null
+            return geminiProxyEgressOptionsFor(ctx.proxyPool, proxyId, { ownerUserId })
           },
           apiEndpointStore: ctx.apiEndpointStore,
           cfg,

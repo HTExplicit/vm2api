@@ -739,6 +739,10 @@ test('Codex lease counts reach the account list and scoped live stream through f
     const listed = await buildVmList({ cfg, poolScheduler })
     return Object.fromEntries(listed.data.items.map(({ id, inflight }) => [id, inflight]))
   }
+  const listRpm = async () => {
+    const listed = await buildVmList({ cfg, poolScheduler })
+    return Object.fromEntries(listed.data.items.map(({ id, rpm }) => [id, rpm]))
+  }
   const codexRequest = (overrides) =>
     makeAcquireRequest({ model: 'gpt-5.4', model_family: 'openai', protocol: 'openai.responses', ...overrides })
   assert.deepEqual(frames[0].codex_inflight, {})
@@ -749,6 +753,12 @@ test('Codex lease counts reach the account list and scoped live stream through f
     assert.deepEqual(await frame, { 'gpt-a': index + 1 })
   }
   assert.deepEqual(await listCounts(), { 'gpt-a': 2, 'gpt-b': 0 })
+  assert.equal(rt.codexInflight('gpt-a'), 2)
+  assert.equal(rt.codexInflight('gpt-a', 'stream-1'), 1)
+  assert.equal(rt.codexInflight('gpt-a', 'another-lease'), 2)
+  await rt.acquireNode(codexRequest({ session_id: 'stream-1' }))
+  assert.deepEqual(await listCounts(), { 'gpt-a': 2, 'gpt-b': 0 })
+  assert.deepEqual(await listRpm(), { 'gpt-a': 2, 'gpt-b': 0 })
 
   const switching = nextFrame()
   const switched = rt.switchNode({
@@ -762,6 +772,8 @@ test('Codex lease counts reach the account list and scoped live stream through f
   await switched
   assert.deepEqual(await reassigned, { 'gpt-a': 1 })
   assert.deepEqual(await listCounts(), { 'gpt-a': 1, 'gpt-b': 1 })
+  assert.deepEqual(await listRpm(), { 'gpt-a': 2, 'gpt-b': 1 })
+  assert.equal(rt.codexInflight('gpt-b', 'retry'), 0)
 
   const reaped = nextFrame()
   await rt.client.flushHeartbeat()
@@ -769,6 +781,11 @@ test('Codex lease counts reach the account list and scoped live stream through f
   assert.deepEqual(await listCounts(), { 'gpt-a': 0, 'gpt-b': 1 })
   await rt.releaseLease('retry', { outcome: 'aborted' })
   assert.deepEqual(await listCounts(), { 'gpt-a': 0, 'gpt-b': 0 })
+  await rt.acquireNode(codexRequest({ session_id: 'probe', is_ephemeral_probe: true }))
+  assert.deepEqual(await listCounts(), { 'gpt-a': 1, 'gpt-b': 0 })
+  assert.deepEqual(await listRpm(), { 'gpt-a': 2, 'gpt-b': 1 })
+  await rt.releaseLease('probe', { outcome: 'ok' })
+  assert.deepEqual(rt.client.codexRpmByVm(Date.now() + 60_001), {})
 })
 
 test('mock TCP + cap-file discovery, AbortSignal immediate cancel, transient reconnect, and fail-closed 503', async (t) => {

@@ -14,6 +14,7 @@ import http from 'node:http'
 import path from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
+import { parseEnv } from 'node:util'
 import { isCodexVm } from '../src/lib/vm/vm-kind.mjs'
 
 const root = String(process.argv[2] || process.env.KIN_PROJECT_ROOT || '/opt/vm2api').replace(/\/+$/, '')
@@ -28,18 +29,13 @@ const SYNC_TIMEOUT_MS = 30 * 60_000
 
 async function apiKey() {
   if (envKey) return envKey
-  try {
-    const text = await fs.readFile(`${root}/.env`, 'utf8')
-    const line = text.split(/\r?\n/).find((entry) => /^(?:VM2API_API_KEY|KIN_API_KEY)=/.test(entry))
-    return line
-      ? line
-          .slice(line.indexOf('=') + 1)
-          .replace(/^['"]|['"]$/g, '')
-          .trim()
-      : ''
-  } catch {
-    return ''
+  for (const file of ['.env', 'data/.bootstrap.env']) {
+    const text = await fs.readFile(path.join(root, file), 'utf8').catch(() => '')
+    const config = parseEnv(text)
+    const key = config.VM2API_API_KEY || config.KIN_API_KEY
+    if (key) return key
   }
+  return ''
 }
 
 function call(key, method, pathname, body, timeoutMs) {

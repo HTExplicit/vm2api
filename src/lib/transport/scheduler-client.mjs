@@ -411,6 +411,7 @@ export class SchedulerClient {
   #exitHook = null
 
   #activeLeases = new Map() // lease ID -> Codex VM ID, or null for other leases
+  #codexStarts = new Map() // non-ephemeral Codex lease ID -> { vmId, startedAt }
   #heartbeatTimer = null
   #heartbeatInFlight = false
 
@@ -525,6 +526,30 @@ export class SchedulerClient {
     const counts = new Map()
     for (const vmId of this.#activeLeases.values()) {
       if (vmId) counts.set(vmId, (counts.get(vmId) || 0) + 1)
+    }
+    return Object.fromEntries(counts)
+  }
+
+  codexInflight(vmId, ownLeaseId = null) {
+    let count = 0
+    for (const [leaseId, slot] of this.#activeLeases) {
+      if (slot === vmId && leaseId !== ownLeaseId) count += 1
+    }
+    return count
+  }
+
+  #pruneCodexStarts(now) {
+    for (const [leaseId, { startedAt }] of this.#codexStarts) {
+      if (now - startedAt < 60_000) break
+      this.#codexStarts.delete(leaseId)
+    }
+  }
+
+  codexRpmByVm(now = Date.now()) {
+    this.#pruneCodexStarts(now)
+    const counts = new Map()
+    for (const { vmId } of this.#codexStarts.values()) {
+      counts.set(vmId, (counts.get(vmId) || 0) + 1)
     }
     return Object.fromEntries(counts)
   }
@@ -1253,7 +1278,7 @@ export class SchedulerClient {
       allowRetry: true,
     })
     if (this.#autoTrackLeases && res?.lease_id) {
-      this.trackLease(res.lease_id, res.selected_node)
+      this.trackLease(res.lease_id, res.selected_node, body.is_ephemeral_probe)
     }
     return res
   }
@@ -1288,7 +1313,7 @@ export class SchedulerClient {
       })
       if (this.#autoTrackLeases) {
         this.untrackLease(releaseLeaseId)
-        this.trackLease(res?.lease_id, res?.selected_node)
+        this.trackLease(res?.lease_id, res?.selected_node, body.next_attempt?.is_ephemeral_probe)
       }
       return res
     } catch (err) {
@@ -1667,13 +1692,19 @@ export class SchedulerClient {
 
   // ==================== Batch Heartbeat Manager (30s) ====================
 
-  trackLease(leaseId, selectedNode) {
+  trackLease(leaseId, selectedNode, ephemeral = false) {
     if (!leaseId) return
     const id = String(leaseId)
     if (this.#activeLeases.has(id)) return
     const vmId = selectedNode?.node_type === 'codex_vm' ? selectedNode.node_id : null
     this.#activeLeases.set(id, vmId)
-    if (vmId) this.#onCodexInflightChange?.()
+    if (!vmId) return
+    if (!ephemeral) {
+      const now = Date.now()
+      this.#pruneCodexStarts(now)
+      if (!this.#codexStarts.has(id)) this.#codexStarts.set(id, { vmId, startedAt: now })
+    }
+    this.#onCodexInflightChange?.()
   }
 
   untrackLease(leaseId) {
@@ -1687,6 +1718,7 @@ export class SchedulerClient {
   clearTrackedLeases() {
     const hadCodexLeases = [...this.#activeLeases.values()].some(Boolean)
     this.#activeLeases.clear()
+    this.#codexStarts.clear()
     if (hadCodexLeases) this.#onCodexInflightChange?.()
   }
 
