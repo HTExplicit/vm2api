@@ -740,3 +740,32 @@ test('migration 072 upgrades pre-072 crag_shop_orders in place with NULL activat
     db.close()
   }
 })
+
+test('upgrading preserves API endpoint body policies and changes the PG column default', () => {
+  const src = path.resolve('src/lib/db/migrations')
+  const pg010 = path.resolve('src/lib/db/pg/pg-migrations/010_api_endpoint_body_policy_default.sql')
+  const oldDir = path.join(tmp, 'before076')
+  fs.mkdirSync(oldDir, { recursive: true })
+  for (const file of fs.readdirSync(src)) {
+    if (file.endsWith('.sql') && file < '076') fs.copyFileSync(path.join(src, file), path.join(oldDir, file))
+  }
+  const db = new DatabaseSync(':memory:')
+  try {
+    applyMigrations(db, { migrationsDir: oldDir })
+    const insert = db.prepare(`INSERT INTO api_endpoints (id, name, base_url, created_at, updated_at, body_policy)
+      VALUES (?, ?, 'https://api.anthropic.com', '2026-11-27', '2026-11-27', ?)`)
+    insert.run('ep_caller', 'Caller', 'caller')
+    insert.run('ep_persona', 'Persona', 'persona')
+
+    applyMigrations(db, { migrationsDir: src })
+    const policy = db.prepare('SELECT body_policy FROM api_endpoints WHERE id = ?')
+    assert.equal(policy.get('ep_caller').body_policy, 'caller')
+    assert.equal(policy.get('ep_persona').body_policy, 'persona')
+
+    const pg010Sql = fs.readFileSync(pg010, 'utf8')
+    assert.match(pg010Sql, /ALTER TABLE api_endpoints[\s\S]*ALTER COLUMN body_policy SET DEFAULT 'caller'/i)
+    assert.doesNotMatch(pg010Sql, /UPDATE api_endpoints/i)
+  } finally {
+    db.close()
+  }
+})
