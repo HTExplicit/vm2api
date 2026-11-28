@@ -1421,7 +1421,8 @@ export async function handleCodexProtocol({
             const named = nameSseEvent(line)
             if (named) {
               if (clientFirstWriteMs == null) clientFirstWriteMs = Math.max(0, Date.now() - requestStartedAt)
-              res.write(named)
+              // SIWC forwards only data lines. The native transport also forwards the blank separator.
+              res.write(useSiwc ? named + '\n' : named)
             }
           },
         })
