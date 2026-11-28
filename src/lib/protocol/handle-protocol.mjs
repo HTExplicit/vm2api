@@ -229,6 +229,7 @@ import {
   personaHideForUnofficial,
   personaHideForCliZero,
 } from '../identity/crs-persona-usage.mjs'
+import { stripCacheScopeFields } from './cache-ttl.mjs'
 import {
   applyCacheBreakpoints,
   applyCacheTtlToUsage,
@@ -2974,17 +2975,10 @@ export function createHandleProtocol(deps) {
             moved = true
           }
         }
-        let cragBody = null
-        if (moved && hasCragSystem) {
-          const cragRelocated = relocateThirdPartySystem(
-            { ...preRelocateBody, system: preRelocateCragSystem },
-            { onlyForeign: officialTraffic === true },
-          )
-          const cragBase = cragRelocated.moved
-            ? cragRelocated.body
-            : { ...preRelocateBody, system: preRelocateCragSystem }
-          cragBody = !officialTraffic ? foldThirdPartyRoleSystemMessages(cragBase) : cragBase
-        }
+        const cragBody = relocateThirdPartySystem(
+          hasCragSystem ? { ...preRelocateBody, system: preRelocateCragSystem } : preRelocateBody,
+          { onlyForeign: officialTraffic === true, preserveSystemMessages: true },
+        ).body
         relocatedCache = {
           body: nextBody,
           cragBody,
@@ -3859,7 +3853,7 @@ export function createHandleProtocol(deps) {
               }
               if (!strictPassthrough) {
                 for (const policy of extra.repairs || []) source = repairAnthropicRequest(source, policy)
-                if (!officialTraffic && !officialPassthrough && !attemptPoolOwnsSystemDirectly) {
+                if (headlessBridge && !officialTraffic && !officialPassthrough && !attemptPoolOwnsSystemDirectly) {
                   source = foldThirdPartyRoleSystemMessages(source)
                 }
               }
@@ -3946,7 +3940,10 @@ export function createHandleProtocol(deps) {
               }
               logBag.official_cc_inference = 'crag-print'
               logBag.provider = 'local_cli'
-              if (!strictPassthrough) hopBody = noteCachePrefix(selected, attemptSessionId, hopBody)
+              if (!strictPassthrough) {
+                if (!headlessBridge) hopBody = stripCacheScopeFields(hopBody)
+                hopBody = noteCachePrefix(selected, attemptSessionId, hopBody)
+              }
               logBag.outbound_summary = summarizeBody(hopBody)
               logBag.outbound_session_id = sessionIdForLog(sessionIdFromOutboundBody(hopBody) || attemptSessionId)
               return {

@@ -292,15 +292,15 @@ test('a 429 moves to the next slot', async () => {
 })
 
 test('ordinary image 429 preserves full-window credits and only adds the provider hold', async () => {
-  writeGptVm('vm-a')
-  writeGptVm('vm-b')
-  const vm = getVm(root, 'vm-a')
+  writeGptVm('vm-image-rate-a')
+  writeGptVm('vm-image-rate-b')
+  const vm = getVm(root, 'vm-image-rate-a')
   const credits = { has_credits: true, balance: '4', fetched_at: new Date().toISOString() }
-  fs.writeFileSync(path.join(root, 'vms', 'vm-a.json'), JSON.stringify({ ...vm, codex: { credits } }))
+  fs.writeFileSync(path.join(root, 'vms', 'vm-image-rate-a.json'), JSON.stringify({ ...vm, schedule_level_manual: 10, codex: { credits } }))
   const { res } = await images({
     ops: {
       fetchImpl: async (_url, init) => {
-        return init.headers['chatgpt-account-id'] === 'vm-a'
+        return init.headers['chatgpt-account-id'] === 'vm-image-rate-a'
           ? upstream(
               429,
               { error: { code: 'rate_limit_exceeded' } },
@@ -318,10 +318,10 @@ test('ordinary image 429 preserves full-window credits and only adds the provide
     },
   })
   assert.equal(res.statusCode, 200)
-  const stored = getVm(root, 'vm-a')
+  const stored = getVm(root, 'vm-image-rate-a')
   assert.deepEqual(stored.codex.credits, credits)
   assert.equal(stored.codex.extra.codex_limited_until, undefined)
-  const hold = openAIAccountHold('vm-a')
+  const hold = openAIAccountHold('vm-image-rate-a')
   assert.equal(hold.reason, 'rate_limited')
   assert.ok(hold.until > Date.now() && hold.until <= Date.now() + 13_000)
 })

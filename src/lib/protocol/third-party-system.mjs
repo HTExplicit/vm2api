@@ -159,11 +159,11 @@ function firstUserIndex(messages) {
  *   blocks and leave the official envelope in `system`. See splitSystem.
  * @returns {{ body: object, moved: boolean, blocks: number, chars: number }}
  */
-export function relocateThirdPartySystem(body, { onlyForeign = false } = {}) {
+export function relocateThirdPartySystem(body, { onlyForeign = false, preserveSystemMessages = false } = {}) {
   const none = { body, moved: false, blocks: 0, chars: 0 }
   if (!body || typeof body !== 'object' || !Array.isArray(body.messages) || !body.messages.length) return none
   const movedFromSystem = splitSystem(body.system, { onlyForeign })
-  const fromMessages = onlyForeign
+  const fromMessages = onlyForeign || preserveSystemMessages
     ? { moved: [], messages: body.messages.slice() }
     : extractThirdPartySystemMessages(body.messages)
   const moved = [...movedFromSystem, ...fromMessages.moved]

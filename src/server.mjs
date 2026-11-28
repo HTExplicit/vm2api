@@ -1719,7 +1719,7 @@ schedulerRuntime = createSchedulerRuntime({
   isStandby: STANDBY,
   getDb,
   settings: () => new SettingsRepo(),
-  getVms: () => listVms(cfg.paths.project, routingConfig),
+  getVms: () => listVms(cfg.paths.project, routingConfig, { reconcileCodexQuota: true }),
   getRoutingConfig: () => routingConfig,
   apiKeyStore,
   apiEndpointStore,

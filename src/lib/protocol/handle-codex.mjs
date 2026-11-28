@@ -1162,12 +1162,16 @@ export async function handleCodexProtocol({
         }
       }
       const localExit = isLocalEgressProxy(vm.proxy)
-      const written = useSiwc ? null : writeCfg(projectRoot, vm, {
+      const pelicanTest = isPelicanTestRequest(req)
+      const existingKernel = !useSiwc && pelicanTest
+        ? await (ops.codexKernelHealth || codexKernelHealth)(execFor(projectRoot, vm), { timeoutMs: 2500 })
+        : null
+      const written = useSiwc || (pelicanTest && !existingKernel?.ok) ? null : writeCfg(projectRoot, vm, {
         proxyUrl: localExit && !vmNodeId(vm) ? '' : hostProxyUrlForVm(vm),
         proxyRequired: true,
         routing,
       })
-      const ready = useSiwc ? { ok: !!siwc } : await ensure(execFor(projectRoot, vm))
+      const ready = useSiwc ? { ok: !!siwc } : pelicanTest ? existingKernel : await ensure(execFor(projectRoot, vm))
       if (!ready?.ok) {
         last = {
           ok: false,
@@ -1214,7 +1218,9 @@ export async function handleCodexProtocol({
       let streamedUsage = null
       let streamedImageUsage = null
       let conversionError = null
+      let errorEmitted = false
       const attemptStartedAt = Date.now()
+      const kernelRunId = useSiwc ? null : codexKernelRunId(vm.id)
       const sessionOptions = {
         boundSessionId: '',
         boundVmId: '',
@@ -1311,8 +1317,14 @@ export async function handleCodexProtocol({
             hopEmitted = true
             markCommitted()
             if (conversionError) return
-            const responseModel = line.startsWith('data:') ? reportedModel(parseJson(line.slice(5))) : null
+            const event = line.startsWith('data:') ? parseJson(line.slice(5)) : null
+            const responseModel = reportedModel(event)
             if (responseModel) logBag.upstream_response_model = responseModel
+            if (stream && protocol === 'openai.responses' &&
+              (event?.type === 'error' || event?.type === 'response.failed' || event?.type === 'response.incomplete' ||
+              (event?.type === 'response.done' && event.response?.status !== 'completed'))) {
+              errorEmitted = true
+            }
             const tier = serviceTierFromSseLine(line)
             if (tier) responseServiceTier = tier
             const seen = usageFromSseLine(line)
@@ -1445,7 +1457,7 @@ export async function handleCodexProtocol({
         const hold = codexFailureHold({ ...result, committed: false })
         if (hold) holdOpenAIAccount(vm.id, { ...hold, reason: 'siwc_rate_limited' })
       }
-      if (result?.failureDiagnostics) logBag.failure_diagnostics = result.failureDiagnostics
+      if (result?.failureDiagnostics) logBag.failure_diagnostics = { ...result.failureDiagnostics, kernelRunId }
       if (useSiwc) {
         const upstreamRequestId = sanitizeErrorToken(result?.headers?.['x-request-id'])
         if (upstreamRequestId || !result?.ok) {
@@ -1464,6 +1476,7 @@ export async function handleCodexProtocol({
       if (Number(result?.status) === 400 && protocol === 'openai.responses') {
         logBag.failure_diagnostics = {
           ...logBag.failure_diagnostics,
+          kernelRunId,
           responsesHistory: codexToolHistorySummary(outboundBody, req),
         }
       }
@@ -1477,19 +1490,19 @@ export async function handleCodexProtocol({
       const preferredUsage = preferUsage(hopUsage, streamedUsage)
       const usage = mergeUsage(preferredUsage === hopUsage ? streamedUsage : hopUsage, preferredUsage)
       const delivered = !policyRefusal && !conversionError && result?.ok
+      const serviceTier = normalizeServiceTier(outboundBody.service_tier)
+      logBag.upstream_service_tier = responseServiceTier
+      const logged = disjointOpenaiUsage(usage ? { ...usage, service_tier: serviceTier } : usage)
+      logBag.usage = logged
+      const imageUsage =
+        result.body?.tool_usage?.image_gen || result.body?.response?.tool_usage?.image_gen || streamedImageUsage
+      if (imageUsage) logBag.image_usage = imageUsage
+      logBag.input_tokens = logged?.input_tokens ?? null
+      logBag.output_tokens = logged?.output_tokens ?? null
+      logBag.cache_read_tokens = logged?.cache_read_input_tokens ?? logged?.cache_read_tokens ?? null
+      logBag.cache_creation_tokens = logged?.cache_creation_input_tokens ?? logged?.cache_creation_tokens ?? null
 
       if (delivered) {
-        const serviceTier = normalizeServiceTier(outboundBody.service_tier)
-        logBag.upstream_service_tier = responseServiceTier
-        const logged = disjointOpenaiUsage(usage ? { ...usage, service_tier: serviceTier } : usage)
-        logBag.usage = logged
-        const imageUsage =
-          result.body?.tool_usage?.image_gen || result.body?.response?.tool_usage?.image_gen || streamedImageUsage
-        if (imageUsage) logBag.image_usage = imageUsage
-        logBag.input_tokens = logged?.input_tokens ?? null
-        logBag.output_tokens = logged?.output_tokens ?? null
-        logBag.cache_read_tokens = logged?.cache_read_input_tokens ?? logged?.cache_read_tokens ?? null
-        logBag.cache_creation_tokens = logged?.cache_creation_input_tokens ?? logged?.cache_creation_tokens ?? null
         logBag.final_state = result.terminalState || 'verified'
         logBag.stop_reason = result.body?.incomplete_details?.reason || null
         logBag.upstream_model = converted.body.model
@@ -1603,15 +1616,17 @@ export async function handleCodexProtocol({
         })
         stats.errors++
         logBag.error_code = result?.body?.error?.code || 'codex_upstream'
+        logBag.error_message = result?.body?.error?.message || ''
         logBag.upstream_status = result?.status || 0
-        logBag.final_state = result?.terminalState || 'incomplete'
-        if (stream) {
-          if (useSiwc && protocol === 'openai.responses' && result?.body?.error) {
-            res.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: result.body.error })}\n\n`)
-          }
-          return res.end()
+        logBag.final_state = result?.terminalState === 'cancelled' ? 'cancelled' : 'incomplete'
+        if (!stream) return json(res, result?.status >= 400 ? result.status : 502, result?.body)
+        if (!conversionError && !errorEmitted && !gone.signal.aborted) {
+          const error = result.body?.error || { type: 'api_error', code: logBag.error_code, message: logBag.error_message }
+          res.write(protocol === 'openai.chat' || protocol === 'openai.completions'
+            ? `data: ${JSON.stringify({ error })}\n\ndata: [DONE]\n\n`
+            : `event: error\ndata: ${JSON.stringify({ type: 'error', error })}\n\n`)
         }
-        return json(res, result?.status >= 400 ? result.status : 502, result?.body)
+        return res.end()
       }
 
       const localAdmissionChanged = ['credential_blocked', 'quota_exhausted', 'vm_stopped', 'siwc_mode_changed'].includes(
@@ -2156,12 +2171,17 @@ export async function handleCodexSearch({
       logBag.usage_account_id = openaiUsageAccountId(last.accountId)
       logBag.upstream_status = last.status || null
       const parsedBody = parseJson(last.text)
-      ingestCodexHop(projectRoot, vm.id, {
+      const hopResult = {
         ok: last.status >= 200 && last.status < 300,
         status: last.status,
         headers: last.headers || {},
         body: parsedBody,
-      })
+      }
+      logBag.sent_model = outbound.model || null
+      logBag.upstream_response_model = reportedModel(parsedBody)
+      ingestCodexHop(projectRoot, vm.id, hopResult, Date.now(), codex.quota, last.auth)
+      const hold = codexFailureHold(hopResult)
+      if (hold && codexQuotaFailure(hopResult) === 'rate_limited') holdOpenAIAccount(vm.id, hold)
       parkCodexGrantDeadIfHit(projectRoot, vm.id, last)
 
       if (!isSearchFailover(last)) {
@@ -2493,12 +2513,17 @@ export async function handleCodexImages({
       logBag.usage_account_id = openaiUsageAccountId(last.accountId)
       logBag.upstream_status = last.status || null
       const parsedBody = parseJson(last.text)
-      ingestCodexHop(projectRoot, vm.id, {
+      const hopResult = {
         ok: last.status >= 200 && last.status < 300,
         status: last.status,
         headers: last.headers || {},
         body: parsedBody,
-      })
+      }
+      logBag.sent_model = outboundBody.model || null
+      logBag.upstream_response_model = reportedModel(parsedBody)
+      ingestCodexHop(projectRoot, vm.id, hopResult, Date.now(), codex.quota, last.auth)
+      const hold = codexFailureHold(hopResult)
+      if (hold && codexQuotaFailure(hopResult) === 'rate_limited') holdOpenAIAccount(vm.id, hold)
       parkCodexGrantDeadIfHit(projectRoot, vm.id, last)
 
       if (!isSearchFailover(last)) {

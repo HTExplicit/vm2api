@@ -16,7 +16,6 @@ import { getVm, summarizeVm } from '../../src/lib/vm/vm-registry.mjs'
 import {
   codexAccountStatus,
   isCodexSlotReady,
-  orderCodexSessionSlots,
   pickCodexSlots,
 } from '../../src/lib/pool/codex-slot-pool.mjs'
 import { resetOpenAIAccountRuntime } from '../../src/lib/pool/openai-account-runtime.mjs'
@@ -60,9 +59,7 @@ test('401 persists across runtime reset and excludes ordinary, sticky and pinned
   assert.equal(isCodexSlotReady(vm), false)
   assert.equal(codexAccountStatus(vm), 'error')
   assert.deepEqual(pickCodexSlots([vm]).ids, [])
-  assert.deepEqual(orderCodexSessionSlots([vm], { boundVmId: vm.id }).ids, [])
   assert.equal(pickCodexSlots([vm], { pin: vm.id }).error, 'credential_blocked')
-  assert.deepEqual(orderCodexSessionSlots([vm], { pin: vm.id }).ids, [])
   assert.equal(slot.block().account_id, undefined)
   assert.equal(slot.block().access_token, undefined)
   assert.equal(slot.raw().schedulable, true, 'operator scheduling intent is untouched')

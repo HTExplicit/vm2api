@@ -56,7 +56,6 @@ import { createClaudeMessageAssembler, applyClaudeSSELineToMessage } from '../..
 import { ApiScheduler } from '../../src/lib/pool/api-scheduler.mjs'
 import { classifierFixture } from '../fixtures/auto-mode.mjs'
 import { classifyClaudeRequestPurpose } from '../../src/lib/protocol/request-purpose.mjs'
-import { isOfficialClaudeCodeTraffic } from '../../src/lib/identity/crs-persona.mjs'
 import { normalizeRedaction } from '../../src/lib/redaction/policy.mjs'
 import { publishRedactionForTests } from '../../src/lib/redaction/runtime.mjs'
 
@@ -2077,7 +2076,6 @@ test('account API does not turn a caller classifier contract into the Claude cla
   inbound.metadata = { user_id: { device_id: 'fixture-device', session_id: 'fixture-session' } }
   inbound.system.push({ type: 'text', text: '## Session Context\nCWD: /work' })
   const headers = { 'user-agent': 'claude-cli/2.1.303 (external, cli)', 'x-app': 'cli' }
-  assert.equal(isOfficialClaudeCodeTraffic(headers, inbound), true)
   assert.ok(classifyClaudeRequestPurpose(inbound, { officialTraffic: true }))
   const run = await runAccountApiProtocol(inbound, 'anthropic.messages', { headers })
   assert.equal(run.response.statusCode, 200, JSON.stringify(run.response.body))

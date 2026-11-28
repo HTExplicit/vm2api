@@ -268,8 +268,10 @@ export async function runFetchPayload(argv = process.argv.slice(2), { fetchImpl 
       if (buf === null) throw new Error(`${file.path} is missing; cannot pin`)
       file.size = buf.length
       file.sha256 = sha256(buf)
+      delete file.release
     }
     manifest.release = opts.pin
+    if (manifest.crag_release) manifest.crag_release = opts.pin
     fs.writeFileSync(opts.manifest, `${JSON.stringify(manifest, null, 2)}\n`)
     console.log(`pinned ${manifest.files.length} files to ${opts.pin}`)
   } else if (opts.stage) {

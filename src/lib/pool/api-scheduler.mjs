@@ -260,15 +260,16 @@ export class ApiScheduler {
     if (!matched.length) {
       return { ok: false, code: 'model_not_found', message: `No API endpoint serves model '${requestedModel}'` }
     }
-    const readyEndpoints = matched.filter((ep) =>
-      this.readyKeys(ep, now, scope).length > 0,
-    )
+    const ready = matched
+      .map((endpoint) => ({ endpoint, keys: this.readyKeys(endpoint, now, scope) }))
+      .filter(({ keys }) => keys.length)
+    const readyEndpoints = ready.map(({ endpoint }) => endpoint)
     if (!readyEndpoints.length) {
       return { ok: false, code: 'no_ready_api_key', message: 'All API keys for matching endpoints are unavailable' }
     }
     const primary = readyEndpoints[0]
     const upstreamModels = resolveUpstreamPool(primary, requestedModel, modelOptions)
-    const readyKeys = this.readyKeys(primary, now, scope)
+    const readyKeys = ready[0].keys
     return {
       ok: true,
       endpoints: matched,

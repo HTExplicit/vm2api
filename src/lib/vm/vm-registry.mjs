@@ -59,15 +59,25 @@ import { ensureSlotSmbios } from './machine-spec.mjs'
 
 export { isCodexVm, normalizeVmKind } from './vm-kind.mjs'
 
-export function listVms(projectRoot, routing = null) {
+export function listVms(projectRoot, routing = null, { reconcileCodexQuota = false } = {}) {
   const dir = path.join(projectRoot, 'vms')
   if (!fs.existsSync(dir)) return []
   const files = listVmRecordFiles(dir)
   return files
     .map((f) => {
+      const file = path.join(dir, f)
+      let raw
       try {
-        const raw = readJsonCached(path.join(dir, f))
-        if (!raw?.id) return null
+        raw = readJsonCached(file)
+      } catch {
+        return null
+      }
+      if (!raw?.id) return null
+      if (reconcileCodexQuota && isCodexVm(raw)) {
+        const result = syncCodexQuotaSchedule(projectRoot, raw, { policy: routing?.codex?.quota })
+        if (result.changed) raw = readJsonCached(file) || raw
+      }
+      try {
         return summarizeVm(raw, projectRoot, routing)
       } catch {
         return null

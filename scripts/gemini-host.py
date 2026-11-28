@@ -7202,6 +7202,11 @@ class Host:
                     slot, proxy_url, refresh_credential
                 )
                 account = refresh_result.get("account") or {"state": "error", "checked_at": now()}
+                if (
+                    refresh_result.get("error") == "oauth_client_not_configured"
+                    or account.get("error_code") == "oauth_client_not_configured"
+                ):
+                    raise Failure(503, "gemini_oauth_client_not_configured")
                 if account.get("state") == "reauth_required":
                     raise Failure(400, "gemini_oauth_import_rejected")
                 if account.get("state") not in ("ok", "partial"):

@@ -281,6 +281,18 @@ test('migrate-sqlite-to-pg MIGRATION_TABLES, preflight FK checks, and seedMockSq
   for (const tbl of NEW_TABLES) {
     assert.ok(seeded.tableCounts[tbl] >= 1, `seedMockSqlite should seed ${tbl}`)
   }
+  const forkReport = await preflightSqliteToPostgres({ sqlitePath: mockPath })
+  assert.deepEqual(forkReport.unmappedTables, ['openai_api_accounts', 'openai_api_orgs', 'slot_browser_profiles'])
+  assert.equal(forkReport.ok, false)
+
+  // Fork-only SQLite tables have no PostgreSQL mapping. Use just the common
+  // schema in this disposable fixture to exercise the scheduler preflight.
+  const commonSchema = new DatabaseSync(mockPath)
+  try {
+    commonSchema.exec('DROP TABLE openai_api_orgs; DROP TABLE openai_api_accounts; DROP TABLE slot_browser_profiles')
+  } finally {
+    commonSchema.close()
+  }
   const okReport = await preflightSqliteToPostgres({ sqlitePath: mockPath })
   assert.equal(okReport.ok, true, JSON.stringify(okReport.blockingIssues))
   assert.deepEqual(okReport.unmappedTables, [])

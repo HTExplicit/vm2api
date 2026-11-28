@@ -278,6 +278,8 @@ test('migration 059 onward preserves the published 9102 ledger, browser state an
       '073_multi_tier_key_permissions.sql',
       '074_log_error_details_and_hop_correlation.sql',
       '075_usage_logs_advisor_billing.sql',
+      '076_scheduler_center.sql',
+      '077_scheduler_pool_prompt_default.sql',
     ])
     assert.deepEqual(db.prepare("SELECT * FROM schema_migrations WHERE version < '059' ORDER BY version").all(), ledger)
     for (const table of preservedTables)
@@ -600,6 +602,8 @@ test('migrations 054 and 055 preserve a published fork 054 database and do not r
       '073_multi_tier_key_permissions.sql',
       '074_log_error_details_and_hop_correlation.sql',
       '075_usage_logs_advisor_billing.sql',
+      '076_scheduler_center.sql',
+      '077_scheduler_pool_prompt_default.sql',
     ])
     const { risk_review_enabled, body_policy, owner_user_id, ...after } = db
       .prepare('SELECT * FROM api_endpoints WHERE id = ?')
@@ -719,6 +723,8 @@ test('migration 072 upgrades pre-072 crag_shop_orders in place with NULL activat
       '073_multi_tier_key_permissions.sql',
       '074_log_error_details_and_hop_correlation.sql',
       '075_usage_logs_advisor_billing.sql',
+      '076_scheduler_center.sql',
+      '077_scheduler_pool_prompt_default.sql',
     ])
     assert.deepEqual(applyMigrations(db, { migrationsDir: src }), [])
     const row = db

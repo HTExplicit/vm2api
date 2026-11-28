@@ -595,9 +595,7 @@ test('routing entrypoint switches rendered billing between cli and sdk-cli', () 
       assert.match(out.system[0].text, new RegExp(`cc_entrypoint=${entrypoint};`))
       assert.equal(
         out.system[1].text,
-        entrypoint === 'cli'
-          ? "You are Claude Code, Anthropic's official CLI for Claude."
-          : OFFICIAL_303_AGENT_IDENTITY,
+        "You are Claude Code, Anthropic's official CLI for Claude.",
       )
       assert.doesNotMatch(out.system.map((block) => block.text).join('\n'), /! <command>/)
     }

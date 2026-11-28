@@ -205,15 +205,15 @@ test('search moves to the next GPT slot on a usage-limit 429 and parks the first
 test('ordinary search 429 keeps credits and uses Retry-After instead of the full-window reset', async (t) => {
   const root = tempRoot('rate-limit')
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  for (const id of ['vm-gpt-a', 'vm-gpt-b']) writeGptVm(root, id)
+  for (const id of ['vm-gpt-rate-a', 'vm-gpt-rate-b']) writeGptVm(root, id)
   const credits = { has_credits: true, balance: '8.25', fetched_at: new Date().toISOString() }
-  const vm = getVm(root, 'vm-gpt-a')
-  fs.writeFileSync(path.join(root, 'vms', 'vm-gpt-a.json'), JSON.stringify({ ...vm, codex: { credits } }))
+  const vm = getVm(root, 'vm-gpt-rate-a')
+  fs.writeFileSync(path.join(root, 'vms', 'vm-gpt-rate-a.json'), JSON.stringify({ ...vm, schedule_level_manual: 10, codex: { credits } }))
   const started = Date.now()
   const { res } = await search(root, {
     ops: {
       fetchImpl: async (_url, init) => {
-        if (init.headers['chatgpt-account-id'] === 'vm-gpt-a')
+        if (init.headers['chatgpt-account-id'] === 'vm-gpt-rate-a')
           return upstream(
             429,
             { error: { code: 'rate_limit_exceeded' } },
@@ -229,10 +229,10 @@ test('ordinary search 429 keeps credits and uses Retry-After instead of the full
     },
   })
   assert.equal(res.statusCode, 200)
-  const stored = getVm(root, 'vm-gpt-a')
+  const stored = getVm(root, 'vm-gpt-rate-a')
   assert.deepEqual(stored.codex.credits, credits)
   assert.equal(stored.codex.extra.codex_limited_until, undefined)
-  const hold = openAIAccountHold('vm-gpt-a')
+  const hold = openAIAccountHold('vm-gpt-rate-a')
   assert.equal(hold.reason, 'rate_limited')
   assert.ok(hold.until >= started + 23_000 && hold.until <= Date.now() + 23_000)
 })
@@ -240,15 +240,15 @@ test('ordinary search 429 keeps credits and uses Retry-After instead of the full
 test('search quota failure after token rotation applies to the refreshed credential generation', async (t) => {
   const root = tempRoot('refresh-quota')
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
-  for (const id of ['vm-gpt-a', 'vm-gpt-b']) writeGptVm(root, id)
+  for (const id of ['vm-gpt-refresh-a', 'vm-gpt-refresh-b']) writeGptVm(root, id)
   const credits = { has_credits: true, balance: '6', fetched_at: new Date().toISOString() }
-  const vm = getVm(root, 'vm-gpt-a')
-  fs.writeFileSync(path.join(root, 'vms', 'vm-gpt-a.json'), JSON.stringify({ ...vm, codex: { credits } }))
+  const vm = getVm(root, 'vm-gpt-refresh-a')
+  fs.writeFileSync(path.join(root, 'vms', 'vm-gpt-refresh-a.json'), JSON.stringify({ ...vm, policy: { priority: 10 }, codex: { credits } }))
   const { res } = await search(root, {
     ops: {
       refresh: async () => ({ ok: true, access_token: 'at2', refresh_token: 'rt2' }),
       fetchImpl: async (_url, init) => {
-        if (init.headers['chatgpt-account-id'] === 'vm-gpt-b') return upstream(200, { output: 'from b' })
+        if (init.headers['chatgpt-account-id'] === 'vm-gpt-refresh-b') return upstream(200, { output: 'from b' })
         return init.headers.authorization === 'Bearer at2'
           ? upstream(429, { error: { code: 'usage_limit_reached' } })
           : upstream(401, { error: { code: 'token_expired' } })
@@ -256,7 +256,7 @@ test('search quota failure after token rotation applies to the refreshed credent
     },
   })
   assert.equal(res.statusCode, 200)
-  const stored = getVm(root, 'vm-gpt-a')
+  const stored = getVm(root, 'vm-gpt-refresh-a')
   assert.equal(stored.codex.credits.balance, '6')
   assert.ok(stored.codex.credits.invalidated_at)
   assert.ok(stored.codex.extra.codex_limited_until)
