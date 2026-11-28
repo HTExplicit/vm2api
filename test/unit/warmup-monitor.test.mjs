@@ -49,6 +49,7 @@ function fakeDb() {
       created_at TEXT NOT NULL,
       vm_id TEXT,
       status INTEGER DEFAULT 200,
+      final_state TEXT,
       error_code TEXT,
       error_message TEXT
     )`,
@@ -56,14 +57,10 @@ function fakeDb() {
   return db
 }
 
-function insert(db, { at, vm = 'vm-1', status = 200, code = null, msg = null }) {
-  db.prepare('INSERT INTO usage_logs (created_at, vm_id, status, error_code, error_message) VALUES (?,?,?,?,?)').run(
-    at,
-    vm,
-    status,
-    code,
-    msg,
-  )
+function insert(db, { at, vm = 'vm-1', status = 200, state = null, code = null, msg = null }) {
+  db.prepare(
+    'INSERT INTO usage_logs (created_at, vm_id, status, final_state, error_code, error_message) VALUES (?,?,?,?,?,?)',
+  ).run(at, vm, status, state, code, msg)
 }
 
 const NOW_ISO = '2026-11-27T06:00:00.000Z'
@@ -85,6 +82,7 @@ test('fatalCountSince and successCountSince use PG-compatible ISO string compari
   insert(db, { at: '2026-11-27T05:30:00.000Z', code: 'upstream_status', msg: null }) // not fatal
   insert(db, { at: '2026-11-27T05:30:00.000Z', vm: 'vm-2', code: 'refusal_guard' }) // other vm
   insert(db, { at: '2026-11-27T05:00:00.500Z', status: 200 }) // success
+  insert(db, { at: '2026-11-27T05:00:00.600Z', status: 200, state: 'siwc-prewarm' })
   insert(db, { at: '2026-11-27T05:01:00.000Z', status: 500, code: 'upstream_status' }) // failure
   insert(db, { at: '2026-11-26T10:00:00.000Z', status: 200 }) // before since
 
