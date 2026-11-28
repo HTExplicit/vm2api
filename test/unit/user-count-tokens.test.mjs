@@ -473,7 +473,7 @@ const CODEX_VM = {
   owner_user_id: 'u1',
   platform: 'openai',
   family: 'codex',
-  codex: { has_access: true, usage: CODEX_USAGE },
+  codex: { has_access: true, usage: { snapshot: CODEX_USAGE } },
 }
 
 test('usage keeps the next Claude account and tags its platform', async (t) => {

@@ -281,6 +281,7 @@ jobs:
             test/unit/openai-subscription.test.mjs \
             test/unit/openai-quota.test.mjs \
             test/unit/codex-usage.test.mjs \
+            test/unit/user-count-tokens.test.mjs \
             test/unit/scheduler-codex-quota-snapshot.test.mjs \
             test/unit/codex-credits.test.mjs \
             test/unit/codex-slot-pool.test.mjs \
@@ -454,7 +455,7 @@ jobs:
           pnpm exec vitest run src/features/vm/codex-browser-finish.test.ts src/features/vm/codex-credential-browser-completion.test.tsx
           pnpm exec vitest run src/features/vm/claude-credential-panel.test.tsx
           pnpm exec vitest run src/features/openai-apikey src/features/logs/account-api-logs.test.tsx src/components/layout/data/sidebar-data.test.ts
-          pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx src/features/logs/failure-display.test.tsx
+          pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/log-detail/summary-tab.test.tsx src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx src/features/logs/failure-display.test.tsx
           pnpm exec vitest run src/features/anthropic/endpoint-save.test.ts
           pnpm exec vitest run src/features/settings/health-pane.test.ts src/features/cluster/slot-migration.test.ts
           pnpm exec vitest run src/features/vm/engine-editor.test.tsx src/features/wrap/index.test.tsx src/lib/slash-line.test.ts src/features/vm/engine-contract.test.ts src/features/vm/persona-contract.test.ts src/lib/wrap-health.test.ts src/features/system/compat-patch.test.ts

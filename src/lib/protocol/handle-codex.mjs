@@ -690,6 +690,7 @@ export async function handleCodexProtocol({
   keyScope = null,
   sessions = null,
   afterHop = null,
+  recordFinal400 = null,
   ownerScope = null,
   pinVmId = undefined,
   poolAccess = null,
@@ -1427,7 +1428,7 @@ export async function handleCodexProtocol({
 
       const runAttempt = async () => {
         let result = await runHop()
-        let policyRefusal = afterHop?.(result)
+        let policyRefusal = afterHop?.(result, { blockSessionOn400: false })
         const error = result?.body?.error
         if (
           !useSiwc &&
@@ -1451,7 +1452,7 @@ export async function handleCodexProtocol({
             outboundBody = { ...outboundBody, tools: compatibleTools }
             if (captureOutbound) logBag.outbound_body = outboundBody
             result = await runHop()
-            policyRefusal = afterHop?.(result)
+            policyRefusal = afterHop?.(result, { blockSessionOn400: false })
           }
         }
         return { result, policyRefusal }
@@ -1659,6 +1660,7 @@ export async function handleCodexProtocol({
       }
 
       if (policyRefusal && policyRefusal !== 'upstream:billing_refusal') {
+        if (!gone.signal.aborted) recordFinal400?.(result)
         await releaseActiveLeaseNow({ outcome: 'ok', http_status: Number(result?.status) || 400 })
         stats.errors++
         const error = upstreamRiskClientError(policyRefusal, res._kinRequestId)
@@ -1672,6 +1674,7 @@ export async function handleCodexProtocol({
 
       const failureReport = buildCodexFailureReport(result)
       if (res.headersSent || hopEmitted) {
+        if (!gone.signal.aborted) recordFinal400?.(result)
         await releaseActiveLeaseNow({
           outcome: failureReport.error_class === 'timeout' ? 'timeout' : 'error',
           http_status: failureReport.http_status || undefined,
@@ -1728,6 +1731,7 @@ export async function handleCodexProtocol({
     gone.settle()
   }
 
+  if (last && !last.ok && !gone.signal.aborted) recordFinal400?.(last)
   stats.errors++
   logBag.error_code = last?.body?.error?.code || 'codex_upstream'
   logBag.error_message ||= last?.body?.error?.message || ''
@@ -2053,6 +2057,7 @@ export async function handleCodexSearch({
   poolAccess = null,
   originPoolId = null,
   schedulerRuntime = null,
+  recordFinal400 = null,
 }) {
   logBag.via = 'codex-search'
   const reject = (status, type, code, message) => {
@@ -2319,6 +2324,14 @@ export async function handleCodexSearch({
     return reject(502, 'api_error', last?.error || 'upstream_transport', 'Codex search upstream request failed')
   }
   const payload = parseJson(last.text)
+  if (last.status === 400 && !gone.signal.aborted) {
+    recordFinal400?.({
+      ok: false,
+      status: 400,
+      upstreamStatus: 400,
+      body: payload ?? last.text,
+    })
+  }
   if (payload === undefined) {
     logBag.final_state = 'upstream_error'
     return reject(
@@ -2364,6 +2377,7 @@ export async function handleCodexImages({
   poolAccess = null,
   originPoolId = null,
   schedulerRuntime = null,
+  recordFinal400 = null,
 }) {
   logBag.via = 'codex-images'
   const reject = (status, type, code, message) => {
@@ -2661,6 +2675,14 @@ export async function handleCodexImages({
     return reject(502, 'api_error', last?.error || 'upstream_transport', 'Codex images upstream request failed')
   }
   const payload = parseJson(last.text)
+  if (last.status === 400 && !gone.signal.aborted) {
+    recordFinal400?.({
+      ok: false,
+      status: 400,
+      upstreamStatus: 400,
+      body: payload ?? last.text,
+    })
+  }
   if (payload === undefined) {
     logBag.final_state = 'upstream_error'
     return reject(
