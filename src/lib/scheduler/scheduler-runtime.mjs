@@ -861,6 +861,7 @@ export class SchedulerRuntime {
         drainIntervalMs: this.#drainIntervalMs,
         onBootstrap: (ctx) => this.#buildBootstrapPayload(ctx),
         onDrain: (batch) => this.#persistDrainBatch(batch),
+        onCodexInflightChange: () => this.#resolvePoolScheduler()?.signalChange?.(),
         onError: (err, info) => {
           this.#onError?.(err, info)
         },

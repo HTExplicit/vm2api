@@ -778,6 +778,8 @@ export type PoolSeatLive = {
 /** `GET /api/panel/pool/stream` 的 `event: seats` 负载。 */
 export type PoolSeatSnapshot = PoolQueueSummary & {
   seats: Record<string, PoolSeatLive>
+  /** Codex VM 正在处理的请求数。旧帧可能没有，空对象表示全部空闲。 */
+  codex_inflight?: Record<string, number>
   ts: number
 }
 

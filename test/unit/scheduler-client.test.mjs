@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { EventEmitter, once } from 'node:events'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
@@ -6,6 +7,10 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
+import { buildVmList } from '../../src/lib/admin/panel-api.mjs'
+import { servePoolSeatStream } from '../../src/lib/admin/pool-seat-stream.mjs'
+import { PoolScheduler } from '../../src/lib/pool/pool-scheduler.mjs'
+import { createSchedulerRuntime } from '../../src/lib/scheduler/scheduler-runtime.mjs'
 import {
   computeAcquireTimeoutMs,
   computeSwitchTimeoutMs,
@@ -671,6 +676,99 @@ test('mock UDS contract: all 14 endpoints, batch heartbeat, throttled telemetry,
   )
   assert.equal(standbyClient.startDrainLoop({ onDrain: () => {} }), false)
   assert.equal(drainCalls, callsBefore, 'standby must never call /persistence/drain over IPC')
+})
+
+test('Codex lease counts reach the account list and scoped live stream through failover and cleanup', async (t) => {
+  const project = makeTempDir()
+  fs.mkdirSync(path.join(project, 'vms'))
+  for (const id of ['gpt-a', 'gpt-b']) {
+    fs.writeFileSync(path.join(project, 'vms', `${id}.json`), JSON.stringify({ id, kind: 'codex' }))
+  }
+  const switchReply = Promise.withResolvers()
+  const mock = await startMockServer({
+    handler: async (req, res) => {
+      const body = await readJsonBody(req)
+      const lease = (id, node_id) => ({ lease_id: id, selected_node: { node_type: 'codex_vm', node_id } })
+      if (req.url === '/internal/v1/schedule/switch') await switchReply.promise
+      const replies = {
+        '/internal/v1/schedule/acquire': lease(body.session_id, 'gpt-a'),
+        '/internal/v1/schedule/switch': lease('retry', 'gpt-b'),
+        '/internal/v1/schedule/release': { ok: true, released: true },
+        '/internal/v1/schedule/heartbeat': { ok: true, missing: ['stream-2'] },
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(replies[req.url]))
+    },
+  })
+  const cfg = { paths: { project } }
+  const poolScheduler = new PoolScheduler({ projectRoot: project })
+  const rt = createSchedulerRuntime({
+    cfg,
+    poolScheduler,
+    isStandby: false,
+    clientOptions: { transport: 'tcp', host: mock.host, port: mock.port, token: 'test-token', manageProcess: false },
+  })
+  poolScheduler.setSchedulerRuntime(rt)
+
+  const req = new EventEmitter()
+  const res = new EventEmitter()
+  const frames = []
+  res.write = (chunk) => {
+    if (!chunk.startsWith('event: seats\n')) return
+    const frame = JSON.parse(chunk.split('\n')[1].slice('data: '.length))
+    frames.push(frame)
+    res.emit('frame', frame)
+  }
+  t.after(async () => {
+    switchReply.resolve()
+    req.emit('close')
+    await rt.client.shutdown({ drain: false, stopProcess: false })
+    await mock.close()
+    fs.rmSync(project, { recursive: true })
+  })
+  servePoolSeatStream({
+    req,
+    res,
+    getScheduler: () => poolScheduler,
+    visibleVmIds: () => new Set(['gpt-a']),
+    writeSSEHeaders: () => {},
+    throttleMs: 0,
+  })
+  const nextFrame = async () => (await once(res, 'frame', { signal: AbortSignal.timeout(3000) }))[0].codex_inflight
+  const listCounts = async () => {
+    const listed = await buildVmList({ cfg, poolScheduler })
+    return Object.fromEntries(listed.data.items.map(({ id, inflight }) => [id, inflight]))
+  }
+  const codexRequest = (overrides) =>
+    makeAcquireRequest({ model: 'gpt-5.4', model_family: 'openai', protocol: 'openai.responses', ...overrides })
+  assert.deepEqual(frames[0].codex_inflight, {})
+
+  for (const [index, id] of ['stream-1', 'stream-2'].entries()) {
+    const frame = nextFrame()
+    await rt.acquireNode(codexRequest({ session_id: id }))
+    assert.deepEqual(await frame, { 'gpt-a': index + 1 })
+  }
+  assert.deepEqual(await listCounts(), { 'gpt-a': 2, 'gpt-b': 0 })
+
+  const switching = nextFrame()
+  const switched = rt.switchNode({
+    release_lease_id: 'stream-1',
+    next_attempt: codexRequest({ session_id: 'stream-1', attempt_no: 2 }),
+  })
+  assert.deepEqual(await switching, { 'gpt-a': 1 })
+  assert.deepEqual(await listCounts(), { 'gpt-a': 1, 'gpt-b': 0 })
+  const reassigned = nextFrame()
+  switchReply.resolve()
+  await switched
+  assert.deepEqual(await reassigned, { 'gpt-a': 1 })
+  assert.deepEqual(await listCounts(), { 'gpt-a': 1, 'gpt-b': 1 })
+
+  const reaped = nextFrame()
+  await rt.client.flushHeartbeat()
+  assert.deepEqual(await reaped, {})
+  assert.deepEqual(await listCounts(), { 'gpt-a': 0, 'gpt-b': 1 })
+  await rt.releaseLease('retry', { outcome: 'aborted' })
+  assert.deepEqual(await listCounts(), { 'gpt-a': 0, 'gpt-b': 0 })
 })
 
 test('mock TCP + cap-file discovery, AbortSignal immediate cancel, transient reconnect, and fail-closed 503', async (t) => {

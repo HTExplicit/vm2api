@@ -9,6 +9,7 @@ import type {
 } from '@/types/panel-vm'
 import { panelFetch } from '@/lib/api'
 import { hasSession } from '@/lib/session'
+import { isCodexVm } from '@/lib/vm-kind'
 import { vmsListQueryOptions } from '@/features/vm/queries'
 
 const RETRY_MS = 5000
@@ -76,8 +77,13 @@ export function isLiveSeatQueryKey(key: readonly unknown[]): boolean {
   return false
 }
 
-/** 席位快照只覆盖 Claude 行（`seats_max` 非空）的实时字段；缺席即空闲。 */
+/** 席位快照更新 Claude 的席位和 Codex 的请求数；缺席即空闲。 */
 export function mergeSeatVm(vm: Vm, snap: PoolSeatSnapshot): Vm {
+  if (isCodexVm(vm)) {
+    if (!snap.codex_inflight) return vm
+    const inflight = Number(snap.codex_inflight[vm.id]) || 0
+    return vm.inflight === inflight ? vm : { ...vm, inflight }
+  }
   if (vm.seats_max == null) return vm
   const live = snap.seats[vm.id]
   // 缺席的 VM 只清零计数；上限不在帧里，保留列表接口给的值。

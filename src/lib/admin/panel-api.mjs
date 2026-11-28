@@ -2367,7 +2367,9 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     seat_sessions: isCodex ? null : Array.isArray(seatRow?.sessions) ? seatRow.sessions : [],
     queue_depth: isCodex ? null : Number(seatRow?.queue_depth) || 0,
     conc_waiting: isCodex ? null : Number(seatRow?.conc_waiting) || 0,
-    inflight: isCodex ? openAIRuntimeSignals(v.id).inFlight : Number(seatRow?.inflight ?? acc?.inflight ?? 0),
+    inflight: isCodex
+      ? Number(extras.pool?.codex_inflight?.[v.id]) || 0
+      : Number(seatRow?.inflight ?? acc?.inflight ?? 0),
     requests: acc?.requests ?? v.stats?.requests ?? 0,
     tokens_in: acc?.tokens_in ?? 0,
     tokens_out: acc?.tokens_out ?? 0,

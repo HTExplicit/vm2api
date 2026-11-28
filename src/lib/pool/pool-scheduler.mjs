@@ -1187,6 +1187,7 @@ export class PoolScheduler extends EventEmitter {
       waiters: {},
       health_cache: Object.fromEntries([...this.healthCache].map(([id, entry]) => [id, entry.value])),
       seats: seat.seats,
+      codex_inflight: seat.codex_inflight,
       pool_queue: { global_queue_depth: seat.global_queue_depth, queue_max: seat.queue_max },
     }
   }
@@ -1209,6 +1210,11 @@ export class PoolScheduler extends EventEmitter {
         sessions: [],
       }
     }
-    return { seats, global_queue_depth: 0, queue_max: this.config.queue_max }
+    return {
+      seats,
+      codex_inflight: this.schedulerRuntime?.client?.codexInflightByVm?.() || {},
+      global_queue_depth: 0,
+      queue_max: this.config.queue_max,
+    }
   }
 }
