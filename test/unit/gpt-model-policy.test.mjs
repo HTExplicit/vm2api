@@ -9,9 +9,10 @@ import {
   isGptModelEnabled,
   isImageToolModelEnabled,
   listGptPolicyModels,
-  listGptFastAliases,
+  listGptSpeedAliases,
   listImageToolModels,
   loadGptModelPolicy,
+  patchGptUltrafastAliases,
   resetGptModelPolicy,
   saveGptModelPolicy,
   syncGptIdsIntoPolicy,
@@ -25,6 +26,30 @@ function withDb(t) {
     loadGptModelPolicy({ force: true })
   })
 }
+
+test('Ultrafast patch preserves synced membership and persists only selected flags', (t) => {
+  withDb(t)
+  syncGptIdsIntoPolicy(['gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6-luna'])
+  const before = structuredClone(getGptModelPolicy())
+  assert.equal(patchGptUltrafastAliases({ 'gpt-6.2-sol': true, 'gpt-6-luna': true }).ok, false)
+  assert.equal(patchGptUltrafastAliases({ 'gpt-5.5': true }).ok, false)
+  assert.equal(patchGptUltrafastAliases({ 'gpt-6.2-sol': 'true' }).ok, false)
+  assert.deepEqual(getGptModelPolicy(), before)
+  assert.equal(patchGptUltrafastAliases({ 'gpt-6.2-sol': true, 'gpt-6.2-astra': true }).ok, true)
+
+  const after = loadGptModelPolicy({ force: true })
+  assert.deepEqual(after, {
+    ...before,
+    updated_at: after.updated_at,
+    models: {
+      ...before.models,
+      'gpt-6.2-sol': { ...before.models['gpt-6.2-sol'], expose_ultrafast: true },
+      'gpt-6.2-astra': { ...before.models['gpt-6.2-astra'], expose_ultrafast: true },
+    },
+  })
+  assert.equal(patchGptUltrafastAliases({ 'gpt-6.2-sol': false }).ok, true)
+  assert.equal(loadGptModelPolicy({ force: true }).models['gpt-6.2-sol'].expose_ultrafast, false)
+})
 
 test('seed enables image models', (t) => {
   withDb(t)
@@ -134,7 +159,7 @@ test('Fast exposure defaults off, survives sync, and is persisted by panel save'
   saveGptModelPolicy({ models: { 'gpt-6-luna': { enabled: true, expose_fast: true } } })
   assert.equal(getGptModelPolicy().models['gpt-6-luna'].expose_fast, true)
   assert.equal(isGptFastAliasAvailable('gpt-6-luna-fast'), true)
-  assert.equal(listGptFastAliases()[0].id, 'gpt-6-luna-fast')
+  assert.equal(listGptSpeedAliases()[0].id, 'gpt-6-luna-fast')
   syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { service_tiers: [{ id: 'priority', name: 'Fast' }] } }])
   assert.equal(isGptFastAliasAvailable('gpt-6-luna-fast'), true)
   loadGptModelPolicy({ force: true })
@@ -142,7 +167,7 @@ test('Fast exposure defaults off, survives sync, and is persisted by panel save'
   syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { service_tiers: [] } }])
   assert.equal(isGptFastAliasAvailable('gpt-6-luna-fast'), false)
   assert.equal(getGptModelPolicy().models['gpt-6-luna'].expose_fast, true)
-  assert.deepEqual(listGptFastAliases(), [])
+  assert.deepEqual(listGptSpeedAliases(), [])
 })
 
 test('Fast aliases require priority and never replace actual or mapped ids', (t) => {
@@ -158,12 +183,12 @@ test('Fast aliases require priority and never replace actual or mapped ids', (t)
     },
   })
   assert.equal(isGptFastAliasAvailable('gpt-6-luna-fast'), false)
-  assert.deepEqual(listGptFastAliases(), [])
+  assert.deepEqual(listGptSpeedAliases(), [])
 
   resetGptModelPolicy()
   syncGptIdsIntoPolicy([{ id: 'gpt-6-luna', catalog: { service_tiers: [{ id: 'priority', name: 'fast' }] } }])
   saveGptModelPolicy({ models: { 'gpt-6-luna': { enabled: true, expose_fast: true } } })
-  assert.deepEqual(listGptFastAliases({ mappingKeys: ['gpt-6-luna-fast'] }), [])
+  assert.deepEqual(listGptSpeedAliases({ mappingKeys: ['gpt-6-luna-fast'] }), [])
 })
 
 test('sync without metadata keeps the previous catalog', (t) => {

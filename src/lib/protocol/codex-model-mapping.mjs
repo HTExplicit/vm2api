@@ -3,7 +3,7 @@
  * Applied before detectInboundPlatform; literal detect on raw ids is unchanged.
  */
 import { isGptSeriesId } from './gpt-ids.mjs'
-import { getGptPolicyCatalogIds, isGptModelEnabled, resolveGptFastAlias } from './gpt-model-policy.mjs'
+import { getGptPolicyCatalogIds, isGptModelEnabled, resolveGptSpeedAlias } from './gpt-model-policy.mjs'
 import { canonicalImageToolModel } from './image-tool-models.mjs'
 import { detectInboundPlatform } from './platform-detect.mjs'
 
@@ -67,16 +67,17 @@ export function validateCodexModelMappingTarget(target) {
       message: `model mapping target '${id || ''}' must be an enabled GPT chat model id`,
     }
   }
-  const fast = resolveGptFastAlias(id)
-  if (fast.kind === 'unavailable') {
+  const alias = resolveGptSpeedAlias(id)
+  if (alias.kind === 'unavailable') {
     return {
       ok: false,
-      code: fast.reason === 'base_disabled' ? 'model_disabled' : 'model_fast_unavailable',
-      message: `model mapping target '${id}' is not an available Fast alias`,
+      code: alias.reason === 'base_disabled' ? 'model_disabled' : alias.errorCode,
+      message: `model mapping target '${id}' is not an available ${alias.label} alias`,
     }
   }
-  if (fast.kind === 'fast') return { ok: true, target: fast.base, service_tier: fast.service_tier, alias: fast.alias }
-  const actual = fast.kind === 'actual' ? fast.model : id
+  if (alias.kind === 'tier')
+    return { ok: true, target: alias.base, service_tier: alias.service_tier, alias: alias.alias }
+  const actual = alias.kind === 'actual' ? alias.model : id
   if (!isGptModelEnabled(actual)) {
     return {
       ok: false,
@@ -145,15 +146,15 @@ export function applyCodexInboundModelRewrite(body, routing = {}) {
   const mappings = normalizeCodexModelMappings(codex?.model_mappings)
   const target = mappingLookup(mappings, model)
   const requestedModel = model.trim()
-  const fast = target == null ? resolveGptFastAlias(requestedModel) : null
-  if (target == null && fast?.kind === 'unavailable') {
+  const alias = target == null ? resolveGptSpeedAlias(requestedModel) : null
+  if (target == null && alias?.kind === 'unavailable') {
     return {
       ok: false,
-      code: fast.reason === 'base_disabled' ? 'model_disabled' : 'model_fast_unavailable',
-      message: `model '${requestedModel}' is not an available Fast alias`,
+      code: alias.reason === 'base_disabled' ? 'model_disabled' : alias.errorCode,
+      message: `model '${requestedModel}' is not an available ${alias.label} alias`,
     }
   }
-  if (target == null && fast?.kind !== 'fast') {
+  if (target == null && alias?.kind !== 'tier') {
     return { ok: true, body, requestedModel, upstreamModel: null, mapped: false }
   }
   const validated = validateCodexModelMappingTarget(target == null ? requestedModel : target)

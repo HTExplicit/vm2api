@@ -80,7 +80,7 @@ import { CLIENT_POOL_BUSY_MESSAGE, CLIENT_POOL_UNAVAILABLE_MESSAGE, ErrorCode, r
 import { applyOpenaiWashLog } from './openai-wash.mjs'
 import { appendOpenAiSystemPrompt } from './openai-system-prompt.mjs'
 import { canonicalImageToolModel, imageGenerationTools } from './image-tool-models.mjs'
-import { isImageToolModelEnabled, resolveGptFastAlias } from './gpt-model-policy.mjs'
+import { isImageToolModelEnabled, resolveGptSpeedAlias } from './gpt-model-policy.mjs'
 import { sessionIdForLog } from './log-fields.mjs'
 import { redactHeaders } from '../admin/request-log.mjs'
 import {
@@ -763,9 +763,9 @@ export async function handleCodexProtocol({
   }
   let converted
   if (pfMode === 'go' && pfCompile) {
-    const fast = resolveGptFastAlias(ctx.body?.model)
-    if (fast.kind === 'unavailable') {
-      converted = { ok: false, code: fast.reason === 'base_disabled' ? 'model_disabled' : 'model_fast_unavailable' }
+    const alias = resolveGptSpeedAlias(ctx.body?.model)
+    if (alias.kind === 'unavailable') {
+      converted = { ok: false, code: alias.reason === 'base_disabled' ? 'model_disabled' : alias.errorCode }
     } else if (!pfCompile.ok) {
       stats.errors++
       logBag.via = 'codex-kernel'
@@ -783,14 +783,14 @@ export async function handleCodexProtocol({
       )
     } else {
       const goBody = pfCompile.outbound_body
-      if (fast.kind === 'fast') {
+      if (alias.kind === 'tier') {
         const parts = String(goBody.model || '')
           .trim()
           .split('/')
           .filter(Boolean)
-        if (parts.length) parts[parts.length - 1] = fast.base
+        if (parts.length) parts[parts.length - 1] = alias.base
         goBody.model = parts.join('/')
-        goBody.service_tier = fast.service_tier
+        goBody.service_tier = alias.service_tier
       }
       converted = { ok: true, converted: pfCompile.mode !== 'passthrough', body: goBody }
     }

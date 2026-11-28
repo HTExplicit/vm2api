@@ -16,7 +16,7 @@ import { activeHoursOf, evaluateActiveHours } from '../pool/active-hours.mjs'
 import { slotAllowsModel } from '../pool/slot-model-gate.mjs'
 import { fromClaudeToOpenAIChat, fromClaudeToOpenAICompletions, fromClaudeToResponses } from '../protocol/convert.mjs'
 import { isGptSeriesId } from '../protocol/gpt-ids.mjs'
-import { listGptPolicyModels, resolveGptFastAlias } from '../protocol/gpt-model-policy.mjs'
+import { listGptPolicyModels, resolveGptSpeedAlias } from '../protocol/gpt-model-policy.mjs'
 import { isGeminiSeriesId, listGeminiPolicyModels } from '../protocol/gemini-model-policy.mjs'
 import { listPolicyModels, resolvePolicyModelId } from '../protocol/model-policy.mjs'
 import { canonicalizeDottedClaudeId } from '../protocol/models.mjs'
@@ -226,8 +226,8 @@ export function canonicalHealthModelKey(platform, rawModel) {
   if (p === 'openai') {
     const bare = bareModelId(raw)
     try {
-      const fast = resolveGptFastAlias(bare)
-      if (fast.kind === 'fast' && fast.base) return String(fast.base).trim().toLowerCase()
+      const alias = resolveGptSpeedAlias(bare)
+      if (alias.kind === 'tier') return alias.base.toLowerCase()
     } catch {}
     return bare.toLowerCase()
   }

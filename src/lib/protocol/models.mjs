@@ -15,7 +15,7 @@ import {
 } from './model-policy.mjs'
 import { hasClaudeCode1mSuffix, stripClaudeCode1mSuffix } from './context-1m.mjs'
 import { isGptSeriesId } from './gpt-ids.mjs'
-import { listGptFastAliases, listGptPolicyModels, listImageToolModels } from './gpt-model-policy.mjs'
+import { listGptSpeedAliases, listGptPolicyModels, listImageToolModels } from './gpt-model-policy.mjs'
 
 const FAMILY_ALIASES = new Map([
   ['sonnet', 'sonnet'],
@@ -70,7 +70,7 @@ export function listGptPublicModels(mappingKeys = []) {
     }))
     return [
       ...models,
-      ...listGptFastAliases({ mappingKeys }).map((m) => ({
+      ...listGptSpeedAliases({ mappingKeys }).map((m) => ({
         ...m,
         object: 'model',
         type: 'model',

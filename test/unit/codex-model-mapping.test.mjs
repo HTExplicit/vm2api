@@ -10,6 +10,9 @@ import {
   validateCodexModelMappingsPatch,
 } from '../../src/lib/protocol/codex-model-mapping.mjs'
 import { normalizeCodexRouting } from '../../src/lib/protocol/codex-route.mjs'
+import { toCodexResponses } from '../../src/lib/protocol/codex-convert.mjs'
+import { listGptPublicModels } from '../../src/lib/protocol/models.mjs'
+import { formatSiwcBody } from '../../src/lib/transport/siwc-responses.mjs'
 import {
   resetGptModelPolicy,
   saveGptModelPolicy,
@@ -63,6 +66,62 @@ test('Fast aliases rewrite to the base model and force priority', () => {
     service_tier: 'priority',
     alias: 'gpt-6-luna-fast',
   })
+})
+
+test('explicit Ultrafast aliases are listed and converted alongside Fast and standard', () => {
+  resetGptModelPolicy()
+  const model = 'gpt-6.2-sol'
+  const fast = `${model}-fast`
+  const ultrafast = `${model}-ultrafast`
+  const tiers = { service_tiers: [{ id: 'priority', name: 'Fast' }] }
+  syncGptIdsIntoPolicy([
+    { id: model, catalog: tiers },
+    { id: 'gpt-6-luna', catalog: tiers },
+  ])
+  saveGptModelPolicy({ models: { [model]: { enabled: true, expose_fast: true } } })
+  assert.equal(applyCodexInboundModelRewrite({ model: ultrafast }).code, 'model_ultrafast_unavailable')
+  assert.equal(
+    listGptPublicModels().some((row) => row.id === ultrafast),
+    false,
+  )
+
+  saveGptModelPolicy({
+    models: {
+      [model]: { enabled: true, expose_fast: true, expose_ultrafast: true },
+      'gpt-6-luna': { enabled: true, expose_ultrafast: true },
+    },
+  })
+  syncGptIdsIntoPolicy([
+    { id: model, catalog: tiers },
+    { id: 'gpt-6-luna', catalog: tiers },
+  ])
+  const models = new Map(listGptPublicModels().map((row) => [row.id, row]))
+  assert.equal(models.get(fast)?.service_tier, 'priority')
+  assert.equal(models.get(ultrafast)?.service_tier, 'ultrafast')
+  assert.equal(models.has('gpt-6-luna-ultrafast'), false)
+
+  for (const [id, tier] of [
+    [model, 'default'],
+    [fast, 'priority'],
+    [ultrafast, 'ultrafast'],
+  ]) {
+    const request = { model: id, input: 'ping', service_tier: 'default' }
+    const rewritten = applyCodexInboundModelRewrite(request)
+    assert.equal(rewritten.ok, true)
+    assert.equal(rewritten.body.model, model)
+    assert.equal(rewritten.body.service_tier, tier)
+    const converted = toCodexResponses('openai.responses', request)
+    assert.equal(converted.ok, true)
+    assert.equal(formatSiwcBody(converted.body).model, model)
+    assert.equal(formatSiwcBody(converted.body).service_tier, tier)
+  }
+
+  saveGptModelPolicy({ models: { [model]: { enabled: false } } })
+  assert.equal(applyCodexInboundModelRewrite({ model: ultrafast }).code, 'model_disabled')
+  assert.equal(
+    listGptPublicModels().some((row) => row.id === ultrafast),
+    false,
+  )
 })
 
 test('unavailable Fast aliases fail locally and mapping keys take precedence', () => {

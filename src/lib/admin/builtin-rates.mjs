@@ -3,6 +3,8 @@
  * Anthropic cache: 5m = 1.25× input, 1h = 2× input unless a published read/write differs.
  * OpenAI cache_5m = published cache_write (0 if none); cache_1h = cache_5m.
  */
+import { isPublishedGptUltrafastModel } from '../protocol/gpt-ids.mjs'
+
 export const BUILTIN_SOURCE = 'builtin-2026-10-14'
 
 const WEB_SEARCH = 0.01
@@ -401,8 +403,6 @@ export const BUILTIN_ALIASES = {
 export const BUILTIN_RATES = { anthropic: ANTHROPIC, openai: OPENAI, google: GOOGLE }
 
 // https://developers.openai.com/api/docs/pricing?latest-pricing=ultrafast
-const ULTRAFAST_MODELS = new Set(['gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6-astra', 'gpt-6.1-sol'])
-
 function scaleRates(band, multiplier) {
   return tokenPrice(
     band.input * multiplier,
@@ -415,7 +415,7 @@ function scaleRates(band, multiplier) {
 
 export function builtinRate(platform, id, at) {
   const price = BUILTIN_RATES[platform]?.[id] || null
-  if (platform !== 'openai' || !ULTRAFAST_MODELS.has(id)) return price
+  if (platform !== 'openai' || !isPublishedGptUltrafastModel(id)) return price
   const multiplier = id.startsWith('gpt-6.2-') && at < ULTRAFAST_PROMOTION_END ? 3 : 6
   const ultrafast = {
     ...scaleRates(price, multiplier),

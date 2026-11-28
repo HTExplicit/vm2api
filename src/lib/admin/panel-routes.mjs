@@ -101,6 +101,7 @@ import {
   listImageToolModels,
   saveGptModelPolicy,
   resetGptModelPolicy,
+  patchGptUltrafastAliases,
 } from '../protocol/gpt-model-policy.mjs'
 import {
   getGeminiModelPolicy,
@@ -8062,6 +8063,20 @@ export function createPanelHandler(ctx) {
             platform: 'anthropic',
           }),
         )
+      }
+      if (req.method === 'PATCH' && p === '/api/panel/model-policy') {
+        const body = await readBody(req, 8192)
+        const result =
+          url.searchParams.get('platform') === 'openai'
+            ? patchGptUltrafastAliases(body?.models)
+            : { ok: false, message: '请指定 platform=openai' }
+        if (!result.ok) {
+          return json(res, 400, {
+            ok: false,
+            error: { code: 'invalid_ultrafast_alias_patch', message: result.message },
+          })
+        }
+        return json(res, 200, panel.ok({ models: result.models }))
       }
       if (req.method === 'PUT' && p === '/api/panel/model-policy') {
         const body = await readBody(req, 2 * 1024 * 1024)

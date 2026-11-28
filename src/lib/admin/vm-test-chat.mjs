@@ -37,7 +37,7 @@ import { isModelEnabled, getModelParams, getCapabilities, listPolicyModels } fro
 import {
   listGptPolicyModels,
   isGptModelEnabled,
-  resolveGptFastAlias,
+  resolveGptSpeedAlias,
   syncGptIdsIntoPolicy,
 } from '../protocol/gpt-model-policy.mjs'
 import { modelsDevMeta } from './price-catalog.mjs'
@@ -1162,21 +1162,21 @@ export async function runVmTestChat(opts = {}) {
   push('info', `模型 ${model}`)
 
   if (codex) {
-    const fast = resolveGptFastAlias(model)
-    if (fast.kind === 'unavailable') {
+    const alias = resolveGptSpeedAlias(model)
+    if (alias.kind === 'unavailable') {
       push('error', `模型不可用: ${model}`)
       return done({
         ok: false,
         vm_id: vmId,
         model,
-        error: { code: 'model_fast_unavailable', message: 'Fast alias is unavailable' },
+        error: { code: alias.errorCode, message: `${alias.label} alias is unavailable` },
         log,
         duration_ms: Date.now() - started,
       })
     }
-    if (fast.kind === 'fast') {
-      model = fast.base
-      serviceTier = fast.service_tier
+    if (alias.kind === 'tier') {
+      model = alias.base
+      serviceTier = alias.service_tier
     }
     if (!isGptSeriesId(model) || !isGptModelEnabled(model)) {
       push('error', `模型不可用: ${model}`)
