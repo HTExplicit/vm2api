@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { StatusBadge } from '../log-cells'
+import { isInFlightLog, logRowKey, resolveLiveMeta } from '../log-display'
 import type { DetailTab } from '../virtualized-logs-table'
 import { LogicTraceTab } from './logic-trace-tab'
 import { PerformanceTab } from './performance-tab'
@@ -43,6 +44,8 @@ export function LogDetailDialog({
     setTab(state.scrollToRedirect ? 'summary' : (state.tab ?? 'summary'))
   }, [state])
   const row = state?.row
+  const inFlight = row ? isInFlightLog(row) : false
+  const live = row && inFlight ? resolveLiveMeta(row) : null
 
   return (
     <Dialog open={!!state} onOpenChange={(open) => !open && onClose()}>
@@ -64,6 +67,9 @@ export function LogDetailDialog({
                   errorCode={row.errorCode}
                   errorClass={row.errorClass}
                   errorLabel={row.errorLabel}
+                  inFlight={inFlight}
+                  livePhase={live?.phase}
+                  attemptCount={live?.attemptCount}
                 />
               ) : null}
             </DialogTitle>
@@ -73,7 +79,7 @@ export function LogDetailDialog({
           </DialogHeader>
           {row ? (
             <Tabs
-              key={row.id}
+              key={logRowKey(row) || row.id}
               value={tab}
               onValueChange={(value) => setTab(value as DetailTab)}
               className='flex min-h-0 flex-1 flex-col'

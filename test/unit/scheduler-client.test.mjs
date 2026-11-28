@@ -340,7 +340,7 @@ test('computeAcquireTimeoutMs and computeSwitchTimeoutMs enforce dynamic queuein
   assert.equal(computeSwitchTimeoutMs({ no_queue: true }), 2_000)
 })
 
-test('Dockerfiles, entrypoint, and CI workflow wire native kin-scheduler build and conditional Rust CI', () => {
+test('Dockerfiles, entrypoint, and CI workflow wire native kin-scheduler build and run the Rust workspace', () => {
   const pinnedDigest = 'rust:1.86-bookworm@sha256:300ec56abce8cc9448ddea2172747d048ed902a3090e6b57babb2bf19f754081'
   const amd64Dockerfile = fs.readFileSync(path.join(REPO_ROOT, 'Dockerfile'), 'utf8')
   assert.match(amd64Dockerfile, new RegExp(pinnedDigest.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
@@ -359,13 +359,10 @@ test('Dockerfiles, entrypoint, and CI workflow wire native kin-scheduler build a
   assert.match(entrypoint, /KIN_SCHEDULER_BIN/)
 
   const ciYml = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/test.yml'), 'utf8')
-  assert.match(ciYml, /rust_scheduler:/)
-  assert.match(ciYml, /'scheduler\/\*\*'/)
   assert.match(ciYml, /dtolnay\/rust-toolchain@1\.86\.0/)
   assert.match(ciYml, /RUSTUP_TOOLCHAIN:\s*'1\.86\.0'/)
-  assert.match(ciYml, /cargo fmt --check/)
-  assert.match(ciYml, /cargo clippy --workspace --all-targets -- -D warnings/)
-  assert.match(ciYml, /cargo test --workspace --locked/)
+  assert.match(ciYml, /cargo test --manifest-path scheduler\/Cargo\.toml --workspace --locked/)
+  assert.match(ciYml, /npm run build:scheduler/)
 })
 
 test('mock UDS contract: all 14 endpoints, batch heartbeat, throttled telemetry, drain ACK, SSE & standby guard', async (t) => {

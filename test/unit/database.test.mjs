@@ -773,8 +773,8 @@ test('migration 078 updates existing endpoint policies once and allows rollback 
     const pg010Sql = fs.readFileSync(pg010, 'utf8')
     assert.match(pg010Sql, /ALTER TABLE api_endpoints[\s\S]*ALTER COLUMN body_policy SET DEFAULT 'caller'/i)
     assert.doesNotMatch(pg010Sql, /UPDATE api_endpoints/i)
-    const pg011 = path.resolve('src/lib/db/pg/pg-migrations/011_api_endpoint_body_policy_backfill.sql')
-    assert.equal(fs.readFileSync(pg011, 'utf8'), fs.readFileSync(path.join(src, '078_api_endpoint_body_policy_backfill.sql'), 'utf8'))
+    const pg012 = path.resolve('src/lib/db/pg/pg-migrations/012_api_endpoint_body_policy_backfill.sql')
+    assert.equal(fs.readFileSync(pg012, 'utf8'), fs.readFileSync(path.join(src, '078_api_endpoint_body_policy_backfill.sql'), 'utf8'))
   } finally {
     db.close()
   }

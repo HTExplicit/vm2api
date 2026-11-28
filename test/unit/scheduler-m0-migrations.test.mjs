@@ -825,7 +825,7 @@ test('PostgreSQL 008 migration, SchedulerPoolsRepo, bootstrapSchedulerPools, and
   }
 })
 
-test('PostgreSQL 011 backfills existing body policies and keeps later choices', { skip: !PG_URL }, async (t) => {
+test('PostgreSQL 012 backfills existing body policies and keeps later choices', { skip: !PG_URL }, async (t) => {
   const oldDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-pg-before011-'))
   const migrationDir = path.dirname(PG_009)
   for (const file of fs.readdirSync(migrationDir)) {
@@ -847,7 +847,11 @@ test('PostgreSQL 011 backfills existing body policies and keeps later choices', 
 
   await applyPgMigrations(pool, { migrationsDir: oldDir })
   await pool.query("INSERT INTO api_endpoints (id, name, base_url, body_policy) VALUES ('old', 'Old', 'https://example.test', 'persona')")
-  assert.deepEqual(await applyPgMigrations(pool), ['011_api_endpoint_body_policy_backfill.sql'])
+  assert.deepEqual(await applyPgMigrations(pool), [
+    '011_drop_duplicate_usage_logs_indexes.sql',
+    '012_api_endpoint_body_policy_backfill.sql',
+    '013_fork_api_log_metadata.sql',
+  ])
   const policy = () => pool.query("SELECT body_policy FROM api_endpoints WHERE id = 'old'")
   assert.equal((await policy()).rows[0].body_policy, 'caller')
 

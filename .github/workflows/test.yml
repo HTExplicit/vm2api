@@ -98,7 +98,8 @@ jobs:
         env:
           VM2API_TEST_PG_URL: postgresql://postgres:fixture-password@127.0.0.1:${{ job.services.postgres.ports[5432] }}/postgres
         run: |
-          node --test --test-name-pattern='PostgreSQL 011' test/unit/scheduler-m0-migrations.test.mjs
+          node --test --test-name-pattern='PostgreSQL 012' test/unit/scheduler-m0-migrations.test.mjs
+          node --test test/unit/pg-log-writer.test.mjs test/unit/log-realtime-merge.test.mjs test/unit/panel-redis-opt.test.mjs test/unit/request-redis-opt.test.mjs
           node --test test/unit/scheduler-client.test.mjs test/unit/scheduler-m3-parity-fable.test.mjs test/unit/scheduler-m3-parity-node-gates.test.mjs test/unit/scheduler-m3-parity-session-home.test.mjs
           node --test test/unit/codex-kernel-packed.test.mjs test/unit/gemini-pool-circuit-config.test.mjs test/unit/gemini-slot-prefs-502-ttl.test.mjs test/unit/panel-node-cooldown.test.mjs test/unit/crag-321-rectifier.test.mjs test/unit/crag-v4-protocol-invariants.test.mjs
       - name: focused backend regressions
@@ -455,7 +456,7 @@ jobs:
           pnpm exec vitest run src/features/vm/codex-browser-finish.test.ts src/features/vm/codex-credential-browser-completion.test.tsx
           pnpm exec vitest run src/features/vm/claude-credential-panel.test.tsx
           pnpm exec vitest run src/features/openai-apikey src/features/logs/account-api-logs.test.tsx src/components/layout/data/sidebar-data.test.ts
-          pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/log-detail/summary-tab.test.tsx src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx src/features/logs/failure-display.test.tsx
+          pnpm exec vitest run src/features/logs/log-display.test.ts src/features/logs/log-detail/summary-tab.test.tsx src/features/logs/live-logs.test.tsx src/features/logs/export-query.test.ts src/features/logs/model-display.test.tsx src/features/logs/failure-display.test.tsx
           pnpm exec vitest run src/features/anthropic/endpoint-save.test.ts
           pnpm exec vitest run src/features/settings/health-pane.test.ts src/features/cluster/slot-migration.test.ts
           pnpm exec vitest run src/features/vm/engine-editor.test.tsx src/features/wrap/index.test.tsx src/lib/slash-line.test.ts src/features/vm/engine-contract.test.ts src/features/vm/persona-contract.test.ts src/lib/wrap-health.test.ts src/features/system/compat-patch.test.ts
