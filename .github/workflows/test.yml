@@ -381,6 +381,7 @@ jobs:
             test/unit/gemini-host.test.mjs \
             test/unit/gemini-convert.test.mjs \
             test/unit/gemini-foundation.test.mjs \
+            test/unit/codex-reauth-unrest.test.mjs \
             test/unit/gemini-routing-config.test.mjs \
             test/unit/gemini-system-prompt.test.mjs \
             test/unit/proxy-boot-grace.test.mjs \

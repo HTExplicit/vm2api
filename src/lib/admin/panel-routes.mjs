@@ -578,6 +578,7 @@ export async function commitImportedCodexVm({
   catalogClientVersion = 'auto',
   routingConfig = {},
   onAccountChanged,
+  poolScheduler = null,
 }) {
   const wasCodex = isCodexVm(existing)
   const previousPolicy = existing.policy && typeof existing.policy === 'object' ? existing.policy : {}
@@ -638,6 +639,8 @@ export async function commitImportedCodexVm({
     // 凭证换新同时清进程内存 hold（含 grant-death 的 MAX_SAFE_INTEGER 永久占位），
     // 否则复活号磁盘健康但调度层恒 cooldown，直到进程重启才回池。
     clearOpenAIAccountHold(existing.id)
+    // The Rust scheduler keeps its own penalty for a revoked grant; clear it too (#2086).
+    poolScheduler?.unrestCodexNode?.(existing.id)
   }
   let catalog = null
   try {
@@ -7858,6 +7861,7 @@ export function createPanelHandler(ctx) {
               catalogClientVersion: ctx.routingConfig.codex?.catalog_client_version,
               routingConfig: ctx.routingConfig,
               onAccountChanged: cleanupChangedBrowserAccount,
+              poolScheduler: ctx.poolScheduler,
             })
             return json(res, 200, panel.ok(committed))
           }
@@ -8085,6 +8089,7 @@ export function createPanelHandler(ctx) {
               catalogClientVersion: ctx.routingConfig.codex?.catalog_client_version,
               routingConfig: ctx.routingConfig,
               onAccountChanged: cleanupChangedBrowserAccount,
+              poolScheduler: ctx.poolScheduler,
               account: {
                 access_token: oauth.access_token,
                 refresh_token: oauth.refresh_token,
@@ -8383,6 +8388,7 @@ export function createPanelHandler(ctx) {
               expires_at: tok.expires_at || first.expires_at,
             })
             clearOpenAIAccountHold(id)
+            ctx.poolScheduler?.unrestCodexNode?.(id)
             return json(res, 200, panel.ok({ ok: true, refreshed: true, platform: 'openai' }))
           })
         }
