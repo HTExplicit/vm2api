@@ -6,6 +6,38 @@ import os from 'node:os'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
+import { createFailoverMockSchedulerRuntime, createMockSchedulerRuntime } from '../helpers/mock-scheduler-runtime.mjs'
+
+function makeMockApiScheduler(pickFn) {
+  const runtime = createMockSchedulerRuntime()
+  return {
+    pick: pickFn,
+    async acquire(requestedModel, opts = {}) {
+      const picked = pickFn(requestedModel, Date.now(), opts)
+      if (!picked?.ok) return picked
+      const epId = picked.endpoint?.id || 'ep-test'
+      const acquired = await (opts.schedulerRuntime || runtime).acquireNode({
+        ...opts,
+        nodeTypes: ['api_endpoint'],
+        allowedNodeKeys: [`api_endpoint:${epId}`],
+        model: requestedModel,
+      })
+      return {
+        ...picked,
+        leaseId: acquired.lease_id,
+        leaseTtlMs: acquired.lease_ttl_ms,
+        nodeKey: acquired.selected_node.node_key,
+        resolvedPoolId: acquired.resolved_pool_id,
+      }
+    },
+    async commitLease(leaseId, opts = {}) {
+      return (opts.schedulerRuntime || runtime).commitLease(leaseId)
+    },
+    async releaseLease(leaseId, payload = {}, opts = {}) {
+      return (opts.schedulerRuntime || runtime).releaseLease(leaseId, payload)
+    },
+  }
+}
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
 import { FailoverRunner } from '../../src/lib/pool/failover-runner.mjs'
 import { CRS_OFFICIAL_AGENT_PROMPT, CRS_OFFICIAL_CLI_SYSTEM } from '../../src/lib/identity/crs-persona.mjs'
@@ -13,11 +45,13 @@ import { OFFICIAL_303_HARNESS } from '../../src/lib/identity/official-profiles.m
 import { sessionIdFromOutboundBody } from '../../src/lib/identity/identity-rewrite.mjs'
 import { DEFAULT_AGENT_STANDING } from '../../src/lib/identity/persona-template.mjs'
 import {
+  forwardAnthropicProtocolHeaders,
   isOpenAIResponsesCommitEvent,
   resolveInferenceBackend,
   messagesUrl,
   runApiInference,
 } from '../../src/lib/pool/api-protocol.mjs'
+import { OFFICIAL_CLAUDE_CLI_UA } from '../../src/lib/identity/vm-identity.mjs'
 import { createClaudeMessageAssembler, applyClaudeSSELineToMessage } from '../../src/lib/protocol/convert.mjs'
 import { ApiScheduler } from '../../src/lib/pool/api-scheduler.mjs'
 import { classifierFixture } from '../fixtures/auto-mode.mjs'
@@ -162,14 +196,13 @@ async function runOfficialFullApiFixture({ input = {}, extraEvents = '' } = {}) 
     stickyRouter: {},
     accountQuota: {},
     apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
-    apiScheduler: {
-      pick: () => ({
-        ok: true,
-        endpoint: { id: 'ep-test', kind: 'claude', protocol: 'anthropic', base_url: 'https://upstream.invalid' },
-        upstream_model: 'claude-haiku-4-5',
-        key: { id: 'key-test', api_key: 'secret' },
-      }),
-    },
+    schedulerRuntime: createMockSchedulerRuntime(),
+    apiScheduler: makeMockApiScheduler(() => ({
+      ok: true,
+      endpoint: { id: 'ep-test', kind: 'claude', protocol: 'anthropic', base_url: 'https://upstream.invalid' },
+      upstream_model: 'claude-haiku-4-5',
+      key: { id: 'key-test', api_key: 'secret' },
+    })),
     apiEndpointStore: {},
     stats,
     routingConfigPath: routingFile,
@@ -316,24 +349,23 @@ async function apiBackendHop({ endpoint = {}, body, reqHeaders = {}, pick, routi
     stickyRouter: {},
     accountQuota: {},
     apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
-    apiScheduler: {
-      pick: (...args) => {
-        picks.push(args)
-        const chosen = pick ? pick(picks.length) : endpoint
-        return {
-          ok: true,
-          endpoint: {
-            id: 'ep-test',
-            kind: 'claude',
-            protocol: 'anthropic',
-            base_url: 'https://upstream.invalid',
-            ...chosen,
-          },
-          upstream_model: 'claude-haiku-4-5',
-          key: { id: 'key-test', api_key: 'secret' },
-        }
-      },
-    },
+    schedulerRuntime: createMockSchedulerRuntime(),
+    apiScheduler: makeMockApiScheduler((...args) => {
+      picks.push(args)
+      const chosen = pick ? pick(picks.length) : endpoint
+      return {
+        ok: true,
+        endpoint: {
+          id: 'ep-test',
+          kind: 'claude',
+          protocol: 'anthropic',
+          base_url: 'https://upstream.invalid',
+          ...chosen,
+        },
+        upstream_model: 'claude-haiku-4-5',
+        key: { id: 'key-test', api_key: 'secret' },
+      }
+    }),
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
     routingConfigPath: routingFile,
@@ -584,8 +616,10 @@ for (const previousVm of [null, 'vm-01']) {
       vm,
       exec: { vmId: vm.id, vm, homeDir: path.join(root, 'home'), oauth: { account_uuid: 'account-1' } },
     }
+    const scheduler = { selectAndReserve: async () => selected, markSuccess() {} }
     const runner = new FailoverRunner({
-      scheduler: { selectAndReserve: async () => selected, markSuccess() {} },
+      scheduler,
+      schedulerRuntime: createFailoverMockSchedulerRuntime({ scheduler }),
       stickyRouter: sticky,
     })
     let releaseFirst
@@ -1598,14 +1632,13 @@ test('API backend non-stream maps incomplete assistant hops to incomplete_respon
     stickyRouter: {},
     accountQuota: {},
     apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
-    apiScheduler: {
-      pick: () => ({
-        ok: true,
-        endpoint: { id: 'ep-test', kind: 'claude', protocol: 'anthropic', base_url: 'https://upstream.invalid' },
-        upstream_model: 'claude-haiku-4-5',
-        key: { id: 'key-test', api_key: 'secret' },
-      }),
-    },
+    schedulerRuntime: createMockSchedulerRuntime(),
+    apiScheduler: makeMockApiScheduler(() => ({
+      ok: true,
+      endpoint: { id: 'ep-test', kind: 'claude', protocol: 'anthropic', base_url: 'https://upstream.invalid' },
+      upstream_model: 'claude-haiku-4-5',
+      key: { id: 'key-test', api_key: 'secret' },
+    })),
     apiEndpointStore: {},
     stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
     routingConfigPath: routingFile,
@@ -2833,3 +2866,182 @@ for (const clientStream of [false, true]) {
     assert.equal(beforeOutput.result.upstreamResponseModel, null)
   })
 }
+test('V11: api-direct gates forwardAnthropicProtocolHeaders on verified officialTraffic || passthrough', async () => {
+  const thirdPartyHeaders = {
+    'user-agent': 'python-httpx/0.27.0',
+    'anthropic-beta': 'evil-third-party-beta-2026',
+    'x-stainless-lang': 'python',
+    'x-stainless-runtime': 'CPython',
+    'x-app': 'opencode',
+    'x-claude-code-session-id': 'spoof-session',
+    'x-client-request-id': 'spoof-req',
+  }
+
+  // Unit check: non-official + passthrough=false drops ALL third-party protocol headers
+  assert.deepEqual(
+    forwardAnthropicProtocolHeaders(thirdPartyHeaders, 'anthropic.messages', 'anthropic', {
+      passthrough: false,
+      officialTraffic: false,
+    }),
+    {},
+  )
+
+  // Verified officialTraffic=true forwards protocol headers (but keeps UA gated on passthrough)
+  const officialFwd = forwardAnthropicProtocolHeaders(thirdPartyHeaders, 'anthropic.messages', 'anthropic', {
+    passthrough: false,
+    officialTraffic: true,
+  })
+  assert.equal(officialFwd['user-agent'], undefined)
+  assert.equal(officialFwd['anthropic-beta'], 'evil-third-party-beta-2026')
+  assert.equal(officialFwd['x-app'], 'opencode')
+
+  // End-to-end API Direct hop: spoofed third-party headers never reach upstream
+  const { received, response } = await apiBackendHop({
+    endpoint: {},
+    body: { model: 'claude-haiku-4-5', messages: [{ role: 'user', content: 'hello' }] },
+    reqHeaders: thirdPartyHeaders,
+  })
+  assert.equal(response.status, 200)
+  assert.equal(received.headers['user-agent'], OFFICIAL_CLAUDE_CLI_UA)
+  assert.equal(received.headers['anthropic-version'], '2023-06-01')
+  assert.equal(received.headers['anthropic-beta'], undefined)
+  assert.equal(received.headers['x-stainless-lang'], undefined)
+  assert.equal(received.headers['x-stainless-runtime'], undefined)
+  assert.equal(received.headers['x-app'], undefined)
+  assert.equal(received.headers['x-claude-code-session-id'], undefined)
+  assert.equal(received.headers['x-client-request-id'], undefined)
+})
+
+unixTest(
+  'V6: openai.responses on API Direct rewrites non-CC tools to mcp__ and restores original names in JSON and SSE',
+  async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-api-v6-resp-'))
+    const routingFile = path.join(root, 'routing.json')
+    const socketPath = path.join(root, 'run', 'api-kernel.sock')
+    fs.mkdirSync(path.dirname(socketPath), { recursive: true })
+    fs.writeFileSync(routingFile, JSON.stringify({ compatibility: { persona_preset: 'official_full' } }))
+    const receivedBodies = []
+    const kernel = http.createServer((req, res) => {
+      const chunks = []
+      req.on('data', (c) => chunks.push(c))
+      req.on('end', () => {
+        const env = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        receivedBodies.push(JSON.parse(env.body))
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        res.end(
+          [
+            `data: ${JSON.stringify({ type: 'message_start', message: { id: 'msg_v6', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6', content: [], usage: { input_tokens: 10, output_tokens: 0 } } })}`,
+            `data: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'mcp__fs_read', input: {} } })}`,
+            `data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"/tmp/a"}' } })}`,
+            `data: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}`,
+            `data: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 5 } })}`,
+            `data: ${JSON.stringify({ type: 'message_stop' })}`,
+            '',
+          ].join('\n\n'),
+        )
+      })
+    })
+    await new Promise((resolve) => kernel.listen(socketPath, resolve))
+    try {
+      const makeHandler = (body, response) =>
+        createHandleProtocol({
+          json: (_res, status, payload) => {
+            response.status = status
+            response.body = payload
+            return payload
+          },
+          writeSSEHeaders: () => {
+            response.headersSent = true
+          },
+          readBody: async () => structuredClone(body),
+          requireAuth: () => true,
+          cfg: {
+            rewrite: { enabled: false },
+            intercept: { rules: [] },
+            distill: { enabled: false },
+            limits: { max_body_bytes: 1024 * 1024, upstream_timeout_ms: 2000 },
+            paths: { data: root },
+          },
+          requestLog: { start: () => ({ request_id: 'v6-api-test' }), finish() {} },
+          stickyRouter: {},
+          accountQuota: {},
+          apiKeyStore: { acquire: () => ({ ok: true }), release() {} },
+          schedulerRuntime: createMockSchedulerRuntime(),
+          apiScheduler: makeMockApiScheduler(() => ({
+            ok: true,
+            endpoint: { id: 'ep-v6', kind: 'claude', protocol: 'anthropic', base_url: 'https://upstream.invalid' },
+            upstream_model: 'claude-sonnet-4-6',
+            key: { id: 'key-v6', api_key: 'secret' },
+          })),
+          apiEndpointStore: {},
+          stats: { errors: 0, requests: 0, by_route: {}, passthrough: 0, rewrite: 0, convert: 0 },
+          routingConfigPath: routingFile,
+          routingConfig: { compatibility: { persona_preset: 'official_full' }, failover: {} },
+          groupsRepo: { rateMultiplier: () => 1 },
+        })
+
+      const baseResponsesReq = {
+        model: 'claude-sonnet-4-6',
+        input: [{ role: 'user', content: 'read file' }],
+        tools: [
+          {
+            type: 'function',
+            name: 'fs_read',
+            description: 'Read a file',
+            parameters: { type: 'object', properties: { path: { type: 'string' } } },
+          },
+        ],
+      }
+
+      // 1. Non-stream JSON response
+      const jsonRes = fakeResponse()
+      await makeHandler({ ...baseResponsesReq, stream: false }, jsonRes).handleProtocol(
+        {
+          method: 'POST',
+          url: '/v1/responses',
+          headers: { authorization: 'Bearer sk-vm-api', 'user-agent': 'OpenAI-SDK/1.0' },
+          apiKeyKind: 'managed',
+          apiKeyRecord: { category: 'api' },
+          once() {},
+          off() {},
+        },
+        jsonRes,
+        'openai.responses',
+        '/v1/responses',
+      )
+      assert.equal(jsonRes.status, 200)
+      assert.equal(receivedBodies[0].tools[0].name, 'mcp__fs_read')
+      const fnCall = jsonRes.body.output.find((item) => item.type === 'function_call')
+      assert.equal(fnCall?.name, 'fs_read')
+
+      // 2. Streaming SSE response
+      let sseWire = ''
+      const sseRes = {
+        ...fakeResponse(),
+        write(chunk) {
+          sseWire += String(chunk)
+        },
+      }
+      await makeHandler({ ...baseResponsesReq, stream: true }, sseRes).handleProtocol(
+        {
+          method: 'POST',
+          url: '/v1/responses',
+          headers: { authorization: 'Bearer sk-vm-api', 'user-agent': 'OpenAI-SDK/1.0' },
+          apiKeyKind: 'managed',
+          apiKeyRecord: { category: 'api' },
+          once() {},
+          off() {},
+        },
+        sseRes,
+        'openai.responses',
+        '/v1/responses',
+      )
+      assert.equal(receivedBodies[1].tools[0].name, 'mcp__fs_read')
+      assert.match(sseWire, /"name":"fs_read"/)
+      assert.doesNotMatch(sseWire, /"name":"mcp__fs_read"/)
+    } finally {
+      await new Promise((resolve) => kernel.close(resolve))
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  },
+)

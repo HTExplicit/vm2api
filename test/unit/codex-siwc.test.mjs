@@ -24,6 +24,8 @@ import { withVmLock } from '../../src/lib/vm/vm-file.mjs'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 import { createResponsesWsHandler } from '../../src/lib/protocol/responses-ws.mjs'
 
+import { createMockSchedulerRuntime } from '../helpers/mock-scheduler-runtime.mjs'
+
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
 const issuer = 'https://auth.openai.com'
 const authClaim = 'https://api.openai.com/auth'
@@ -544,6 +546,7 @@ async function infer(f, protocol, partial, { pin = f.vm.id, native, extraRouting
     projectRoot: f.root,
     routing: extraRouting,
     siwc: f.siwc,
+    schedulerRuntime: createMockSchedulerRuntime({ projectRoot: f.root }),
     ops: {
       writeCodexKernelConfig: () => (native ? null : assert.fail('native Codex configuration')),
       ensureCodexKernel: async () => ({ ok: true }),
@@ -625,6 +628,7 @@ test('unsupported tools and standalone images never use either credential on a p
 async function searchOnSlot(f, { pin, key, fetchImpl = () => assert.fail('unexpected search hop'), refresh } = {}) {
   const logBag = {}
   const response = await handleCodexSearch({
+    schedulerRuntime: createMockSchedulerRuntime({ projectRoot: f.root }),
     req: {
       headers: pin ? { 'x-kin-vm': pin } : {},
       apiKeyKind: key ? 'managed' : 'master',
@@ -1000,6 +1004,7 @@ async function listenGateway(t, f, { upstreamTransport, codexOps, logs = [], max
     paths: { project: f.root, data: f.root },
   }
   const { handleProtocol } = createHandleProtocol({
+    schedulerRuntime: createMockSchedulerRuntime({ projectRoot: f.root }),
     json,
     requireAuth,
     cfg,

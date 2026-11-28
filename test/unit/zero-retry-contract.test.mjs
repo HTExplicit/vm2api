@@ -5,6 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { createHandleProtocol } from '../../src/lib/protocol/handle-protocol.mjs'
 import { FailoverRunner } from '../../src/lib/pool/failover-runner.mjs'
+import { createFailoverMockSchedulerRuntime } from '../helpers/mock-scheduler-runtime.mjs'
 import { validateCacheBreakpoints } from '../../src/lib/protocol/cache-ttl.mjs'
 
 const rule = 'CALLER_SYSTEM_SURVIVES_REPAIR_38ba'
@@ -97,10 +98,9 @@ async function runCase(
   }
   const routingFile = path.join(root, 'routing.json')
   fs.writeFileSync(routingFile, JSON.stringify(routing))
-  let selections = 0
   const scheduler = {
-    async selectAndReserve() {
-      const alternate = switchAfterRepair && selections++ >= 2
+    async selectAndReserve({ excluded } = {}) {
+      const alternate = switchAfterRepair && Boolean(excluded?.has('vm-zero'))
       const vmId = alternate ? 'vm-other' : 'vm-zero'
       const vm = { id: vmId, persona_preset: alternate ? 'official_full' : 'zero', official_cc_inference: 'cli-hop' }
       return { ok: true, vmId, accountId: vmId, vm, exec: { vmId, vm, homeDir: root }, release() {} }
@@ -111,7 +111,11 @@ async function runCase(
     },
     releaseAccountSessions() {},
   }
-  const runner = new FailoverRunner({ scheduler, config: { signature_repair: true, max_same_account_retries: 0 } })
+  const runner = new FailoverRunner({
+    scheduler,
+    schedulerRuntime: createFailoverMockSchedulerRuntime({ scheduler }),
+    config: { signature_repair: true, max_same_account_retries: 0 },
+  })
   const hops = []
   let refusalWrites = 0
   let deviceBlocks = 0
@@ -224,11 +228,16 @@ async function runCase(
     assert.equal(JSON.stringify(hop.body).split(rule).length - 1, 1)
     assert.equal(hop.repaired, !repeatAfterEntitlement && index > 0 && !(repeatWithCachedSearchRepair && index === 2))
     assert.equal(hop.body.system[0].text.includes('prompt_version=<'), hop.preset === 'zero')
-    // A third-party caller's system is relocated to the head of the first user
-    // message before any hop renders (#1208), on every slot preset.
+    // Mode 3 (zero) preserves caller system verbatim in system[] without relocating to messages[0];
+    // non-zero presets relocate third-party caller system to the head of the first user turn.
     const firstUser = hop.body.messages.find((message) => message.role === 'user')
-    assert.ok(firstUser.content.some((block) => block.text === rule))
-    assert.ok(!JSON.stringify(hop.body.system).includes(rule))
+    if (hop.preset === 'zero') {
+      assert.ok(hop.body.system.some((block) => block.text === rule))
+      assert.ok(!firstUser.content.some((block) => block.text === rule))
+    } else {
+      assert.ok(firstUser.content.some((block) => block.text === rule))
+      assert.ok(!JSON.stringify(hop.body.system).includes(rule))
+    }
     if (index > 0) fixture.check(hop.body)
     validateCacheBreakpoints(hop.body)
   }

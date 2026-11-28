@@ -38,6 +38,7 @@ import {
   createGeminiTerminal,
   formatGoogleModelList,
   geminiKeyAllowsPath,
+  geminiProxyEgressOptionsFor,
   geminiProxyFor,
   googleModelEntry,
   callGeminiHost,
@@ -92,16 +93,28 @@ import { normalizeNotifyConfig, createNotifyMonitor, dispatchNotify } from './li
 import { snapshotVmConnectivity } from './lib/admin/vm-connectivity.mjs'
 import { runVmTestChat } from './lib/admin/vm-test-chat.mjs'
 import { VmTestScheduleRunner } from './lib/admin/vm-test-schedule.mjs'
-import { preheatNextWindowEnd, preheatWindowState } from './lib/admin/vm-test-preheat-window.mjs'
+import {
+  preheatNextWindowEnd,
+  preheatRenewEpisodeKey,
+  preheatWindowStateLikeServer,
+} from './lib/admin/vm-test-preheat-window.mjs'
 import { StickyRouter } from './lib/pool/sticky-router.mjs'
 import { AccountQuota } from './lib/pool/account-quota.mjs'
 import { normalizeTiers } from './lib/pool/quota-tiers.mjs'
 import { ApiKeyStore, makeApiKeyGateError } from './lib/admin/api-keys.mjs'
-import { keyScopeFromRequest, keyTierPolicyFromRecord } from './lib/admin/key-scope.mjs'
+import {
+  filterModelsForPoolAccess,
+  keyScopeFromRequest,
+  keyTierPolicyFromRecord,
+  resolvePoolAccessForKey,
+} from './lib/admin/key-scope.mjs'
+import { requestedPoolIdFromHeaders } from './lib/protocol/pool-prompt-policy.mjs'
 import { ownerScopeFromRequest } from './lib/admin/resource-owner.mjs'
 import { filterModelCatalogForKey } from './lib/admin/key-models.mjs'
 import { GroupsRepo } from './lib/db/repos/groups-repo.mjs'
 import { GeminiOwnersRepo } from './lib/db/repos/gemini-owners-repo.mjs'
+import { bootstrapSchedulerPools } from './lib/db/repos/scheduler-pools-repo.mjs'
+import { createSchedulerRuntime } from './lib/scheduler/scheduler-runtime.mjs'
 import { SettingsRepo } from './lib/db/repos/settings-repo.mjs'
 import { ApiEndpointStore } from './lib/admin/api-endpoints.mjs'
 import { ApiScheduler } from './lib/pool/api-scheduler.mjs'
@@ -210,7 +223,13 @@ import { createKeySelfHandler, KEY_SELF_PATHS } from './lib/protocol/key-self.mj
 import { createPanelHandler, syncInstalledKernels } from './lib/admin/panel-routes.mjs'
 import { IntegrationTokenStore } from './lib/admin/integration-tokens.mjs'
 import { createIntegrationHandler } from './lib/admin/integration-routes.mjs'
-import { createCragShopHandler, isCragShopPath, sessionBuyerOwner } from './lib/admin/crag-shop.mjs'
+import {
+  createCragShopHandler,
+  createGeminiCragShopHandler,
+  isCragShopPath,
+  isGeminiCragShopPath,
+  sessionBuyerOwner,
+} from './lib/admin/crag-shop.mjs'
 
 const FEATURES = [
   'passthrough',
@@ -290,9 +309,11 @@ async function activateStandby(reason = 'signal') {
   // and count its live requests and seats against capacity until it has gone.
   setOverlap(true)
   try {
+    const foreign = createForeignLoad({ scheduler: poolScheduler, accountQuota, apiKeys: apiKeyStore })
+    schedulerRuntime?.setExternalLoadProvider?.(() => foreign.snapshot()?.vms || {})
     foreignLoadReader = startLoadReader({
       file: foreignLoadPath(dataDir),
-      foreign: createForeignLoad({ scheduler: poolScheduler, accountQuota, apiKeys: apiKeyStore }),
+      foreign,
       // Ends the overlap on its own if the deploy script never sends SIGHUP (watcher killed, host reboot).
       onGone: () => {
         console.log(JSON.stringify({ event: 'handover-peer-gone' }))
@@ -310,6 +331,13 @@ async function activateStandby(reason = 'signal') {
         out.catch((e) => console.warn(`[standby] ${name} failed`, e?.message || e))
     } catch (e) {
       console.warn(`[standby] ${name} failed`, e?.message || e)
+    }
+  }
+  if (schedulerRuntime) {
+    try {
+      await schedulerRuntime.promoteToLeader({ rebootstrap: true, startDrain: true })
+    } catch (e) {
+      console.warn('[standby] scheduler-runtime promote failed', e?.message || e)
     }
   }
   console.log(JSON.stringify({ event: 'standby-activated' }))
@@ -397,6 +425,13 @@ if (vmSync.proxy_cli_repaired) {
 if (vmSync.reclaimed_vm_ids.length) {
   console.log(`[vm] reclaimed ${vmSync.reclaimed_vm_ids.length} slot(s) assigned to deleted users`)
 }
+// Idempotent Leader-only backfill of legacy vm_pools -> scheduler_pools (skipped under KIN_STANDBY=1 until SIGUSR2).
+runAtActivation('scheduler-pools-bootstrap', () => {
+  const res = bootstrapSchedulerPools({ db: getDb(), isStandby: !standbyActive })
+  if (res.pools || res.members || res.bindings || res.apiKeysUpdated) {
+    console.log('[db] scheduler pools bootstrapped:', JSON.stringify(res))
+  }
+})
 
 // --- P3 sticky + quota ---
 
@@ -421,6 +456,7 @@ let attemptsRepo
 let poolScheduler
 let failoverRunner
 let groupsRepo
+let schedulerRuntime = null
 
 const routingRt = createRoutingRuntime({
   get routingConfig() {
@@ -449,6 +485,7 @@ const routingRt = createRoutingRuntime({
   },
   setPoolScheduler: (v) => {
     poolScheduler = v
+    if (schedulerRuntime) v?.setSchedulerRuntime?.(schedulerRuntime)
   },
   get healthMonitor() {
     return healthMonitor
@@ -477,6 +514,7 @@ const routingRt = createRoutingRuntime({
   },
   setFailoverRunner: (v) => {
     failoverRunner = v
+    if (schedulerRuntime) v?.setSchedulerRuntime?.(schedulerRuntime)
   },
   get runtimeRepo() {
     return runtimeRepo
@@ -777,17 +815,19 @@ function attachSlotRuntime(vm) {
       if (rt) {
         return {
           ...vm,
+          _account: acc || null,
           cooldown_until: rt.cooldown_until || 0,
           cooldown_reason: rt.cooldown_reason || null,
         }
       }
     } catch {}
   }
-  return vm
+  return acc ? { ...vm, _account: acc } : vm
 }
 
 healthMonitor = createHealthProbeMonitor({
   config: routingConfig.health_probe,
+  getFableRequiresMax: () => routingConfig?.pool?.fable_requires_max === true,
   listTargets: () => listVms(cfg.paths.project).map(attachSlotRuntime),
   runChat: (vm, real) =>
     runVmTestChat({
@@ -860,7 +900,10 @@ const vmTestSchedule = new VmTestScheduleRunner({
     try {
       const vm = getVm(cfg.paths.project, vmId)
       if (!vm) return { hasCredential: false, schedulable: false, windowLive: false }
-      return preheatWindowState(vm, { projectRoot: cfg.paths.project, accountQuota })
+      return preheatWindowStateLikeServer(vm, () => routingConfig, {
+        projectRoot: cfg.paths.project,
+        accountQuota,
+      })
     } catch {
       return null
     }
@@ -873,6 +916,18 @@ const vmTestSchedule = new VmTestScheduleRunner({
     } catch {
       return null
     }
+  },
+  renewEpisodeKey: (vmId) => {
+    try {
+      const vm = getVm(cfg.paths.project, vmId)
+      if (!vm) return null
+      return preheatRenewEpisodeKey(vm, { projectRoot: cfg.paths.project, accountQuota })
+    } catch {
+      return null
+    }
+  },
+  onRenewGateSkip: (event) => {
+    console.debug?.('[vm-test-renew-gate-skip]', JSON.stringify(event))
   },
 })
 credentialRefreshMonitor = createCredentialRefreshMonitor({
@@ -1047,6 +1102,7 @@ backupService.onRestored(async (db) => {
   notifyMonitor?.setConfig(routingConfig.notify)
 
   initPoolRuntime()
+  void schedulerRuntime?.syncConfigNow?.('backup_restore').catch(() => {})
   reloadActiveVm(cfg)
   vmTestSchedule.reload()
   try {
@@ -1316,6 +1372,7 @@ const { handleProtocol, handleSearch, handleImages } = createHandleProtocol({
   get geminiScheduler() {
     return geminiScheduler
   },
+  geminiOwnerMap: () => geminiOwnersProxy.ownerMap(),
   admitCragInference: (input) => cragSubscription.admitInference(input),
   json,
   writeSSEHeaders,
@@ -1346,6 +1403,10 @@ const { handleProtocol, handleSearch, handleImages } = createHandleProtocol({
   get poolScheduler() {
     return poolScheduler
   },
+  getSchedulerRuntime: () => schedulerRuntime,
+  get schedulerRuntime() {
+    return schedulerRuntime
+  },
   get groupsRepo() {
     return groupsRepo
   },
@@ -1357,6 +1418,13 @@ const responsesWs = createResponsesWsHandler({
   json,
   getRouting: () => routingConfig,
   maxBodyBytes: cfg.limits.max_body_bytes,
+  cfg,
+  accountQuota,
+  apiKeyStore,
+  getSchedulerRuntime: () => schedulerRuntime,
+  get schedulerRuntime() {
+    return schedulerRuntime
+  },
 })
 
 /**
@@ -1476,6 +1544,7 @@ for (const vm of listVms(cfg.paths.project)) {
 cliNodeGuard = createCliNodeGuard({
   listTargets: () => listVms(cfg.paths.project),
   liveTokens: () => slotShell.liveShellTokens?.() || [],
+  getRouting: () => routingConfig,
 })
 // Opt-in (routing.crag_zombie_guard.enabled): power-cycles idle CRAG slots whose
 // gateway worker left unreaped claude children, through the panel 恢复服务 path.
@@ -1591,6 +1660,16 @@ const geminiCragSubscription = createGeminiCragSubscription({
   publicKeyFile: process.env.KIN_GEMINI_PUBLIC_KEY_FILE || null,
   callHost: callGeminiHost,
 })
+const handleGeminiCragShop = createGeminiCragShopHandler({
+  getDb,
+  dataDir: cfg.paths.data,
+  publicBaseUrl: cfg.base_url,
+  json,
+  readRawBody,
+  subscription: geminiCragSubscription,
+  isCurrentAdmin: (req) => isCragShopAdmin(req.panelBuyerOwner),
+  isActivationAdmin: isCragShopAdmin,
+})
 const geminiTerminal = createGeminiTerminal({ proxyPool: () => proxyPool })
 const geminiSlotPrefs = createGeminiSlotPrefs({
   settingsRepo: {
@@ -1601,6 +1680,8 @@ const geminiSlotPrefs = createGeminiSlotPrefs({
 const geminiScheduler = createGeminiScheduler({
   callHost: callGeminiHost,
   resolveProxy: (proxyId, envOwnerId) => geminiProxyFor(proxyPool, proxyId, { ownerUserId: envOwnerId }),
+  resolveProxyEgressOptions: (proxyId, envOwnerId) =>
+    geminiProxyEgressOptionsFor(proxyPool, proxyId, { ownerUserId: envOwnerId }),
   poolScheduler,
   stickyRouter,
   apiKeyStore,
@@ -1610,6 +1691,10 @@ const geminiScheduler = createGeminiScheduler({
   cragSubscription: geminiCragSubscription,
   getRoutingConfig: () => routingConfig,
   getAttemptsRepo: () => attemptsRepo,
+  getSchedulerRuntime: () => schedulerRuntime,
+  get schedulerRuntime() {
+    return schedulerRuntime
+  },
   listCacheTtlMs: 2000,
 })
 const handleGeminiPublic = createGeminiPublicHandler({
@@ -1622,10 +1707,45 @@ const handleGeminiPublic = createGeminiPublicHandler({
   apiKeyStore,
   getRoutingConfig: () => routingConfig,
   getHealthMonitor: () => healthMonitor,
+  getSchedulerRuntime: () => schedulerRuntime,
+  get schedulerRuntime() {
+    return schedulerRuntime
+  },
+  cfg,
+  geminiOwnerMap: () => geminiOwnersProxy.ownerMap(),
 })
+schedulerRuntime = createSchedulerRuntime({
+  cfg,
+  isStandby: STANDBY,
+  getDb,
+  settings: () => new SettingsRepo(),
+  getVms: () => listVms(cfg.paths.project, routingConfig),
+  getRoutingConfig: () => routingConfig,
+  apiKeyStore,
+  apiEndpointStore,
+  accountQuota,
+  poolScheduler: () => poolScheduler,
+  geminiScheduler: () => geminiScheduler,
+  geminiSlotPrefs,
+  geminiOwnersRepo: geminiOwnersProxy,
+  cragSubscription,
+  geminiCragSubscription,
+  proxyPool: () => proxyPool,
+  hostMemoryPressure,
+  onError: (err, info) => {
+    console.warn(`[scheduler-runtime] ${info?.phase || 'error'}:`, err?.message || err)
+  },
+})
+poolScheduler?.setSchedulerRuntime?.(schedulerRuntime)
+failoverRunner?.setSchedulerRuntime?.(schedulerRuntime)
+apiScheduler?.setSchedulerRuntime?.(schedulerRuntime)
 const integrationTokenStore = new IntegrationTokenStore()
 const handlePanel = createPanelHandler({
   getDb,
+  getSchedulerRuntime: () => schedulerRuntime,
+  get schedulerRuntime() {
+    return schedulerRuntime
+  },
   integrationTokenStore,
   cragSubscription,
   geminiCragSubscription,
@@ -1633,6 +1753,7 @@ const handlePanel = createPanelHandler({
   geminiSlotPrefs,
   geminiScheduler,
   handleCragShop,
+  handleGeminiCragShop,
   json,
   writeSSEHeaders,
   readBody,
@@ -1789,6 +1910,9 @@ async function handoverLeadership() {
   if (handoverRole() !== 'leader' || !standbyActive) return false
   stopLeaderJobs()
   await openaiApiManager.stop()
+  // Flush final dirty sticky/penalty deltas while still holding the leader flock.
+  await schedulerRuntime?.drainPersistenceNow?.().catch(() => {})
+  schedulerRuntime?.demoteToStandby?.()
   setHandoverRole('draining')
   // Publish our live load first, so the new leader counts it from its first scheduling decision.
   try {
@@ -1874,6 +1998,11 @@ const gracefulShutdown = createGracefulShutdown({
     } catch {}
     installJevUsageRecorder(null)
     try {
+      await schedulerRuntime?.shutdown?.({ drain: handoverRole() !== 'draining', stopProcess: true })
+    } catch (e) {
+      console.warn('[shutdown] scheduler-runtime shutdown failed', e?.message || e)
+    }
+    try {
       await closeDatabaseAsync()
     } catch {}
   },
@@ -1883,7 +2012,9 @@ const server = http.createServer(async (req, res) => {
   try {
     res.req = req
     const url = parseRequestUrl(req)
-    if (url && isCragShopPath(url.pathname)) res.setHeader('Cache-Control', 'no-store')
+    if (url && (isCragShopPath(url.pathname) || isGeminiCragShopPath(url.pathname))) {
+      res.setHeader('Cache-Control', 'no-store')
+    }
     if (req.method === 'OPTIONS') {
       res.writeHead(204, corsHeadersForRequest(req))
       return res.end()
@@ -1915,6 +2046,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (
       p === '/api/panel/pool/stream' ||
+      p === '/api/panel/scheduler/events' ||
       (p.startsWith('/api/panel/') && String(req.headers.accept || '').includes('text/event-stream'))
     ) {
       panelStreams.add(res)
@@ -2030,11 +2162,55 @@ const server = http.createServer(async (req, res) => {
       (p === '/v1/models' || p === '/models' || p === '/v1beta/models' || Boolean(singleModelGet))
     ) {
       if (!requireAuth(req, res)) return
+      const modelOwnerScope = ownerScopeFromRequest(req, apiKeyStore?.users)
+      const modelVms = listVms(cfg.paths.project)
+      const modelApiEndpoints = apiEndpointStore.listRaw()
+      const modelPoolAccess = resolvePoolAccessForKey({
+        key: req.apiKeyRecord || null,
+        apiKeyKind: req.apiKeyKind || null,
+        requestedPoolId: requestedPoolIdFromHeaders(req.headers),
+        vms: Array.isArray(modelVms) ? modelVms : null,
+        geminiOwnerMap: geminiOwnersProxy.ownerMap(),
+        apiEndpoints: Array.isArray(modelApiEndpoints) ? modelApiEndpoints : null,
+        ownerScope: modelOwnerScope,
+      })
+      if (!modelPoolAccess.ok) {
+        const status = modelPoolAccess.status || 403
+        const code = modelPoolAccess.code || 'pool_unavailable'
+        const message = modelPoolAccess.message || '分组池不可用'
+        if (p === '/v1beta/models' || singleModelGet?.version === 'v1beta') {
+          return json(res, status, {
+            error: {
+              code: status,
+              status: 'PERMISSION_DENIED',
+              message,
+              details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: code }],
+            },
+          })
+        }
+        return json(res, status, makeError({ type: ErrorType.PERMISSION, code, message, status }).body)
+      }
       const groupType = keyScopeFromRequest(req).group_type
       const backend = resolveInferenceBackend(req)
-      const apiScopeForModels = apiScheduleScope(req, groupType, apiKeyStore?.users)
+      let apiScopeForModels = apiScheduleScope(req, groupType, apiKeyStore?.users)
+      if (!modelPoolAccess.legacy) {
+        const poolEps = modelPoolAccess.allowedEndpointIds || []
+        const existingEps = apiScopeForModels.allowedEndpointIds
+        apiScopeForModels = {
+          ...apiScopeForModels,
+          allowedEndpointIds:
+            Array.isArray(existingEps) && existingEps.length
+              ? existingEps.filter((id) => poolEps.includes(id))
+              : [...poolEps],
+        }
+      }
+      const poolFilterCtx = { vms: modelVms, apiEndpoints: modelApiEndpoints }
       if (backend === 'api') {
-        const filtered = filterModelCatalogForKey(apiScheduler.catalog(apiScopeForModels), req)
+        const filtered = filterModelsForPoolAccess(
+          filterModelCatalogForKey(apiScheduler.catalog(apiScopeForModels), req),
+          modelPoolAccess,
+          poolFilterCtx,
+        )
         if (singleModelGet) {
           const want = singleModelGet.model.replace(/^models\//i, '').toLowerCase()
           const hit = (filtered?.data || []).find((m) => String(m?.id || '').toLowerCase() === want)
@@ -2052,23 +2228,44 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, p === '/v1beta/models' ? formatGoogleModelList(filtered?.data || []) : filtered)
       }
       const modelPolicy = req.apiKeyKind === 'managed' ? keyTierPolicyFromRecord(req.apiKeyRecord) : null
-      const modelGeminiScope = {
-        ownerScope: ownerScopeFromRequest(req, apiKeyStore?.users),
-        allowedEnvIds:
-          modelPolicy?.permission_tier === 'resource'
+      let allowedGeminiEnvs =
+        modelPolicy?.permission_tier === 'resource'
+          ? modelPolicy.allowed_gemini_envs
+          : modelPolicy?.allowed_gemini_envs?.length
             ? modelPolicy.allowed_gemini_envs
-            : modelPolicy?.allowed_gemini_envs?.length
-              ? modelPolicy.allowed_gemini_envs
-              : null,
+            : null
+      if (!modelPoolAccess.legacy) {
+        const poolEnvs = modelPoolAccess.allowedGeminiEnvIds || []
+        allowedGeminiEnvs = Array.isArray(allowedGeminiEnvs)
+          ? allowedGeminiEnvs.filter((id) => poolEnvs.includes(id))
+          : [...poolEnvs]
+      }
+      const modelGeminiScope = {
+        ownerScope: modelOwnerScope,
+        allowedEnvIds: allowedGeminiEnvs,
       }
       if (p === '/v1beta/models' || singleModelGet?.version === 'v1beta' || groupType === 'gemini') {
         if (backend === 'all') {
           let gemModels = []
+          let gemAccounts = null
           try {
             const gemCat = await geminiScheduler.catalog(modelGeminiScope)
             gemModels = Array.isArray(gemCat?.models) ? gemCat.models : []
+            gemAccounts = Array.isArray(gemCat?.accounts) ? gemCat.accounts : null
           } catch {}
-          const apiCat = apiScheduler.catalog(apiScheduleScope(req, 'gemini', apiKeyStore?.users))
+          let gemApiScope = apiScheduleScope(req, 'gemini', apiKeyStore?.users)
+          if (!modelPoolAccess.legacy) {
+            const poolEps = modelPoolAccess.allowedEndpointIds || []
+            const existingEps = gemApiScope.allowedEndpointIds
+            gemApiScope = {
+              ...gemApiScope,
+              allowedEndpointIds:
+                Array.isArray(existingEps) && existingEps.length
+                  ? existingEps.filter((id) => poolEps.includes(id))
+                  : [...poolEps],
+            }
+          }
+          const apiCat = apiScheduler.catalog(gemApiScope)
           const merged = []
           const seen = new Set()
           for (const m of [...gemModels, ...(apiCat?.data || [])]) {
@@ -2077,7 +2274,11 @@ const server = http.createServer(async (req, res) => {
             seen.add(id)
             merged.push(m)
           }
-          const filtered = filterModelCatalogForKey({ object: 'list', data: merged }, req)
+          const filtered = filterModelsForPoolAccess(
+            filterModelCatalogForKey({ object: 'list', data: merged }, req),
+            modelPoolAccess,
+            { ...poolFilterCtx, geminiEnvs: gemAccounts },
+          )
           if (singleModelGet) {
             const want = singleModelGet.model.replace(/^models\//i, '').toLowerCase()
             const hit = (filtered?.data || []).find((m) => String(m?.id || '').toLowerCase() === want)
@@ -2097,9 +2298,11 @@ const server = http.createServer(async (req, res) => {
         return handleGeminiPublic(req, res)
       }
       const result = await fetchWorkerModels({ groupType })
+      let gemAccountsForAll = null
       if (groupType === 'all') {
         try {
           const gemCatalog = await geminiScheduler.catalog(modelGeminiScope)
+          gemAccountsForAll = Array.isArray(gemCatalog?.accounts) ? gemCatalog.accounts : null
           if (Array.isArray(gemCatalog?.models) && gemCatalog.models.length) {
             const existing = Array.isArray(result?.data) ? result.data : []
             const seen = new Set(existing.map((m) => m?.id).filter(Boolean))
@@ -2117,7 +2320,10 @@ const server = http.createServer(async (req, res) => {
           if (extra.length) result.data = [...existing, ...extra]
         }
       }
-      const filtered = filterModelCatalogForKey(result, req)
+      const filtered = filterModelsForPoolAccess(filterModelCatalogForKey(result, req), modelPoolAccess, {
+        ...poolFilterCtx,
+        geminiEnvs: gemAccountsForAll,
+      })
       if (singleModelGet) {
         const want = singleModelGet.model.replace(/^models\//i, '').toLowerCase()
         const hit = (filtered?.data || []).find((m) => String(m?.id || '').toLowerCase() === want)
@@ -2163,6 +2369,7 @@ const server = http.createServer(async (req, res) => {
         requireAuth,
         apiKeyStore,
         cfg,
+        projectRoot: cfg.paths.project,
         stickyRouter,
         accountQuota,
         getPoolScheduler: () => poolScheduler,
@@ -2202,7 +2409,7 @@ const server = http.createServer(async (req, res) => {
         }
         if (
           !hasOwnedGemEnv &&
-          apiScheduler.pick(gemGen.model, Date.now(), apiScheduleScope(req, 'gemini', apiKeyStore?.users))?.ok
+          apiScheduler.matchEndpoints(gemGen.model, Date.now(), apiScheduleScope(req, 'gemini', apiKeyStore?.users))?.ok
         ) {
           return await handleProtocol(req, res, 'google.gemini', p, {
             routeModel: gemGen.model,
@@ -2343,6 +2550,7 @@ function runExclusivePass() {
     const keys = deferredKeys()
     foreignLoadReader?.stop()
     foreignLoadReader = null
+    schedulerRuntime?.setExternalLoadProvider?.(null)
     // Async: copying a new image's binaries can take a while and must not hold the event loop.
     const synced = await runCapture('/usr/local/bin/vm2api-entrypoint', ['sync'], { timeoutMs: 120_000 })
     const wrapChanged = /WRAP_CHANGED=1/.test(synced.stdout || '')
@@ -2441,6 +2649,13 @@ if (process.env.KIN_CRS_MOCK !== '1') {
 }
 await bootApiKernel(cfg)
 await bootProtoFront(cfg)
+if (process.env.KIN_CRS_MOCK !== '1' || fs.existsSync(schedulerRuntime.client.paths.binPath)) {
+  try {
+    await schedulerRuntime.start({ waitMs: 5_000, startLoops: true })
+  } catch (e) {
+    console.error('[scheduler-runtime] startup failed (Fail-Closed 503 until recovered):', e?.message || e)
+  }
+}
 server.keepAliveTimeout = 120_000
 server.headersTimeout = 125_000
 server.timeout = 0
@@ -2497,19 +2712,27 @@ server.listen(cfg.port, cfg.host, () => {
     }
     // The order-expiry policy is independent from activation polling.
     if (process.env.VM2API_CRAG_SHOP_AUTO_EXPIRY === '1') {
-      const expireOrders = () =>
+      const expireOrders = () => {
         void handleCragShop.pollOrderExpiry().catch(() => {
           console.warn('[crag-shop] order expiry deferred')
         })
+        void handleGeminiCragShop.pollOrderExpiry().catch(() => {
+          console.warn('[crag-gemini-shop] order expiry deferred')
+        })
+      }
       const timer = setInterval(expireOrders, 60_000).unref()
       onLeaderStop(() => clearInterval(timer))
       expireOrders()
     }
     if (process.env.KIN_CRS_MOCK !== '1' && typeof handleCragShop.warmPlans === 'function') {
-      const warmCatalog = () =>
+      const warmCatalog = () => {
         void handleCragShop.warmPlans().catch(() => {
           console.warn('[crag-shop] catalog cache warm deferred')
         })
+        void handleGeminiCragShop.warmPlans().catch(() => {
+          console.warn('[crag-gemini-shop] catalog cache warm deferred')
+        })
+      }
       const timer = setInterval(warmCatalog, 5 * 60_000).unref()
       onLeaderStop(() => clearInterval(timer))
       warmCatalog()

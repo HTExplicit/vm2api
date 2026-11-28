@@ -24,6 +24,7 @@ local-src
 skills
 src/lib/oauth/auth.js
 worker/bin
+scheduler/target
 *.md
 !README.md
 !CHANGELOG.md

@@ -2,9 +2,8 @@
 
 git 里只有源码。`bin/`、`web/dist`、`share/crag` 与 `share/wrap-cli` 里的 ELF / glibc 都不进 git：
 
-- `web/dist`、`kin-api-kernel`、`kin-redact` 与 `kin-egress` 在最终控制面镜像内从 fork 源码构建。`kin-egress` 保留 fork 的出口逻辑并包含 HTTP CONNECT 支持。
+- `web/dist`、`kin-api-kernel`、`kin-redact` 、`kin-egress` 与 `kin-scheduler` 在最终控制面镜像内从 fork 源码构建。`kin-egress` 保留 fork 的出口逻辑并包含 HTTP CONNECT 支持。
 - 其余 linux amd64 kernel / helper、Claude CLI、完整签名加密 CRAG native v2 包与 glibc shim 由 [`deploy/payload.json`](../deploy/payload.json) 按大小和 SHA-256 固定。清单的 `release` 指向已公开、不可变的 payload Release，可独立于应用版本；`npm run fetch:payload` 与镜像构建使用同一清单，校验失败即停止。
-- 当前载荷来源为官方 `payload-2026.11.17-cli-node-321`，CRAG 保持 `3.1.4` standard 原签名包；仅 CLI `2.1.321` 重打包字节变化（31,005,108 bytes，SHA256 `f6c3744dda01f756049360113607d2bd9a25911de0fdaf30fe9bb1a1918a6788`），两个 kernel、worker、OAuth helper 和其余资产保持。应用、成功 CI、amd64 构建与不可变载荷见 [136 供应来源记录](releases/v1.4.136-binaries.json)；官方总发行因 ARM64 smoke 检查失败，amd64 任务成功。CRAG 原始签名及 `SOURCES.json` 继续引用 [3.1.4 来源](releases/v1.4.130-crag.json)。这些是 fork 根据供应方公开发行整理的记录，不声明独立重建或重签；历史 cache-TTL 构建记录不作为本次重打包的新源码证明。
 
 ## 完整应用交付
 
@@ -79,15 +78,18 @@ install -m 755 kin-kernel kin-egress kin-worker kin-codex-kernel kin-oauth-auth 
 
 ## 本机构建
 
-依赖：Node 22、Go 1.25、pnpm 10、python3（官方 CLI PTY 脚本）。OAuth 换票使用固定的 `bin/kin-oauth-auth`：内核具备能力且遥测就绪时在槽内执行，否则由控制面经槽当前绑定出口执行。`auth.js` 只保留在本地构建目录，不上传到控制面。kernel / wrap CLI 用 payload ELF，不要在本机 cargo / 重编 Claude Code。
+依赖：Node 22、Go 1.25、Rust / Cargo 1.86+（控制面调度器）、pnpm 10、python3（官方 CLI PTY 脚本）。OAuth 换票使用固定的 `bin/kin-oauth-auth`：内核具备能力且遥测就绪时在槽内执行，否则由控制面经槽当前绑定出口执行。`auth.js` 只保留在本地构建目录，不上传到控制面。kernel / wrap CLI 用 payload ELF，不要在本机 cargo / 重编 Claude Code。
 
 ```bash
 npm ci
 pnpm -C web install --frozen-lockfile
 
 npm run fetch:payload     # 固定 bin/、share/wrap-cli 与 share/crag；egress 由源码构建
+npm run build:scheduler   # bin/kin-scheduler（Rust 1.86+，等价于 cd scheduler && cargo build --release --locked --bin kin-scheduler）
 npm run build:web         # web/dist
 ```
+
+`bin/kin-scheduler` 不随 `deploy/payload.json` 或 GitHub Release 附件分发：Docker 部署由镜像多阶段构建自动编入并在启动时同步到 `bin/kin-scheduler`；本机 Node / systemd 部署必须先运行 `npm run build:scheduler`（或自行执行 `cd scheduler && cargo build --release --locked --bin kin-scheduler` 并复制到 `bin/kin-scheduler`，也可用 `KIN_SCHEDULER_BIN` 指定绝对路径）。缺少可执行 `kin-scheduler` 时，全部推理数据面按 fail-closed 返回 `503`（`/health` 仍返回 `200`）。
 
 格式：和 CI 同一套，全文 LF。说明见 [FORMAT.md](FORMAT.md)。
 
@@ -139,7 +141,7 @@ curl -sS --noproxy '*' http://127.0.0.1:8787/health
 **本机 Node + systemd**
 
 1. `git pull` 或检出目标 tag。
-2. `npm ci`；`pnpm -C web install --frozen-lockfile && npm run build:web`；`npm run build:egress && npm run build:worker`。
+2. `npm ci`；`pnpm -C web install --frozen-lockfile && npm run build:web`；`npm run build:egress && npm run build:worker`；`npm run build:scheduler`（需 Rust / Cargo 1.86+；缺少 `bin/kin-scheduler` 时全部推理数据面按 fail-closed 返回 `503`）。
 3. `npm run fetch:payload` 换 `bin/` 和 `share/` ELF，再调用 `POST /api/panel/wrap-cli/sync` 并传 `{"restart":true}`。同步优先 `bin/kin-kernel`。
 4. `node --check src/server.mjs`。
 5. `systemctl restart vm2api` **一次**。确认 `/health`。

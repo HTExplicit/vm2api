@@ -116,7 +116,7 @@ export function KeyLimitsDialog({
   vms?: Vm[]
   vmsReady?: boolean
   vmsError?: boolean
-  pools?: VmPool[]
+  pools?: Pick<VmPool, 'id' | 'name' | 'enabled'>[]
   channels?: ApiEndpoint[]
   channelsLoading?: boolean
   channelsError?: boolean
