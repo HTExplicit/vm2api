@@ -309,6 +309,9 @@ jobs:
             test/unit/vm-test-chat-billing.test.mjs \
             test/unit/kernel-catalog.test.mjs \
             test/unit/kernel-install.test.mjs \
+            test/unit/shared-store-crag-sync.test.mjs \
+            test/unit/account-warmup.test.mjs \
+            test/unit/warmup-monitor.test.mjs \
             test/unit/kernel-seat-release.test.mjs \
             test/unit/kernel-switch-recovery.test.mjs \
             test/unit/crag-update.test.mjs \

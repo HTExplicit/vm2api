@@ -2,13 +2,13 @@
   "schema": 1,
   "recorded_by": "HTExplicit/vm2api",
   "record_type": "supplier_release_observation",
-  "application_release": "v1.4.245",
-  "application_commit": "eb422f61e54af473cd2e52738288a1ed2c06b694",
-  "application_source": "https://github.com/dofastted/vm2api/tree/v1.4.245",
-  "statement": "Observed official GitHub release assets. The upstream amd64 release job failed on a stale CRAG pin. The fork verifies the currently published signed package and does not rebuild it.",
+  "application_release": "v1.4.246",
+  "application_commit": "4da1e2ced5cd532441c39c5f7824a1cc5fd02002",
+  "application_source": "https://github.com/dofastted/vm2api/tree/v1.4.246",
+  "statement": "Observed official GitHub release assets. The v1.4.246 source pins the hotfixed CRAG assets. The fork verifies the supplier signed package and ships it as published.",
   "official_release_workflow": {
-    "url": "https://github.com/dofastted/vm2api/actions/runs/46117761333",
-    "conclusion": "failure"
+    "url": "https://github.com/dofastted/vm2api/actions/runs/46120159321",
+    "conclusion": "success"
   },
   "payload_release": "payload-2026.11.28-system-prompt",
   "payload_source": {
