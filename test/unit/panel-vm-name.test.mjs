@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 import { parseVmDisplayName, VM_DISPLAY_NAME_MAX } from '../../src/lib/vm/vm-registry.mjs'
-import { tryAcquireOpenAISlot } from '../../src/lib/pool/openai-account-runtime.mjs'
+import { SchedulerClient } from '../../src/lib/transport/scheduler-client.mjs'
 
 function seed(root, id, extra = {}) {
   const dir = path.join(root, 'vms')
@@ -183,15 +183,15 @@ test('PATCH id checks the live Codex lease and allows rename after its release',
   t.after(() => fs.rmSync(root, { recursive: true }))
   const before = seed(root, 'codex-source', { platform: 'openai', family: 'codex' })
   assert.equal(Object.hasOwn(before, 'inflight'), false)
-  const lease = tryAcquireOpenAISlot('codex-source', { concurrency: 1 })
-  assert.ok(lease)
-  t.after(() => lease.release())
+  const schedulerRuntime = new SchedulerClient({ manageProcess: false })
+  schedulerRuntime.trackLease('codex-lease', { node_type: 'codex_vm', node_id: 'codex-source' })
   const events = []
   const { handlePanel, response } = handler(
     root,
     { id: 'codex-next' },
     {
       poolScheduler: { vmInflight: new Map() },
+      schedulerRuntime,
       codexBrowserLogin: {
         async cancel() {
           events.push('oauth')
@@ -228,7 +228,7 @@ test('PATCH id checks the live Codex lease and allows rename after its release',
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'vms/codex-source.json'))), before)
   assert.equal(fs.existsSync(path.join(root, 'vms/codex-next.json')), false)
 
-  lease.release()
+  schedulerRuntime.untrackLease('codex-lease')
   await handlePanel({ method: 'PATCH' }, {}, endpoint)
   assert.equal(response.status, 200, JSON.stringify(response.body))
   assert.deepEqual(events, ['inspect', 'oauth', 'platform', 'browser', 'discard'])

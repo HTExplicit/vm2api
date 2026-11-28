@@ -75,7 +75,7 @@ describe('VM scheduling priority', () => {
       )
       expect(list).not.toMatch(/等级|权重/)
 
-      const detail = renderToStaticMarkup(<VmSchedulingBlock vm={vm} />)
+      const detail = renderToStaticMarkup(<QueryClientProvider client={new QueryClient()}><VmSchedulingBlock vm={vm} /></QueryClientProvider>)
       expect(detail).toContain('>调度优先级</span>')
       expect(detail).toContain('>8 · 手动</span>')
 
@@ -151,19 +151,19 @@ describe('VM row interaction and health', () => {
         },
       ],
     }
-    const block = renderToStaticMarkup(<VmSchedulingBlock vm={vm} />)
+    const block = renderToStaticMarkup(<QueryClientProvider client={new QueryClient()}><VmSchedulingBlock vm={vm} /></QueryClientProvider>)
     expect(block).toContain('主会话上限')
     expect(block).toContain('子代理 0/0 · 排队 2')
     expect(block).toContain('本槽钉住；全局 关闭')
     expect(
-      renderToStaticMarkup(<VmSchedulingBlock vm={{ id: 'legacy' }} />)
-    ).toContain('关闭(子代理各占一个席位)')
+      renderToStaticMarkup(<QueryClientProvider client={new QueryClient()}><VmSchedulingBlock vm={{ id: 'legacy' }} /></QueryClientProvider>)
+    ).toContain('关闭(子代理各占一个执行位)')
     const editor = renderToStaticMarkup(
       <QueryClientProvider client={new QueryClient()}>
         <VmSchedulingEditor vm={vm} />
       </QueryClientProvider>
     )
-    expect(editor).toContain('默认控制同时占用的客户端会话席位数')
+    expect(editor).toContain('默认控制同时占用的物理执行位数')
     expect(editor).toContain('跟随 · 6')
     expect(editor).toMatch(/<select[^>]*aria-label="每会话子代理上限"/)
     expect(editor).toContain('<option value="20">20</option>')
@@ -681,7 +681,7 @@ describe('Gemini VM page full UI alignment', () => {
     expect(rackL).toContain('$28.90')
     expect(rackL).toContain('刷新数据')
     expect(rackL).toContain('拉取模型')
-    expect(rackL).toContain('席位')
+    expect(rackL).toContain('执行位')
 
     const rackS = renderNode(<VmRack vms={[gemini]} filter='all' size='s' />)
     expect(rackS).toContain('--tier-gemini-solid')

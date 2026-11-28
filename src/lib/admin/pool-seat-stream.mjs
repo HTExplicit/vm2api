@@ -32,8 +32,7 @@ export function servePoolSeatStream({
   let proxyTimer = null
   let closed = false
 
-  const scope = (byVm) => {
-    const visible = visibleVmIds ? visibleVmIds() : null
+  const scope = (byVm, visible = visibleVmIds ? visibleVmIds() : null) => {
     return visible ? Object.fromEntries(Object.entries(byVm).filter(([id]) => visible.has(id))) : byVm
   }
 
@@ -41,8 +40,10 @@ export function servePoolSeatStream({
     seatTimer = null
     if (closed) return
     const snap = scheduler?.seatSnapshot?.() || {}
+    const visible = visibleVmIds ? visibleVmIds() : null
     const frame = {
-      seats: scope(snap.seats || {}),
+      seats: scope(snap.seats || {}, visible),
+      codex_inflight: scope(snap.codex_inflight || {}, visible),
       global_queue_depth: Number(snap.global_queue_depth) || 0,
       queue_max: Number(snap.queue_max) || 0,
       ts: Date.now(),

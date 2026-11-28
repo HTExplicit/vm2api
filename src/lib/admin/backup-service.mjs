@@ -43,7 +43,7 @@ import { getDb, getDbEngine, getDbPath, getPgConfig, getPgPool, closeDatabase, o
 import { buildPgConnectionString } from '../db/pg/config.mjs'
 import { stopSqlitePool } from '../db/sqlite-pool.mjs'
 import { pgRestoreAvailable, queryPgServerMajorVersion, sha256File, SLOT_BACKUP_FILES } from './backup-core.mjs'
-import { getCacheRuntime } from '../cache/index.mjs'
+import { invalidateAllCaches } from '../cache/index.mjs'
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { BackupRepo } from '../db/repos/backup-repo.mjs'
 import { reconcileVms } from '../vm/vm-db-sync.mjs'
@@ -588,7 +588,6 @@ export class BackupService {
       if (isPg) {
         databaseClosed = true
         await this._restorePostgresSnapshot(dbFile)
-        await getCacheRuntime().client.invalidate({ prefixes: ['apikey:', 'billing:', 'sched:', 'dash:'] })
       } else {
         await stopSqlitePool()
         closeDatabase()
@@ -652,6 +651,7 @@ export class BackupService {
 
       // 4. reopen + migrate (old backups upgrade automatically)
       const db = isPg ? getDb() : openDatabase({ dataDir: this.dataDir, dbPath })
+      await invalidateAllCaches()
 
       // 5. db-only backups: rebuild slot metadata (not OAuth credentials)
       if (this.projectRoot) {

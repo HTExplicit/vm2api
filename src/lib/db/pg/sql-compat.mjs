@@ -475,6 +475,7 @@ export function translateSqliteToPg(rawSql, { returningId = false } = {}) {
   sql = rewriteJsonEach(sql)
   sql = rewriteScalarMaxMin(sql)
   sql = rewriteStrftime(sql)
+  sql = sql.replace(/\bjulianday\(([a-z_][a-z_0-9.]*)\)/gi, 'EXTRACT(EPOCH FROM CAST($1 AS timestamptz)) / 86400.0')
   sql = rewritePrintf(sql)
   sql = rewriteCollateNocase(sql)
 

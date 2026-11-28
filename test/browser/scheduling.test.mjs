@@ -322,7 +322,7 @@ test('official VM list preserves sorting, live counts, responsive access and det
       '7D',
       'Fable',
       '今日请求数',
-      '席位/会话',
+      '执行位/会话',
       '排队',
       '请求中',
       '7 天窗口花费',
@@ -340,8 +340,8 @@ test('official VM list preserves sorting, live counts, responsive access and det
   assert.equal(await weeklyQuota.locator('i').evaluate((bar) => bar.style.width), '18%')
   assert.equal(await cell(row, '今日请求数').innerText(), '12')
   assert.equal(await cell(row, '7 天窗口花费').innerText(), '$71.72')
-  assert.equal(await cell(rowOf('offline-claude-seats'), '席位/会话').innerText(), '2/5')
-  const sessions = cell(row, '席位/会话')
+  assert.equal(await cell(rowOf('offline-claude-seats'), '执行位/会话').innerText(), '2/5')
+  const sessions = cell(row, '执行位/会话')
   assert.equal(await sessions.innerText(), '2/不限')
   assert.equal(await cell(rowOf('offline-claude-seats'), '排队').innerText(), '1')
   assert.equal(await rowOf('offline-manual6').getByText('24h 无请求', { exact: true }).count(), 1)

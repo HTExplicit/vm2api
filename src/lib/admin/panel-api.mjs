@@ -52,6 +52,7 @@ import { nodePlatform } from '../cluster/placement.mjs'
 import { computeWeeklySplit, publicWeeklySplit, weeklySplitConfig } from '../pool/weekly-split.mjs'
 import { proxyBlockedReason } from '../vm/proxy-policy.mjs'
 import { pickScheduleFields } from '../pool/schedule-state.mjs'
+import { warmupSummary } from '../pool/account-warmup.mjs'
 import { socksProxyFamily, normalizeSocksHost } from '../vm/socks-address.mjs'
 import { accountTierKey, isNearLimit, normalizeTiers, resolveTierPolicy } from '../pool/quota-tiers.mjs'
 import { isOrganizationDisabledUsageResult } from '../pool/upstream-error-policy.mjs'
@@ -59,6 +60,7 @@ import { mergeBatchGroupConfig } from '../pool/batch-group.mjs'
 import { applyVmQuotaConfig, applyVmQuotaPolicy, vmQuotaOverrideOf, vmQuotaView } from '../pool/vm-quota-override.mjs'
 import { GATE_OPEN, gatePolicyFields, gateZone, quotaGateOf } from '../pool/quota-gate.mjs'
 import { guardUsageTier, inferClaudeTier } from '../pool/claude-tier.mjs'
+import { fableRequiresMaxEnabled, slotDeniesFableForPlan } from '../pool/slot-model-gate.mjs'
 import { listQuotaFromHeaders, isOfficialWindowLimited } from '../pool/quota-window.mjs'
 import { lastClosedWindow } from '../pool/window-history.mjs'
 import { hardBlockOf } from '../pool/rate-limit-service.mjs'
@@ -112,7 +114,6 @@ import { normalizeCodexRouting, normalizeInferenceWebsocket } from '../protocol/
 import { normalizeOpenAiSystemPrompt } from '../protocol/openai-system-prompt.mjs'
 import { normalizeOpenaiApiConfig } from '../openai-api/config.mjs'
 import { effectiveOpenAIPolicy, normalizeOpenAIQuotaPolicy } from '../pool/openai-quota-policy.mjs'
-import { openAIRuntimeSignals } from '../pool/openai-account-runtime.mjs'
 import { normalizeVmConfig, memoryMiB } from '../vm/machine-spec.mjs'
 import { runtimeKind } from '../vm/runtime-kind.mjs'
 import {
@@ -709,23 +710,26 @@ export async function buildDashboard({
   proxyPool = null,
   clusterNodes = [],
   openaiApiManager = null,
+  bypass = false,
 }) {
   try {
     accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
   } catch {}
   const active = getActiveVmId(cfg.paths.project)
   const pool = poolScheduler?.snapshot?.() || {}
+  const nodePenalties = poolScheduler?.nodePenalties?.() || null
   const poolSnap = snapshotPool(proxyPool)
   const listed = listVms(cfg.paths.project, routingConfig)
   const liveById = await collectLivePanelCredentials(cfg.paths.project, listed)
-  // One snapshot for the whole response: the slot rows and the account summary
-  // below must agree anyway, and re-reading per slot scales the account SQL by
-  // the number of slots (#1043).
+  // One snapshot + one batched runtime lookup for the whole response:
+  // avoids per-slot account/runtime N+1 queries (#1043).
   const snap = accountQuota.snapshot()
+  const runtimeById = prefetchRuntimeMap(accountQuota, listed, snap)
   const vms = listed.map((v) =>
     enrichVm(v, accountQuota, active, {
       routingConfig,
       pool,
+      nodePenalties,
       poolSnap,
       liveById,
       projectRoot: cfg.paths.project,
@@ -733,6 +737,7 @@ export async function buildDashboard({
       role: 'admin',
       openaiApiManager,
       accountSnap: snap,
+      runtimeById,
     }),
   )
   const accounts = liveAccounts(snap.accounts, listed)
@@ -755,7 +760,7 @@ export async function buildDashboard({
   ).length
   const proxy_pool = summarizeProxyPool(proxyPool)
 
-  const billing = stampVmBilling(vms, await panelBillingStats(requestLog, accountQuota, vms, snap), snap.accounts || [])
+  const billing = stampVmBilling(vms, await panelBillingStats(requestLog, accountQuota, vms, snap, { bypass }), snap.accounts || [])
 
   const opsSince = new Date(Date.now() - 3600_000).toISOString()
   const [totalsRead, windowRead] = await Promise.allSettled([
@@ -831,20 +836,24 @@ export async function buildVmList({
   requestLog = null,
   clusterNodes = [],
   openaiApiManager = null,
+  bypass = false,
 } = {}) {
   try {
     accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
   } catch {}
   const active = getActiveVmId(cfg.paths.project)
   const pool = poolScheduler?.snapshot?.() || {}
+  const nodePenalties = poolScheduler?.nodePenalties?.() || null
   const poolSnap = snapshotPool(proxyPool)
   const listed = filterVmsForPanel(listVms(cfg.paths.project, routingConfig), { role, userId: ownerUserId })
   const liveById = await collectLivePanelCredentials(cfg.paths.project, listed)
   const snap = readAccountSnapshot(accountQuota)
+  const runtimeById = prefetchRuntimeMap(accountQuota, listed, snap)
   const vms = listed.map((v) =>
     enrichVm(v, accountQuota, active, {
       routingConfig,
       pool,
+      nodePenalties,
       poolSnap,
       liveById,
       projectRoot: cfg.paths.project,
@@ -852,10 +861,11 @@ export async function buildVmList({
       role,
       openaiApiManager,
       accountSnap: snap,
+      runtimeById,
     }),
   )
   const accounts = snap?.accounts || []
-  stampVmBilling(vms, await panelBillingStats(requestLog, accountQuota, vms, snap), accounts)
+  stampVmBilling(vms, await panelBillingStats(requestLog, accountQuota, vms, snap, { bypass }), accounts)
   return ok({
     items: vms,
     active_vm: active,
@@ -881,6 +891,7 @@ export async function buildVmDetail({
   clusterNodes = [],
   role = 'admin',
   openaiApiManager = null,
+  bypass = false,
 }) {
   const vm = getVm(cfg.paths.project, id)
   if (!vm) {
@@ -895,13 +906,16 @@ export async function buildVmDetail({
   }
   const active = getActiveVmId(cfg.paths.project)
   const pool = poolScheduler?.snapshot?.() || {}
+  const nodePenalties = poolScheduler?.nodePenalties?.() || null
   const poolSnap = snapshotPool(proxyPool)
   const listed = [summarizeVm(vm, cfg.paths.project, routingConfig)]
   const liveById = await collectLivePanelCredentials(cfg.paths.project, listed, { cacheMs: 0 })
   const snap = readAccountSnapshot(accountQuota)
+  const runtimeById = prefetchRuntimeMap(accountQuota, listed, snap)
   const summary = enrichVm(listed[0], accountQuota, active, {
     routingConfig,
     pool,
+    nodePenalties,
     poolSnap,
     liveById,
     projectRoot: cfg.paths.project,
@@ -909,9 +923,10 @@ export async function buildVmDetail({
     role,
     openaiApiManager,
     accountSnap: snap,
+    runtimeById,
   })
   const acc = findAccount(accountQuota, summary, snap)
-  const billing = await panelBillingStats(requestLog, accountQuota, [summary], snap)
+  const billing = await panelBillingStats(requestLog, accountQuota, [summary], snap, { bypass })
   const cost = lookupBilling(indexBillingAccounts(billing), acc || summary)
   const gpt = isCodexVm(vm)
   applyCostFields(summary, cost, { coveredSince: billing?.log_coverage_start })
@@ -978,7 +993,7 @@ export async function buildVmDetail({
           window_7d_cost: cost?.window_7d_cost || 0,
           last_blocked: acc.last_blocked,
           recent: (acc.recent_allocations || []).slice(-10),
-          runtime_window: runtimeWindow(accountQuota, acc.account_id),
+          runtime_window: runtimeWindow(accountQuota, acc.account_id, runtimeById),
         }
       : null,
     official_cc: gpt ? null : readOfficialCcStatus(officialCcHome(cfg.paths.project, id)),
@@ -1005,9 +1020,12 @@ export async function buildVmDetail({
 }
 
 /** Structured session-window / rate-limit state from account_runtime_states. */
-function runtimeWindow(accountQuota, accountId) {
+function runtimeWindow(accountQuota, accountId, runtimeById = null) {
   try {
-    const state = accountQuota?.runtimeRepo?.get?.(accountId)
+    const state =
+      runtimeById instanceof Map && runtimeById.has(accountId)
+        ? runtimeById.get(accountId)
+        : accountQuota?.runtimeRepo?.get?.(accountId)
     if (!state) return null
     return {
       rate_limited_at: state.rate_limited_at,
@@ -1529,13 +1547,22 @@ export async function buildProbeAll({ cfg, accountQuota, hop = true, force = tru
   return ok({ items, total: items.length })
 }
 
-export async function buildUsage({ accountQuota, cfg, requestLog = null }) {
-  const snap = accountQuota.snapshot()
-  const listed = listVms(cfg?.paths?.project)
-  const billing = await panelBillingStats(requestLog, accountQuota, listed, snap)
-  const costByKey = indexBillingAccounts(billing)
-  const listedById = new Map(listed.map((vm) => [vm.id, vm]))
-  const accounts = liveAccounts(snap.accounts, listed).map((a) => {
+export function buildUsage({ accountQuota, cfg, requestLog = null, billing = undefined, snap = null, listed = null }) {
+  const accountSnap = snap || accountQuota.snapshot()
+  const vmList = listed || listVms(cfg?.paths?.project)
+  const resolvedBilling =
+    billing !== undefined
+      ? billing
+      : (() => {
+          try {
+            return requestLog?.billingStats?.({ accountWindows: accountWindowsForBilling(accountQuota, vmList, accountSnap) }) ?? null
+          } catch {
+            return null
+          }
+        })()
+  const costByKey = indexBillingAccounts(resolvedBilling)
+  const listedById = new Map(vmList.map((vm) => [vm.id, vm]))
+  const accounts = liveAccounts(accountSnap.accounts, vmList).map((a) => {
     const cost = lookupBilling(costByKey, a)
     const vm = a.vm_id ? getVm(cfg?.paths?.project, a.vm_id) : null
     const quota = quotaFromAccount(a, accountQuota?.config)
@@ -1580,7 +1607,7 @@ export async function buildUsage({ accountQuota, cfg, requestLog = null }) {
       ...windowEstimates(
         codexVm ? { ...quota, ...(codexVm.codex_usage?.quota || {}) } : quota,
         cost,
-        billing?.log_coverage_start,
+        resolvedBilling?.log_coverage_start,
         !!codexVm,
       ),
       near_limit:
@@ -1589,8 +1616,8 @@ export async function buildUsage({ accountQuota, cfg, requestLog = null }) {
           a,
           resolveTierPolicy(
             {
-              tiers: snap.tiers,
-              quota: { safety_ratio: snap.safety_ratio, weekly_safety_ratio: snap.weekly_safety_ratio },
+              tiers: accountSnap.tiers,
+              quota: { safety_ratio: accountSnap.safety_ratio, weekly_safety_ratio: accountSnap.weekly_safety_ratio },
             },
             accountTierKey(a),
           ),
@@ -1598,8 +1625,8 @@ export async function buildUsage({ accountQuota, cfg, requestLog = null }) {
     }
   })
   return ok({
-    safety_ratio: snap.safety_ratio,
-    billing: attachBillingMeta(billing, snap.accounts || []),
+    safety_ratio: accountSnap.safety_ratio,
+    billing: attachBillingMeta(resolvedBilling, accountSnap.accounts || []),
     accounts,
     totals: {
       requests: accounts.reduce((s, a) => s + (a.requests || 0), 0),
@@ -1608,19 +1635,26 @@ export async function buildUsage({ accountQuota, cfg, requestLog = null }) {
       cache_read_tokens: accounts.reduce((s, a) => s + (a.cache_read_tokens || 0), 0),
       cache_creation_tokens: accounts.reduce((s, a) => s + (a.cache_creation_tokens || 0), 0),
       ...cacheHitStats(
-        billing?.total || {
+        resolvedBilling?.total || {
           input_tokens: accounts.reduce((s, a) => s + (a.tokens_in || 0), 0),
           cache_read_tokens: accounts.reduce((s, a) => s + (a.cache_read_tokens || 0), 0),
           cache_creation_tokens: accounts.reduce((s, a) => s + (a.cache_creation_tokens || 0), 0),
         },
       ),
-      today_cost: billing?.today?.total_cost || 0,
-      total_cost: billing?.total?.total_cost || 0,
+      today_cost: resolvedBilling?.today?.total_cost || 0,
+      total_cost: resolvedBilling?.total?.total_cost || 0,
       peak_5h: Math.max(0, ...accounts.map((a) => a.utilization_5h), 0),
       peak_7d: Math.max(0, ...accounts.map((a) => a.utilization_7d), 0),
       near_limit: accounts.filter((a) => a.near_limit).length,
     },
   })
+}
+
+export async function buildUsageAsync({ accountQuota, cfg, requestLog = null, bypass = false } = {}) {
+  const snap = accountQuota.snapshot()
+  const listed = listVms(cfg?.paths?.project)
+  const billing = await panelBillingStats(requestLog, accountQuota, listed, snap, { bypass })
+  return buildUsage({ accountQuota, cfg, requestLog, billing, snap, listed })
 }
 
 function presentCompatibility(compat) {
@@ -1684,12 +1718,14 @@ export async function snapshotAccountPool({
   poolScheduler = null,
   proxyPool = null,
   requestLog = null,
+  bypass = false,
 }) {
   try {
     accountQuota?.runtimeRepo?.clearExpired?.(Date.now())
   } catch {}
   const active = getActiveVmId(cfg.paths.project)
   const pool = poolScheduler?.snapshot?.() || {}
+  const nodePenalties = poolScheduler?.nodePenalties?.() || null
   const poolSnap = snapshotPool(proxyPool)
   const listed = listVms(cfg.paths.project, routingConfig)
   let liveById = null
@@ -1699,18 +1735,21 @@ export async function snapshotAccountPool({
     liveById = null
   }
   const snap = readAccountSnapshot(accountQuota)
+  const runtimeById = prefetchRuntimeMap(accountQuota, listed, snap)
   const vms = listed.map((v) =>
     enrichVm(v, accountQuota, active, {
       routingConfig,
       pool,
+      nodePenalties,
       poolSnap,
       liveById,
       projectRoot: cfg.paths.project,
       accountSnap: snap,
+      runtimeById,
     }),
   )
   const accounts = snap?.accounts || []
-  const billing = stampVmBilling(vms, await panelBillingStats(requestLog, accountQuota, vms, snap), accounts)
+  const billing = stampVmBilling(vms, await panelBillingStats(requestLog, accountQuota, vms, snap, { bypass }), accounts)
   let today = null
   try {
     today = (await requestLog?.windowStatsAsync?.({ since: shanghaiDayStartIso() })) || null
@@ -1989,7 +2028,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     }
   }
   const acc = findAccount(accountQuota, v, extras.accountSnap || null)
-  const runtime = findRuntime(accountQuota, v, extras.accountSnap || null)
+  const runtime = findRuntime(accountQuota, v, extras.accountSnap || null, extras.runtimeById || null)
   const liveCred = extras.liveById instanceof Map ? extras.liveById.get(v.id) : extras.liveById?.[v.id]
   const workerCred = liveCred || runtime?.worker_status?.credential || null
   const quotaOverride = isCodexVm(v) ? null : v.quota_override || null
@@ -2004,6 +2043,9 @@ function enrichVm(v, accountQuota, active, extras = {}) {
   )
   const fablePool = fablePoolFields(acc, runtime, extras.pool || {}, extras.routingConfig || {}, v)
   const isCodex = isCodexVm(v)
+  // Rust kin-scheduler's own node_cooldown (e.g. content-filter refusals) never reaches
+  // `runtime`, yet it keeps the slot out of dispatch: read it as a cooldown here too.
+  const nodePenalty = isCodex ? null : extras.nodePenalties?.get(String(v.id)) || null
   const scheduleLevel = isCodex
     ? codexScheduleLevel(v)
     : resolveCredentialScheduleLevel({ manualLevel: v.schedule_level_manual, unified: acc?.unified || {} })
@@ -2089,12 +2131,14 @@ function enrichVm(v, accountQuota, active, extras = {}) {
       v.claude?.temp_unschedulable_until ||
       v.temp_unschedulable_until ||
       v.cooldown_until ||
+      nodePenalty?.until ||
       null,
     cooldownReason:
       runtime?.cooldown_reason ||
       v.claude?.temp_unschedulable_reason ||
       v.temp_unschedulable_reason ||
       v.cooldown_reason ||
+      (nodePenalty ? `node_cooldown:${nodePenalty.reason}` : null) ||
       null,
   })
   const authBlock = isCodex ? openaiAuthBlock(v) : null
@@ -2141,6 +2185,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     v.claude?.temp_unschedulable_until ||
     v.temp_unschedulable_until ||
     v.cooldown_until ||
+    nodePenalty?.until ||
     availability.until ||
     null
   // 内核故障（watchdog 恢复预算耗尽）只在内存里：调度器跳过该槽，但列表/
@@ -2154,6 +2199,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     v.claude?.temp_unschedulable_reason ||
     v.temp_unschedulable_reason ||
     v.cooldown_reason ||
+    (nodePenalty ? `node_cooldown:${nodePenalty.reason}` : null) ||
     availability.reason ||
     null
   const circuit = isCodex ? null : circuitViewFor(v, extras.projectRoot)
@@ -2254,11 +2300,17 @@ function enrichVm(v, accountQuota, active, extras = {}) {
       max_primary_sessions: limits?.inheritedPrimary ?? null,
       max_subagents_per_session: limits?.inheritedSubagents ?? null,
     },
+    warmup: isCodex
+      ? null
+      : warmupSummary(policy, {
+          schedulable: v.schedulable !== false,
+          fatalWindowHours: extras.routingConfig?.warmup?.fatal_window_hours ?? 0,
+        }),
     quota_override: quotaOverride,
     quota_policy: isCodex ? null : vmQuotaView(policy, vmQuotaConfig),
     quota_inherited: isCodex ? null : vmQuotaView(inheritedPolicy, globalQuotaConfig),
     openai_quota_policy: isCodex ? v.quota_policy || null : null,
-    rpm: isCodex ? openAIRuntimeSignals(v.id).rpmCount : (acc?.rpm ?? 0),
+    rpm: isCodex ? Number(extras.pool?.codex_rpm?.[v.id]) || 0 : (acc?.rpm ?? 0),
     allowed_models: Array.isArray(v.allowed_models) ? v.allowed_models : null,
     weight: v.weight ?? 1,
     schedule_level: scheduleLevel.level,
@@ -2334,11 +2386,19 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     usage_has_fable: isCodex ? null : q.usage_has_fable,
     fable_credits_required: isCodex ? null : q.fable_credits_required || null,
     // pool.fable_requires_max: this slot never gets Fable because it is not Max.
-    fable_requires_max: !isCodex && extras.routingConfig?.pool?.fable_requires_max === true && tierKey !== 'max',
+    // Same predicate dispatch uses (scheduler-runtime -> slotAllowsModel).
+    fable_requires_max: slotDeniesFableForPlan({
+      vm: v,
+      account: acc,
+      fableRequiresMax: fableRequiresMaxEnabled(extras.routingConfig),
+    }),
     availability,
     cred_status: credStatusFromAvailability(availability),
     cooldown_until: Number(restrictionUntil) > Date.now() ? Number(restrictionUntil) : null,
     cooldown_reason: Number(restrictionUntil) > Date.now() ? restrictionReason : null,
+    node_cooldown: nodePenalty
+      ? { until: nodePenalty.until, reason: nodePenalty.reason, left_ms: Math.max(0, nodePenalty.until - Date.now()) }
+      : null,
     schedule_state: triad.schedule_state,
     restriction_reason: triad.restriction_reason,
     restriction_until: triad.restriction_until,
@@ -2367,7 +2427,9 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     seat_sessions: isCodex ? null : Array.isArray(seatRow?.sessions) ? seatRow.sessions : [],
     queue_depth: isCodex ? null : Number(seatRow?.queue_depth) || 0,
     conc_waiting: isCodex ? null : Number(seatRow?.conc_waiting) || 0,
-    inflight: isCodex ? openAIRuntimeSignals(v.id).inFlight : Number(seatRow?.inflight ?? acc?.inflight ?? 0),
+    inflight: isCodex
+      ? Number(extras.pool?.codex_inflight?.[v.id]) || 0
+      : Number(seatRow?.inflight ?? acc?.inflight ?? 0),
     requests: acc?.requests ?? v.stats?.requests ?? 0,
     tokens_in: acc?.tokens_in ?? 0,
     tokens_out: acc?.tokens_out ?? 0,
@@ -2459,14 +2521,47 @@ export function findAccount(accountQuota, vm, snap = null) {
   )
 }
 
-function findRuntime(accountQuota, vm, snap = null) {
+/**
+ * Batch-prefetch account runtime states for a VM list in a single DB query,
+ * replacing per-VM `runtimeRepo.get()` N+1 calls during panel rendering.
+ */
+function prefetchRuntimeMap(accountQuota, vms = [], snap = null) {
   try {
     const repo = accountQuota?.runtimeRepo
-    if (!repo?.get) return null
+    if (!repo) return null
+    const canBatch = typeof repo.getMany === 'function' || typeof repo.schedulingSnapshot === 'function'
+    if (!canBatch) return null
+    const keys = new Set()
+    for (const vm of vms || []) {
+      if (!vm) continue
+      const acc = findAccount(accountQuota, vm, snap)
+      for (const key of [vm.account_uuid, vm.claude?.account_uuid, acc?.account_id, vm.id]) {
+        if (key) keys.add(String(key))
+      }
+    }
+    if (!keys.size) return new Map()
+    if (typeof repo.getMany === 'function') {
+      return repo.getMany([...keys])
+    }
+    const snapMap = repo.schedulingSnapshot([...keys])
+    const out = new Map()
+    for (const [id, entry] of snapMap) {
+      if (entry?.state) out.set(id, entry.state)
+    }
+    return out
+  } catch {
+    return null
+  }
+}
+
+function findRuntime(accountQuota, vm, snap = null, runtimeById = null) {
+  try {
+    const repo = accountQuota?.runtimeRepo
+    if (!runtimeById && !repo?.get) return null
     const acc = findAccount(accountQuota, vm, snap)
     const keys = [vm.account_uuid, acc?.account_id, vm.id].filter(Boolean)
     for (const key of keys) {
-      const state = repo.get(key)
+      const state = runtimeById instanceof Map ? runtimeById.get(String(key)) || null : repo.get(key)
       if (!state) continue
       const cred = state.worker_status?.credential || {}
       const err = String(state.worker_status?.last_error || state.last_error || '')
@@ -2679,14 +2774,17 @@ function billingWindowOf(accountId, vmId, vm, q) {
   }
 }
 
-async function panelBillingStats(requestLog, accountQuota, vms, snap) {
+async function panelBillingStats(requestLog, accountQuota, vms, snap, { bypass = false } = {}) {
   if (!requestLog) return null
   try {
-    return await requestLog.billingStatsAsync({ accountWindows: accountWindowsForBilling(accountQuota, vms, snap) })
+    const accountWindows = accountWindowsForBilling(accountQuota, vms, snap)
+    if (typeof requestLog.billingStatsAsync === 'function') return await requestLog.billingStatsAsync({ accountWindows, bypass })
+    return await requestLog.repo?.billingStatsAsync?.({ accountWindows, bypass }) ?? requestLog.billingStats?.({ accountWindows }) ?? null
   } catch {
     return null
   }
 }
+
 
 function applyLifetimeUsage(vm, index) {
   const key = vm.has_token ? (isCodexVm(vm) ? openaiUsageAccountId(vm.org_uuid) : vm.account_uuid) : null

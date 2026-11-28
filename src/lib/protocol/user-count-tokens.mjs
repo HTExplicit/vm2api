@@ -11,7 +11,7 @@ import { RefusalSessionBlocksRepo } from '../db/repos/refusal-session-blocks-rep
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { findAccount } from '../admin/panel-api.mjs'
 import { readJevConfig, scopeAccountFromVm } from './jev-intercept.mjs'
-import { runProtocolIntercept } from './intercept-gate.mjs'
+import { recordUpstream400SessionBlock, runProtocolIntercept } from './intercept-gate.mjs'
 import { inboundBodyLimit, readRoutingConfigFile } from '../core/config.mjs'
 import { verifyOfficialClaudeCode } from '../identity/official-cc-verifier.mjs'
 import {
@@ -20,13 +20,14 @@ import {
   isClaudeCodeFamilyRequest,
 } from '../identity/claude-code-only.mjs'
 import { toStandardAnthropicBody } from './anthropic-policy.mjs'
+import { rectifyCrag321Request } from './crag-321-rectifier.mjs'
 import { relocateThirdPartySystem } from './third-party-system.mjs'
 import { foldThirdPartyRoleSystemMessages } from './outbound-attempt.mjs'
 import { canCountTokens, canOfficialUsage, credentialModeOfVm, isApiKeyMode } from '../oauth/credential-mode.mjs'
 import { attachUsageFetchMeta, getUsageCache, getUsageFetchMeta } from '../oauth/usage-cache.mjs'
 import { probeAccount } from '../oauth/usage-probe.mjs'
 import { isOfficialUsageRateLimited, shouldHopOfficialUsage } from '../oauth/crs-usage-probe.mjs'
-import { countTokensViaKernel, countTokensViaWorker } from '../transport/go-worker-client.mjs'
+import { countTokensViaKernel, countTokensViaWorker, extractCragCallerHeaders } from '../transport/go-worker-client.mjs'
 import { peekRustHealth } from '../transport/kernel-router.mjs'
 import { apiKeyBetaHeader, setupTokenBetaHeader } from './claude-code-betas.mjs'
 import { listQuotaFromHeaders, publicUsageWindow, usageWindowsEmpty } from '../pool/quota-window.mjs'
@@ -40,6 +41,7 @@ import { isCodexVm } from '../vm/vm-kind.mjs'
 import { summarizeCodexSlot } from '../vm/codex-slot.mjs'
 import { pickCodexSlots } from '../pool/codex-slot-pool.mjs'
 import { detectInboundPlatform } from './platform-detect.mjs'
+import { isAntigravityRoutedModel } from '../gemini/model-catalog.mjs'
 import { blockedClientError, blockedClientFor } from '../identity/blocked-clients.mjs'
 import { resolveInboundIdentity } from '../identity/identity-rewrite.mjs'
 
@@ -344,6 +346,61 @@ function sendCountTokensHopResult(res, json, hop, { preserveOfficialErrors = fal
   return forwardHeaders ? json(res, 200, payload, forwardHeaders) : json(res, 200, payload)
 }
 
+export function estimateGeminiCountTokens(body = {}) {
+  let chars = 0
+  let nonAscii = 0
+  let mediaTokens = 0
+  const addText = (val) => {
+    if (typeof val !== 'string' || !val) return
+    chars += val.length
+    for (let i = 0; i < val.length; i += 1) {
+      if (val.charCodeAt(i) > 0x7f) nonAscii += 1
+    }
+  }
+  const addContent = (content) => {
+    if (typeof content === 'string') {
+      addText(content)
+      return
+    }
+    if (!Array.isArray(content)) return
+    for (const block of content) {
+      if (typeof block === 'string') {
+        addText(block)
+      } else if (block && typeof block === 'object') {
+        if (typeof block.text === 'string') addText(block.text)
+        if (typeof block.thinking === 'string') addText(block.thinking)
+        if (block.type === 'tool_use') {
+          addText(block.name)
+          if (block.input != null) addText(JSON.stringify(block.input))
+        } else if (block.type === 'tool_result') {
+          addContent(block.content)
+        } else if (block.type === 'image' || block.type === 'document') {
+          mediaTokens += 258
+        }
+      }
+    }
+  }
+  addContent(body.system)
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) {
+      if (!tool || typeof tool !== 'object') continue
+      addText(tool.name)
+      addText(tool.description)
+      if (tool.input_schema != null) addText(JSON.stringify(tool.input_schema))
+    }
+  }
+  if (Array.isArray(body.messages)) {
+    for (const msg of body.messages) {
+      if (!msg || typeof msg !== 'object') continue
+      addContent(msg.content)
+    }
+  }
+  const ascii = Math.max(0, chars - nonAscii)
+  const textTokens = Math.ceil(ascii / 4 + nonAscii / 1.5)
+  const overhead = (Array.isArray(body.messages) ? body.messages.length * 4 : 0) + 3
+  return Math.max(1, textTokens + mediaTokens + overhead)
+}
+
 export async function handleUserCountTokens(req, res, deps) {
   const json = (...args) => deps.json(...args)
   if (!deps.requireAuth(req, res)) return
@@ -373,6 +430,73 @@ export async function handleUserCountTokens(req, res, deps) {
   if (!parsed.ok) return json(res, parsed.error.status, parsed.error.body)
   const modelDenied = keyModelError(req, parsed.body.model, { anthropic: true })
   if (modelDenied) return json(res, modelDenied.status, modelDenied.body)
+
+  const requestedPoolId = requestedPoolIdFromHeaders(req?.headers || {})
+  const keyRec = req?.apiKeyRecord || null
+  const explicitPoolIntent =
+    Boolean(requestedPoolId) ||
+    keyRec?.pool_binding_mode === 'strict_pool' ||
+    Boolean(keyRec?.default_pool_id) ||
+    (Array.isArray(keyRec?.allowed_pool_ids) && keyRec.allowed_pool_ids.length > 0)
+  const isGeminiCountTokens =
+    isAntigravityRoutedModel(parsed.body.model) || (req?.apiKeyKind === 'managed' && keyRec?.group_type === 'gemini')
+
+  if (isGeminiCountTokens) {
+    const ownerScope = ownerScopeFromRequest(req, deps.apiKeyStore?.users || null)
+    let geminiEnvs = Array.isArray(deps.geminiEnvs) ? deps.geminiEnvs : null
+    if (!geminiEnvs && typeof deps.geminiScheduler?.catalog === 'function' && explicitPoolIntent) {
+      try {
+        const cat = await deps.geminiScheduler.catalog({ ownerScope })
+        if (Array.isArray(cat?.accounts)) geminiEnvs = cat.accounts
+      } catch {}
+    }
+    let gemPoolAccess = null
+    if (deps.poolsRepo || isDbOpen() || explicitPoolIntent) {
+      gemPoolAccess = resolvePoolAccessForKey({
+        key: keyRec,
+        apiKeyKind: req?.apiKeyKind || null,
+        requestedPoolId,
+        model: parsed.body.model,
+        poolsRepo: deps.poolsRepo || null,
+        geminiEnvs,
+        ownerScope,
+      })
+      if (!gemPoolAccess.ok) {
+        const err = makeError({
+          type: ErrorType.PERMISSION,
+          code: gemPoolAccess.code || 'pool_unavailable',
+          message: gemPoolAccess.message || '分组池不可用',
+          status: gemPoolAccess.status || 403,
+        })
+        return json(res, gemPoolAccess.status || 403, err.body)
+      }
+    }
+    const keyScope = keyScopeFromRequest(req)
+    const poolGrantsGemini =
+      gemPoolAccess && !gemPoolAccess.legacy && (gemPoolAccess.allowedGeminiEnvIds?.length || 0) > 0
+    if (
+      req?.apiKeyKind === 'managed' &&
+      keyScope.group_type !== 'gemini' &&
+      keyScope.group_type !== 'all' &&
+      !poolGrantsGemini
+    ) {
+      return sendPoolFail(res, json, { code: ErrorCode.KEY_GROUP_MISMATCH, group_type: keyScope.group_type })
+    }
+    const gate = await blockCountTokensBeforeHop(req, parsed.body, {
+      ...deps,
+      rawInbound: inbound,
+      effectivePool: gemPoolAccess?.effectivePool || null,
+      routing,
+      nodeProvider: 'google',
+      official: false,
+    })
+    if (gate?.error) {
+      if (gate.error.retryAfterSec) res.setHeader?.('retry-after', String(gate.error.retryAfterSec))
+      return json(res, gate.error.status, gate.error.body)
+    }
+    return json(res, 200, { input_tokens: estimateGeminiCountTokens(parsed.body) })
+  }
+
   const targetPlatform = detectInboundPlatform(parsed.body.model).platform || 'anthropic'
   const ccVerdict =
     targetPlatform === 'anthropic'
@@ -400,13 +524,6 @@ export async function handleUserCountTokens(req, res, deps) {
       return json(res, error.status, error.body)
     }
   }
-  const requestedPoolId = requestedPoolIdFromHeaders(req?.headers || {})
-  const keyRec = req?.apiKeyRecord || null
-  const explicitPoolIntent =
-    Boolean(requestedPoolId) ||
-    keyRec?.pool_binding_mode === 'strict_pool' ||
-    Boolean(keyRec?.default_pool_id) ||
-    (Array.isArray(keyRec?.allowed_pool_ids) && keyRec.allowed_pool_ids.length > 0)
   let poolAccess = null
   if (deps.poolsRepo || isDbOpen() || explicitPoolIntent) {
     const poolScheduler = typeof deps.getPoolScheduler === 'function' ? deps.getPoolScheduler() : deps.poolScheduler
@@ -484,14 +601,42 @@ export async function handleUserCountTokens(req, res, deps) {
       return json(res, again.error.status, again.error.body)
     }
   }
+  const observeCountTokens400 = (hop) => {
+    if (!hop || hop.ok === true) return
+    recordUpstream400SessionBlock({
+      inbound,
+      body: parsed.body,
+      headers: req?.headers,
+      identity: refusalAuditIdentity({
+        inbound,
+        body: parsed.body,
+        headers: req?.headers,
+        principal: riskPrincipal(req),
+      }),
+      result: hop,
+      policy: refusalPolicy(deps),
+      devices: deviceRepo(deps),
+    })
+  }
   const outboundBody = officialTraffic ? parsed.body : sanitizeThirdPartyCountTokensBody(parsed.body, { routing })
   const caps = slotCapabilitiesForCountTokens(peeked, deps)
   if (caps.includes('count_tokens_v1')) {
+    const kernelHeaders = {}
+    if (officialTraffic) {
+      const callerHeaders = extractCragCallerHeaders(req?.headers, { includeUserAgent: true })
+      if (callerHeaders) Object.assign(kernelHeaders, callerHeaders)
+      const beta = req?.headers?.['anthropic-beta']
+      if (typeof beta === 'string' && beta.trim()) kernelHeaders['anthropic-beta'] = beta.trim()
+    }
     const hop = await (deps.countTokensViaKernel || countTokensViaKernel)(peeked.exec, {
-      body: outboundBody,
-      headers: {},
+      body: rectifyCrag321Request(outboundBody, {
+        strictPassthrough: officialTraffic === true,
+        countTokens: true,
+      }),
+      headers: kernelHeaders,
       timeoutMs: 45000,
     })
+    observeCountTokens400(hop)
     return sendCountTokensHopResult(res, json, hop, { preserveOfficialErrors: true })
   }
   const mode = credentialModeOfVm(peeked.vm)
@@ -516,6 +661,7 @@ export async function handleUserCountTokens(req, res, deps) {
     },
     timeoutMs: 45000,
   })
+  observeCountTokens400(hop)
   return sendCountTokensHopResult(res, json, hop)
 }
 

@@ -40,14 +40,17 @@ import { createGeminiSlotPrefs, parseGeminiDisplayName, parseGeminiScheduleLevel
 import { resolveCragGeminiPromptPolicy } from './system-prompt.mjs'
 import { configuredDnsUpstream, proxyDnsEmptyTypes } from '../vm/egress.mjs'
 import { compileWithProtoFront, protoFrontMode } from '../transport/proto-front-client.mjs'
+import { resolveAuditSessionIdentity, riskPrincipal } from '../core/refusal-guard.mjs'
+import { observeUpstreamRisk } from '../protocol/intercept-gate.mjs'
 import {
   clientBlockErrorOf,
   isTrustedGateDecision,
   resolveRiskRepos,
   runUnifiedPreDispatch,
 } from '../protocol/unified-pre-dispatch.mjs'
-import { resolveSchedulerIdentity } from '../identity/identity-rewrite.mjs'
+import { firstUserIdentityText, parseUserId, resolveSchedulerIdentity } from '../identity/identity-rewrite.mjs'
 import { queueAllowedByHeaders } from '../protocol/queue-hint.mjs'
+import { DEFAULT_STREAM_KEEPALIVE_MS, createDownstreamKeepalive } from '../protocol/stream-keepalive.mjs'
 import { SchedulerApiError, SchedulerUnavailableError, formatSchedulerError } from '../scheduler/scheduler-runtime.mjs'
 
 const PANEL_PATH = '/api/panel/gemini'
@@ -896,7 +899,12 @@ function proxyRecordFor(proxyPool, proxyId, ownerUserId = null) {
 
 function proxyEgressOptionsFor(proxyPool, proxyId, { ownerUserId = null } = {}) {
   if (!proxyPool || !validId(proxyId)) return null
-  const proxy = proxyRecordFor(proxyPool, proxyId, ownerUserId)
+  const targetOwner = normalizeOwnerId(ownerUserId)
+  const proxy = proxyRecordFor(proxyPool, proxyId, targetOwner)
+  if (!proxy) return null
+  const pOwner = normalizeOwnerId(proxy.owner_user_id)
+  const ownerAllowed = targetOwner ? !pOwner || pOwner === targetOwner : !pOwner
+  if (!ownerAllowed) return null
   const withAuth = proxyPool.getProxyByIdWithAuth?.(proxyId) || null
   const opts = {}
   if (proxy?.domain_forward === true || withAuth?.domain_forward === true) {
@@ -1013,7 +1021,12 @@ export const callGeminiHostStream = (operation, payload, options) =>
  * for all authorized, licensed OAuth environments so inference starts hot and recovers
  * automatically after control-plane or gemini-host restarts.
  */
-export async function warmGeminiEnvironments({ callHost = callGeminiHost, proxyPool, environmentIds = null } = {}) {
+export async function warmGeminiEnvironments({
+  callHost = callGeminiHost,
+  proxyPool,
+  geminiOwnersRepo = null,
+  environmentIds = null,
+} = {}) {
   const report = { warmed: 0, warming: 0, skipped: 0 }
   let view
   try {
@@ -1049,15 +1062,16 @@ export async function warmGeminiEnvironments({ callHost = callGeminiHost, proxyP
       report.warmed += 1
       continue
     }
+    const ownerUserId = geminiOwnersRepo?.getOwner ? normalizeOwnerId(geminiOwnersRepo.getOwner(env.id)) : null
     let proxyUrl
     try {
-      proxyUrl = proxyFor(pool, env.proxy_id)
+      proxyUrl = proxyFor(pool, env.proxy_id, { ownerUserId })
     } catch {
       report.skipped += 1
       continue
     }
     const proxySha256 = crypto.createHash('sha256').update(proxyUrl).digest('hex')
-    const egressOptions = proxyEgressOptionsFor(pool, env.proxy_id)
+    const egressOptions = proxyEgressOptionsFor(pool, env.proxy_id, { ownerUserId })
     try {
       const res = await callHost('warm', {
         id: env.id,
@@ -1226,7 +1240,7 @@ export async function checkGeminiAccounts({
   return report
 }
 
-export function createGeminiTerminal({ proxyPool, callHost = callGeminiHost }) {
+export function createGeminiTerminal({ proxyPool, geminiOwnersRepo = null, callHost = callGeminiHost }) {
   return createGeminiTerminalBridge({
     callHost,
     async resolveTarget(id) {
@@ -1244,11 +1258,12 @@ export function createGeminiTerminal({ proxyPool, callHost = callGeminiHost }) {
       if (typeof environment.proxy_id !== 'string' || !ID.test(environment.proxy_id)) {
         throw hostError('gemini_proxy_unavailable', 409)
       }
+      const ownerUserId = geminiOwnersRepo?.getOwner ? normalizeOwnerId(geminiOwnersRepo.getOwner(id)) : null
       const pool = proxyPool()
-      const egressOptions = proxyEgressOptionsFor(pool, environment.proxy_id)
+      const egressOptions = proxyEgressOptionsFor(pool, environment.proxy_id, { ownerUserId })
       return {
         proxy_id: environment.proxy_id,
-        proxy_url: proxyFor(pool, environment.proxy_id),
+        proxy_url: proxyFor(pool, environment.proxy_id, { ownerUserId }),
         ...(egressOptions ? { egress_options: egressOptions } : {}),
       }
     },
@@ -2261,11 +2276,13 @@ function logProtocolName(protocol) {
 }
 
 function extractGeminiSessionId(req, body, sessionPathId = '') {
+  const fromMeta = parseUserId(body?.metadata?.user_id)?.session_id
+  if (typeof fromMeta === 'string' && fromMeta.trim()) return fromMeta.trim()
   const headers = req?.headers || {}
   for (const key of [
+    'x-claude-code-session-id',
     'x-session-id',
     'x-conversation-id',
-    'x-claude-code-session-id',
     'x-opencode-session',
     'x-opencode-session-id',
     'session-id',
@@ -2278,14 +2295,6 @@ function extractGeminiSessionId(req, body, sessionPathId = '') {
   }
   if (typeof body?.metadata?.user_id === 'string' && body.metadata.user_id.trim()) {
     const rawUser = body.metadata.user_id.trim()
-    if (rawUser.startsWith('{')) {
-      try {
-        const parsedUid = JSON.parse(rawUser)
-        if (typeof parsedUid?.session_id === 'string' && parsedUid.session_id.trim()) {
-          return parsedUid.session_id.trim()
-        }
-      } catch {}
-    }
     const match = /_session_([A-Za-z0-9._-]+)$/.exec(rawUser)
     return match ? match[1] : rawUser
   }
@@ -2387,8 +2396,13 @@ export function createGeminiPublicHandler({
     } = {},
   ) {
     res.setHeader('Cache-Control', 'no-store')
-    const keyGroupType = req.apiKeyKind === 'managed' ? req.apiKeyRecord?.group_type || 'all' : null
-    if (keyGroupType !== 'gemini' && keyGroupType !== 'all') {
+    const keyGroupType =
+      req.apiKeyKind === 'master' ? 'all' : req.apiKeyKind === 'managed' ? req.apiKeyRecord?.group_type || 'all' : null
+    const poolGrantsGeminiKey =
+      Boolean(req._poolAccess?.ok) &&
+      req._poolAccess.legacy === false &&
+      (req._poolAccess.allowedGeminiEnvIds?.length || 0) > 0
+    if (keyGroupType !== 'gemini' && keyGroupType !== 'all' && !poolGrantsGeminiKey) {
       return json(res, 403, {
         error: {
           type: 'permission_error',
@@ -2487,7 +2501,7 @@ export function createGeminiPublicHandler({
     }
     const routeStream = google ? google.stream : undefined
     const modelFromPath = google ? google.model : null
-    const bodyLimit = protocol === 'gemini-session' ? 256 * 1024 : 12 * 1024 * 1024
+    const bodyLimit = protocol === 'gemini-session' ? 256 * 1024 : 64 * 1024 * 1024
 
     const ownLogCtx =
       !externalLogBag && requestLog?.start
@@ -2499,6 +2513,7 @@ export function createGeminiPublicHandler({
     if (logBag.outbound_headers_source === 'unavailable') logBag.outbound_headers_source = null
     if (ownLogCtx) {
       res._kinRequestId = ownLogCtx.request_id
+      requestLog?.bindLifecycle?.(ownLogCtx, req, res)
       // Register tapResponse before our finish listener so ctx.response has final status/headers/body.
       requestLog?.tapResponse?.(ownLogCtx, res)
     }
@@ -2730,10 +2745,20 @@ export function createGeminiPublicHandler({
 
     // Bypasses #1-#4 closed: every public Gemini inference call must clear the
     // unified pre-dispatch JEV gate BEFORE any Gemini account/slot reservation.
+    const geminiRiskState = resolveRiskRepos({ settings, refusalGuards, refusalDevices, refusalSessions })
+    const baseGeminiIdentity = resolveAuditSessionIdentity({
+      inbound: body,
+      body,
+      headers: req.headers,
+      principal: riskPrincipal(req),
+    })
+    const geminiIdentity =
+      !baseGeminiIdentity.sessionId && stickyHeader
+        ? { ...baseGeminiIdentity, sessionId: stickyHeader }
+        : baseGeminiIdentity
     const existingDecision = preDispatchDecision || req._preDispatchDecision || null
     let gateDecision = isTrustedGateDecision(existingDecision) ? existingDecision : null
     if (!gateDecision) {
-      const riskState = resolveRiskRepos({ settings, refusalGuards, refusalDevices, refusalSessions })
       const preDispatchInput = {
         req,
         inbound: body,
@@ -2742,12 +2767,13 @@ export function createGeminiPublicHandler({
             ? { ...body, model: targetModel }
             : body,
         headers: req.headers,
+        identity: geminiIdentity,
         distillRules: cfg?.distill,
-        policy: riskState.policy,
+        policy: geminiRiskState.policy,
         settings,
-        repo: riskState.repo,
-        devices: riskState.devices,
-        sessions: riskState.sessions,
+        repo: geminiRiskState.repo,
+        devices: geminiRiskState.devices,
+        sessions: geminiRiskState.sessions,
         requestId: activeLogCtx?.request_id || '',
         poolJevProfile:
           poolAccess.effectivePool?.jev_profile || req.poolJevProfile || req.apiKeyRecord?.jev_profile || null,
@@ -2776,6 +2802,7 @@ export function createGeminiPublicHandler({
       const retryAfter = gateDecision.retry_after_sec || gateDecision.error?.retryAfterSec
       if (retryAfter) res.setHeader?.('Retry-After', String(retryAfter))
       const clientErr = clientBlockErrorOf(gateDecision)
+      if (clientErr.details?.retryable === false) res.setHeader?.('x-should-retry', 'false')
       return respondJson(
         clientErr.status,
         protocolErrorBody(protocol, clientErr.status, clientErr.code, clientErr.message, clientErr.details),
@@ -2957,6 +2984,32 @@ export function createGeminiPublicHandler({
       }
     }
 
+    const observeGeminiError = (error) => {
+      if (!error || controller.signal.aborted) return
+      const upstreamStatus = Number(error.upstreamStatus) || 0
+      if (upstreamStatus !== 400) return
+      observeUpstreamRisk({
+        ...geminiRiskState,
+        inbound: body,
+        body,
+        headers: req.headers,
+        identity: geminiIdentity,
+        result: {
+          ok: false,
+          status: upstreamStatus,
+          upstreamStatus,
+          body: {
+            error: {
+              code: typeof error.code === 'string' ? error.code : 'gemini_upstream_error',
+              message: String(error.message || ''),
+            },
+          },
+        },
+        logBag,
+        requestId: activeLogCtx?.request_id || '',
+      })
+    }
+
     const inboundIdentity = resolveSchedulerIdentity({
       inbound: body,
       headers: req.headers,
@@ -3042,6 +3095,7 @@ export function createGeminiPublicHandler({
           finishOwnLog(499)
           return
         }
+        observeGeminiError(error)
         const mapped = publicError(error)
         logBag.error_code = mapped.body.error.code
         logBag.error_message = mapped.body.error.message
@@ -3057,41 +3111,82 @@ export function createGeminiPublicHandler({
     }
 
     let headersSent = false
-    const encoder = wantStream
+    let encoder = wantStream
       ? createGeminiProtocolStreamEncoder(protocol, { model: parsed.model, restoreContext: parsed.restoreContext })
       : null
+    let pendingEncodedChunks = []
+    let firstThinkingAt = 0
+    const THINKING_COMMIT_GRACE_MS = 15_000
+    const keepaliveIntervalMs = Number(
+      (typeof getRoutingConfig === 'function' ? getRoutingConfig()?.failover?.stream_keepalive_ms : null) ??
+        cfg?.limits?.stream_keepalive_ms ??
+        DEFAULT_STREAM_KEEPALIVE_MS,
+    )
+    const downstreamKeepalive =
+      wantStream && keepaliveIntervalMs > 0
+        ? createDownstreamKeepalive({
+            intervalMs: keepaliveIntervalMs,
+            userAgent: req.headers?.['user-agent'] || req.headers?.['User-Agent'] || '',
+            protocol: logProtocolName(protocol),
+            write: (chunk) => {
+              if (!headersSent || controller.signal.aborted || res.writableEnded || res.destroyed) return
+              res.write(chunk)
+            },
+          })
+        : null
     const continuationCallIds = []
     const parsedMsgs = Array.isArray(parsed.messages) ? parsed.messages : []
     for (let i = parsedMsgs.length - 1; i >= 0; i -= 1) {
+      if (parsedMsgs[i]?.role === 'assistant') break
       const msgResults = []
       for (const part of parsedMsgs[i]?.parts || []) {
         if (part?.kind === 'tool_result' && typeof part.callId === 'string' && part.callId) {
           msgResults.push(part.callId)
         }
       }
-      if (!msgResults.length) break
-      continuationCallIds.unshift(...msgResults)
+      if (msgResults.length) continuationCallIds.unshift(...msgResults)
     }
     const writeChunk = (text) => {
       if (!text || controller.signal.aborted) return
       if (!headersSent) {
         beginSse(res)
         headersSent = true
+        downstreamKeepalive?.arm()
       }
       res.write(text)
+      if (downstreamKeepalive && typeof text === 'string') {
+        for (const line of text.split('\n')) downstreamKeepalive.observeLine(line)
+      }
+    }
+    const flushPendingChunks = () => {
+      if (!pendingEncodedChunks.length) return
+      const joined = pendingEncodedChunks.join('')
+      pendingEncodedChunks = []
+      writeChunk(joined)
+    }
+    const resetStreamBuffer = () => {
+      if (headersSent) return
+      pendingEncodedChunks = []
+      firstThinkingAt = 0
+      if (wantStream) {
+        encoder = createGeminiProtocolStreamEncoder(protocol, {
+          model: parsed.model,
+          restoreContext: parsed.restoreContext,
+        })
+      }
     }
 
     const deriveFirstUserFingerprint = () => {
       const msgs = Array.isArray(parsed?.messages) ? parsed.messages : []
       const firstUser = msgs.find((m) => m?.role === 'user') || msgs[0]
       if (!firstUser || !Array.isArray(firstUser.parts)) return ''
-      const text = firstUser.parts
-        .filter((p) => p?.kind === 'text' && typeof p.text === 'string' && p.text.trim())
-        .map((p) => p.text)
-        .join('\n')
+      const text = firstUserIdentityText(
+        firstUser.parts
+          .filter((p) => p?.kind === 'text' && typeof p.text === 'string' && p.text.trim())
+          .map((p) => p.text),
+      )
         .replace(/\s+/g, ' ')
         .trim()
-        .slice(0, 4000)
       if (text) return `ch:${crypto.createHash('sha256').update(text).digest('hex').slice(0, 24)}`
       const firstMedia = firstUser.parts.find((p) => p?.data || p?.url)
       if (firstMedia) {
@@ -3117,20 +3212,22 @@ export function createGeminiPublicHandler({
       const turn = await scheduler.stream({
         model: parsed.model,
         requestedEffort,
+        inboundProtocol: protocol,
+        rawInboundBody: body,
+        promptPolicy,
+        wantStream,
         ...(activeLogCtx?.request_id ? { requestId: activeLogCtx.request_id } : {}),
         startedAt,
         targetBodyFor: (target, meta) => {
           const targetModelName = meta?.upstreamModel || parsed.model
-          const cacheKey = `${target}\0${targetModelName}`
+          const escapeSlashes = meta?.escapeSlashes !== false
+          const cacheKey = `${target}\0${targetModelName}\0${escapeSlashes ? 1 : 0}`
           let built = builtTargetBodies.get(cacheKey)
           if (!built) {
             const irForTarget = {
               ...parsed,
               requestedModel: targetModel,
               ...(meta?.upstreamModel ? { model: meta.upstreamModel } : {}),
-              // On CRAGGemini (`antigravity`), always apply the scheduler's account-scoped
-              // outbound conversation_id so switching accounts never reuses the prior account's
-              // or raw caller's conversation_id.
               ...(target === 'antigravity' && meta?.conversationId ? { conversationId: meta.conversationId } : {}),
             }
             const reqBody = buildGeminiRequest(irForTarget, {
@@ -3138,11 +3235,13 @@ export function createGeminiPublicHandler({
               defaultEffort: defaultGeminiEffort,
               includeThinkingConfig:
                 target === 'antigravity' && Boolean(requestedEffort || parsed?.thinking || parsed?.hideThinking),
+              escapeSlashes,
             })
             const normalized = normalizeGeminiOutboundPrompt(reqBody, {
               target,
               policy: promptPolicy,
               headers: req.headers,
+              escapeSlashes,
             })
             built = {
               body: normalized.body,
@@ -3192,14 +3291,53 @@ export function createGeminiPublicHandler({
         ...(activeSchedulerRuntime ? { schedulerRuntime: activeSchedulerRuntime } : {}),
         ...(catalogSnapshot ? { catalogSnapshot } : {}),
         ...geminiScope,
+        onResetStream: resetStreamBuffer,
+        onOutboundBody: (finalBody, meta = {}) => {
+          lastOutboundBody = finalBody
+          logBag.outbound_summary = summarizeBody(finalBody)
+          if (activeLogCtx?.capture_outbound) {
+            logBag.outbound_body = finalBody
+            logBag.outbound_body_source = meta.source || 'craggemini'
+          }
+        },
+        onRawSseFrame: wantStream
+          ? (frame) => {
+              writeChunk(frame)
+              return headersSent
+            }
+          : null,
         onEvent: wantStream
           ? (event) => {
-              if (event?.kind === 'error') return headersSent
-              writeChunk(encoder.push(event))
+              if (!event || event.kind === 'error' || event.kind === 'provider_result' || event.kind === 'meta') {
+                return headersSent
+              }
+              const encoded = encoder.push(event)
+              if (headersSent) {
+                if (encoded) writeChunk(encoded)
+                return true
+              }
+              if (encoded) pendingEncodedChunks.push(encoded)
+              const isSubstantive =
+                (event.kind === 'text' && typeof event.text === 'string' && event.text.trim().length > 0) ||
+                event.kind === 'tool_call' ||
+                event.kind === 'image' ||
+                event.kind === 'search'
+              if (isSubstantive) {
+                flushPendingChunks()
+                return headersSent
+              }
+              if (event.kind === 'thinking' || event.kind === 'thinking_signature') {
+                const nowTs = Date.now()
+                if (!firstThinkingAt) firstThinkingAt = nowTs
+                if (nowTs - firstThinkingAt >= THINKING_COMMIT_GRACE_MS) {
+                  flushPendingChunks()
+                }
+              }
               return headersSent
             }
           : null,
       })
+      downstreamKeepalive?.stop()
       if (controller.signal.aborted) {
         applyTurnLog(turn)
         delete logBag.merge_into_request_id
@@ -3213,11 +3351,17 @@ export function createGeminiPublicHandler({
       }
       applyTurnLog(turn)
       if (wantStream) {
-        writeChunk(encoder.finish())
+        if (!turn.passthroughHandled) {
+          flushPendingChunks()
+          writeChunk(encoder.finish())
+        }
         if (!headersSent) beginSse(res)
         res.end()
         if (ownLogCtx && !hasFinishHook) finishOwnLog(200)
         return
+      }
+      if (turn.passthroughJson) {
+        return respondJson(200, turn.passthroughJson)
       }
       return respondJson(
         200,
@@ -3229,6 +3373,7 @@ export function createGeminiPublicHandler({
         }),
       )
     } catch (error) {
+      downstreamKeepalive?.stop()
       applyErrorLog(error)
       if (controller.signal.aborted) {
         logBag.error_code = 'gemini_inference_cancelled'
@@ -3237,6 +3382,7 @@ export function createGeminiPublicHandler({
         finishOwnLog(499)
         return
       }
+      observeGeminiError(error)
       const mapped = publicError(error)
       logBag.error_code = mapped.body.error.code
       logBag.error_message = mapped.body.error.message
@@ -3259,6 +3405,8 @@ export function createGeminiPublicHandler({
         mapped.status,
         protocolErrorBody(protocol, mapped.status, mapped.body.error.code, mapped.body.error.message, mapped.details),
       )
+    } finally {
+      downstreamKeepalive?.stop()
     }
   }
 }

@@ -925,8 +925,9 @@ describe('vmRequestingCount', () => {
     ).toBe(1)
   })
 
-  it('does not let a stale VM inflight counter stand in for an empty seat book', () => {
-    expect(vmRequestingCount({ inflight: 1, seat_sessions: [] })).toBe(0)
+  it('uses the Rust VM count when the scheduler has no per-seat details', () => {
+    expect(vmRequestingCount({ inflight: 2, seat_sessions: [] })).toBe(2)
+    expect(vmRequestingCount({ inflight: 0, seat_sessions: [] })).toBe(0)
   })
 
   it('falls back to VM inflight when the row has no per-session book', () => {

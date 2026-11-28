@@ -717,6 +717,14 @@ export type Vm = {
   sessions?: { active?: number; max?: number }
   session_active?: number
   session_max?: number
+  /** Warm-up ramp segment summary; null when the slot is not warming (codex rows are null). */
+  warmup?: {
+    phase: 'warming' | 'paused' | 'abnormal'
+    started_at: string
+    accumulated_minutes: number
+    target_rpm: number
+    last_fatal_at: string | null
+  } | null
   /** 预调度席位簿：正在占用槽位的 client session 数。对话结束即释放，粘性 TTL 不占槽（Codex 为 null）。 */
   seats_used?: number | null
   /** 席位上限（VM 覆盖 → 全局 `inference.session_slots`）。 */
@@ -778,6 +786,8 @@ export type PoolSeatLive = {
 /** `GET /api/panel/pool/stream` 的 `event: seats` 负载。 */
 export type PoolSeatSnapshot = PoolQueueSummary & {
   seats: Record<string, PoolSeatLive>
+  /** Codex VM 正在处理的请求数。旧帧可能没有，空对象表示全部空闲。 */
+  codex_inflight?: Record<string, number>
   ts: number
 }
 

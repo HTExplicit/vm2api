@@ -304,15 +304,17 @@ export function seatTitle(vm: Vm): string {
  * 这台 VM 正在处理的请求数。
  * 有逐席 session 时只加总正在请求的席位（`active`，或 `inflight > 0`）。
  * 重启交接的 `held` 不算。`inflight` 为 0 但状态已是 active 时记 1。
- * 没有逐席明细（Codex）才回退 VM 级 `inflight`。
+ * Rust 调度仅提供 VM 级计数时，使用 VM 的 `inflight`。
  * `session_active` 是空闲对话窗口，不能当成请求中。
  */
 export function vmRequestingCount(
   vm: Pick<Vm, 'seat_sessions' | 'inflight'>
 ): number {
-  if (!Array.isArray(vm.seat_sessions)) return Number(vm.inflight) || 0
+  const seats = vm.seat_sessions
+  if (!Array.isArray(seats) || seats.length === 0)
+    return Number(vm.inflight) || 0
   let total = 0
-  for (const seat of vm.seat_sessions) {
+  for (const seat of seats) {
     const inflight = Number(seat.inflight) || 0
     if (inflight > 0) total += inflight
     else if (seat.state === 'active') total += 1

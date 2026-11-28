@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   buildDashboard,
-  buildUsage,
+  buildUsageAsync,
   buildVmList,
   indexBillingAccounts,
   lookupBilling,
@@ -54,7 +54,7 @@ test('billing rows of an older account on a reused slot keep their own email', a
       ],
     }),
   }
-  const usage = await buildUsage({
+  const usage = await buildUsageAsync({
     accountQuota,
     cfg: { paths: { project: root } },
     requestLog: { billingStatsAsync: () => billing },
@@ -118,7 +118,7 @@ test('usage rows of a deleted VM are not listed', async (t) => {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
   fs.writeFileSync(path.join(root, 'vms', 'vm-02.json'), JSON.stringify({ id: 'vm-02' }))
-  const usage = await buildUsage({
+  const usage = await buildUsageAsync({
     accountQuota: {
       snapshot: () => ({
         accounts: [
@@ -155,7 +155,7 @@ test('GPT usage row without pool email takes slot email', async (t) => {
       codex: { email: 'lemeryvorhees@gmail.com' },
     }),
   )
-  const usage = await buildUsage({
+  const usage = await buildUsageAsync({
     accountQuota: {
       snapshot: () => ({
         accounts: [{ account_id: 'vm-codex-01', vm_id: 'vm-codex-01', email: null }],

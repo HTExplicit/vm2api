@@ -10,12 +10,16 @@ import { boundProxyUrl, isLocalEgressProxy, localEgressProxyUrl } from '../vm/eg
 import { vmNodeId } from '../cluster/placement.mjs'
 import { assertProxyAllowed } from '../vm/proxy-policy.mjs'
 import { maxRequestBytes } from '../core/config.mjs'
-import { openAIRuntimeSignals } from '../pool/openai-account-runtime.mjs'
 import { codexKernelHealth, codexKernelPaths } from './codex-kernel-client.mjs'
 import { computedUpstreamTransport, normalizeCodexRouting } from '../protocol/codex-route.mjs'
 
 const starts = new Map()
 const stops = new Map()
+let readCodexInflight = () => 0
+
+export function setCodexKernelInflightReader(read) {
+  readCodexInflight = read
+}
 
 /** Keep native output in the operator's rotated process log, never in panel data. */
 export function captureCodexKernelLogs(child, log = (record) => console.error(JSON.stringify(record))) {
@@ -137,7 +141,7 @@ export function writeCodexKernelConfig(projectRoot, vm, { token, proxyUrl, proxy
 }
 
 export function shouldRecycleCodexKernel({ wanted, stamped, inFlight } = {}) {
-  return wanted > 0 && stamped > 0 && wanted !== stamped && inFlight <= 1
+  return wanted > 0 && stamped > 0 && wanted !== stamped && inFlight === 0
 }
 
 function limitStampPath(configPath) {
@@ -234,7 +238,7 @@ export function stopCodexKernelAndWait(exec, opts = {}) {
   return settled
 }
 
-export async function ensureCodexKernel(exec, { timeoutMs = 8000, startupRecoveryCheck } = {}) {
+export async function ensureCodexKernel(exec, { timeoutMs = 8000, startupRecoveryCheck, leaseId = null } = {}) {
   const stopping = stops.get(exec?.vmId)
   if (stopping) {
     const stopped = await stopping
@@ -246,9 +250,9 @@ export async function ensureCodexKernel(exec, { timeoutMs = 8000, startupRecover
   if (!paths.configPath) return { ok: false, reason: 'config_missing' }
   const wanted = configRequestBytes(paths.configPath)
   const stamped = readLimitStamp(paths.configPath)
-  const inFlight = openAIRuntimeSignals(exec.vmId).inFlight
-  // Only the request that holds this seat may recycle. A timeout is not an
-  // exit: leave the socket and the tracked child in place.
+  // A request may recycle its own kernel only when it holds the sole lease.
+  // Background callers pass no lease and therefore require an idle slot.
+  const inFlight = readCodexInflight(exec.vmId, leaseId)
   if (shouldRecycleCodexKernel({ wanted, stamped, inFlight })) {
     const child = stopCodexKernel(exec.vmId)
     if (child) {

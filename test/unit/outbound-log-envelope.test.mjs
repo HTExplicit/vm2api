@@ -682,13 +682,18 @@ unixTest('public CRAG handler preserves folded controls through normalization an
     assert.deepEqual(body.output_config, { effort: 'max', format })
     assert.deepEqual(
       body.messages.map((message) => message.role),
-      ['user', 'assistant', 'system', 'user', 'system'],
+      ['user', 'assistant', 'user', 'system'],
     )
-    assert.match(body.messages[0].content.at(-1).text, /Claude Code environment update/)
-    assert.deepEqual(body.messages[2].content[0].cache_control, { type: 'ephemeral', ttl: '1h' })
-    assert.deepEqual(body.messages[3].content[0].cache_control, shortMarker)
+    const firstUser = body.messages[0].content
+    assert.ok(firstUser.some((block) => /Claude Code environment update/.test(block.text)))
+    assert.deepEqual(body.messages[2].content[0].cache_control, shortMarker)
     assert.equal(body.messages.at(-1).clear_at, 'tool_uses')
-    assert.equal(body.messages.at(-1).content[0].text, 'clear this point')
+    // The system control follows its matching tool result. A later 1h
+    // breakpoint must normalize to the preceding 5m TTL.
+    assert.deepEqual(body.messages.at(-1).content, [
+      { type: 'text', text: 'keep this anchor', cache_control: shortMarker },
+      { type: 'text', text: 'clear this point' },
+    ])
     assert.equal(
       body.messages.some((message) => message.role === 'system' && message.content.length === 0),
       false,
@@ -969,3 +974,45 @@ for (const stream of [false, true]) {
     },
   )
 }
+
+unixTest('CRAG forwards the same Bash history in a parent continuation and a fresh fork', async (t) => {
+  const tool = { type: 'tool_use', id: 'tool-cwd', name: 'Bash', input: { command: 'cd /example && pwd' } }
+  const fixture = await protocolKernelFixture(t, {
+    health: { ...printHealth, capabilities: [...printCapabilities, 'generation_controls_v3', 'system_text_cache_v3'] },
+    staleHealth: ordinaryHealth,
+    tool,
+  })
+  const base = {
+    model: 'claude-sonnet-5-5',
+    max_tokens: 128,
+    stream: true,
+    metadata: { user_id: JSON.stringify({ session_id: '22222222-2222-4222-8222-222222222222' }) },
+    tools: [{ name: 'Bash', input_schema: { type: 'object' } }],
+  }
+  const prefix = [{ role: 'user', content: 'Show the current directory.' }]
+  const first = await fixture.send({ ...base, messages: prefix })
+  assert.equal(first.extra.official_cc_inference, 'crag-print')
+
+  const echo = { ...tool, input: { command: 'pwd' } }
+  const result = { type: 'tool_result', tool_use_id: tool.id, content: '/example' }
+  const messages = [...prefix, { role: 'assistant', content: [echo] }, { role: 'user', content: [result] }]
+  const parent = await fixture.send({ ...base, messages })
+  const fork = await fixture.send(
+    {
+      ...base,
+      messages: [
+        ...messages,
+        { role: 'assistant', content: 'The directory check is complete.' },
+        { role: 'user', content: 'Continue in the fork.' },
+      ],
+    },
+    ordinaryHealth,
+    { headers: { 'x-claude-code-agent-id': 'fork-test' } },
+  )
+  const parentHistory = parent.envelope.body.messages
+  assert.deepEqual(fork.envelope.body.messages.slice(0, parentHistory.length), parentHistory)
+  assert.deepEqual(
+    parentHistory.flatMap((m) => m.content).find((b) => b.type === 'tool_use'),
+    echo,
+  )
+})

@@ -1,4 +1,5 @@
 import type { UsageLogRow } from '@/types/panel-usage-logs'
+import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -10,6 +11,8 @@ import { GptRouteBadge } from '@/components/gpt-route-badge'
 import { ModelVendorIcon } from '@/components/model-vendor-icon'
 import {
   copyText,
+  livePhaseBadgeClass,
+  livePhaseLabel,
   statusBadgeClass,
   statusBadgeLabel,
   statusBadgeTooltip,
@@ -22,6 +25,9 @@ export function StatusBadge({
   errorCode = null,
   errorClass = null,
   errorLabel = null,
+  inFlight = false,
+  livePhase = null,
+  attemptCount = null,
   className,
 }: {
   statusCode: number | null
@@ -29,8 +35,42 @@ export function StatusBadge({
   errorCode?: string | null
   errorClass?: string | null
   errorLabel?: string | null
+  inFlight?: boolean
+  livePhase?: string | null
+  attemptCount?: number | null
   className?: string
 }) {
+  if (inFlight) {
+    const phaseText = livePhaseLabel(livePhase)
+    const liveBadge = (
+      <Badge
+        variant='outline'
+        data-in-flight='true'
+        data-live-phase={livePhase ?? undefined}
+        className={cn(
+          'inline-flex items-center gap-1 whitespace-nowrap',
+          livePhaseBadgeClass(livePhase),
+          className
+        )}
+      >
+        <Loader2 className='h-3 w-3 shrink-0 animate-spin' />
+        <span>{phaseText}</span>
+      </Badge>
+    )
+    const liveTip =
+      attemptCount != null && attemptCount > 1
+        ? `请求进行中 · ${phaseText}（第 ${attemptCount} 次尝试）`
+        : `请求进行中 · ${phaseText}`
+    return (
+      <Tooltip delayDuration={250}>
+        <TooltipTrigger asChild>
+          <span className='inline-flex'>{liveBadge}</span>
+        </TooltipTrigger>
+        <TooltipContent className='max-w-xs text-xs'>{liveTip}</TooltipContent>
+      </Tooltip>
+    )
+  }
+
   const label = statusBadgeLabel(statusCode, finalState, errorLabel)
   const showHttp = statusCode != null && label !== String(statusCode)
   const badge = (

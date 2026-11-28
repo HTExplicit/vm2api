@@ -391,6 +391,7 @@ export class SchedulerClient {
   #telemetryThrottleMs
   #drainIntervalMs
   #autoTrackLeases
+  #onCodexInflightChange
   #onBootstrap
   #onDrain
   #onError
@@ -409,7 +410,8 @@ export class SchedulerClient {
   #crashTimestamps = []
   #exitHook = null
 
-  #activeLeases = new Set()
+  #activeLeases = new Map() // lease ID -> Codex VM ID, or null for other leases
+  #codexStarts = new Map() // non-ephemeral Codex lease ID -> { vmId, startedAt }
   #heartbeatTimer = null
   #heartbeatInFlight = false
 
@@ -456,6 +458,8 @@ export class SchedulerClient {
     this.#telemetryThrottleMs = nonNegativeMs(options.telemetryThrottleMs, DEFAULT_TELEMETRY_THROTTLE_MS)
     this.#drainIntervalMs = nonNegativeMs(options.drainIntervalMs, DEFAULT_DRAIN_INTERVAL_MS)
     this.#autoTrackLeases = options.autoTrackLeases !== false
+    this.#onCodexInflightChange =
+      typeof options.onCodexInflightChange === 'function' ? options.onCodexInflightChange : null
 
     this.#onBootstrap = typeof options.onBootstrap === 'function' ? options.onBootstrap : null
     this.#onDrain = typeof options.onDrain === 'function' ? options.onDrain : null
@@ -516,6 +520,38 @@ export class SchedulerClient {
 
   get activeLeaseCount() {
     return this.#activeLeases.size
+  }
+
+  codexInflightByVm() {
+    const counts = new Map()
+    for (const vmId of this.#activeLeases.values()) {
+      if (vmId) counts.set(vmId, (counts.get(vmId) || 0) + 1)
+    }
+    return Object.fromEntries(counts)
+  }
+
+  codexInflight(vmId, ownLeaseId = null) {
+    let count = 0
+    for (const [leaseId, slot] of this.#activeLeases) {
+      if (slot === vmId && leaseId !== ownLeaseId) count += 1
+    }
+    return count
+  }
+
+  #pruneCodexStarts(now) {
+    for (const [leaseId, { startedAt }] of this.#codexStarts) {
+      if (now - startedAt < 60_000) break
+      this.#codexStarts.delete(leaseId)
+    }
+  }
+
+  codexRpmByVm(now = Date.now()) {
+    this.#pruneCodexStarts(now)
+    const counts = new Map()
+    for (const { vmId } of this.#codexStarts.values()) {
+      counts.set(vmId, (counts.get(vmId) || 0) + 1)
+    }
+    return Object.fromEntries(counts)
   }
 
   get stopped() {
@@ -1242,13 +1278,18 @@ export class SchedulerClient {
       allowRetry: true,
     })
     if (this.#autoTrackLeases && res?.lease_id) {
-      this.#activeLeases.add(res.lease_id)
+      this.trackLease(res.lease_id, res.selected_node, body.is_ephemeral_probe)
     }
     return res
   }
 
   async switchLease(request, options = {}) {
     const releaseLeaseId = request?.release_lease_id
+    // The outgoing attempt has ended. Keep heartbeating its lease until the switch is resolved.
+    if (this.#activeLeases.get(releaseLeaseId)) {
+      this.#activeLeases.set(releaseLeaseId, null)
+      this.#onCodexInflightChange?.()
+    }
     const body = {
       ...request,
       next_attempt: request?.next_attempt
@@ -1271,13 +1312,13 @@ export class SchedulerClient {
         allowRetry: true,
       })
       if (this.#autoTrackLeases) {
-        if (releaseLeaseId) this.#activeLeases.delete(releaseLeaseId)
-        if (res?.lease_id) this.#activeLeases.add(res.lease_id)
+        this.untrackLease(releaseLeaseId)
+        this.trackLease(res?.lease_id, res?.selected_node, body.next_attempt?.is_ephemeral_probe)
       }
       return res
     } catch (err) {
       if (this.#autoTrackLeases && releaseLeaseId && err instanceof SchedulerApiError) {
-        this.#activeLeases.delete(releaseLeaseId)
+        this.untrackLease(releaseLeaseId)
       }
       throw err
     }
@@ -1296,7 +1337,7 @@ export class SchedulerClient {
       allowRetry: true,
     })
     if (Array.isArray(res?.missing)) {
-      for (const id of res.missing) this.#activeLeases.delete(id)
+      for (const id of res.missing) this.untrackLease(id)
     }
     return res
   }
@@ -1334,7 +1375,7 @@ export class SchedulerClient {
       })
     } finally {
       if (this.#autoTrackLeases && leaseId) {
-        this.#activeLeases.delete(leaseId)
+        this.untrackLease(leaseId)
       }
     }
   }
@@ -1651,16 +1692,34 @@ export class SchedulerClient {
 
   // ==================== Batch Heartbeat Manager (30s) ====================
 
-  trackLease(leaseId) {
-    if (leaseId) this.#activeLeases.add(String(leaseId))
+  trackLease(leaseId, selectedNode, ephemeral = false) {
+    if (!leaseId) return
+    const id = String(leaseId)
+    if (this.#activeLeases.has(id)) return
+    const vmId = selectedNode?.node_type === 'codex_vm' ? selectedNode.node_id : null
+    this.#activeLeases.set(id, vmId)
+    if (!vmId) return
+    if (!ephemeral) {
+      const now = Date.now()
+      this.#pruneCodexStarts(now)
+      if (!this.#codexStarts.has(id)) this.#codexStarts.set(id, { vmId, startedAt: now })
+    }
+    this.#onCodexInflightChange?.()
   }
 
   untrackLease(leaseId) {
-    if (leaseId) this.#activeLeases.delete(String(leaseId))
+    if (!leaseId) return
+    const id = String(leaseId)
+    const vmId = this.#activeLeases.get(id)
+    this.#activeLeases.delete(id)
+    if (vmId) this.#onCodexInflightChange?.()
   }
 
   clearTrackedLeases() {
+    const hadCodexLeases = [...this.#activeLeases.values()].some(Boolean)
     this.#activeLeases.clear()
+    this.#codexStarts.clear()
+    if (hadCodexLeases) this.#onCodexInflightChange?.()
   }
 
   async flushHeartbeat() {
@@ -1669,7 +1728,7 @@ export class SchedulerClient {
     }
     this.#heartbeatInFlight = true
     try {
-      return await this.heartbeat([...this.#activeLeases])
+      return await this.heartbeat([...this.#activeLeases.keys()])
     } finally {
       this.#heartbeatInFlight = false
     }
@@ -1861,7 +1920,7 @@ export class SchedulerClient {
 
     this.#stopping = true
     this.#bootstrapped = false
-    this.#activeLeases.clear()
+    this.clearTrackedLeases()
     this.#pendingTelemetry.clear()
     this.#removeExitHook()
 

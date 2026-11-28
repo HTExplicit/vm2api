@@ -10,6 +10,7 @@ import {
   DollarSign,
   Globe,
   InfoIcon,
+  Loader2,
   Monitor,
   Settings2,
   ShieldAlert,
@@ -28,6 +29,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { UPSTREAM_400_ACTION_LABELS, upstream400CategoryLabel } from '@/features/risk/upstream-400'
 import { StatusBadge, ThinkingEffortBadge } from '../log-cells'
 import {
   actualCacheRate,
@@ -35,7 +37,9 @@ import {
   cacheWriteSplit,
   effectiveMultiplier,
   hasFastMode,
+  isInFlightLog,
   isSuccessfulRequest,
+  resolveLiveMeta,
   resolveModelAuditDisplay,
 } from '../log-display'
 import { FailureDiagnosticsPanel } from './failure-diagnostics'
@@ -154,6 +158,14 @@ function RiskAuditCard({ row }: { row: UsageLogRow }) {
   ].includes(row.via || '')
   const riskBucket =
     typeof details.risk_bucket === 'string' ? details.risk_bucket : null
+  const u400Category =
+    typeof details.upstream_400_category === 'string'
+      ? details.upstream_400_category
+      : null
+  const u400Action =
+    typeof details.upstream_400_action === 'string'
+      ? details.upstream_400_action
+      : null
   const gateMiss = details.gate_miss === true
   const hasRisk =
     riskVia ||
@@ -161,6 +173,7 @@ function RiskAuditCard({ row }: { row: UsageLogRow }) {
     row.intercept?.kind === 'block' ||
     gateMiss ||
     !!riskBucket ||
+    !!u400Category ||
     jevScores.length > 0
   if (!hasRisk) return null
   const disguised429 =
@@ -206,6 +219,23 @@ function RiskAuditCard({ row }: { row: UsageLogRow }) {
           {riskBucket ? (
             <span className='rounded-md bg-[var(--status-caution-bg)] px-2 py-0.5 text-[11px] font-medium text-[var(--status-caution)]'>
               {RISK_BUCKET_LABELS[riskBucket] || riskBucket}
+            </span>
+          ) : null}
+          {u400Category ? (
+            <span className='rounded-md bg-[var(--status-warn-bg)] px-2 py-0.5 text-[11px] font-medium text-[var(--status-warn)]'>
+              400 分类：{upstream400CategoryLabel(u400Category)}
+            </span>
+          ) : null}
+          {u400Action ? (
+            <span
+              className={cn(
+                'rounded-md px-2 py-0.5 text-[11px] font-medium',
+                u400Action === 'session_10m' || u400Action === 'permanent_kept'
+                  ? 'bg-[var(--status-bad-bg)] text-[var(--status-bad)]'
+                  : 'bg-[var(--status-none-bg)] text-[var(--status-none)]'
+              )}
+            >
+              {UPSTREAM_400_ACTION_LABELS[u400Action] || u400Action}
             </span>
           ) : null}
         </div>
@@ -291,6 +321,8 @@ export function SummaryTab({
   scrollToRedirect: boolean
 }) {
   const audit = resolveModelAuditDisplay(row)
+  const inFlight = isInFlightLog(row)
+  const live = inFlight ? resolveLiveMeta(row) : null
   const success = isSuccessfulRequest(row)
   const cancelled = row.finalState === 'cancelled'
   const rate = calculateOutputRate(row.outputTokens, row.generationMs)
@@ -328,24 +360,30 @@ export function SummaryTab({
       <div
         className={cn(
           'flex items-center gap-4 rounded-lg border p-4',
-          cancelled
-            ? 'border-border bg-muted/40'
-            : success
-              ? 'border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/20'
-              : 'border-rose-200 bg-rose-50 dark:border-rose-800 dark:bg-rose-950/20'
+          inFlight
+            ? 'border-sky-200 bg-sky-50 dark:border-sky-800 dark:bg-sky-950/20'
+            : cancelled
+              ? 'border-border bg-muted/40'
+              : success
+                ? 'border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/20'
+                : 'border-rose-200 bg-rose-50 dark:border-rose-800 dark:bg-rose-950/20'
         )}
       >
         <div
           className={cn(
             'flex h-12 w-12 items-center justify-center rounded-full',
-            cancelled
-              ? 'bg-muted'
-              : success
-                ? 'bg-emerald-100 dark:bg-emerald-900/30'
-                : 'bg-rose-100 dark:bg-rose-900/30'
+            inFlight
+              ? 'bg-sky-100 dark:bg-sky-900/30'
+              : cancelled
+                ? 'bg-muted'
+                : success
+                  ? 'bg-emerald-100 dark:bg-emerald-900/30'
+                  : 'bg-rose-100 dark:bg-rose-900/30'
           )}
         >
-          {cancelled ? (
+          {inFlight ? (
+            <Loader2 className='h-6 w-6 animate-spin text-sky-600' />
+          ) : cancelled ? (
             <Clock className='h-6 w-6 text-muted-foreground' />
           ) : success ? (
             <CheckCircle className='h-6 w-6 text-emerald-600' />
@@ -361,14 +399,19 @@ export function SummaryTab({
               errorCode={row.errorCode}
               errorClass={row.errorClass}
               errorLabel={row.errorLabel}
+              inFlight={inFlight}
+              livePhase={live?.phase}
+              attemptCount={live?.attemptCount}
             />
           </div>
           <p className='text-sm text-muted-foreground'>
-            {cancelled
-              ? '请求已由客户端取消'
-              : success
-                ? '请求成功完成'
-                : '请求失败，以下是详细的错误信息和供应商决策链'}
+            {inFlight
+              ? '请求仍在处理中，完成后将自动更新最终状态与用量'
+              : cancelled
+                ? '请求已由客户端取消'
+                : success
+                  ? '请求成功完成'
+                  : '请求失败，以下是详细的错误信息和供应商决策链'}
           </p>
         </div>
       </div>
@@ -677,13 +720,13 @@ export function SummaryTab({
         </div>
       ) : null}
 
-      {row.specialSettings.length ? (
+      {(row.specialSettings ?? []).length ? (
         <div className='space-y-2'>
           <SectionTitle icon={Settings2} color='text-purple-600'>
             特殊设置
           </SectionTitle>
           <div className='flex flex-wrap gap-2 rounded-lg border bg-card p-4'>
-            {row.specialSettings.map((setting) => (
+            {(row.specialSettings ?? []).map((setting) => (
               <Badge
                 key={setting.key}
                 variant='outline'

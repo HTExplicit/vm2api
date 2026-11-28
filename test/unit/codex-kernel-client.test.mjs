@@ -134,7 +134,7 @@ test('writeCodexKernelConfig follows the panel request body limit', () => {
 })
 
 test('codex kernel recycles a body-limit change only when the slot is alone', () => {
-  assert.equal(shouldRecycleCodexKernel({ wanted: 64 << 20, stamped: 32 << 20, inFlight: 1 }), true)
+  assert.equal(shouldRecycleCodexKernel({ wanted: 64 << 20, stamped: 32 << 20, inFlight: 1 }), false)
   assert.equal(shouldRecycleCodexKernel({ wanted: 64 << 20, stamped: 32 << 20, inFlight: 0 }), true)
   assert.equal(shouldRecycleCodexKernel({ wanted: 64 << 20, stamped: 32 << 20, inFlight: 2 }), false)
   assert.equal(shouldRecycleCodexKernel({ wanted: 32 << 20, stamped: 32 << 20, inFlight: 1 }), false)

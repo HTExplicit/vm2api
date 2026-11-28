@@ -507,7 +507,7 @@ const COLS: Col[] = [
     cell: (r) => (r.today ? fmtNum(r.today) : <span className={TERT}>0</span>),
   },
   {
-    label: '席位/会话',
+    label: '执行位/会话',
     sort: 'seats',
     num: true,
     cell: (r) => {
@@ -615,6 +615,21 @@ function ProdCell({ vm }: { vm: Vm }) {
       >
         {vm.gemini ? 'CRAGAnti' : crag ? 'crag' : '默认'}
       </span>
+      {vm.warmup ? (
+        <span
+          className={cn(
+            'shrink-0 rounded-[3px] px-1 font-mono text-[10px] leading-[1.5] font-semibold',
+            vm.warmup.phase === 'abnormal'
+              ? 'bg-red-200 text-red-900 dark:bg-red-400/20 dark:text-red-300'
+              : vm.warmup.phase === 'paused'
+                ? 'bg-amber-200 text-amber-900 dark:bg-amber-400/20 dark:text-amber-300'
+                : 'bg-sky-200 text-sky-900 dark:bg-sky-400/20 dark:text-sky-300'
+          )}
+          title={`预热中 · ${vm.warmup.accumulated_minutes}min · 目标 ${vm.warmup.target_rpm} RPM${vm.warmup.last_fatal_at ? ` · 近窗致命错误 ${vm.warmup.last_fatal_at}` : ''}`}
+        >
+          预热
+        </span>
+      ) : null}
       <NodePoolBadges
         pools={vm.pools}
         maxVisible={1}
@@ -788,7 +803,7 @@ function SummaryBar({ a }: { a: Agg }) {
         x={a.top ? `最高 ${a.top.vm.id} ${fmtUsd(a.top.spend, 0)}` : ''}
       />
       <Kpi
-        k='席位占用'
+        k='执行位占用'
         v={
           <>
             {a.used}
@@ -1080,7 +1095,7 @@ export function VmTable({
                         </b>
                       </span>
                       <span>
-                        席位{' '}
+                        执行位{' '}
                         <b className='font-mono text-foreground'>
                           {sec.agg.used}/{sec.agg.cap}
                         </b>

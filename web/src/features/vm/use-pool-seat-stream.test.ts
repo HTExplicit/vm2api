@@ -45,7 +45,14 @@ describe('seat snapshot merge', () => {
     conc_waiting: 2,
     inflight: 1,
   } as Vm
-  const codex = { id: 'vm-2', seats_max: null, seats_used: null } as Vm
+  const codex = {
+    id: 'vm-2',
+    family: 'codex',
+    seats_max: null,
+    seats_used: null,
+    session_active: 1,
+    inflight: 0,
+  } as Vm
   const snap = (seats: PoolSeatSnapshot['seats']): PoolSeatSnapshot => ({
     seats,
     global_queue_depth: 0,
@@ -53,7 +60,7 @@ describe('seat snapshot merge', () => {
     ts: 1,
   })
 
-  it('zeroes Claude rows absent from the snapshot and leaves Codex rows alone', () => {
+  it('zeroes absent Claude rows and preserves Codex counts on legacy frames', () => {
     const [nextClaude, nextCodex] = mergeSeatSnapshot([claude, codex], snap({}))
     expect(nextClaude).toMatchObject({
       seats_used: 0,
@@ -65,6 +72,19 @@ describe('seat snapshot merge', () => {
       inflight: 0,
     })
     expect(nextCodex).toBe(codex)
+  })
+
+  it('updates Codex requests while its conversation window stays open', () => {
+    const [busy] = mergeSeatSnapshot([codex], {
+      ...snap({}),
+      codex_inflight: { 'vm-2': 2 },
+    })
+    expect(busy).toMatchObject({ inflight: 2, session_active: 1 })
+    const [idle] = mergeSeatSnapshot([busy], {
+      ...snap({}),
+      codex_inflight: {},
+    })
+    expect(idle).toMatchObject({ inflight: 0, session_active: 1 })
   })
 
   it('applies live seat, grace, queue counts and the sessions holding those slots', () => {
